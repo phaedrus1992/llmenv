@@ -137,6 +137,76 @@ fn network_matcher_rejects_wrong_mac() {
 }
 
 #[test]
+fn project_path_prefix_respects_component_boundary() {
+    // `/home/breed/git/xyz` must NOT match prefix `/home/breed/git/x`.
+    let cfg = Config {
+        scope: Scopes {
+            project: vec![ProjectScope {
+                id: "p".into(),
+                r#match: ProjectMatch {
+                    path_prefix: Some("/home/breed/git/x".into()),
+                    marker_file: None,
+                },
+                tags: vec!["x".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        cwd: "/home/breed/git/xyz".into(),
+        ..Env::empty()
+    };
+    assert!(!evaluate(&cfg, &env).tags.contains("x"));
+}
+
+#[test]
+fn host_matcher_is_case_insensitive() {
+    let cfg = Config {
+        scope: Scopes {
+            host: vec![HostScope {
+                id: "h".into(),
+                r#match: HostMatch {
+                    hostname: Some("Fixed".into()),
+                },
+                tags: vec!["t".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        hostname: "fixed".into(),
+        ..Env::empty()
+    };
+    assert!(evaluate(&cfg, &env).tags.contains("t"));
+}
+
+#[test]
+fn network_matcher_is_case_insensitive() {
+    let cfg = Config {
+        scope: Scopes {
+            network: vec![NetworkScope {
+                id: "home".into(),
+                r#match: NetworkMatch {
+                    gateway_mac: Some("AA:BB:CC:DD:EE:FF".into()),
+                    ssid: None,
+                    cidr: None,
+                },
+                tags: vec!["home".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        gateway_mac: Some("aa:bb:cc:dd:ee:ff".into()),
+        ..Env::empty()
+    };
+    assert!(evaluate(&cfg, &env).tags.contains("home"));
+}
+
+#[test]
 fn project_matcher_uses_marker_file() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let nested = tmp.path().join("a/b/c");
