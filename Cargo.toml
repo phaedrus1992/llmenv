@@ -1,0 +1,27 @@
+[package]
+name = "llme"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Universal scope-aware environment for AI coding agents"
+repository = "https://github.com/phaedrus1992/llmenv"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "fs", "process", "io-util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+thiserror = "2.0"
+anyhow = "1.0"
+directories = "6"
+sha2 = "0.11"
+hex = "0.4"
+
+[dev-dependencies]
+assert_cmd = "2.2"
+insta = { version = "1.47", features = ["yaml"] }
+tempfile = "3.27"
+predicates = "3.1"
