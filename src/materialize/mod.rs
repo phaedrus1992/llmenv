@@ -16,11 +16,19 @@ pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<Path
         return Ok(dest);
     }
     std::fs::create_dir_all(cache_root)?;
-    let staging = cache_root.join(format!("{hash}.tmp"));
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging)?;
-    }
-    std::fs::create_dir_all(&staging)?;
+
+    // Per-call staging directory: `<hash>.<pid>.<nanos>.tmp`. Each concurrent
+    // writer gets its own staging path, so they cannot clobber each other on
+    // the way in. GC sweeps anything ending in `.tmp` regardless of age.
+    let staging = cache_root.join(format!(
+        "{hash}.{pid}.{nanos}.tmp",
+        pid = std::process::id(),
+        nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir(&staging)?;
     std::fs::write(staging.join("AGENTS.md"), &m.agents_md)?;
     for (rel, abs) in &m.files {
         let out = staging.join(rel);
@@ -32,12 +40,14 @@ pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<Path
     match std::fs::rename(&staging, &dest) {
         Ok(()) => Ok(dest),
         Err(e) => {
-            // Another concurrent writer may have completed the same hash. If
-            // the destination now exists, accept it and drop our staging dir.
+            // Another concurrent writer raced us to the same hash. Their dir
+            // is byte-identical (same hash ⇒ same contents), so accept it
+            // and drop our staging.
             if dest.exists() {
                 let _ = std::fs::remove_dir_all(&staging);
                 Ok(dest)
             } else {
+                let _ = std::fs::remove_dir_all(&staging);
                 Err(e.into())
             }
         }
