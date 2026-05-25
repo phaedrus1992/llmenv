@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 158a799571777d05016a8c8149b210d2665475f0259584d17725ba8ad4d8fc0a # shrinks to network = [NetworkScope { id: "a", match: NetworkMatch { gateway_mac: None, ssid: None, cidr: None }, tags: [] }], host = []
+cc 454ca608c263fdce63f8723f620f6c77b097b5fff7e79e032046a4805b64439b # shrinks to id = "A", extra_network = []
