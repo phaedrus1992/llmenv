@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub settings: Settings,
@@ -11,7 +11,7 @@ pub struct Config {
     pub icm: Option<Icm>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     #[serde(default = "default_cache_dir")]
     pub cache_dir: String,
@@ -36,7 +36,7 @@ fn default_sync_interval() -> u64 {
     15
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Scopes {
     #[serde(default)]
     pub network: Vec<NetworkScope>,
@@ -48,7 +48,7 @@ pub struct Scopes {
     pub project: Vec<ProjectScope>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NetworkScope {
     pub id: String,
     pub r#match: NetworkMatch,
@@ -56,14 +56,14 @@ pub struct NetworkScope {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NetworkMatch {
     pub gateway_mac: Option<String>,
     pub ssid: Option<String>,
     pub cidr: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HostScope {
     pub id: String,
     pub r#match: HostMatch,
@@ -71,12 +71,12 @@ pub struct HostScope {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HostMatch {
     pub hostname: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserScope {
     pub id: String,
     pub r#match: UserMatch,
@@ -84,12 +84,12 @@ pub struct UserScope {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserMatch {
     pub user: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProjectScope {
     pub id: String,
     pub r#match: ProjectMatch,
@@ -97,20 +97,20 @@ pub struct ProjectScope {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProjectMatch {
     pub path_prefix: Option<String>,
     pub marker_file: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Bundle {
     pub name: String,
     #[serde(default)]
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Icm {
     pub server_tag: String,
     pub server_bind: String,
