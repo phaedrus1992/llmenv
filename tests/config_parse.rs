@@ -53,6 +53,21 @@ match = { user = "b" }
 }
 
 #[test]
+fn rejects_duplicate_bundle_names() {
+    let s = r#"
+[[bundle]]
+name = "dup"
+tags = ["a"]
+
+[[bundle]]
+name = "dup"
+tags = ["b"]
+"#;
+    let cfg: Config = toml::from_str(s).unwrap();
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
 fn fixture_passes_validation() {
     let s = std::fs::read_to_string("tests/fixtures/llmenv.toml").unwrap();
     let cfg: Config = toml::from_str(&s).unwrap();
