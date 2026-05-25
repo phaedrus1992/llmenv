@@ -14,11 +14,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
         "claude-code"
     }
 
-    fn env_vars(&self, cache_dir: &Path) -> Vec<(String, String)> {
-        vec![(
-            "CLAUDE_CONFIG_DIR".into(),
-            cache_dir.to_string_lossy().into_owned(),
-        )]
+    fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
+        let dir = cache_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
+        })?;
+        Ok(vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())])
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<()> {

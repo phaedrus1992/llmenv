@@ -15,7 +15,13 @@ pub trait AgentAdapter {
 
     /// Environment variables the shell hook should `export` so the agent
     /// discovers `cache_dir` as its config root.
-    fn env_vars(&self, cache_dir: &Path) -> Vec<(String, String)>;
+    ///
+    /// # Errors
+    /// Returns an error if `cache_dir` is not valid UTF-8 — env vars cannot
+    /// carry arbitrary bytes on all platforms, so callers that surface a
+    /// non-UTF-8 cache root should fail loudly rather than emit a lossy
+    /// path the agent will silently mis-parse.
+    fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>>;
 
     /// Write the manifest into `out` in the agent-native layout.
     ///
