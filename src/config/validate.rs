@@ -59,7 +59,8 @@ fn is_valid_hostname(hostname: &str) -> bool {
     }
     hostname.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') &&
         !hostname.starts_with('-') && !hostname.ends_with('-') &&
-        !hostname.contains("..")
+        !hostname.contains("..") &&
+        hostname.split('.').all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
 }
 
 fn is_valid_path_prefix(path: &str) -> bool {
@@ -432,6 +433,50 @@ mod tests {
                     id: "host1".to_string(),
                     r#match: HostMatch {
                         hostname: Some("invalid..local".to_string()),
+                    },
+                    tags: vec!["tag1".to_string()],
+                }],
+                user: vec![],
+                project: vec![],
+            },
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_hostname_label_ends_with_hyphen() {
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes {
+                network: vec![],
+                host: vec![HostScope {
+                    id: "host1".to_string(),
+                    r#match: HostMatch {
+                        hostname: Some("foo-.example.com".to_string()),
+                    },
+                    tags: vec!["tag1".to_string()],
+                }],
+                user: vec![],
+                project: vec![],
+            },
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_hostname_label_starts_with_hyphen() {
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes {
+                network: vec![],
+                host: vec![HostScope {
+                    id: "host1".to_string(),
+                    r#match: HostMatch {
+                        hostname: Some("foo.-example.com".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
                 }],
