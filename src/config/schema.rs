@@ -12,28 +12,19 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Settings {
-    #[serde(default = "default_cache_dir")]
     pub cache_dir: String,
-    #[serde(default = "default_sync_interval")]
     pub sync_interval_minutes: u64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            cache_dir: default_cache_dir(),
-            sync_interval_minutes: default_sync_interval(),
+            cache_dir: "~/.cache/llmenv".into(),
+            sync_interval_minutes: 15,
         }
     }
-}
-
-fn default_cache_dir() -> String {
-    "~/.cache/llmenv".into()
-}
-
-fn default_sync_interval() -> u64 {
-    15
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

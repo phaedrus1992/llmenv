@@ -5,6 +5,6 @@ use clap::Parser;
 struct Cli {}
 
 pub fn run() -> anyhow::Result<()> {
-    let _ = Cli::parse();
+    Cli::parse();
     Ok(())
 }
