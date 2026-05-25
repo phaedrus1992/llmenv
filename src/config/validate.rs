@@ -40,10 +40,7 @@ fn is_valid_cidr(cidr: &str) -> bool {
             _ => return false,
         }
     }
-    match parts[1].parse::<u32>() {
-        Ok(n) if n <= 32 => true,
-        _ => false,
-    }
+    matches!(parts[1].parse::<u32>(), Ok(n) if n <= 32)
 }
 
 fn is_valid_mac_address(mac: &str) -> bool {
@@ -95,29 +92,29 @@ impl Config {
             }
         }
         for scope in &self.scope.network {
-            if let Some(cidr) = &scope.r#match.cidr {
-                if !is_valid_cidr(cidr) {
-                    return Err(ValidateError::InvalidCIDR(cidr.clone()));
-                }
+            if let Some(cidr) = &scope.r#match.cidr
+                && !is_valid_cidr(cidr)
+            {
+                return Err(ValidateError::InvalidCIDR(cidr.clone()));
             }
-            if let Some(mac) = &scope.r#match.gateway_mac {
-                if !is_valid_mac_address(mac) {
-                    return Err(ValidateError::InvalidMACAddress(mac.clone()));
-                }
+            if let Some(mac) = &scope.r#match.gateway_mac
+                && !is_valid_mac_address(mac)
+            {
+                return Err(ValidateError::InvalidMACAddress(mac.clone()));
             }
         }
         for scope in &self.scope.host {
-            if let Some(hostname) = &scope.r#match.hostname {
-                if !is_valid_hostname(hostname) {
-                    return Err(ValidateError::InvalidHostname(hostname.clone()));
-                }
+            if let Some(hostname) = &scope.r#match.hostname
+                && !is_valid_hostname(hostname)
+            {
+                return Err(ValidateError::InvalidHostname(hostname.clone()));
             }
         }
         for scope in &self.scope.project {
-            if let Some(path) = &scope.r#match.path_prefix {
-                if !is_valid_path_prefix(path) {
-                    return Err(ValidateError::InvalidPathPrefix(path.clone()));
-                }
+            if let Some(path) = &scope.r#match.path_prefix
+                && !is_valid_path_prefix(path)
+            {
+                return Err(ValidateError::InvalidPathPrefix(path.clone()));
             }
         }
         let mut seen_bundle_names = std::collections::HashSet::new();
