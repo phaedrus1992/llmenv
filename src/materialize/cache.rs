@@ -5,17 +5,26 @@ use sha2::{Digest, Sha256};
 
 use crate::merge::MergedManifest;
 
-/// Stable SHA-256 of the merged manifest: `agents_md` followed by each
-/// `(relative_path, file_contents)` in `BTreeMap` iteration order.
+/// Stable SHA-256 of the merged manifest. Each field is length-prefixed
+/// (little-endian u64) before its bytes so concatenation cannot ambiguate
+/// boundaries — i.e. `{agents_md="ABC", files={"DE":"FG"}}` and
+/// `{agents_md="ABCD", files={"E":"FG"}}` must hash differently.
 pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
     let mut h = Sha256::new();
-    h.update(m.agents_md.as_bytes());
+    update_len_prefixed(&mut h, m.agents_md.as_bytes());
+    h.update((m.files.len() as u64).to_le_bytes());
     for (rel, abs) in &m.files {
-        h.update(rel.to_string_lossy().as_bytes());
+        let rel_str = rel.to_string_lossy();
+        update_len_prefixed(&mut h, rel_str.as_bytes());
         let bytes = std::fs::read(abs)?;
-        h.update(&bytes);
+        update_len_prefixed(&mut h, &bytes);
     }
     Ok(hex::encode(h.finalize()))
+}
+
+fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
+    h.update((data.len() as u64).to_le_bytes());
+    h.update(data);
 }
 
 #[derive(Debug, Default)]
@@ -36,7 +45,16 @@ pub fn gc(cache_root: &Path, older_than: Duration) -> anyhow::Result<GcReport> {
     for entry in std::fs::read_dir(cache_root)? {
         let entry = entry?;
         let p = entry.path();
-        if !entry.file_type()?.is_dir() {
+        // Use `file_type()` (lstat-equivalent) — a symlink at the top level
+        // is never treated as a cache directory we own. Removing one removes
+        // only the link, never the target.
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            std::fs::remove_file(&p)?;
+            report.removed.push(p);
+            continue;
+        }
+        if !ft.is_dir() {
             continue;
         }
         if p.extension().is_some_and(|e| e == "tmp") {

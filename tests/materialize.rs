@@ -86,6 +86,40 @@ fn gc_removes_tmp_stage_dirs_regardless_of_age() {
 }
 
 #[test]
+fn hash_is_unambiguous_across_field_boundaries() {
+    // Without length prefixing, manifest A and B below would hash identically
+    // because `agents_md || files[].rel || files[].bytes` concatenates to the
+    // same bytes. With length prefixing they must differ.
+    use llme::materialize::cache::hash_manifest;
+    use llme::merge::MergedManifest;
+    use std::collections::BTreeMap;
+
+    let tmp = tempdir().expect("tempdir");
+    let f_de = tmp.path().join("de");
+    let f_e = tmp.path().join("e");
+    std::fs::write(&f_de, b"FG").expect("write de");
+    std::fs::write(&f_e, b"FG").expect("write e");
+
+    let mut a_files = BTreeMap::new();
+    a_files.insert(PathBuf::from("DE"), f_de.clone());
+    let a = MergedManifest {
+        agents_md: "ABC".into(),
+        files: a_files,
+    };
+
+    let mut b_files = BTreeMap::new();
+    b_files.insert(PathBuf::from("E"), f_e.clone());
+    let b = MergedManifest {
+        agents_md: "ABCD".into(),
+        files: b_files,
+    };
+
+    let ha = hash_manifest(&a).expect("hash a");
+    let hb = hash_manifest(&b).expect("hash b");
+    assert_ne!(ha, hb, "hash must distinguish field boundaries");
+}
+
+#[test]
 fn gc_on_missing_root_is_noop() {
     let tmp = tempdir().expect("tempdir");
     let missing = tmp.path().join("nope");
