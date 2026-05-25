@@ -2,7 +2,10 @@ use super::Config;
 use thiserror::Error;
 
 #[cfg(test)]
-use super::{Settings, Scopes, Bundle, NetworkScope, NetworkMatch, HostScope, HostMatch, UserScope, UserMatch, ProjectScope, ProjectMatch};
+use super::{
+    Bundle, HostMatch, HostScope, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope, Scopes,
+    Settings, UserMatch, UserScope,
+};
 
 #[derive(Debug, Error)]
 pub enum ValidateError {
@@ -33,7 +36,7 @@ fn is_valid_cidr(cidr: &str) -> bool {
     }
     for octet in octets {
         match octet.parse::<u16>() {
-            Ok(n) if n <= 255 => {},
+            Ok(n) if n <= 255 => {}
             _ => return false,
         }
     }
@@ -48,19 +51,24 @@ fn is_valid_mac_address(mac: &str) -> bool {
     if parts.len() != 6 {
         return false;
     }
-    parts.iter().all(|part| {
-        part.len() == 2 && u8::from_str_radix(part, 16).is_ok()
-    })
+    parts
+        .iter()
+        .all(|part| part.len() == 2 && u8::from_str_radix(part, 16).is_ok())
 }
 
 fn is_valid_hostname(hostname: &str) -> bool {
     if hostname.is_empty() || hostname.len() > 253 {
         return false;
     }
-    hostname.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') &&
-        !hostname.starts_with('-') && !hostname.ends_with('-') &&
-        !hostname.contains("..") &&
-        hostname.split('.').all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
+    hostname
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        && !hostname.starts_with('-')
+        && !hostname.ends_with('-')
+        && !hostname.contains("..")
+        && hostname
+            .split('.')
+            .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
 }
 
 fn is_valid_path_prefix(path: &str) -> bool {
@@ -134,47 +142,87 @@ mod tests {
         r"[a-zA-Z0-9_-]{1,20}"
     }
 
-
     fn arb_config() -> impl Strategy<Value = Config> {
         (
             Just(Settings::default()),
-            prop::collection::vec(arb_string(), 0..10)
-                .prop_map(|ids| {
-                    let network = ids.iter().take(2).map(|id| NetworkScope {
+            prop::collection::vec(arb_string(), 0..10).prop_map(|ids| {
+                let network = ids
+                    .iter()
+                    .take(2)
+                    .map(|id| NetworkScope {
                         id: id.clone(),
-                        r#match: NetworkMatch { gateway_mac: None, ssid: None, cidr: None },
+                        r#match: NetworkMatch {
+                            gateway_mac: None,
+                            ssid: None,
+                            cidr: None,
+                        },
                         tags: vec![],
-                    }).collect();
-                    let host = ids.iter().skip(2).take(2).map(|id| HostScope {
+                    })
+                    .collect();
+                let host = ids
+                    .iter()
+                    .skip(2)
+                    .take(2)
+                    .map(|id| HostScope {
                         id: id.clone(),
                         r#match: HostMatch { hostname: None },
                         tags: vec![],
-                    }).collect();
-                    let user = ids.iter().skip(4).take(2).map(|id| UserScope {
+                    })
+                    .collect();
+                let user = ids
+                    .iter()
+                    .skip(4)
+                    .take(2)
+                    .map(|id| UserScope {
                         id: id.clone(),
                         r#match: UserMatch { user: None },
                         tags: vec![],
-                    }).collect();
-                    let project = ids.iter().skip(6).take(2).map(|id| ProjectScope {
+                    })
+                    .collect();
+                let project = ids
+                    .iter()
+                    .skip(6)
+                    .take(2)
+                    .map(|id| ProjectScope {
                         id: id.clone(),
-                        r#match: ProjectMatch { path_prefix: None, marker_file: None },
+                        r#match: ProjectMatch {
+                            path_prefix: None,
+                            marker_file: None,
+                        },
                         tags: vec![],
-                    }).collect();
-                    (network, host, user, project)
-                }),
-            prop::collection::vec((arb_string(), prop::collection::vec(arb_string(), 1..3)), 0..3)
-                .prop_map(|bundles| bundles.into_iter().enumerate().map(|(i, (name, tags))| Bundle {
-                    name: format!("bundle-{}-{}", i, name),
-                    tags,
-                }).collect()),
+                    })
+                    .collect();
+                (network, host, user, project)
+            }),
+            prop::collection::vec(
+                (arb_string(), prop::collection::vec(arb_string(), 1..3)),
+                0..3,
+            )
+            .prop_map(|bundles| {
+                bundles
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (name, tags))| Bundle {
+                        name: format!("bundle-{}-{}", i, name),
+                        tags,
+                    })
+                    .collect()
+            }),
             Just(None),
         )
-            .prop_map(|(settings, (network, host, user, project), bundle, icm)| Config {
-                settings,
-                scope: Scopes { network, host, user, project },
-                bundle,
-                icm,
-            })
+            .prop_map(
+                |(settings, (network, host, user, project), bundle, icm)| Config {
+                    settings,
+                    scope: Scopes {
+                        network,
+                        host,
+                        user,
+                        project,
+                    },
+                    bundle,
+                    icm,
+                },
+            )
     }
 
     proptest! {
