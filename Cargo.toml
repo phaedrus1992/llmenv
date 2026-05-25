@@ -25,3 +25,4 @@ assert_cmd = "2.2"
 insta = { version = "1.47", features = ["yaml"] }
 tempfile = "3.27"
 predicates = "3.1"
+walkdir = "2.5"
