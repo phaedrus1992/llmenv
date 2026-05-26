@@ -74,23 +74,38 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
         }
 
         let content = std::fs::read_to_string(&skill_md)?;
-        // Check that it has YAML frontmatter markers
-        if !content.starts_with("---") {
-            return Err(anyhow::anyhow!(
-                "Skill {} SKILL.md missing YAML frontmatter (must start with ---)",
-                path.display()
-            ));
-        }
 
-        // Check for required fields in frontmatter (simple check: lines starting with "name:" or "description:")
-        let has_name = content.lines().any(|l| l.trim().starts_with("name:"));
-        let has_description = content
-            .lines()
-            .any(|l| l.trim().starts_with("description:"));
+        if let Some(frontmatter_end) = content.find("\n---\n").or_else(|| {
+            if content.ends_with("---") {
+                Some(content.len() - 3)
+            } else {
+                None
+            }
+        }) {
+            let frontmatter_str = &content[3..frontmatter_end];
+            match serde_yaml::from_str::<serde_yaml::Mapping>(frontmatter_str) {
+                Ok(mapping) => {
+                    let has_name = mapping.get("name").is_some();
+                    let has_description = mapping.get("description").is_some();
 
-        if !has_name || !has_description {
+                    if !has_name || !has_description {
+                        return Err(anyhow::anyhow!(
+                            "Skill {} SKILL.md missing required frontmatter fields (name and description)",
+                            path.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Skill {} SKILL.md has invalid YAML frontmatter: {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+        } else {
             return Err(anyhow::anyhow!(
-                "Skill {} SKILL.md missing required frontmatter fields (name and description)",
+                "Skill {} SKILL.md missing YAML frontmatter (must start with --- and end with ---)",
                 path.display()
             ));
         }

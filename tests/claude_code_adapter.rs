@@ -128,3 +128,101 @@ fn skills_with_frontmatter_are_validated() {
         );
     }
 }
+
+#[test]
+fn rejects_skill_missing_skill_md() {
+    let tmp = tempdir().expect("tempdir");
+    let skills_dir = tmp.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).expect("create skills dir");
+    std::fs::create_dir(skills_dir.join("bad-skill")).expect("create skill dir");
+
+    let m = llme::merge::MergedManifest {
+        agents_md: String::new(),
+        files: Default::default(),
+    };
+    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
+        "should reject skill directory missing SKILL.md",
+    );
+    assert!(err.to_string().contains("missing SKILL.md"));
+}
+
+#[test]
+fn rejects_skill_missing_frontmatter_markers() {
+    let tmp = tempdir().expect("tempdir");
+    let skills_dir = tmp.path().join("skills");
+    let skill_dir = skills_dir.join("bad-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "name: bad\ndescription: missing markers")
+        .expect("write SKILL.md");
+
+    let m = llme::merge::MergedManifest {
+        agents_md: String::new(),
+        files: Default::default(),
+    };
+    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
+        "should reject SKILL.md without frontmatter markers",
+    );
+    assert!(err.to_string().contains("missing YAML frontmatter"));
+}
+
+#[test]
+fn rejects_skill_missing_name_field() {
+    let tmp = tempdir().expect("tempdir");
+    let skills_dir = tmp.path().join("skills");
+    let skill_dir = skills_dir.join("bad-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\ndescription: no name field\n---\n",
+    )
+    .expect("write SKILL.md");
+
+    let m = llme::merge::MergedManifest {
+        agents_md: String::new(),
+        files: Default::default(),
+    };
+    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
+        "should reject SKILL.md missing name",
+    );
+    assert!(err.to_string().contains("missing required frontmatter fields"));
+}
+
+#[test]
+fn rejects_skill_missing_description_field() {
+    let tmp = tempdir().expect("tempdir");
+    let skills_dir = tmp.path().join("skills");
+    let skill_dir = skills_dir.join("bad-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "---\nname: bad\n---\n").expect("write SKILL.md");
+
+    let m = llme::merge::MergedManifest {
+        agents_md: String::new(),
+        files: Default::default(),
+    };
+    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
+        "should reject SKILL.md missing description",
+    );
+    assert!(err.to_string().contains("missing required frontmatter fields"));
+}
+
+#[test]
+fn rejects_skill_with_invalid_yaml_frontmatter() {
+    let tmp = tempdir().expect("tempdir");
+    let skills_dir = tmp.path().join("skills");
+    let skill_dir = skills_dir.join("bad-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\ninvalid: yaml: syntax: here\n---\n",
+    )
+    .expect("write SKILL.md");
+
+    let m = llme::merge::MergedManifest {
+        agents_md: String::new(),
+        files: Default::default(),
+    };
+    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
+        "should reject invalid YAML frontmatter",
+    );
+    assert!(err.to_string().contains("invalid YAML frontmatter"));
+}
