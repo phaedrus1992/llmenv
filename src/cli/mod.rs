@@ -135,11 +135,16 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
                 if meta.permissions().readonly() {
                     eprintln!("⚠ GC failed: cache directory is read-only");
                 } else {
-                    let cache_retention_hours = config.settings.cache_retention_hours.unwrap_or(168);
+                    let cache_retention_hours =
+                        config.settings.cache_retention_hours.unwrap_or(168);
                     let retention = std::time::Duration::from_secs(cache_retention_hours * 3600);
                     match crate::materialize::cache::gc(&cache_dir, retention) {
                         Ok(report) => {
-                            eprintln!("✓ GC complete: removed {} entries, kept {}", report.removed.len(), report.kept);
+                            eprintln!(
+                                "✓ GC complete: removed {} entries, kept {}",
+                                report.removed.len(),
+                                report.kept
+                            );
                         }
                         Err(e) => eprintln!("⚠ GC failed: {}", e),
                     }
