@@ -23,6 +23,8 @@ pub enum ValidateError {
     InvalidHostname(String),
     #[error("invalid path prefix: {0}")]
     InvalidPathPrefix(String),
+    #[error("bundle {0}: invalid variable name '{1}' (must match [A-Za-z_][A-Za-z0-9_]*)")]
+    InvalidVarName(String, String),
 }
 
 fn is_valid_cidr(cidr: &str) -> bool {
@@ -75,6 +77,17 @@ fn is_valid_path_prefix(path: &str) -> bool {
     !path.contains('\0') && !path.contains("../") && !path.contains("/..\\")
 }
 
+fn is_valid_var_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), ValidateError> {
         let mut seen_scope_ids = std::collections::HashSet::new();
@@ -124,6 +137,11 @@ impl Config {
             }
             if !seen_bundle_names.insert(&b.name) {
                 return Err(ValidateError::DuplicateBundleName(b.name.clone()));
+            }
+            for var_name in b.vars.keys() {
+                if !is_valid_var_name(var_name) {
+                    return Err(ValidateError::InvalidVarName(b.name.clone(), var_name.clone()));
+                }
             }
         }
         Ok(())
@@ -580,5 +598,58 @@ mod tests {
             icm: None,
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_var_name_starts_with_digit() {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("123var".to_string(), "value".to_string());
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes::default(),
+            bundle: vec![Bundle {
+                name: "test".to_string(),
+                tags: vec!["tag1".to_string()],
+                vars,
+            }],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_var_name_contains_hyphen() {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("my-var".to_string(), "value".to_string());
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes::default(),
+            bundle: vec![Bundle {
+                name: "test".to_string(),
+                tags: vec!["tag1".to_string()],
+                vars,
+            }],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_valid_var_names() {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("MY_VAR".to_string(), "value1".to_string());
+        vars.insert("_private".to_string(), "value2".to_string());
+        vars.insert("var123".to_string(), "value3".to_string());
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes::default(),
+            bundle: vec![Bundle {
+                name: "test".to_string(),
+                tags: vec!["tag1".to_string()],
+                vars,
+            }],
+            icm: None,
+        };
+        assert!(config.validate().is_ok());
     }
 }
