@@ -1,0 +1,23 @@
+name: coverage
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        with:
+          tool: cargo-llvm-cov
+      # Print the per-file summary to the job log and fail if total line
+      # coverage drops below the baseline minus tolerance. Baseline at the
+      # time this landed was 65.12%; see issue #57. No external service.
+      - run: cargo llvm-cov --all-features --summary-only --fail-under-lines 64

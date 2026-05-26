@@ -1,5 +1,8 @@
 # llmenv
 
+[![CI](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml)
+[![coverage](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml)
+
 A universal scope-aware environment manager for AI coding agents.
 
 **llmenv** is like `direnv` for Claude Code and other AI tools. It automatically applies context-specific configuration based on your current network, host, user, or project.
@@ -77,6 +80,19 @@ OFFICE_PROXY = "proxy.internal"
 ```
 
 As you move to the office WiFi or into the `myapp` project, the corresponding bundles automatically activate.
+
+## Development
+
+After cloning, install the git hooks so the same checks CI enforces run locally:
+
+```bash
+prek install --hook-type pre-commit --hook-type pre-push
+```
+
+- `cargo fmt --check` runs on every commit (fast).
+- `cargo clippy -D warnings` and `cargo test` run on push (slower).
+
+Install `prek` from <https://github.com/j178/prek> if you don't have it.
 
 ## Documentation
 
