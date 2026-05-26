@@ -2,6 +2,7 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags:
       - 'v*'
 
@@ -27,12 +28,14 @@ jobs:
             target: aarch64-apple-darwin
             artifact_name: llme
             asset_name: llme-macos-aarch64
+    outputs:
+      checksums: ${{ steps.checksum.outputs.hashes }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1cac3dba77a9a4a10ac88d3c5b31e10eeb4dd0e3
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@23bce251afb0c3f1aefd855a166a5d37a2c9cdfb
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
       - name: Strip binary
@@ -41,11 +44,22 @@ jobs:
         run: mkdir -p assets
       - name: Copy binary
         run: cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} assets/${{ matrix.asset_name }}
-      - name: Upload artifact
+      - name: Compute SHA256
+        id: checksum
+        run: |
+          cd assets
+          sha256sum ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha256
+          echo "hashes=$(cat ${{ matrix.asset_name }}.sha256)" >> $GITHUB_OUTPUT
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: assets/${{ matrix.asset_name }}
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}-sha256
+          path: assets/${{ matrix.asset_name }}.sha256
 
   publish-crate:
     name: Publish to crates.io
@@ -53,9 +67,11 @@ jobs:
     needs: build-binaries
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1cac3dba77a9a4a10ac88d3c5b31e10eeb4dd0e3
       - name: Publish
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
 
   create-release:
     name: Create GitHub Release
@@ -69,15 +85,26 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: assets
-      - name: Flatten artifacts
+      - name: Prepare release assets
         run: |
-          mkdir -p release-assets
-          find assets -type f -name 'llme-*' -exec mv {} release-assets/ \;
+          mkdir -p release-assets checksums
+          find assets -type f -name 'llme-*' ! -name '*.sha256' -exec mv {} release-assets/ \;
+          find assets -type f -name '*.sha256' -exec mv {} checksums/ \;
+          cd checksums && cat *.sha256 > checksums.txt && cd ..
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@d3bbd6494e50145444b0219a39a90f00b0f01dab
         with:
-          files: release-assets/llme-*
+          files: |
+            release-assets/llme-*
+            checksums/checksums.txt
           draft: false
           prerelease: false
+          body: |
+            ## Binary Checksums
+
+            Verify binary integrity:
+            ```bash
+            sha256sum -c checksums.txt
+            ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
