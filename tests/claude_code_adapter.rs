@@ -90,9 +90,7 @@ fn plugins_are_materialized() {
         .materialize(&m, tmp.path())
         .expect("materialize");
 
-    let plugin_json = tmp
-        .path()
-        .join("plugins/test-plugin/plugin.json");
+    let plugin_json = tmp.path().join("plugins/test-plugin/plugin.json");
     assert!(
         plugin_json.exists(),
         "plugin.json should be copied to plugins/<name>/plugin.json"

@@ -2,7 +2,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "llme", version, about = "Universal scope-aware environment for AI coding agents")]
+#[command(
+    name = "llme",
+    version,
+    about = "Universal scope-aware environment for AI coding agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -26,8 +30,8 @@ pub fn run() -> anyhow::Result<()> {
             run_doctor(gc)?;
         }
         None => {
-            // Default: run doctor
-            run_doctor(false)?;
+            eprintln!("Usage: llme [COMMAND]");
+            eprintln!("Run 'llme --help' for more information.");
         }
     }
 
@@ -70,11 +74,16 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
 
         let skills_dir = config_path.join("skills");
         if skills_dir.exists() {
-            let skill_count = std::fs::read_dir(&skills_dir)
-                .ok()
-                .map(|entries| entries.count())
-                .unwrap_or(0);
-            eprintln!("✓ skills/ directory exists ({} items)", skill_count);
+            match std::fs::read_dir(&skills_dir) {
+                Ok(entries) => {
+                    let skill_count = entries.count();
+                    eprintln!("✓ skills/ directory exists ({} items)", skill_count);
+                }
+                Err(e) => {
+                    eprintln!("✗ Failed to read skills/ directory: {}", e);
+                    return Err(e.into());
+                }
+            }
         }
     } else {
         eprintln!("⚠ CLAUDE_CONFIG_DIR not set (not in an active scope?)");
