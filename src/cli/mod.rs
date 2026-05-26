@@ -172,15 +172,28 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_export(_scope: Option<String>, _tag: Option<String>) -> anyhow::Result<()> {
+fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
 
     let mut vars = std::collections::BTreeMap::new();
     for bundle in &config.bundle {
+        // Filter by tags if specified
+        if let Some(ref t) = tag {
+            if !bundle.tags.contains(t) {
+                continue;
+            }
+        }
         for (key, value) in &bundle.vars {
             vars.insert(key.clone(), value.clone());
         }
+    }
+
+    // TODO: Scope filtering would require evaluating scope match conditions
+    // (network gateway/ssid/cidr, host hostname, user user, project path/marker)
+    // For now, only tag filtering is implemented
+    if scope.is_some() {
+        eprintln!("warning: scope filtering not yet implemented, exporting all matching tags");
     }
 
     for (key, value) in vars {
