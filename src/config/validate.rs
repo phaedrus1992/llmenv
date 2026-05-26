@@ -25,6 +25,10 @@ pub enum ValidateError {
     InvalidPathPrefix(String),
     #[error("bundle {0}: invalid variable name '{1}' (must match [A-Za-z_][A-Za-z0-9_]*)")]
     InvalidVarName(String, String),
+    #[error("cache_dir contains path traversal components: {0}")]
+    CacheDirTraversal(String),
+    #[error("cache_retention_hours must be > 0")]
+    CacheRetentionInvalid,
 }
 
 fn is_valid_cidr(cidr: &str) -> bool {
@@ -89,8 +93,25 @@ fn is_valid_var_name(name: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+fn is_safe_cache_dir(dir: &str) -> bool {
+    if dir.is_empty() || dir.len() > 4096 {
+        return false;
+    }
+    !dir.contains('\0') && !dir.contains("../") && !dir.contains("/..")
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), ValidateError> {
+        if !is_safe_cache_dir(&self.settings.cache_dir) {
+            return Err(ValidateError::CacheDirTraversal(
+                self.settings.cache_dir.clone(),
+            ));
+        }
+        if let Some(hours) = self.settings.cache_retention_hours
+            && hours == 0
+        {
+            return Err(ValidateError::CacheRetentionInvalid);
+        }
         let mut seen_scope_ids = std::collections::HashSet::new();
         let ids = self
             .scope
@@ -652,6 +673,92 @@ mod tests {
                 tags: vec!["tag1".to_string()],
                 vars,
             }],
+            icm: None,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cache_dir_with_traversal() {
+        let config = Config {
+            settings: Settings {
+                cache_dir: "~/.cache/../../../etc/passwd".to_string(),
+                sync_interval_minutes: 15,
+                cache_retention_hours: Some(168),
+            },
+            scope: Scopes::default(),
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cache_dir_with_null_byte() {
+        let config = Config {
+            settings: Settings {
+                cache_dir: "~/.cache/llm\0env".to_string(),
+                sync_interval_minutes: 15,
+                cache_retention_hours: Some(168),
+            },
+            scope: Scopes::default(),
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cache_dir_valid() {
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cache_retention_zero() {
+        let config = Config {
+            settings: Settings {
+                cache_dir: "~/.cache/llmenv".to_string(),
+                sync_interval_minutes: 15,
+                cache_retention_hours: Some(0),
+            },
+            scope: Scopes::default(),
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cache_retention_valid() {
+        let config = Config {
+            settings: Settings {
+                cache_dir: "~/.cache/llmenv".to_string(),
+                sync_interval_minutes: 15,
+                cache_retention_hours: Some(168),
+            },
+            scope: Scopes::default(),
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cache_retention_none() {
+        let config = Config {
+            settings: Settings {
+                cache_dir: "~/.cache/llmenv".to_string(),
+                sync_interval_minutes: 15,
+                cache_retention_hours: None,
+            },
+            scope: Scopes::default(),
+            bundle: vec![],
             icm: None,
         };
         assert!(config.validate().is_ok());
