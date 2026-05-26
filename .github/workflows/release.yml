@@ -31,48 +31,67 @@ jobs:
     outputs:
       checksums: ${{ steps.checksum.outputs.hashes }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@eef61447b9ff4aafe5dcd72be0363a5d3b588f4e  # v6.4.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1cac3dba77a9a4a10ac88d3c5b31e10eeb4dd0e3
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@23bce251afb0c3f1aefd855a166a5d37a2c9cdfb
+        with:
+          cache-on-failure: false
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target "${{ matrix.target }}"
       - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }} || true
+        run: strip "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" || true
       - name: Create asset directory
         run: mkdir -p assets
       - name: Copy binary
-        run: cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} assets/${{ matrix.asset_name }}
+        run: cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" \
+          "assets/${{ matrix.asset_name }}"
       - name: Compute SHA256
         id: checksum
         run: |
           cd assets
-          sha256sum ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha256
-          echo "hashes=$(cat ${{ matrix.asset_name }}.sha256)" >> $GITHUB_OUTPUT
+          sha256sum "${{ matrix.asset_name }}" > "${{ matrix.asset_name }}.sha256"
+          echo "hashes=$(cat "${{ matrix.asset_name }}.sha256")" >> $GITHUB_OUTPUT
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@c7d193f32edcb7bfad88892161225aeda64e9179  # v4.1.2
         with:
           name: ${{ matrix.asset_name }}
           path: assets/${{ matrix.asset_name }}
       - name: Upload checksum artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@c7d193f32edcb7bfad88892161225aeda64e9179  # v4.1.2
         with:
           name: ${{ matrix.asset_name }}-sha256
           path: assets/${{ matrix.asset_name }}.sha256
       - name: Generate SLSA provenance
         id: slsa
+        env:
+          ARTIFACT_NAME: ${{ matrix.asset_name }}
+          GH_REF: ${{ github.ref }}
+          GH_REPO: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+          GH_RUN_ID: ${{ github.run_id }}
         run: |
-          ARTIFACT_HASH=$(sha256sum assets/${{ matrix.asset_name }} | awk '{print $1}')
-          PROVENANCE_FILE="${{ matrix.asset_name }}.intoto.jsonl"
+          ARTIFACT_HASH=$(sha256sum assets/"${ARTIFACT_NAME}" | awk '{print $1}')
+          PROVENANCE_FILE="${ARTIFACT_NAME}.intoto.jsonl"
 
-          # Create minimal SLSA v1.0 provenance in intoto format
-          python3 -c "
+          python3 << 'PYTHON_EOF'
           import json
           import datetime
+          import os
+
+          artifact_hash = os.environ['ARTIFACT_HASH']
+          artifact_name = os.environ['ARTIFACT_NAME']
+          gh_ref = os.environ['GH_REF']
+          gh_repo = os.environ['GH_REPO']
+          gh_sha = os.environ['GH_SHA']
+          gh_run_id = os.environ['GH_RUN_ID']
+
           provenance = {
             '_type': 'https://slsa.dev/provenance/v1',
-            'subject': [{'name': '${{ matrix.asset_name }}', 'digest': {'sha256': '${ARTIFACT_HASH}'}}],
+            'subject': [{'name': artifact_name, 'digest': {'sha256': artifact_hash}}],
             'predicateType': 'https://slsa.dev/provenance/v1',
             'predicate': {
               'buildDefinition': {
@@ -80,19 +99,17 @@ jobs:
                 'externalParameters': {
                   'workflow': {
                     'path': '.github/workflows/release.yml',
-                    'ref': '${{ github.ref }}',
-                    'repository': '${{ github.repository }}'
+                    'ref': gh_ref,
+                    'repository': gh_repo
                   }
                 },
-                'internalParameters': {
-                  'source-commit': '${{ github.sha }}'
-                },
+                'internalParameters': {'source-commit': gh_sha},
                 'resolvedDependencies': []
               },
               'runDetails': {
                 'builder': {'id': 'https://github.com/slsa-framework/slsa-github-generator/releases/tag/v2.0.0'},
                 'buildMetadata': {
-                  'invocationId': '${{ github.run_id }}',
+                  'invocationId': gh_run_id,
                   'startedOn': datetime.datetime.utcnow().isoformat() + 'Z',
                   'completedOn': datetime.datetime.utcnow().isoformat() + 'Z'
                 },
@@ -100,10 +117,12 @@ jobs:
               }
             }
           }
-          with open('${PROVENANCE_FILE}', 'w') as f:
+          with open(os.environ['PROVENANCE_FILE'], 'w') as f:
             json.dump(provenance, f)
-          "
+          PYTHON_EOF
+
           echo "provenance_file=${PROVENANCE_FILE}" >> $GITHUB_OUTPUT
+          echo "ARTIFACT_HASH=${ARTIFACT_HASH}" >> $GITHUB_ENV
       - name: Upload provenance artifact
         uses: actions/upload-artifact@v4
         with:
@@ -115,7 +134,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-binaries
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@eef61447b9ff4aafe5dcd72be0363a5d3b588f4e  # v6.4.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1cac3dba77a9a4a10ac88d3c5b31e10eeb4dd0e3
       - name: Publish
         env:
@@ -131,23 +152,33 @@ jobs:
     outputs:
       release_version: ${{ steps.extract_version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@eef61447b9ff4aafe5dcd72be0363a5d3b588f4e  # v6.4.0
+        with:
+          persist-credentials: false
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@65a9edc5881444af0b3872cd0cbb87b1d723d535  # v4.1.7
         with:
           path: assets
       - name: Prepare release assets
         run: |
           mkdir -p release-assets checksums provenance
-          find assets -type f -name 'llmenv-*' ! -name '*.sha256' ! -name '*.intoto.jsonl' -exec mv {} release-assets/ \;
+          find assets -type f -name 'llmenv-*' ! -name '*.sha256' ! -name '*.intoto.jsonl' \
+            -exec mv {} release-assets/ \;
           find assets -type f -name '*.sha256' -exec mv {} checksums/ \;
           find assets -type f -name '*.intoto.jsonl' -exec mv {} provenance/ \;
           cd checksums && cat *.sha256 > checksums.txt && cd ..
       - name: Extract version from tag
         id: extract_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: |
+          if [[ ! "${{ github.ref }}" =~ ^refs/tags/v ]]; then
+            echo "Error: Not a release tag" >&2
+            exit 1
+          fi
+          VERSION="${{ github.ref }}"
+          VERSION="${VERSION#refs/tags/v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
       - name: Create Release
-        uses: softprops/action-gh-release@d3bbd6494e50145444b0219a39a90f00b0f01dab
+        uses: softprops/action-gh-release@d3bbd6494e50145444b0219a39a90f00b0f01dab  # v1.0.6
         with:
           files: |
             release-assets/llmenv-*
@@ -178,23 +209,35 @@ jobs:
     needs: create-release
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@eef61447b9ff4aafe5dcd72be0363a5d3b588f4e  # v6.4.0
+        with:
+          persist-credentials: false
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@65a9edc5881444af0b3872cd0cbb87b1d723d535  # v4.1.7
         with:
           path: artifacts
       - name: Extract and validate checksums
         id: checksums
         run: |
-          LINUX_X64=$(grep 'llmenv-linux-x86_64' artifacts/llmenv-linux-x86_64-sha256/*.sha256 | awk '{print $1}')
-          MACOS_X64=$(grep 'llmenv-macos-x86_64' artifacts/llmenv-macos-x86_64-sha256/*.sha256 | awk '{print $1}')
-          MACOS_ARM=$(grep 'llmenv-macos-aarch64' artifacts/llmenv-macos-aarch64-sha256/*.sha256 | awk '{print $1}')
+          # Extract checksums with validation
+          LINUX_X64=$(grep -h -F 'llmenv-linux-x86_64' \
+            "artifacts/llmenv-linux-x86_64-sha256"/*.sha256 2>/dev/null | awk '{print $1}')
+          MACOS_X64=$(grep -h -F 'llmenv-macos-x86_64' \
+            "artifacts/llmenv-macos-x86_64-sha256"/*.sha256 2>/dev/null | awk '{print $1}')
+          MACOS_ARM=$(grep -h -F 'llmenv-macos-aarch64' \
+            "artifacts/llmenv-macos-aarch64-sha256"/*.sha256 2>/dev/null | awk '{print $1}')
 
-          # Validate all checksums present
-          if [[ -z "${LINUX_X64}" || -z "${MACOS_X64}" || -z "${MACOS_ARM}" ]]; then
-            echo "Error: Missing checksums"
-            exit 1
-          fi
+          # Validate all checksums present and format (64 hex digits)
+          for checksum in "$LINUX_X64" "$MACOS_X64" "$MACOS_ARM"; do
+            if [[ -z "$checksum" ]]; then
+              echo "Error: Missing checksum" >&2
+              exit 1
+            fi
+            if ! [[ "$checksum" =~ ^[a-f0-9]{64}$ ]]; then
+              echo "Error: Invalid SHA256 format: $checksum" >&2
+              exit 1
+            fi
+          done
 
           echo "linux_x64=${LINUX_X64}" >> $GITHUB_OUTPUT
           echo "macos_x64=${MACOS_X64}" >> $GITHUB_OUTPUT
@@ -202,14 +245,15 @@ jobs:
       - name: Trigger Homebrew formula update
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          VERSION: ${{ needs.create-release.outputs.release_version }}
-          LINUX_X64: ${{ steps.checksums.outputs.linux_x64 }}
-          MACOS_X64: ${{ steps.checksums.outputs.macos_x64 }}
-          MACOS_ARM: ${{ steps.checksums.outputs.macos_arm }}
         run: |
+          VERSION="${{ needs.create-release.outputs.release_version }}"
+          LINUX_X64="${{ steps.checksums.outputs.linux_x64 }}"
+          MACOS_X64="${{ steps.checksums.outputs.macos_x64 }}"
+          MACOS_ARM="${{ steps.checksums.outputs.macos_arm }}"
+
           gh workflow run update-formula.yml \
             --repo phaedrus1992/homebrew-tap \
-            -f version="${VERSION}" \
-            -f linux_x64="${LINUX_X64}" \
-            -f macos_x64="${MACOS_X64}" \
-            -f macos_arm="${MACOS_ARM}"
+            -f "version=${VERSION}" \
+            -f "linux_x64=${LINUX_X64}" \
+            -f "macos_x64=${MACOS_X64}" \
+            -f "macos_arm=${MACOS_ARM}"
