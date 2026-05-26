@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-26
+
+### Added
+
+- **Color emission wired into list/status commands** — `tag-ls`, `scope-ls`,
+  `bundle-ls`, `doctor`, and `status` now emit colored markers (active `*`,
+  `(inactive)`, `(orphan)`, doctor `✓`/`⚠`/`✗`) gated by `--color` /
+  `NO_COLOR` / `CLICOLOR_FORCE` / TTY detection. `export` output stays plain so
+  its shell-eval'd stdout never carries escape codes. (#62)
+- **`llmenv prune` filesystem logic** — `cache::prune()` now performs the
+  on-disk sweep behind `--all` / `--older-than` / `--dry-run`. Deletion is
+  symlink-safe (links are unlinked, never followed), orphaned `*.tmp` staging
+  dirs are always cleared, and `--older-than` only ages out current-version
+  cache folders so the staleness and age axes stay orthogonal. (#63)
+
+### Documentation
+
+- Comprehensive security/performance/property-test audit
+  (`docs/superpowers/specs/2026-05-26-comprehensive-audit.md`); follow-ups
+  filed as #65–#73. (#56)
+
 ## [1.1.0] - 2026-05-26
 
 ### Added
