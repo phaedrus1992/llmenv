@@ -16,6 +16,7 @@ pub struct Config {
 pub struct Settings {
     pub cache_dir: String,
     pub sync_interval_minutes: u64,
+    pub cache_retention_hours: Option<u64>,
 }
 
 impl Default for Settings {
@@ -23,6 +24,7 @@ impl Default for Settings {
         Self {
             cache_dir: "~/.cache/llmenv".into(),
             sync_interval_minutes: 15,
+            cache_retention_hours: Some(168), // 7 days
         }
     }
 }

@@ -1,37 +1,119 @@
-LLM Environment
-===============
+# llmenv
 
-A universal environment for LLMs. Like direnv for your agents.
+A universal scope-aware environment manager for AI coding agents.
 
-Features
-========
+**llmenv** is like `direnv` for Claude Code and other AI tools. It automatically applies context-specific configuration based on your current network, host, user, or project.
 
-* define `AGENTS.md`-compatible rules, skills, and plugins and assign them
-  to tags
-* configure tags to apply to the network, host, user, or project scopes
-* integrated memory with scope- and tag-awareness using the `icm` MCP
-* configures hooks for automatic integration with your coding agents
-* automatic sync with github
+## Features
 
-Supported LLM Systems
-=====================
+- **Scope-aware config** — Different settings for office, home, projects, etc.
+- **Tag-based bundles** — Organize environment variables, rules, and plugins
+- **Shell integration** — Automatic scope detection via shell hooks
+- **Cache & sync** — Local caching with optional GitHub synchronization
+- **MCP integration** — Scope-aware access to external tools via Model Context Protocol
+- **Diagnostics** — Built-in `llme doctor` for troubleshooting
 
-* Claude Code
-* Codex
-* Crush
-* OpenCode
+## Quick Start
 
-How Does It Work?
-=================
+### 1. Install
 
-LLMe runs a small, lightweight Rust coordinator that tracks your
-configuration and automatically applies it, direnv-like, to your current
-working environment.
+```bash
+cargo install llmenv
+```
 
-Create bundles of config just like you would for a local project. Rules,
-plugins, skills, documentation, etc. Then configure them to apply to various
-scopes.
+### 2. Initialize
 
-As you move around in your systems and projects, it applies a custom
-`CLAUDE_CONFIG_DIR` for the current scope based on your configuration.
+```bash
+llme init
+```
+
+### 3. Configure your environment
+
+Edit `~/.config/llmenv/config.toml` to add your scopes and bundles.
+
+### 4. Activate shell integration
+
+Add to your `.zshrc` or `.bashrc`:
+
+```bash
+eval "$(llme hook zsh)"
+```
+
+### 5. Verify setup
+
+```bash
+llme doctor
+```
+
+## Example
+
+```toml
+[settings]
+cache_dir = "~/.cache/llmenv"
+
+[[scope.network]]
+id = "office"
+match = { ssid = "OfficeWiFi" }
+tags = ["office"]
+
+[[scope.project]]
+id = "myapp"
+match = { marker = ".llmerc" }
+tags = ["myapp-dev"]
+
+[[bundle]]
+name = "base"
+tags = []
+
+[bundle.vars]
+AGENT = "claude"
+
+[[bundle]]
+name = "office-config"
+tags = ["office"]
+
+[bundle.vars]
+OFFICE_PROXY = "proxy.internal"
+```
+
+As you move to the office WiFi or into the `myapp` project, the corresponding bundles automatically activate.
+
+## Documentation
+
+- [Getting Started](docs/getting-started.md) — Installation and basic usage
+- [Configuration Reference](docs/configuration.md) — Complete schema and examples
+- [MCP Integration](docs/icm-topology.md) — Model Context Protocol setup
+
+## Supported Agents
+
+- Claude Code
+- Codex
+- Other tools via MCP integration
+
+## How It Works
+
+llmenv evaluates **scopes** (network, host, user, project) against your current environment and activates matching **bundles** of configuration:
+
+```
+Current environment → Match scopes → Collect tags → Export variables
+                                                  → Activate MCP server (if configured)
+```
+
+When you run `llme export`, it returns shell commands to set up your environment. The shell hook runs this automatically on every prompt, keeping your config in sync as you move between projects and networks.
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `llme init` | Create configuration |
+| `llme export` | Export environment variables |
+| `llme hook {zsh\|bash}` | Generate shell integration code |
+| `llme doctor [--gc]` | Diagnostics and cache cleanup |
+| `llme scope-ls` | List scopes |
+| `llme bundle-ls` | List bundles |
+| `llme sync` | Push config to GitHub |
+
+## Version
+
+Version 1.0.0 — Ready for production use.
 

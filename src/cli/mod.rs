@@ -3,7 +3,7 @@ use crate::paths;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -100,60 +100,78 @@ pub fn run() -> anyhow::Result<()> {
 fn run_doctor(gc: bool) -> anyhow::Result<()> {
     eprintln!("Running llme doctor...");
 
-    // Check that CLAUDE_CONFIG_DIR is set (if in an active scope)
-    if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        eprintln!("✓ CLAUDE_CONFIG_DIR set to: {}", config_dir);
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    eprintln!("✓ Configuration loaded from {}", config_path.display());
 
-        let config_path = PathBuf::from(&config_dir);
+    // Check that config parses
+    eprintln!("✓ Config is valid TOML");
 
-        // Validate that adapter wiring exists
-        let claude_md = config_path.join("CLAUDE.md");
-        if claude_md.exists() {
-            eprintln!("✓ CLAUDE.md found");
-        } else {
-            eprintln!("⚠ CLAUDE.md not found at {}", claude_md.display());
-        }
+    // Check cache directory is writable
+    let cache_dir = expand_tilde(&config.settings.cache_dir)?;
+    std::fs::create_dir_all(&cache_dir).context("cache directory not writable")?;
+    eprintln!("✓ Cache directory is writable: {}", cache_dir.display());
 
-        let settings_json = config_path.join("settings.json");
-        if settings_json.exists() {
-            eprintln!("✓ settings.json found");
-            // Try to parse it
-            let content = std::fs::read_to_string(&settings_json)?;
-            match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(_) => eprintln!("✓ settings.json is valid JSON"),
-                Err(e) => {
-                    eprintln!("✗ settings.json parse error: {}", e);
-                    return Err(e.into());
-                }
-            }
-        } else {
-            eprintln!("⚠ settings.json not found at {}", settings_json.display());
-        }
-
-        let skills_dir = config_path.join("skills");
-        if skills_dir.exists() {
-            match std::fs::read_dir(&skills_dir) {
-                Ok(entries) => {
-                    let skill_count = entries.count();
-                    eprintln!("✓ skills/ directory exists ({} items)", skill_count);
-                }
-                Err(e) => {
-                    eprintln!("✗ Failed to read skills/ directory: {}", e);
-                    return Err(e.into());
-                }
-            }
+    // Check git remote is reachable (if config_dir is a git repo)
+    let config_dir = paths::config_dir()?;
+    if is_git_repo(&config_dir) {
+        match check_git_remote(&config_dir) {
+            Ok(remote) => eprintln!("✓ Git remote reachable: {}", remote),
+            Err(e) => eprintln!("⚠ Git remote check failed: {}", e),
         }
     } else {
-        eprintln!("⚠ CLAUDE_CONFIG_DIR not set (not in an active scope?)");
+        eprintln!("⚠ Config directory is not a git repo");
     }
 
-    eprintln!("Doctor check complete.");
+    eprintln!("✓ Doctor check complete.");
 
     if gc {
-        eprintln!("✓ GC flag set (cache cleanup deferred to full implementation)");
+        eprintln!("Running garbage collection...");
+        let cache_retention_hours = config.settings.cache_retention_hours.unwrap_or(168);
+        let retention = std::time::Duration::from_secs(cache_retention_hours * 3600);
+        match crate::materialize::cache::gc(&cache_dir, retention) {
+            Ok(report) => {
+                eprintln!("✓ GC complete: removed {} entries, kept {}", report.removed.len(), report.kept);
+            }
+            Err(e) => eprintln!("⚠ GC failed: {}", e),
+        }
     }
 
     Ok(())
+}
+
+fn expand_tilde(path: &str) -> anyhow::Result<PathBuf> {
+    if path.starts_with("~/") || path == "~" {
+        let home = std::env::var("HOME").context("HOME env var not set")?;
+        let expanded = path.replacen("~", &home, 1);
+        Ok(PathBuf::from(expanded))
+    } else {
+        Ok(PathBuf::from(path))
+    }
+}
+
+fn is_git_repo(dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(dir)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(dir)
+        .output()
+        .context("failed to get git remote")?;
+
+    if !output.status.success() {
+        anyhow::bail!("no remote configured");
+    }
+
+    let remote = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(remote)
 }
 
 fn shell_escape(s: &str) -> String {
@@ -491,5 +509,25 @@ mod tests {
     fn hook_unsupported_shell_fails() {
         let result = run_hook("fish");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn expand_tilde_home() {
+        let home = std::env::var("HOME").unwrap();
+        let result = expand_tilde("~/test").unwrap();
+        assert_eq!(result, PathBuf::from(format!("{}/test", home)));
+    }
+
+    #[test]
+    fn expand_tilde_tilde_only() {
+        let home = std::env::var("HOME").unwrap();
+        let result = expand_tilde("~").unwrap();
+        assert_eq!(result, PathBuf::from(&home));
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde() {
+        let result = expand_tilde("/absolute/path").unwrap();
+        assert_eq!(result, PathBuf::from("/absolute/path"));
     }
 }
