@@ -51,6 +51,8 @@ enum Command {
     TagLs,
     /// List available bundles
     BundleLs,
+    /// Sync config with GitHub (git add, commit, push)
+    Sync,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -80,6 +82,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::BundleLs) => {
             run_bundle_ls()?;
+        }
+        Some(Command::Sync) => {
+            run_sync()?;
         }
         None => {
             eprintln!("Usage: llme [COMMAND]");
@@ -206,6 +211,17 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
                 }
             }
         }
+    }
+
+    // Throttled pull: check sync interval and fetch+pull if enough time has elapsed
+    let interval_secs = config.settings.sync_interval_minutes * 60;
+    let state_dir = paths::state_dir()?;
+    if let Err(e) = crate::sync::maybe_pull(
+        &config_path,
+        &state_dir,
+        std::time::Duration::from_secs(interval_secs),
+    ) {
+        eprintln!("warning: throttled pull failed: {e}");
     }
 
     let mut vars = std::collections::BTreeMap::new();
@@ -391,6 +407,36 @@ fn run_bundle_ls() -> anyhow::Result<()> {
         println!("{}", bundle);
     }
 
+    Ok(())
+}
+
+fn run_sync() -> anyhow::Result<()> {
+    let config_dir = paths::config_dir()?;
+
+    // Stage all changes in config_dir
+    std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&config_dir)
+        .status()?;
+
+    // Commit (allow empty if nothing changed)
+    let commit_result = std::process::Command::new("git")
+        .args(["commit", "-m", "Update llmenv config"])
+        .current_dir(&config_dir)
+        .status()?;
+
+    if !commit_result.success() {
+        eprintln!("No changes to commit (working tree clean) or commit failed");
+        return Ok(());
+    }
+
+    // Push to origin
+    std::process::Command::new("git")
+        .args(["push"])
+        .current_dir(&config_dir)
+        .status()?;
+
+    eprintln!("✓ Synced config to GitHub");
     Ok(())
 }
 
