@@ -9,6 +9,10 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod style;
+
+pub use style::{ColorMode, should_use_color};
+
 /// Version string shown by `--version`. Built by `build.rs` as
 /// `"<pkg-version> (<short-hash>[-dirty])"`, falling back to bare pkg version
 /// when the build had no `.git` directory (e.g. crates.io tarball builds).
@@ -68,6 +72,18 @@ enum Command {
     BundleLs,
     /// Sync config with GitHub (git add, commit, push)
     Sync,
+    /// Clean stale cache folders
+    Prune {
+        /// Remove all cache folders (next export re-materializes)
+        #[arg(long)]
+        all: bool,
+        /// Remove current-version folders older than this duration (e.g., "14d", "1w")
+        #[arg(long)]
+        older_than: Option<String>,
+        /// Preview deletions without removing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -100,6 +116,13 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Sync) => {
             run_sync()?;
+        }
+        Some(Command::Prune {
+            all,
+            older_than,
+            dry_run,
+        }) => {
+            run_prune(all, older_than, dry_run)?;
         }
         None => {
             eprintln!("Usage: llmenv [COMMAND]");
@@ -880,6 +903,25 @@ fn run_sync() -> anyhow::Result<()> {
         .context("failed to push config (git push)")?;
 
     eprintln!("✓ Synced config to GitHub");
+    Ok(())
+}
+
+fn run_prune(
+    all: bool,
+    older_than: Option<String>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    // Validate flag combinations
+    if all && older_than.is_some() {
+        anyhow::bail!("--all and --older-than are mutually exclusive");
+    }
+
+    // TODO: Implement prune logic
+    // - Validate older_than duration if provided
+    // - Call materialize::cache::prune() with appropriate flags
+    // - Print summary
+
+    eprintln!("prune stub: all={}, older_than={:?}, dry_run={}", all, older_than, dry_run);
     Ok(())
 }
 
