@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use llme::mcp::proxy::{EnsureOutcome, ensure_running, is_alive};
+use llmenv::mcp::proxy::{EnsureOutcome, ensure_running, is_alive};
 use tempfile::tempdir;
 
 #[derive(Default)]
@@ -143,6 +143,6 @@ fn ensure_running_accepts_peer_published_pid() {
     let outcome =
         ensure_running("127.0.0.1:8765", &pid_path, spawner(log.clone())).expect("ensure_running");
 
-    assert_eq!(outcome, llme::mcp::proxy::EnsureOutcome::AlreadyRunning);
+    assert_eq!(outcome, llmenv::mcp::proxy::EnsureOutcome::AlreadyRunning);
     assert_eq!(log.calls(), 0);
 }

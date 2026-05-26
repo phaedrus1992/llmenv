@@ -31,7 +31,7 @@ tags = ["myapp", "icm-server"]  # Activates MCP when in this project
 
 ## How It Works
 
-1. **Scope Evaluation** — When you open a terminal or run `llme export`, scopes are evaluated against your current environment (network, host, user, project)
+1. **Scope Evaluation** — When you open a terminal or run `llmenv export`, scopes are evaluated against your current environment (network, host, user, project)
 2. **Tag Activation** — Matched scopes contribute their tags; if any includes the `server_tag`, the MCP server is activated
 3. **Server Startup** — llmenv ensures the MCP proxy is running on the configured address
 4. **Environment Export** — Variables are exported to your shell, including MCP_SERVER and related settings
@@ -55,7 +55,7 @@ Since "icm-server" is active:
 Check MCP server status with doctor:
 
 ```bash
-llme doctor
+llmenv doctor
 ```
 
 This validates:
@@ -67,7 +67,7 @@ This validates:
 With GC:
 
 ```bash
-llme doctor --gc
+llmenv doctor --gc
 ```
 
 Garbage collects the cache (removes entries older than `cache_retention_hours`).
@@ -79,7 +79,7 @@ Garbage collects the cache (removes entries older than `cache_retention_hours`).
 Check logs:
 
 ```bash
-llme doctor
+llmenv doctor
 # Review warnings about MCP startup
 ```
 
@@ -94,14 +94,14 @@ netstat -an | grep 9092
 Verify active scopes:
 
 ```bash
-llme export
+llmenv export
 ```
 
 Review your scope configuration:
 
 ```bash
-llme scope-ls
-llme tag-ls
+llmenv scope-ls
+llmenv tag-ls
 ```
 
 ### Scope not matching

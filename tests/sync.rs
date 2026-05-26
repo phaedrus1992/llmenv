@@ -1,4 +1,4 @@
-use llme::sync;
+use llmenv::sync;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 

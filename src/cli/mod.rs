@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
-    name = "llme",
+    name = "llmenv",
     version,
     about = "Universal scope-aware environment for AI coding agents"
 )]
@@ -88,8 +88,8 @@ pub fn run() -> anyhow::Result<()> {
             run_sync()?;
         }
         None => {
-            eprintln!("Usage: llme [COMMAND]");
-            eprintln!("Run 'llme --help' for more information.");
+            eprintln!("Usage: llmenv [COMMAND]");
+            eprintln!("Run 'llmenv --help' for more information.");
         }
     }
 
@@ -98,7 +98,7 @@ pub fn run() -> anyhow::Result<()> {
 
 /// Validates adapter wiring: file layout, config parse, no silent breakage.
 fn run_doctor(gc: bool) -> anyhow::Result<()> {
-    eprintln!("Running llme doctor...");
+    eprintln!("Running llmenv doctor...");
 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
@@ -309,23 +309,23 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
 fn run_hook(shell: &str) -> anyhow::Result<()> {
     match shell {
         "zsh" => {
-            println!("__llme_precmd() {{");
-            println!("  source <(llme export)");
+            println!("__llmenv_precmd() {{");
+            println!("  source <(llmenv export)");
             println!("}}");
             println!();
             println!("# Add to precmd_functions if not already present");
-            println!("if [[ ! \" ${{precmd_functions[@]}} \" =~ \" __llme_precmd \" ]]; then");
-            println!("  precmd_functions+=(\"__llme_precmd\")");
+            println!("if [[ ! \" ${{precmd_functions[@]}} \" =~ \" __llmenv_precmd \" ]]; then");
+            println!("  precmd_functions+=(\"__llmenv_precmd\")");
             println!("fi");
         }
         "bash" => {
-            println!("__llme_prompt() {{");
-            println!("  source <(llme export)");
+            println!("__llmenv_prompt() {{");
+            println!("  source <(llmenv export)");
             println!("}}");
             println!();
             println!("# Prepend to PROMPT_COMMAND if not already present");
-            println!("if [[ \"$PROMPT_COMMAND\" != *\"__llme_prompt\"* ]]; then");
-            println!("  PROMPT_COMMAND=\"__llme_prompt;$PROMPT_COMMAND\"");
+            println!("if [[ \"$PROMPT_COMMAND\" != *\"__llmenv_prompt\"* ]]; then");
+            println!("  PROMPT_COMMAND=\"__llmenv_prompt;$PROMPT_COMMAND\"");
             println!("fi");
         }
         _ => {
