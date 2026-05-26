@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use serde_json::json;
+
 use super::AgentAdapter;
 use crate::merge::MergedManifest;
 
@@ -39,6 +41,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         // Validate that skills are properly structured with SKILL.md frontmatter
         validate_skills(out)?;
+
+        // Generate settings.json from hook/permission bundles
+        generate_settings_json(out)?;
 
         Ok(())
     }
@@ -88,6 +93,24 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
             ));
         }
     }
+
+    Ok(())
+}
+
+/// Generates settings.json from hook/permission contributions in the materialized directory.
+///
+/// Currently creates a minimal settings.json placeholder. Full hook/permission merging
+/// (issue #34) is deferred to a follow-up PR.
+fn generate_settings_json(out: &Path) -> anyhow::Result<()> {
+    let settings = json!({
+        "hooks": [],
+        "permissions": [],
+        "mcp": []
+    });
+
+    let settings_path = out.join("settings.json");
+    let json_str = serde_json::to_string_pretty(&settings)?;
+    std::fs::write(settings_path, json_str)?;
 
     Ok(())
 }
