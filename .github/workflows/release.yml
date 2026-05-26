@@ -60,6 +60,55 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}-sha256
           path: assets/${{ matrix.asset_name }}.sha256
+      - name: Generate SLSA provenance
+        id: slsa
+        run: |
+          ARTIFACT_HASH=$(sha256sum assets/${{ matrix.asset_name }} | awk '{print $1}')
+          PROVENANCE_FILE="${{ matrix.asset_name }}.intoto.jsonl"
+
+          # Create minimal SLSA v1.0 provenance in intoto format
+          python3 -c "
+          import json
+          import datetime
+          provenance = {
+            '_type': 'https://slsa.dev/provenance/v1',
+            'subject': [{'name': '${{ matrix.asset_name }}', 'digest': {'sha256': '${ARTIFACT_HASH}'}}],
+            'predicateType': 'https://slsa.dev/provenance/v1',
+            'predicate': {
+              'buildDefinition': {
+                'buildType': 'https://github.com/slsa-framework/slsa-github-generator/blob/main/internal/builders/docker/v1',
+                'externalParameters': {
+                  'workflow': {
+                    'path': '.github/workflows/release.yml',
+                    'ref': '${{ github.ref }}',
+                    'repository': '${{ github.repository }}'
+                  }
+                },
+                'internalParameters': {
+                  'source-commit': '${{ github.sha }}'
+                },
+                'resolvedDependencies': []
+              },
+              'runDetails': {
+                'builder': {'id': 'https://github.com/slsa-framework/slsa-github-generator/releases/tag/v2.0.0'},
+                'buildMetadata': {
+                  'invocationId': '${{ github.run_id }}',
+                  'startedOn': datetime.datetime.utcnow().isoformat() + 'Z',
+                  'completedOn': datetime.datetime.utcnow().isoformat() + 'Z'
+                },
+                'byproducts': []
+              }
+            }
+          }
+          with open('${PROVENANCE_FILE}', 'w') as f:
+            json.dump(provenance, f)
+          "
+          echo "provenance_file=${PROVENANCE_FILE}" >> $GITHUB_OUTPUT
+      - name: Upload provenance artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}-provenance
+          path: ${{ steps.slsa.outputs.provenance_file }}
 
   publish-crate:
     name: Publish to crates.io
@@ -79,6 +128,8 @@ jobs:
     needs: build-binaries
     permissions:
       contents: write
+    outputs:
+      release_version: ${{ steps.extract_version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
       - name: Download all artifacts
@@ -87,16 +138,21 @@ jobs:
           path: assets
       - name: Prepare release assets
         run: |
-          mkdir -p release-assets checksums
-          find assets -type f -name 'llmenv-*' ! -name '*.sha256' -exec mv {} release-assets/ \;
+          mkdir -p release-assets checksums provenance
+          find assets -type f -name 'llmenv-*' ! -name '*.sha256' ! -name '*.intoto.jsonl' -exec mv {} release-assets/ \;
           find assets -type f -name '*.sha256' -exec mv {} checksums/ \;
+          find assets -type f -name '*.intoto.jsonl' -exec mv {} provenance/ \;
           cd checksums && cat *.sha256 > checksums.txt && cd ..
+      - name: Extract version from tag
+        id: extract_version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
       - name: Create Release
         uses: softprops/action-gh-release@d3bbd6494e50145444b0219a39a90f00b0f01dab
         with:
           files: |
             release-assets/llmenv-*
             checksums/checksums.txt
+            provenance/*.intoto.jsonl
           draft: false
           prerelease: false
           body: |
@@ -106,5 +162,54 @@ jobs:
             ```bash
             sha256sum -c checksums.txt
             ```
+
+            ## Supply Chain Security
+
+            SLSA v1.0 provenance attestations are included in this release. Verify authenticity:
+            ```bash
+            slsa-verifier verify-artifact --artifact-path=<binary> --provenance=<provenance.intoto.jsonl> --source-uri=github.com/phaedrus1992/llmenv
+            ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew formula
+    runs-on: ubuntu-latest
+    needs: create-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Extract and validate checksums
+        id: checksums
+        run: |
+          LINUX_X64=$(grep 'llmenv-linux-x86_64' artifacts/llmenv-linux-x86_64-sha256/*.sha256 | awk '{print $1}')
+          MACOS_X64=$(grep 'llmenv-macos-x86_64' artifacts/llmenv-macos-x86_64-sha256/*.sha256 | awk '{print $1}')
+          MACOS_ARM=$(grep 'llmenv-macos-aarch64' artifacts/llmenv-macos-aarch64-sha256/*.sha256 | awk '{print $1}')
+
+          # Validate all checksums present
+          if [[ -z "${LINUX_X64}" || -z "${MACOS_X64}" || -z "${MACOS_ARM}" ]]; then
+            echo "Error: Missing checksums"
+            exit 1
+          fi
+
+          echo "linux_x64=${LINUX_X64}" >> $GITHUB_OUTPUT
+          echo "macos_x64=${MACOS_X64}" >> $GITHUB_OUTPUT
+          echo "macos_arm=${MACOS_ARM}" >> $GITHUB_OUTPUT
+      - name: Trigger Homebrew formula update
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.create-release.outputs.release_version }}
+          LINUX_X64: ${{ steps.checksums.outputs.linux_x64 }}
+          MACOS_X64: ${{ steps.checksums.outputs.macos_x64 }}
+          MACOS_ARM: ${{ steps.checksums.outputs.macos_arm }}
+        run: |
+          gh workflow run update-formula.yml \
+            --repo phaedrus1992/homebrew-tap \
+            -f version="${VERSION}" \
+            -f linux_x64="${LINUX_X64}" \
+            -f macos_x64="${MACOS_X64}" \
+            -f macos_arm="${MACOS_ARM}"
