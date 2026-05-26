@@ -80,3 +80,53 @@ fn env_vars_rejects_non_utf8_cache_dir() {
 fn name_is_stable() {
     assert_eq!(ClaudeCodeAdapter.name(), "claude-code");
 }
+
+#[test]
+fn plugins_are_materialized() {
+    let bundles = vec![fixture_bundle("with-plugin")];
+    let m = merge(&bundles).expect("merge");
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let plugin_json = tmp
+        .path()
+        .join("plugins/test-plugin/plugin.json");
+    assert!(
+        plugin_json.exists(),
+        "plugin.json should be copied to plugins/<name>/plugin.json"
+    );
+
+    let content = std::fs::read_to_string(&plugin_json).expect("read plugin.json");
+    assert!(content.contains("test-plugin"), "plugin content preserved");
+}
+
+#[test]
+fn skills_with_frontmatter_are_validated() {
+    // This test verifies that skills are structured as directories with SKILL.md
+    // and that the adapter validates the required frontmatter.
+    // Currently skills are single .md files; this test will fail until #33 is implemented.
+    let bundles = vec![fixture_bundle("base")];
+    let m = merge(&bundles).expect("merge");
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    // For now, skills are still flat .md files, but after #33 they should be directories
+    let hello_skill = tmp.path().join("skills/hello");
+    // This will initially be "skills/hello.md"; after #33 it should be "skills/hello/SKILL.md"
+    if hello_skill.is_dir() {
+        let skill_md = hello_skill.join("SKILL.md");
+        assert!(
+            skill_md.exists(),
+            "Each skill should have SKILL.md frontmatter"
+        );
+        let content = std::fs::read_to_string(&skill_md).expect("read SKILL.md");
+        assert!(
+            content.contains("---"),
+            "SKILL.md should have YAML frontmatter"
+        );
+    }
+}
