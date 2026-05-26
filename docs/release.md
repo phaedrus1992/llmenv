@@ -11,12 +11,58 @@ Releases are triggered by pushing a version tag (`v*`) to the **main branch only
 3. **Publishes to crates.io** (requires valid `CARGO_REGISTRY_TOKEN` secret)
 4. **Creates a GitHub Release** with pre-built binaries and checksums attached
 
+## Changelog
+
+`CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/) and
+[Semantic Versioning](https://semver.org/). There is exactly one rule that
+matters and it is easy to get wrong:
+
+> **A version section only exists once that version has been git-tagged.
+> Until then, everything lives under `## [Unreleased]`.**
+
+The `Cargo.toml` version and the changelog must never run ahead of the tags.
+If `git tag -l` shows no `vX.Y.Z` tag, there is no `[X.Y.Z]` changelog section
+and `Cargo.toml` is not bumped to it. (This repo previously accumulated
+phantom `1.0.0`/`1.1.0`/`1.2.0` sections with no tags behind them — don't
+recreate that.)
+
+### While developing (every change)
+
+Add an entry under `## [Unreleased]` in the appropriate category. Do **not**
+touch the `Cargo.toml` version and do **not** create a new version heading.
+
+Categories (Keep a Changelog): `Added`, `Changed`, `Deprecated`, `Removed`,
+`Fixed`, `Security`. This repo also uses `Documentation`. Reference the issue/PR
+number in the entry, e.g. `(#63)`.
+
+```markdown
+## [Unreleased]
+
+### Added
+
+- New `llmenv foo` subcommand that does X. (#81)
+```
+
+### When cutting a release (and only then)
+
+1. Decide the version `X.Y.Z` from the nature of the `[Unreleased]` entries
+   (breaking → major, feature → minor, fix-only → patch).
+2. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and add a fresh empty
+   `## [Unreleased]` above it.
+3. Bump `version` in `Cargo.toml` to `X.Y.Z` and run `cargo build` so
+   `Cargo.lock` updates in the same commit.
+4. Commit (`chore: release X.Y.Z`), then proceed to **Version Tags** below to
+   tag and push.
+
+The version bump, changelog rename, and lockfile update land **together** in the
+release commit — never piecemeal across unrelated changes.
+
 ## Version Tags
 
 Create a tag in the format `vX.Y.Z` and push it to the **main branch**:
 
 ```bash
-# Update version in Cargo.toml
+# Version already bumped in Cargo.toml + CHANGELOG.md (see Changelog section)
 cargo build --release  # Test locally first
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
 git push origin main vX.Y.Z  # Push to main branch
