@@ -1,0 +1,26 @@
+# Codecov configuration for llmenv.
+# Docs: https://docs.codecov.com/docs/codecovyml-reference
+coverage:
+  status:
+    project:
+      default:
+        # Compare against the base commit; allow a 1% drop before failing so
+        # small unavoidable dips don't block PRs, but real regressions do.
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        # New/changed lines should be reasonably covered.
+        target: 70%
+        threshold: 5%
+
+# Files that are not worth chasing for coverage and would drag the baseline
+# down: the thin main.rs wrapper and CLI argument/dispatch glue exercised only
+# through the binary. See issue #57.
+ignore:
+  - "src/main.rs"
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
