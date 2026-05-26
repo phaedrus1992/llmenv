@@ -31,8 +31,12 @@ pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
             if std::env::var("NO_COLOR").is_ok() {
                 return false;
             }
-            // Then check CLICOLOR_FORCE (unconditional enable)
-            if std::env::var("CLICOLOR_FORCE").is_ok() {
+            // Then check CLICOLOR_FORCE (unconditional enable, must be non-empty per spec)
+            if std::env::var("CLICOLOR_FORCE")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some()
+            {
                 return true;
             }
             // Default to TTY detection
@@ -41,7 +45,6 @@ pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
     }
 }
 
-#[allow(dead_code)]
 /// Format an active state marker (e.g., "*") in green.
 pub fn active_marker() -> &'static str {
     "* "
