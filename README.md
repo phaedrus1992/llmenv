@@ -1,7 +1,7 @@
 # llmenv
 
 [![CI](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/phaedrus1992/llmenv/branch/main/graph/badge.svg)](https://codecov.io/gh/phaedrus1992/llmenv)
+[![coverage](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml)
 
 A universal scope-aware environment manager for AI coding agents.
 
