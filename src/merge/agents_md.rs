@@ -27,10 +27,7 @@ pub fn concat(parts: &[(String, String)]) -> String {
 /// file (e.g. `<!-- # from bundle: base rules/rust.md -->`) so provenance is
 /// preserved.
 #[must_use]
-pub fn concat_with_rules(
-    parts: &[(String, String)],
-    rules: &[super::rules::RuleFile],
-) -> String {
+pub fn concat_with_rules(parts: &[(String, String)], rules: &[super::rules::RuleFile]) -> String {
     let mut out = concat(parts);
     for r in rules {
         let _ = writeln!(out);
