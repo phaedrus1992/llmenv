@@ -150,6 +150,28 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn shell_escape(s: &str) -> String {
+    // For values: use single quotes (prevent all expansions) and escape embedded single quotes
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn validate_var_name(name: &str) -> anyhow::Result<()> {
+    // Shell variable names must match [A-Za-z_][A-Za-z0-9_]*
+    if name.is_empty() {
+        anyhow::bail!("Variable name cannot be empty");
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        anyhow::bail!("Variable name '{}' must start with letter or underscore", name);
+    }
+    for ch in name.chars() {
+        if !ch.is_ascii_alphanumeric() && ch != '_' {
+            anyhow::bail!("Variable name '{}' contains invalid character '{}'", name, ch);
+        }
+    }
+    Ok(())
+}
+
 fn run_export(_scope: Option<String>, _tag: Option<String>) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
@@ -162,7 +184,8 @@ fn run_export(_scope: Option<String>, _tag: Option<String>) -> anyhow::Result<()
     }
 
     for (key, value) in vars {
-        println!("export {}=\"{}\"", key, value.replace('"', "\\\""));
+        validate_var_name(&key)?;
+        println!("export {}={}", key, shell_escape(&value));
     }
 
     Ok(())
@@ -172,7 +195,7 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
     match shell {
         "zsh" => {
             println!("__llme_precmd() {{");
-            println!("  eval \"$(llme export)\"");
+            println!("  source <(llme export)");
             println!("}}");
             println!();
             println!("# Add to precmd_functions if not already present");
@@ -182,7 +205,7 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
         }
         "bash" => {
             println!("__llme_prompt() {{");
-            println!("  eval \"$(llme export)\"");
+            println!("  source <(llme export)");
             println!("}}");
             println!();
             println!("# Prepend to PROMPT_COMMAND if not already present");
@@ -326,6 +349,32 @@ fn run_bundle_ls() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_escape_protects_metacharacters() {
+        assert_eq!(shell_escape("normal"), "'normal'");
+        assert_eq!(shell_escape("with'quote"), "'with'\\''quote'");
+        assert_eq!(shell_escape("$var"), "'$var'");
+        assert_eq!(shell_escape("$(cmd)"), "'$(cmd)'");
+        assert_eq!(shell_escape("`cmd`"), "'`cmd`'");
+    }
+
+    #[test]
+    fn validate_var_name_accepts_valid_names() {
+        assert!(validate_var_name("MY_VAR").is_ok());
+        assert!(validate_var_name("_private").is_ok());
+        assert!(validate_var_name("var123").is_ok());
+        assert!(validate_var_name("x").is_ok());
+    }
+
+    #[test]
+    fn validate_var_name_rejects_invalid_names() {
+        assert!(validate_var_name("").is_err());
+        assert!(validate_var_name("123var").is_err());
+        assert!(validate_var_name("my-var").is_err());
+        assert!(validate_var_name("my var").is_err());
+        assert!(validate_var_name("my$var").is_err());
+    }
 
     #[test]
     fn hook_zsh_generates_precmd_code() {
