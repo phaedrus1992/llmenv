@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 mod style;
 
 pub use style::{
-    ColorMode, should_use_color, active_marker, inactive_annotation, orphan_annotation,
-    doctor_pass, doctor_warning, doctor_fail,
+    ColorMode, active_marker, doctor_fail, doctor_pass, doctor_warning, inactive_annotation,
+    orphan_annotation, should_use_color,
 };
 
 /// Version string shown by `--version`. Built by `build.rs` as
