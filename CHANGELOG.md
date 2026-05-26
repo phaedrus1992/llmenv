@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Network scope matching via WiFi SSID
   - Host scope matching via hostname
   - User scope matching via OS user
-  - Project scope matching via project markers (e.g., `.llmerc`)
+  - Project scope matching via project markers (e.g., `.llmenvrc`)
 
 - **Bundle system**
   - Environment variable bundles with tag-based activation
