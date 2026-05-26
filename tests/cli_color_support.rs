@@ -51,17 +51,48 @@ fn test_should_use_color_auto_with_tty() {
 }
 
 #[test]
-fn test_color_marker_functions() {
+fn test_color_marker_functions_plain() {
     use llmenv::cli::{
         active_marker, doctor_fail, doctor_pass, doctor_warning, inactive_annotation,
         orphan_annotation,
     };
 
-    // Verify marker functions return non-empty strings
-    assert!(!active_marker().is_empty());
-    assert!(!inactive_annotation().is_empty());
-    assert!(!orphan_annotation().is_empty());
-    assert!(!doctor_pass().is_empty());
-    assert!(!doctor_warning().is_empty());
-    assert!(!doctor_fail().is_empty());
+    // Without color, markers are bare glyphs with no escape codes.
+    for s in [
+        active_marker(false),
+        inactive_annotation(false),
+        orphan_annotation(false),
+        doctor_pass(false),
+        doctor_warning(false),
+        doctor_fail(false),
+    ] {
+        assert!(!s.is_empty());
+        assert!(
+            !s.contains('\u{1b}'),
+            "plain marker must not contain ANSI: {s:?}"
+        );
+    }
+}
+
+#[test]
+fn test_color_marker_functions_colored() {
+    use llmenv::cli::{
+        active_marker, doctor_fail, doctor_pass, doctor_warning, inactive_annotation,
+        orphan_annotation,
+    };
+
+    // With color, markers wrap the glyph in ANSI escape sequences.
+    for s in [
+        active_marker(true),
+        inactive_annotation(true),
+        orphan_annotation(true),
+        doctor_pass(true),
+        doctor_warning(true),
+        doctor_fail(true),
+    ] {
+        assert!(
+            s.contains('\u{1b}'),
+            "colored marker must contain ANSI: {s:?}"
+        );
+    }
 }

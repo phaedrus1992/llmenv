@@ -1,7 +1,17 @@
 //! CLI styling and color support.
 //! Centralized color palette and TTY-aware color emission.
 
-use anstream::println as anstream_println;
+use anstyle::{AnsiColor, Color, Style};
+
+/// Wrap text in an ANSI style when `use_color` is set, else return it plain.
+fn paint(text: &str, color: AnsiColor, use_color: bool) -> String {
+    if use_color {
+        let style = Style::new().fg_color(Some(Color::Ansi(color)));
+        format!("{style}{text}{style:#}")
+    } else {
+        text.to_string()
+    }
+}
 
 /// Color mode: auto-detect, always on, or always off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,56 +59,32 @@ pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
 
 /// Format an active state marker (e.g., "*") with optional green color.
 pub fn active_marker(use_color: bool) -> String {
-    if use_color {
-        "{green}* {reset}".to_string()
-    } else {
-        "* ".to_string()
-    }
+    paint("*", AnsiColor::Green, use_color)
 }
 
 /// Format an inactive annotation (e.g., "(inactive)") with optional yellow color.
 pub fn inactive_annotation(use_color: bool) -> String {
-    if use_color {
-        "{yellow}(inactive){reset}".to_string()
-    } else {
-        "(inactive)".to_string()
-    }
+    paint("(inactive)", AnsiColor::Yellow, use_color)
 }
 
 /// Format an orphan annotation (e.g., "(orphan)") with optional red color.
 pub fn orphan_annotation(use_color: bool) -> String {
-    if use_color {
-        "{red}(orphan){reset}".to_string()
-    } else {
-        "(orphan)".to_string()
-    }
+    paint("(orphan)", AnsiColor::Red, use_color)
 }
 
 /// Format a doctor "pass" symbol (✓) with optional green color.
 pub fn doctor_pass(use_color: bool) -> String {
-    if use_color {
-        "{green}✓ {reset}".to_string()
-    } else {
-        "✓ ".to_string()
-    }
+    paint("✓", AnsiColor::Green, use_color)
 }
 
 /// Format a doctor "warning" symbol (⚠) with optional yellow color.
 pub fn doctor_warning(use_color: bool) -> String {
-    if use_color {
-        "{yellow}⚠ {reset}".to_string()
-    } else {
-        "⚠ ".to_string()
-    }
+    paint("⚠", AnsiColor::Yellow, use_color)
 }
 
 /// Format a doctor "fail" symbol (✗) with optional red color.
 pub fn doctor_fail(use_color: bool) -> String {
-    if use_color {
-        "{red}✗ {reset}".to_string()
-    } else {
-        "✗ ".to_string()
-    }
+    paint("✗", AnsiColor::Red, use_color)
 }
 
 #[cfg(test)]
@@ -124,12 +110,39 @@ mod tests {
     }
 
     #[test]
-    fn test_marker_functions_return_strings() {
-        assert!(!active_marker().is_empty());
-        assert!(!inactive_annotation().is_empty());
-        assert!(!orphan_annotation().is_empty());
-        assert!(!doctor_pass().is_empty());
-        assert!(!doctor_warning().is_empty());
-        assert!(!doctor_fail().is_empty());
+    fn test_marker_functions_plain_when_no_color() {
+        // Without color, output contains the bare glyph and no escape codes.
+        assert_eq!(active_marker(false), "*");
+        assert_eq!(inactive_annotation(false), "(inactive)");
+        assert_eq!(orphan_annotation(false), "(orphan)");
+        assert_eq!(doctor_pass(false), "✓");
+        assert_eq!(doctor_warning(false), "⚠");
+        assert_eq!(doctor_fail(false), "✗");
+    }
+
+    #[test]
+    fn test_marker_functions_colored_contain_escape_codes() {
+        // With color, output wraps the glyph in ANSI escape sequences.
+        for s in [
+            active_marker(true),
+            inactive_annotation(true),
+            orphan_annotation(true),
+            doctor_pass(true),
+            doctor_warning(true),
+            doctor_fail(true),
+        ] {
+            assert!(s.contains('\u{1b}'), "expected ANSI escape in {s:?}");
+        }
+    }
+
+    #[test]
+    fn test_marker_functions_preserve_glyph_under_color() {
+        // Colored output still contains the underlying glyph text.
+        assert!(active_marker(true).contains('*'));
+        assert!(inactive_annotation(true).contains("(inactive)"));
+        assert!(orphan_annotation(true).contains("(orphan)"));
+        assert!(doctor_pass(true).contains('✓'));
+        assert!(doctor_warning(true).contains('⚠'));
+        assert!(doctor_fail(true).contains('✗'));
     }
 }
