@@ -30,6 +30,28 @@ const VERSION: &str = env!("LLMENV_VERSION");
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Color output: auto (default), always, or never
+    #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
+    color: ColorChoice,
+}
+
+/// CLI-facing color flag values, mapped to the internal `ColorMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorChoice {
+    fn to_mode(self) -> ColorMode {
+        match self {
+            ColorChoice::Auto => ColorMode::Auto,
+            ColorChoice::Always => ColorMode::Always,
+            ColorChoice::Never => ColorMode::Never,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -92,9 +114,14 @@ enum Command {
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Resolve color emission once: combine the --color flag with stdout TTY
+    // state. `export` deliberately never consults this — its stdout is eval'd.
+    use std::io::IsTerminal;
+    let use_color = should_use_color(Some(cli.color.to_mode()), std::io::stdout().is_terminal());
+
     match cli.command {
         Some(Command::Doctor { gc }) => {
-            run_doctor(gc)?;
+            run_doctor(gc, use_color)?;
         }
         Some(Command::Export { scope, tag }) => {
             run_export(scope, tag)?;
@@ -106,16 +133,16 @@ pub fn run() -> anyhow::Result<()> {
             run_init(path, repo)?;
         }
         Some(Command::Status) => {
-            run_status()?;
+            run_status(use_color)?;
         }
         Some(Command::ScopeLs) => {
-            run_scope_ls()?;
+            run_scope_ls(use_color)?;
         }
         Some(Command::TagLs) => {
-            run_tag_ls()?;
+            run_tag_ls(use_color)?;
         }
         Some(Command::BundleLs) => {
-            run_bundle_ls()?;
+            run_bundle_ls(use_color)?;
         }
         Some(Command::Sync) => {
             run_sync()?;
@@ -137,20 +164,26 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 /// Validates adapter wiring: file layout, config parse, no silent breakage.
-fn run_doctor(gc: bool) -> anyhow::Result<()> {
+fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
+    let pass = doctor_pass(use_color);
+    let warn = doctor_warning(use_color);
+
     eprintln!("Running llmenv doctor...");
 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    eprintln!("✓ Configuration loaded from {}", config_path.display());
+    eprintln!("{pass} Configuration loaded from {}", config_path.display());
 
     // Check that config parses
-    eprintln!("✓ Config is valid TOML");
+    eprintln!("{pass} Config is valid TOML");
 
     // Check cache directory is writable
     let cache_dir = expand_tilde(&config.settings.cache_dir)?;
     std::fs::create_dir_all(&cache_dir).context("cache directory not writable")?;
-    eprintln!("✓ Cache directory is writable: {}", cache_dir.display());
+    eprintln!(
+        "{pass} Cache directory is writable: {}",
+        cache_dir.display()
+    );
 
     // Check git remote is reachable (if config_dir is a git repo)
     let config_dir = paths::config_dir()?;
@@ -158,12 +191,12 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
         match check_git_remote(&config_dir) {
             Ok(remote) => {
                 let safe_url = sanitize_git_url(&remote);
-                eprintln!("✓ Git remote reachable: {}", safe_url);
+                eprintln!("{pass} Git remote reachable: {}", safe_url);
             }
-            Err(e) => eprintln!("⚠ Git remote check failed: {}", e),
+            Err(e) => eprintln!("{warn} Git remote check failed: {}", e),
         }
     } else {
-        eprintln!("⚠ Config directory is not a git repo");
+        eprintln!("{warn} Config directory is not a git repo");
     }
 
     // Orphan detection: anything declared but unreachable from the
@@ -179,7 +212,7 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
     for s in &config.scope.network {
         if !s.tags.iter().any(|t| consumed.contains(t)) {
             eprintln!(
-                "⚠ orphan scope network:{}: no bundle consumes its tags",
+                "{warn} orphan scope network:{}: no bundle consumes its tags",
                 s.id
             );
             orphan_count += 1;
@@ -187,20 +220,26 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
     }
     for s in &config.scope.host {
         if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!("⚠ orphan scope host:{}: no bundle consumes its tags", s.id);
+            eprintln!(
+                "{warn} orphan scope host:{}: no bundle consumes its tags",
+                s.id
+            );
             orphan_count += 1;
         }
     }
     for s in &config.scope.user {
         if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!("⚠ orphan scope user:{}: no bundle consumes its tags", s.id);
+            eprintln!(
+                "{warn} orphan scope user:{}: no bundle consumes its tags",
+                s.id
+            );
             orphan_count += 1;
         }
     }
     for s in &config.scope.project {
         if !s.tags.iter().any(|t| consumed.contains(t)) {
             eprintln!(
-                "⚠ orphan scope project:{}: no bundle consumes its tags",
+                "{warn} orphan scope project:{}: no bundle consumes its tags",
                 s.id
             );
             orphan_count += 1;
@@ -210,7 +249,7 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
         let has_emitted_tag = b.tags.iter().any(|t| emitted.contains(t));
         if !has_emitted_tag && !marker_enabled.contains(&b.name) {
             eprintln!(
-                "⚠ orphan bundle {}: no scope emits its tags and no marker enables it",
+                "{warn} orphan bundle {}: no scope emits its tags and no marker enables it",
                 b.name
             );
             orphan_count += 1;
@@ -237,24 +276,24 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
         } else {
             "no bundle consumes it"
         };
-        eprintln!("⚠ orphan tag {}: {}", t, reason);
+        eprintln!("{warn} orphan tag {}: {}", t, reason);
         orphan_count += 1;
     }
 
     if orphan_count == 0 {
-        eprintln!("✓ No orphan scopes/tags/bundles");
+        eprintln!("{pass} No orphan scopes/tags/bundles");
     } else {
-        eprintln!("⚠ Found {} orphan item(s)", orphan_count);
+        eprintln!("{warn} Found {} orphan item(s)", orphan_count);
     }
 
-    eprintln!("✓ Doctor check complete.");
+    eprintln!("{pass} Doctor check complete.");
 
     if gc {
         eprintln!("Running garbage collection...");
         match std::fs::metadata(&cache_dir) {
             Ok(meta) => {
                 if meta.permissions().readonly() {
-                    eprintln!("⚠ GC failed: cache directory is read-only");
+                    eprintln!("{warn} GC failed: cache directory is read-only");
                 } else {
                     let cache_retention_hours =
                         config.settings.cache_retention_hours.unwrap_or(168);
@@ -262,16 +301,16 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
                     match crate::materialize::cache::gc(&cache_dir, retention) {
                         Ok(report) => {
                             eprintln!(
-                                "✓ GC complete: removed {} entries, kept {}",
+                                "{pass} GC complete: removed {} entries, kept {}",
                                 report.removed.len(),
                                 report.kept
                             );
                         }
-                        Err(e) => eprintln!("⚠ GC failed: {}", e),
+                        Err(e) => eprintln!("{warn} GC failed: {}", e),
                     }
                 }
             }
-            Err(e) => eprintln!("⚠ GC failed to stat cache directory: {}", e),
+            Err(e) => eprintln!("{warn} GC failed to stat cache directory: {}", e),
         }
     }
 
@@ -683,11 +722,15 @@ AGENT = "claude"
     Ok(())
 }
 
-fn run_status() -> anyhow::Result<()> {
+fn run_status(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     match Config::load(&config_path) {
         Ok(config) => {
-            eprintln!("✓ Configuration loaded from {}", config_path.display());
+            eprintln!(
+                "{} Configuration loaded from {}",
+                doctor_pass(use_color),
+                config_path.display()
+            );
             eprintln!("  Scopes:");
             eprintln!("    Network: {}", config.scope.network.len());
             eprintln!("    Host: {}", config.scope.host.len());
@@ -696,7 +739,7 @@ fn run_status() -> anyhow::Result<()> {
             eprintln!("  Bundles: {}", config.bundle.len());
         }
         Err(e) => {
-            eprintln!("✗ Configuration error: {}", e);
+            eprintln!("{} Configuration error: {}", doctor_fail(use_color), e);
             return Err(e);
         }
     }
@@ -744,18 +787,18 @@ fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
         .collect()
 }
 
-/// Annotation suffix for a listing row.
-fn annotate(active: bool, orphan: bool) -> &'static str {
+/// Annotation suffix for a listing row, colored when `use_color` is set.
+fn annotate(active: bool, orphan: bool, use_color: bool) -> String {
     if active {
-        ""
+        String::new()
     } else if orphan {
-        " (orphan)"
+        format!(" {}", orphan_annotation(use_color))
     } else {
-        " (inactive)"
+        format!(" {}", inactive_annotation(use_color))
     }
 }
 
-fn run_scope_ls() -> anyhow::Result<()> {
+fn run_scope_ls(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
@@ -794,13 +837,22 @@ fn run_scope_ls() -> anyhow::Result<()> {
 
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, is_active, is_orphan) in rows {
-        let mark = if is_active { "*" } else { " " };
-        println!("{} {}{}", mark, name, annotate(is_active, is_orphan));
+        let mark = if is_active {
+            active_marker(use_color)
+        } else {
+            " ".to_string()
+        };
+        println!(
+            "{} {}{}",
+            mark,
+            name,
+            annotate(is_active, is_orphan, use_color)
+        );
     }
     Ok(())
 }
 
-fn run_tag_ls() -> anyhow::Result<()> {
+fn run_tag_ls(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
@@ -826,13 +878,22 @@ fn run_tag_ls() -> anyhow::Result<()> {
         let emitted_anywhere = emitted.contains(&tag) || active.tags.contains(&tag);
         let consumed_anywhere = consumed.contains(&tag);
         let is_orphan = !(emitted_anywhere && consumed_anywhere);
-        let mark = if is_active { "*" } else { " " };
-        println!("{} {}{}", mark, tag, annotate(is_active, is_orphan));
+        let mark = if is_active {
+            active_marker(use_color)
+        } else {
+            " ".to_string()
+        };
+        println!(
+            "{} {}{}",
+            mark,
+            tag,
+            annotate(is_active, is_orphan, use_color)
+        );
     }
     Ok(())
 }
 
-fn run_bundle_ls() -> anyhow::Result<()> {
+fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
@@ -870,8 +931,17 @@ fn run_bundle_ls() -> anyhow::Result<()> {
     rows.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (name, is_active, is_orphan) in rows {
-        let mark = if is_active { "*" } else { " " };
-        println!("{} {}{}", mark, name, annotate(is_active, is_orphan));
+        let mark = if is_active {
+            active_marker(use_color)
+        } else {
+            " ".to_string()
+        };
+        println!(
+            "{} {}{}",
+            mark,
+            name,
+            annotate(is_active, is_orphan, use_color)
+        );
     }
     Ok(())
 }
@@ -910,28 +980,39 @@ fn run_sync() -> anyhow::Result<()> {
 }
 
 fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Result<()> {
+    use crate::materialize::cache::PruneMode;
+
     // Validate flag combinations
     if all && older_than.is_some() {
         anyhow::bail!("--all and --older-than are mutually exclusive");
     }
 
-    // Validate duration format if provided
-    if let Some(duration_str) = &older_than {
-        humantime::parse_duration(duration_str)
+    let mode = if all {
+        PruneMode::All
+    } else if let Some(duration_str) = &older_than {
+        let dur = humantime::parse_duration(duration_str)
             .with_context(|| format!("failed to parse --older-than duration: {}", duration_str))?;
+        PruneMode::OlderThan(dur)
+    } else {
+        // Default: clean stale (version-mismatched) folders + orphaned *.tmp.
+        PruneMode::StaleOnly
+    };
+
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let cache_dir = expand_tilde(&config.settings.cache_dir)?;
+
+    let report = crate::materialize::cache::prune(&cache_dir, mode, dry_run)?;
+
+    let verb = if dry_run { "would remove" } else { "removed" };
+    for p in &report.removed {
+        eprintln!("  {verb}: {}", p.display());
     }
-
-    // TODO: Implement prune logic
-    // - Call materialize::cache::prune() with appropriate flags
-    // - SECURITY: Ensure materialize::cache::prune() validates:
-    //   1. All paths stay within cache root (no .. traversal)
-    //   2. Symlinks are not followed (or at least validated)
-    //   3. --dry-run prevents all writes
-    // - Print summary
-
     eprintln!(
-        "prune stub: all={}, older_than={:?}, dry_run={}",
-        all, older_than, dry_run
+        "prune complete: {} {} entry(ies), kept {}",
+        verb,
+        report.removed.len(),
+        report.kept
     );
     Ok(())
 }
