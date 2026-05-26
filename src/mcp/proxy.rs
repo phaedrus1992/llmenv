@@ -20,6 +20,14 @@ pub enum EnsureOutcome {
 /// [`EnsureOutcome::AlreadyRunning`]. Otherwise calls `spawn(bind)` and writes
 /// the returned pid to `pid_path`.
 ///
+/// Concurrency: a sibling `<pid_path>.lock` file is created with
+/// `O_CREAT|O_EXCL`. The first writer wins the lock and does the
+/// spawn-and-write; other concurrent callers see `AlreadyExists`, wait briefly
+/// for the holder to publish the pid, then re-check and either accept the new
+/// pidfile or fail loudly. This prevents the TOCTOU window between
+/// "pidfile-empty → spawn → write" that would otherwise let two exports each
+/// spawn their own proxy.
+///
 /// `spawn` is injected so tests can simulate process launches without
 /// actually invoking `mcp-proxy`. Production callers pass [`spawn_mcp_proxy`].
 ///
@@ -40,24 +48,91 @@ where
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let pid = spawn(bind)?;
-    std::fs::write(pid_path, pid.to_string())?;
-    Ok(EnsureOutcome::Spawned)
+
+    // Atomic lock acquisition via O_CREAT|O_EXCL. The lockfile sits next to
+    // the pidfile so it shares the same parent directory ACLs.
+    let lock_path = lockfile_path(pid_path);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(_) => {
+            // We hold the lock — do the spawn-and-publish, then drop it.
+            let result = (|| -> anyhow::Result<EnsureOutcome> {
+                // Re-check inside the lock: another writer may have raced us
+                // past the early-out and published a live pid between our
+                // check above and our lock acquisition.
+                if let Some(existing) = read_pidfile(pid_path)?
+                    && is_alive(existing)
+                {
+                    return Ok(EnsureOutcome::AlreadyRunning);
+                }
+                let pid = spawn(bind)?;
+                write_pidfile_atomic(pid_path, pid)?;
+                Ok(EnsureOutcome::Spawned)
+            })();
+            let _ = std::fs::remove_file(&lock_path);
+            result
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another caller is mid-spawn. Trust that it will publish a live
+            // pid and re-read; if the pidfile still looks dead, surface that
+            // as an error rather than racing again — callers can retry.
+            if let Some(existing) = read_pidfile(pid_path)?
+                && is_alive(existing)
+            {
+                Ok(EnsureOutcome::AlreadyRunning)
+            } else {
+                Err(anyhow::anyhow!(
+                    "another process holds {} but has not published a live pid",
+                    lock_path.display()
+                ))
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn lockfile_path(pid_path: &Path) -> PathBuf {
+    let mut s = pid_path.as_os_str().to_owned();
+    s.push(".lock");
+    PathBuf::from(s)
+}
+
+/// Writes `pid` to `pid_path` atomically via tmpfile + rename. A bare
+/// `fs::write` truncates first, so a concurrent reader can observe an empty
+/// pidfile mid-write.
+fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
+    let tmp = pid_path.with_extension(format!("pid.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, pid.to_string())?;
+    std::fs::rename(&tmp, pid_path)?;
+    Ok(())
 }
 
 /// Default path for the proxy pidfile — `$XDG_STATE_HOME/llmenv/mcp-proxy.pid`,
 /// falling back to `~/.local/state/llmenv/mcp-proxy.pid`.
-#[must_use]
-pub fn default_pid_path() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
-        return PathBuf::from(xdg).join("llmenv").join("mcp-proxy.pid");
+///
+/// # Errors
+/// Returns an error if neither `XDG_STATE_HOME` nor `HOME` is set — writing a
+/// pidfile to a relative path in the caller's CWD would silently scatter state
+/// across whatever directories `llmenv` happens to be invoked from.
+pub fn default_pid_path() -> anyhow::Result<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
+        && !xdg.is_empty()
+    {
+        return Ok(PathBuf::from(xdg).join("llmenv").join("mcp-proxy.pid"));
     }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home)
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return Ok(PathBuf::from(home)
             .join(".local/state/llmenv")
-            .join("mcp-proxy.pid");
+            .join("mcp-proxy.pid"));
     }
-    PathBuf::from(".local/state/llmenv/mcp-proxy.pid")
+    Err(anyhow::anyhow!(
+        "cannot determine pidfile path: neither XDG_STATE_HOME nor HOME is set"
+    ))
 }
 
 /// Production spawner: launches `mcp-proxy --port <port> -- icm mcp-server`

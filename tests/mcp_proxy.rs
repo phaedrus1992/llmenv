@@ -111,3 +111,38 @@ fn is_alive_returns_true_for_self() {
     let my_pid = std::process::id();
     assert!(is_alive(my_pid));
 }
+
+#[test]
+fn ensure_running_errors_when_lock_is_held_and_pid_dead() {
+    // Simulate a peer holding the lockfile mid-spawn: pidfile is stale (or
+    // empty) but the .lock sibling exists. ensure_running must NOT spawn —
+    // that's the bug the lock prevents — and must surface an error instead.
+    let tmp = tempdir().expect("tempdir");
+    let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
+    let lock_path: PathBuf = tmp.path().join("mcp-proxy.pid.lock");
+    std::fs::write(&lock_path, "").expect("write lockfile");
+
+    let log = Arc::new(SpawnLog::default());
+    let result = ensure_running("127.0.0.1:8765", &pid_path, spawner(log.clone()));
+
+    assert!(result.is_err(), "should error when peer holds lock");
+    assert_eq!(log.calls(), 0, "must not spawn while lock is held");
+}
+
+#[test]
+fn ensure_running_accepts_peer_published_pid() {
+    // Peer holds the lock AND has published a live pid. We must observe
+    // AlreadyRunning rather than racing them.
+    let tmp = tempdir().expect("tempdir");
+    let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
+    let lock_path: PathBuf = tmp.path().join("mcp-proxy.pid.lock");
+    std::fs::write(&lock_path, "").expect("write lockfile");
+    std::fs::write(&pid_path, std::process::id().to_string()).expect("write pid");
+
+    let log = Arc::new(SpawnLog::default());
+    let outcome =
+        ensure_running("127.0.0.1:8765", &pid_path, spawner(log.clone())).expect("ensure_running");
+
+    assert_eq!(outcome, llme::mcp::proxy::EnsureOutcome::AlreadyRunning);
+    assert_eq!(log.calls(), 0);
+}
