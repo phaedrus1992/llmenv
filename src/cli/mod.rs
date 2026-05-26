@@ -1,4 +1,7 @@
+use crate::config::Config;
+use crate::paths;
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -20,6 +23,34 @@ enum Command {
         #[arg(long)]
         gc: bool,
     },
+    /// Export environment variables for a scope
+    Export {
+        /// Scope ID to export
+        #[arg(short, long)]
+        scope: Option<String>,
+        /// Tag filter (optional)
+        #[arg(short, long)]
+        tag: Option<String>,
+    },
+    /// Generate shell hook code
+    Hook {
+        /// Shell type: zsh or bash
+        shell: String,
+    },
+    /// Initialize llmenv configuration
+    Init {
+        /// Repository to clone config from (optional)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Show current environment status
+    Status,
+    /// List available scopes
+    ScopeLs,
+    /// List available tags
+    TagLs,
+    /// List available bundles
+    BundleLs,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -28,6 +59,27 @@ pub fn run() -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Doctor { gc }) => {
             run_doctor(gc)?;
+        }
+        Some(Command::Export { scope, tag }) => {
+            run_export(scope, tag)?;
+        }
+        Some(Command::Hook { shell }) => {
+            run_hook(&shell)?;
+        }
+        Some(Command::Init { repo }) => {
+            run_init(repo)?;
+        }
+        Some(Command::Status) => {
+            run_status()?;
+        }
+        Some(Command::ScopeLs) => {
+            run_scope_ls()?;
+        }
+        Some(Command::TagLs) => {
+            run_tag_ls()?;
+        }
+        Some(Command::BundleLs) => {
+            run_bundle_ls()?;
         }
         None => {
             eprintln!("Usage: llme [COMMAND]");
@@ -96,4 +148,200 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn run_export(_scope: Option<String>, _tag: Option<String>) -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+
+    let mut vars = std::collections::BTreeMap::new();
+    for bundle in &config.bundle {
+        for (key, value) in &bundle.vars {
+            vars.insert(key.clone(), value.clone());
+        }
+    }
+
+    for (key, value) in vars {
+        println!("export {}=\"{}\"", key, value.replace('"', "\\\""));
+    }
+
+    Ok(())
+}
+
+fn run_hook(shell: &str) -> anyhow::Result<()> {
+    match shell {
+        "zsh" => {
+            println!("__llme_precmd() {{");
+            println!("  eval \"$(llme export)\"");
+            println!("}}");
+            println!();
+            println!("# Add to precmd_functions if not already present");
+            println!("if [[ ! \" ${{precmd_functions[@]}} \" =~ \" __llme_precmd \" ]]; then");
+            println!("  precmd_functions+=(\"__llme_precmd\")");
+            println!("fi");
+        }
+        "bash" => {
+            println!("__llme_prompt() {{");
+            println!("  eval \"$(llme export)\"");
+            println!("}}");
+            println!();
+            println!("# Prepend to PROMPT_COMMAND if not already present");
+            println!("if [[ \"$PROMPT_COMMAND\" != *\"__llme_prompt\"* ]]; then");
+            println!("  PROMPT_COMMAND=\"__llme_prompt;$PROMPT_COMMAND\"");
+            println!("fi");
+        }
+        _ => {
+            anyhow::bail!("Unsupported shell: {}. Supported: zsh, bash", shell);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_init(repo: Option<String>) -> anyhow::Result<()> {
+    let config_dir = paths::config_dir()?;
+    std::fs::create_dir_all(&config_dir)?;
+
+    if let Some(_repo_url) = repo {
+        anyhow::bail!("Git clone not yet implemented");
+    } else {
+        let config_path = config_dir.join("config.toml");
+        if !config_path.exists() {
+            let template = r#"[settings]
+cache_dir = "~/.cache/llmenv"
+sync_interval_minutes = 60
+
+[scope.network]
+
+[scope.host]
+
+[scope.user]
+
+[scope.project]
+
+[[bundle]]
+name = "base"
+tags = []
+
+[bundle.vars]
+"#;
+            std::fs::write(&config_path, template)?;
+            eprintln!("Created template config at {}", config_path.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn run_status() -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    match Config::load(&config_path) {
+        Ok(config) => {
+            eprintln!("✓ Configuration loaded from {}", config_path.display());
+            eprintln!("  Scopes:");
+            eprintln!("    Network: {}", config.scope.network.len());
+            eprintln!("    Host: {}", config.scope.host.len());
+            eprintln!("    User: {}", config.scope.user.len());
+            eprintln!("    Project: {}", config.scope.project.len());
+            eprintln!("  Bundles: {}", config.bundle.len());
+        }
+        Err(e) => {
+            eprintln!("✗ Configuration error: {}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_scope_ls() -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+
+    let mut scopes = Vec::new();
+    for scope in &config.scope.network {
+        scopes.push(format!("network:{}", scope.id));
+    }
+    for scope in &config.scope.host {
+        scopes.push(format!("host:{}", scope.id));
+    }
+    for scope in &config.scope.user {
+        scopes.push(format!("user:{}", scope.id));
+    }
+    for scope in &config.scope.project {
+        scopes.push(format!("project:{}", scope.id));
+    }
+
+    scopes.sort();
+    for scope in scopes {
+        println!("{}", scope);
+    }
+
+    Ok(())
+}
+
+fn run_tag_ls() -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+
+    let mut tags = HashSet::new();
+    for scope in &config.scope.network {
+        tags.extend(scope.tags.iter().cloned());
+    }
+    for scope in &config.scope.host {
+        tags.extend(scope.tags.iter().cloned());
+    }
+    for scope in &config.scope.user {
+        tags.extend(scope.tags.iter().cloned());
+    }
+    for scope in &config.scope.project {
+        tags.extend(scope.tags.iter().cloned());
+    }
+    for bundle in &config.bundle {
+        tags.extend(bundle.tags.iter().cloned());
+    }
+
+    let mut tag_list: Vec<_> = tags.into_iter().collect();
+    tag_list.sort();
+    for tag in tag_list {
+        println!("{}", tag);
+    }
+
+    Ok(())
+}
+
+fn run_bundle_ls() -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+
+    let mut bundles: Vec<_> = config.bundle.iter().map(|b| b.name.clone()).collect();
+    bundles.sort();
+    for bundle in bundles {
+        println!("{}", bundle);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_zsh_generates_precmd_code() {
+        let result = run_hook("zsh");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn hook_bash_generates_prompt_command_code() {
+        let result = run_hook("bash");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn hook_unsupported_shell_fails() {
+        let result = run_hook("fish");
+        assert!(result.is_err());
+    }
 }

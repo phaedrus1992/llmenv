@@ -1,4 +1,4 @@
-//! XDG paths and path helpers. Cache/state-dir resolution wired in later tasks (M5).
+//! XDG paths and path helpers.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +26,19 @@ pub fn cwd_under_prefix(cwd: &str, prefix: &str) -> bool {
     let cwd_p = Path::new(cwd);
     let pre_p = PathBuf::from(prefix);
     cwd_p.starts_with(&pre_p)
+}
+
+pub fn config_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(dir) = std::env::var("LLMENV_CONFIG_DIR") {
+        Ok(PathBuf::from(dir))
+    } else {
+        let home = std::env::var("HOME")?;
+        Ok(PathBuf::from(home).join(".config/llmenv"))
+    }
+}
+
+pub fn config_path() -> anyhow::Result<PathBuf> {
+    Ok(config_dir()?.join("config.toml"))
 }
 
 #[cfg(test)]

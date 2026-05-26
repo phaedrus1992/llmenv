@@ -202,6 +202,7 @@ mod tests {
                     .map(|(i, (name, tags))| Bundle {
                         name: format!("bundle-{}-{}", i, name),
                         tags,
+                        vars: Default::default(),
                     })
                     .collect()
             }),
@@ -264,7 +265,7 @@ mod tests {
             names in prop::collection::vec(arb_string(), 1..3)
         ) {
             let mut bundles = names.iter()
-                .map(|name| Bundle { name: name.clone(), tags: vec!["tag1".to_string()] })
+                .map(|name| Bundle { name: name.clone(), tags: vec!["tag1".to_string()], vars: Default::default() })
                 .collect::<Vec<_>>();
             if !bundles.is_empty() {
                 bundles[0].tags.clear();
@@ -289,8 +290,8 @@ mod tests {
                 settings: Settings::default(),
                 scope: Scopes::default(),
                 bundle: vec![
-                    Bundle { name: name.clone(), tags: vec!["tag1".to_string()] },
-                    Bundle { name, tags: vec!["tag2".to_string()] },
+                    Bundle { name: name.clone(), tags: vec!["tag1".to_string()], vars: Default::default() },
+                    Bundle { name, tags: vec!["tag2".to_string()], vars: Default::default() },
                 ],
                 icm: None,
             };
@@ -322,6 +323,7 @@ mod tests {
             bundle: vec![Bundle {
                 name: "test-bundle".to_string(),
                 tags: vec!["prod".to_string()],
+                vars: Default::default(),
             }],
             icm: None,
         };
