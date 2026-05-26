@@ -41,6 +41,15 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
 
+pub fn state_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(dir) = std::env::var("LLMENV_STATE_DIR") {
+        Ok(PathBuf::from(dir))
+    } else {
+        let home = std::env::var("HOME")?;
+        Ok(PathBuf::from(home).join(".local/state/llmenv"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
