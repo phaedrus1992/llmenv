@@ -105,6 +105,7 @@ fn hash_is_unambiguous_across_field_boundaries() {
     let a = MergedManifest {
         agents_md: "ABC".into(),
         files: a_files,
+        ..Default::default()
     };
 
     let mut b_files = BTreeMap::new();
@@ -112,6 +113,7 @@ fn hash_is_unambiguous_across_field_boundaries() {
     let b = MergedManifest {
         agents_md: "ABCD".into(),
         files: b_files,
+        ..Default::default()
     };
 
     let ha = hash_manifest(&a).expect("hash a");
