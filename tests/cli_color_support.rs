@@ -44,4 +44,8 @@ fn test_should_use_color_auto_with_tty() {
     // When stdout is not a TTY, colors should be disabled by default
     let result = should_use_color(Some(ColorMode::Auto), false);
     assert!(!result, "auto mode with no TTY should disable colors");
+
+    // When stdout is a TTY, colors should be enabled by default
+    let result = should_use_color(Some(ColorMode::Auto), true);
+    assert!(result, "auto mode with TTY should enable colors");
 }
