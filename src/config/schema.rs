@@ -99,6 +99,8 @@ pub struct Bundle {
     pub name: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub vars: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
