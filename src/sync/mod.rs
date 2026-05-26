@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,7 +30,7 @@ pub fn write_state(state_dir: &Path, t: SystemTime) -> Result<()> {
 
 /// Throttled pull: check if interval has elapsed since last pull,
 /// and if so, run `git fetch` followed by `git pull --ff-only` in repo.
-/// Updates state_dir on success (or after fetch attempt, regardless of merge success).
+/// Only updates state_dir if pull succeeds (to enable retry on failure).
 pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<()> {
     let now = SystemTime::now();
 
@@ -41,20 +41,37 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
         return Ok(());
     }
 
-    // Attempt fetch
-    let _ = Command::new("git")
+    // Validate repo is a git repository
+    if !repo.join(".git").exists() {
+        return Err(anyhow::anyhow!(
+            "config directory is not a git repository: {}",
+            repo.display()
+        ));
+    }
+
+    // Attempt fetch — log but don't fail on fetch errors (network issues are transient)
+    if let Err(e) = Command::new("git")
         .args(["fetch"])
         .current_dir(repo)
-        .status();
+        .status()
+        .context("git fetch failed")
+    {
+        tracing::warn!("git fetch error (continuing with local pull): {e}");
+    }
 
-    // Attempt fast-forward pull
-    let _ = Command::new("git")
+    // Attempt fast-forward pull — fail on merge conflicts or critical errors
+    let pull_status = Command::new("git")
         .args(["pull", "--ff-only"])
         .current_dir(repo)
-        .status();
+        .status()
+        .context("git pull --ff-only failed")?;
 
-    // Update state after pull attempt (success or fail)
-    write_state(state_dir, now)?;
+    // Only update state if pull succeeded (exit code 0)
+    if pull_status.success() {
+        write_state(state_dir, now)?;
+    } else {
+        tracing::warn!("git pull did not complete successfully; will retry on next pull interval");
+    }
 
     Ok(())
 }
