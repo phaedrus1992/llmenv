@@ -139,6 +139,7 @@ fn rejects_skill_missing_skill_md() {
     let m = llme::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
+        ..Default::default()
     };
     let err = ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -161,6 +162,7 @@ fn rejects_skill_missing_frontmatter_markers() {
     let m = llme::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
+        ..Default::default()
     };
     let err = ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -183,6 +185,7 @@ fn rejects_skill_missing_name_field() {
     let m = llme::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
+        ..Default::default()
     };
     let err = ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -204,6 +207,7 @@ fn rejects_skill_missing_description_field() {
     let m = llme::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
+        ..Default::default()
     };
     let err = ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -229,6 +233,7 @@ fn rejects_skill_with_invalid_yaml_frontmatter() {
     let m = llme::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
+        ..Default::default()
     };
     let err = ClaudeCodeAdapter
         .materialize(&m, tmp.path())

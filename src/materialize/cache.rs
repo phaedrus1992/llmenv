@@ -19,6 +19,11 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
         let bytes = std::fs::read(abs)?;
         update_len_prefixed(&mut h, &bytes);
     }
+    // Mix in ICM config so a change in MCP wiring invalidates the cache.
+    // Serialize as JSON for a deterministic byte representation.
+    let icm_bytes = serde_json::to_vec(&m.icm)?;
+    update_len_prefixed(&mut h, &icm_bytes);
+    h.update([u8::from(m.icm_is_server)]);
     Ok(hex::encode(h.finalize()))
 }
 

@@ -3,7 +3,14 @@ use std::path::Path;
 use serde_json::json;
 
 use super::AgentAdapter;
+use crate::config::Icm;
 use crate::merge::MergedManifest;
+
+/// Name used to register the ICM MCP server in Claude Code's `mcp.json`. Also
+/// the substitution value for `{{ICM_MCP}}` placeholders in bundle hook
+/// templates so bundle hooks can reference the MCP by name without knowing
+/// it ahead of time.
+pub const ICM_MCP_NAME: &str = "icm";
 
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
@@ -30,13 +37,21 @@ impl AgentAdapter for ClaudeCodeAdapter {
         std::fs::create_dir_all(out)?;
         std::fs::write(out.join("CLAUDE.md"), &manifest.agents_md)?;
 
-        // Copy all files from the manifest
+        // Copy all files from the manifest. JSON hook templates get
+        // `{{ICM_MCP}}` substituted so bundle hooks can reference the MCP
+        // server by name without hard-coding it.
         for (rel, abs) in &manifest.files {
             let dest = out.join(rel);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(abs, &dest)?;
+            if is_hook_json(rel) {
+                let raw = std::fs::read_to_string(abs)?;
+                let rendered = raw.replace("{{ICM_MCP}}", ICM_MCP_NAME);
+                std::fs::write(&dest, rendered)?;
+            } else {
+                std::fs::copy(abs, &dest)?;
+            }
         }
 
         // Validate that skills are properly structured with SKILL.md frontmatter
@@ -45,8 +60,48 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Generate settings.json from hook/permission bundles
         generate_settings_json(out)?;
 
+        // Emit mcp.json when the manifest carries ICM config
+        if let Some(icm) = &manifest.icm {
+            write_mcp_json(out, icm, manifest.icm_is_server)?;
+        }
+
         Ok(())
     }
+}
+
+/// True if `rel` is a JSON file under the bundle's `hooks/` subtree —
+/// these files are template-rendered rather than byte-copied so bundle hooks
+/// can reference the ICM MCP via `{{ICM_MCP}}`.
+fn is_hook_json(rel: &Path) -> bool {
+    rel.starts_with("hooks") && rel.extension().is_some_and(|e| e == "json")
+}
+
+/// Writes `mcp.json` registering the ICM MCP server.
+///
+/// When `is_server` is true this host is the ICM server: register a local
+/// stdio entry that spawns `icm mcp-server` (the hook ensures `mcp-proxy` is
+/// running separately so other clients on the network can reach it).
+///
+/// When false: register an HTTP client pointing at `icm.client_url`.
+fn write_mcp_json(out: &Path, icm: &Icm, is_server: bool) -> anyhow::Result<()> {
+    let entry = if is_server {
+        json!({
+            "command": "icm",
+            "args": ["mcp-server"],
+        })
+    } else {
+        json!({
+            "url": icm.client_url,
+        })
+    };
+    let doc = json!({
+        "mcpServers": {
+            ICM_MCP_NAME: entry,
+        },
+    });
+    let path = out.join("mcp.json");
+    std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+    Ok(())
 }
 
 /// Validates that all skills in the materialized directory have SKILL.md with required frontmatter.

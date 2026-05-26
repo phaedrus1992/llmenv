@@ -1,0 +1,4 @@
+{
+  "matcher": "PostToolUse",
+  "command": "echo no template here"
+}

@@ -3,6 +3,8 @@ pub mod agents_md;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::Icm;
+
 #[derive(Debug, Clone)]
 pub struct BundleRef {
     pub name: String,
@@ -16,6 +18,13 @@ pub struct MergedManifest {
     /// Relative path inside the bundle → absolute source path. Later bundles
     /// overwrite earlier ones on path collision.
     pub files: BTreeMap<PathBuf, PathBuf>,
+    /// ICM configuration to emit into agent-native MCP config. `None` means
+    /// no ICM integration is materialized.
+    pub icm: Option<Icm>,
+    /// True when this host's active scope tags include `icm.server_tag` — the
+    /// adapter emits a local stdio MCP entry and the hook ensures `mcp-proxy`
+    /// is running. False means register an HTTP client pointing at `icm.client_url`.
+    pub icm_is_server: bool,
 }
 
 const COPIED_SUBDIRS: &[&str] = &["skills", "plugins", "hooks"];
@@ -39,6 +48,7 @@ pub fn merge(bundles: &[BundleRef]) -> anyhow::Result<MergedManifest> {
     Ok(MergedManifest {
         agents_md: agents_md::concat(&agents_parts),
         files,
+        ..MergedManifest::default()
     })
 }
 
