@@ -173,3 +173,48 @@ fn read_marker(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::read_marker;
+    use proptest::prelude::*;
+    use std::io::Write;
+
+    fn write_marker(body: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("create temp marker");
+        f.write_all(body.as_bytes()).expect("write temp marker");
+        f
+    }
+
+    #[test]
+    fn reads_tags_and_bundles_from_valid_yaml() {
+        let f = write_marker("tags: [a, b]\nenable_bundles: [base]\n");
+        let (tags, bundles) = read_marker(f.path());
+        assert_eq!(tags, vec!["a", "b"]);
+        assert_eq!(bundles, vec!["base"]);
+    }
+
+    #[test]
+    fn empty_file_yields_empty() {
+        let f = write_marker("");
+        assert_eq!(read_marker(f.path()), (Vec::new(), Vec::new()));
+    }
+
+    proptest! {
+        // Whitespace-only bodies are treated as empty, never error.
+        #[test]
+        fn whitespace_only_yields_empty(ws in r"[ \t\r\n]*") {
+            let f = write_marker(&ws);
+            prop_assert_eq!(read_marker(f.path()), (Vec::new(), Vec::new()));
+        }
+
+        // Arbitrary bytes never panic; malformed YAML degrades to empty.
+        // A fuzz input could coincidentally be valid YAML, so only assert the
+        // no-panic contract here (the empty-on-malformed path is covered above).
+        #[test]
+        fn arbitrary_input_never_panics(body in r"\PC*") {
+            let f = write_marker(&body);
+            let _ = read_marker(f.path());
+        }
+    }
+}

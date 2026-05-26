@@ -269,8 +269,8 @@ mod tests {
     proptest! {
         #[test]
         fn prop_config_yaml_roundtrip(config in arb_config()) {
-            let yaml_str = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("serialize failed: {}", e));
-            let deserialized: Config = serde_yaml::from_str(&yaml_str).unwrap_or_else(|e| panic!("deserialize failed: {}", e));
+            let yaml_str = serde_yaml::to_string(&config).expect("serialize failed");
+            let deserialized: Config = serde_yaml::from_str(&yaml_str).expect("deserialize failed");
             prop_assert_eq!(config, deserialized, "roundtrip should preserve config");
         }
 
