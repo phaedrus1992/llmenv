@@ -152,7 +152,10 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
     let mut orphan_count: usize = 0;
     for s in &config.scope.network {
         if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!("⚠ orphan scope network:{}: no bundle consumes its tags", s.id);
+            eprintln!(
+                "⚠ orphan scope network:{}: no bundle consumes its tags",
+                s.id
+            );
             orphan_count += 1;
         }
     }
@@ -170,7 +173,10 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
     }
     for s in &config.scope.project {
         if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!("⚠ orphan scope project:{}: no bundle consumes its tags", s.id);
+            eprintln!(
+                "⚠ orphan scope project:{}: no bundle consumes its tags",
+                s.id
+            );
             orphan_count += 1;
         }
     }
@@ -590,10 +596,7 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_init(
-    path: Option<std::path::PathBuf>,
-    repo: Option<String>,
-) -> anyhow::Result<()> {
+fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::Result<()> {
     let config_dir = match path {
         Some(p) => expand_tilde(p.to_string_lossy().as_ref())?,
         None => paths::config_dir()?,
