@@ -156,8 +156,8 @@ server_bind = "127.0.0.1:9092"
 Validate your configuration:
 
 ```bash
-llme status
-llme doctor
+llmenv status
+llmenv doctor
 ```
 
 Both commands will report any parsing errors or missing required fields.

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use llme::adapter::AgentAdapter;
-use llme::adapter::claude_code::ClaudeCodeAdapter;
-use llme::merge::{BundleRef, merge};
+use llmenv::adapter::AgentAdapter;
+use llmenv::adapter::claude_code::ClaudeCodeAdapter;
+use llmenv::merge::{BundleRef, merge};
 use tempfile::tempdir;
 
 fn fixture_bundle(name: &str) -> BundleRef {
@@ -136,7 +136,7 @@ fn rejects_skill_missing_skill_md() {
     std::fs::create_dir_all(&skills_dir).expect("create skills dir");
     std::fs::create_dir(skills_dir.join("bad-skill")).expect("create skill dir");
 
-    let m = llme::merge::MergedManifest {
+    let m = llmenv::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
         ..Default::default()
@@ -159,7 +159,7 @@ fn rejects_skill_missing_frontmatter_markers() {
     )
     .expect("write SKILL.md");
 
-    let m = llme::merge::MergedManifest {
+    let m = llmenv::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
         ..Default::default()
@@ -182,7 +182,7 @@ fn rejects_skill_missing_name_field() {
     )
     .expect("write SKILL.md");
 
-    let m = llme::merge::MergedManifest {
+    let m = llmenv::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
         ..Default::default()
@@ -204,7 +204,7 @@ fn rejects_skill_missing_description_field() {
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), "---\nname: bad\n---\n").expect("write SKILL.md");
 
-    let m = llme::merge::MergedManifest {
+    let m = llmenv::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
         ..Default::default()
@@ -230,7 +230,7 @@ fn rejects_skill_with_invalid_yaml_frontmatter() {
     )
     .expect("write SKILL.md");
 
-    let m = llme::merge::MergedManifest {
+    let m = llmenv::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
         ..Default::default()

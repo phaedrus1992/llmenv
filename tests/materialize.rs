@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use llme::materialize::{cache, materialize};
-use llme::merge::{BundleRef, merge};
+use llmenv::materialize::{cache, materialize};
+use llmenv::merge::{BundleRef, merge};
 use tempfile::tempdir;
 
 fn fixture_bundle(name: &str) -> BundleRef {
@@ -90,8 +90,8 @@ fn hash_is_unambiguous_across_field_boundaries() {
     // Without length prefixing, manifest A and B below would hash identically
     // because `agents_md || files[].rel || files[].bytes` concatenates to the
     // same bytes. With length prefixing they must differ.
-    use llme::materialize::cache::hash_manifest;
-    use llme::merge::MergedManifest;
+    use llmenv::materialize::cache::hash_manifest;
+    use llmenv::merge::MergedManifest;
     use std::collections::BTreeMap;
 
     let tmp = tempdir().expect("tempdir");

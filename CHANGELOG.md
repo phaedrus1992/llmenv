@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Doctor diagnostic command** (`llme doctor`) with full health checks
+- **Doctor diagnostic command** (`llmenv doctor`) with full health checks
   - Validates configuration file parsing
   - Checks cache directory writability
   - Tests git remote connectivity
@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Git sync**
   - Automatic commit and push of configuration changes
-  - `llme sync` command for on-demand synchronization
+  - `llmenv sync` command for on-demand synchronization
   - Configurable sync interval
 
 - **MCP server integration**
