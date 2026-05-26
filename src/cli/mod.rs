@@ -162,11 +162,18 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
     }
     let first = name.chars().next().unwrap();
     if !first.is_ascii_alphabetic() && first != '_' {
-        anyhow::bail!("Variable name '{}' must start with letter or underscore", name);
+        anyhow::bail!(
+            "Variable name '{}' must start with letter or underscore",
+            name
+        );
     }
     for ch in name.chars() {
         if !ch.is_ascii_alphanumeric() && ch != '_' {
-            anyhow::bail!("Variable name '{}' contains invalid character '{}'", name, ch);
+            anyhow::bail!(
+                "Variable name '{}' contains invalid character '{}'",
+                name,
+                ch
+            );
         }
     }
     Ok(())
@@ -178,11 +185,10 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
 
     let mut vars = std::collections::BTreeMap::new();
     for bundle in &config.bundle {
-        // Filter by tags if specified
-        if let Some(ref t) = tag {
-            if !bundle.tags.contains(t) {
-                continue;
-            }
+        if let Some(ref t) = tag
+            && !bundle.tags.contains(t)
+        {
+            continue;
         }
         for (key, value) in &bundle.vars {
             vars.insert(key.clone(), value.clone());
@@ -263,6 +269,10 @@ tags = []
 "#;
             std::fs::write(&config_path, template)?;
             eprintln!("Created template config at {}", config_path.display());
+
+            // Validate the created config
+            Config::load(&config_path)?;
+            eprintln!("✓ Config validated successfully");
         }
     }
 

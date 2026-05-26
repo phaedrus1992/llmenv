@@ -85,7 +85,8 @@ fn is_valid_var_name(name: &str) -> bool {
     if !first.is_ascii_alphabetic() && first != '_' {
         return false;
     }
-    name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    name.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 impl Config {
@@ -140,7 +141,10 @@ impl Config {
             }
             for var_name in b.vars.keys() {
                 if !is_valid_var_name(var_name) {
-                    return Err(ValidateError::InvalidVarName(b.name.clone(), var_name.clone()));
+                    return Err(ValidateError::InvalidVarName(
+                        b.name.clone(),
+                        var_name.clone(),
+                    ));
                 }
             }
         }
