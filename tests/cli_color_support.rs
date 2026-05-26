@@ -49,3 +49,19 @@ fn test_should_use_color_auto_with_tty() {
     let result = should_use_color(Some(ColorMode::Auto), true);
     assert!(result, "auto mode with TTY should enable colors");
 }
+
+#[test]
+fn test_color_marker_functions() {
+    use llmenv::cli::{
+        active_marker, inactive_annotation, orphan_annotation, doctor_pass, doctor_warning,
+        doctor_fail,
+    };
+
+    // Verify marker functions return non-empty strings
+    assert!(!active_marker().is_empty());
+    assert!(!inactive_annotation().is_empty());
+    assert!(!orphan_annotation().is_empty());
+    assert!(!doctor_pass().is_empty());
+    assert!(!doctor_warning().is_empty());
+    assert!(!doctor_fail().is_empty());
+}
