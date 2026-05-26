@@ -103,7 +103,9 @@ fn is_safe_cache_dir(dir: &str) -> bool {
 impl Config {
     pub fn validate(&self) -> Result<(), ValidateError> {
         if !is_safe_cache_dir(&self.settings.cache_dir) {
-            return Err(ValidateError::CacheDirTraversal(self.settings.cache_dir.clone()));
+            return Err(ValidateError::CacheDirTraversal(
+                self.settings.cache_dir.clone(),
+            ));
         }
         if let Some(hours) = self.settings.cache_retention_hours
             && hours == 0
