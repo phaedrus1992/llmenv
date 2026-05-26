@@ -11,7 +11,7 @@ A universal scope-aware environment manager for AI coding agents.
 - **Shell integration** — Automatic scope detection via shell hooks
 - **Cache & sync** — Local caching with optional GitHub synchronization
 - **MCP integration** — Scope-aware access to external tools via Model Context Protocol
-- **Diagnostics** — Built-in `llme doctor` for troubleshooting
+- **Diagnostics** — Built-in `llmenv doctor` for troubleshooting
 
 ## Quick Start
 
@@ -24,7 +24,7 @@ cargo install llmenv
 ### 2. Initialize
 
 ```bash
-llme init
+llmenv init
 ```
 
 ### 3. Configure your environment
@@ -36,13 +36,13 @@ Edit `~/.config/llmenv/config.toml` to add your scopes and bundles.
 Add to your `.zshrc` or `.bashrc`:
 
 ```bash
-eval "$(llme hook zsh)"
+eval "$(llmenv hook zsh)"
 ```
 
 ### 5. Verify setup
 
 ```bash
-llme doctor
+llmenv doctor
 ```
 
 ## Example
@@ -99,19 +99,19 @@ Current environment → Match scopes → Collect tags → Export variables
                                                   → Activate MCP server (if configured)
 ```
 
-When you run `llme export`, it returns shell commands to set up your environment. The shell hook runs this automatically on every prompt, keeping your config in sync as you move between projects and networks.
+When you run `llmenv export`, it returns shell commands to set up your environment. The shell hook runs this automatically on every prompt, keeping your config in sync as you move between projects and networks.
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `llme init` | Create configuration |
-| `llme export` | Export environment variables |
-| `llme hook {zsh\|bash}` | Generate shell integration code |
-| `llme doctor [--gc]` | Diagnostics and cache cleanup |
-| `llme scope-ls` | List scopes |
-| `llme bundle-ls` | List bundles |
-| `llme sync` | Push config to GitHub |
+| `llmenv init` | Create configuration |
+| `llmenv export` | Export environment variables |
+| `llmenv hook {zsh\|bash}` | Generate shell integration code |
+| `llmenv doctor [--gc]` | Diagnostics and cache cleanup |
+| `llmenv scope-ls` | List scopes |
+| `llmenv bundle-ls` | List bundles |
+| `llmenv sync` | Push config to GitHub |
 
 ## Version
 

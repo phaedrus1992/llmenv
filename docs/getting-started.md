@@ -26,7 +26,7 @@ cargo build --release
 Create your first llmenv configuration:
 
 ```bash
-llme init
+llmenv init
 ```
 
 This creates `~/.config/llmenv/config.toml` with a template structure. You can customize it to match your environment.
@@ -36,7 +36,7 @@ This creates `~/.config/llmenv/config.toml` with a template structure. You can c
 Generate shell hook code for your shell (zsh or bash):
 
 ```bash
-eval "$(llme hook zsh)"
+eval "$(llmenv hook zsh)"
 ```
 
 Add this line to your shell profile (`.zshrc` or `.bashrc`) to enable automatic scope detection.
@@ -46,13 +46,13 @@ Add this line to your shell profile (`.zshrc` or `.bashrc`) to enable automatic 
 Export variables for the current scope:
 
 ```bash
-llme export
+llmenv export
 ```
 
 Or with a tag filter:
 
 ```bash
-llme export --tag dev
+llmenv export --tag dev
 ```
 
 ### 4. Check Your Setup
@@ -60,7 +60,7 @@ llme export --tag dev
 Run diagnostics to validate your configuration:
 
 ```bash
-llme doctor
+llmenv doctor
 ```
 
 This checks:
@@ -101,15 +101,15 @@ AGENT = "claude"
 
 | Command | Purpose |
 |---------|---------|
-| `llme init [--repo URL]` | Initialize configuration |
-| `llme export [--scope ID] [--tag TAG]` | Export environment variables |
-| `llme hook {zsh\|bash}` | Generate shell hook code |
-| `llme status` | Show configuration status |
-| `llme scope-ls` | List available scopes |
-| `llme tag-ls` | List available tags |
-| `llme bundle-ls` | List available bundles |
-| `llme doctor [--gc]` | Run diagnostics (optionally with GC) |
-| `llme sync` | Commit and push config to GitHub |
+| `llmenv init [--repo URL]` | Initialize configuration |
+| `llmenv export [--scope ID] [--tag TAG]` | Export environment variables |
+| `llmenv hook {zsh\|bash}` | Generate shell hook code |
+| `llmenv status` | Show configuration status |
+| `llmenv scope-ls` | List available scopes |
+| `llmenv tag-ls` | List available tags |
+| `llmenv bundle-ls` | List available bundles |
+| `llmenv doctor [--gc]` | Run diagnostics (optionally with GC) |
+| `llmenv sync` | Commit and push config to GitHub |
 
 ## Next Steps
 
