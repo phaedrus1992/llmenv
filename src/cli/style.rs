@@ -46,11 +46,12 @@ pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
 }
 
 /// Format an active state marker (e.g., "*") in green.
+#[expect(dead_code, reason = "placeholder awaiting color implementation")]
 pub fn active_marker() -> &'static str {
     "* "
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "placeholder awaiting color implementation")]
 /// Format an inactive annotation (e.g., "(inactive)") in yellow/dim.
 pub fn inactive_annotation() -> &'static str {
     "(inactive)"
