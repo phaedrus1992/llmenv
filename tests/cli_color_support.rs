@@ -3,7 +3,7 @@
 
 #[test]
 fn test_should_use_color_always_mode() {
-    use llmenv::cli::{should_use_color, ColorMode};
+    use llmenv::cli::{ColorMode, should_use_color};
 
     // Always mode should force colors on
     assert!(should_use_color(Some(ColorMode::Always), false));
@@ -12,7 +12,7 @@ fn test_should_use_color_always_mode() {
 
 #[test]
 fn test_should_use_color_never_mode() {
-    use llmenv::cli::{should_use_color, ColorMode};
+    use llmenv::cli::{ColorMode, should_use_color};
 
     // Never mode should force colors off
     assert!(!should_use_color(Some(ColorMode::Never), false));
@@ -21,7 +21,7 @@ fn test_should_use_color_never_mode() {
 
 #[test]
 fn test_should_use_color_auto_respects_no_color_env() {
-    use llmenv::cli::{should_use_color, ColorMode};
+    use llmenv::cli::{ColorMode, should_use_color};
 
     // Test that NO_COLOR env var is checked internally.
     // When NO_COLOR is set, should_use_color should return false.
@@ -30,12 +30,15 @@ fn test_should_use_color_auto_respects_no_color_env() {
 
     // For unit test here, just verify that ColorMode::Auto respects TTY
     // when env vars are not set:
-    assert!(!should_use_color(Some(ColorMode::Auto), false), "auto mode should disable colors when not TTY");
+    assert!(
+        !should_use_color(Some(ColorMode::Auto), false),
+        "auto mode should disable colors when not TTY"
+    );
 }
 
 #[test]
 fn test_should_use_color_auto_with_tty() {
-    use llmenv::cli::{should_use_color, ColorMode};
+    use llmenv::cli::{ColorMode, should_use_color};
 
     // Auto mode should respect TTY when env vars aren't interfering
     // When stdout is not a TTY, colors should be disabled by default
