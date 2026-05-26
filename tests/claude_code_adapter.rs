@@ -140,9 +140,9 @@ fn rejects_skill_missing_skill_md() {
         agents_md: String::new(),
         files: Default::default(),
     };
-    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
-        "should reject skill directory missing SKILL.md",
-    );
+    let err = ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect_err("should reject skill directory missing SKILL.md");
     assert!(err.to_string().contains("missing SKILL.md"));
 }
 
@@ -152,16 +152,19 @@ fn rejects_skill_missing_frontmatter_markers() {
     let skills_dir = tmp.path().join("skills");
     let skill_dir = skills_dir.join("bad-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-    std::fs::write(skill_dir.join("SKILL.md"), "name: bad\ndescription: missing markers")
-        .expect("write SKILL.md");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "name: bad\ndescription: missing markers",
+    )
+    .expect("write SKILL.md");
 
     let m = llme::merge::MergedManifest {
         agents_md: String::new(),
         files: Default::default(),
     };
-    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
-        "should reject SKILL.md without frontmatter markers",
-    );
+    let err = ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect_err("should reject SKILL.md without frontmatter markers");
     assert!(err.to_string().contains("missing YAML frontmatter"));
 }
 
@@ -181,10 +184,13 @@ fn rejects_skill_missing_name_field() {
         agents_md: String::new(),
         files: Default::default(),
     };
-    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
-        "should reject SKILL.md missing name",
+    let err = ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect_err("should reject SKILL.md missing name");
+    assert!(
+        err.to_string()
+            .contains("missing required frontmatter fields")
     );
-    assert!(err.to_string().contains("missing required frontmatter fields"));
 }
 
 #[test]
@@ -199,10 +205,13 @@ fn rejects_skill_missing_description_field() {
         agents_md: String::new(),
         files: Default::default(),
     };
-    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
-        "should reject SKILL.md missing description",
+    let err = ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect_err("should reject SKILL.md missing description");
+    assert!(
+        err.to_string()
+            .contains("missing required frontmatter fields")
     );
-    assert!(err.to_string().contains("missing required frontmatter fields"));
 }
 
 #[test]
@@ -221,8 +230,8 @@ fn rejects_skill_with_invalid_yaml_frontmatter() {
         agents_md: String::new(),
         files: Default::default(),
     };
-    let err = ClaudeCodeAdapter.materialize(&m, tmp.path()).expect_err(
-        "should reject invalid YAML frontmatter",
-    );
+    let err = ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect_err("should reject invalid YAML frontmatter");
     assert!(err.to_string().contains("invalid YAML frontmatter"));
 }
