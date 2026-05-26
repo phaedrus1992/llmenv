@@ -19,7 +19,9 @@ fn materializes_deterministically() {
     let p1 = materialize(&m, tmp.path()).expect("materialize 1");
     let p2 = materialize(&m, tmp.path()).expect("materialize 2");
     assert_eq!(p1, p2, "same manifest hashes to same path");
-    assert!(p1.join("AGENTS.md").exists());
+    // materialize copies raw bundle files only — rules text is rendered by
+    // the per-agent adapter, not written here.
+    assert!(!p1.join("AGENTS.md").exists());
     assert!(p1.join("skills/hello/SKILL.md").exists());
 }
 

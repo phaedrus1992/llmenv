@@ -1,9 +1,11 @@
 pub mod agents_md;
+pub mod rules;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::Icm;
+use rules::RuleFile;
 
 #[derive(Debug, Clone)]
 pub struct BundleRef {
@@ -18,6 +20,12 @@ pub struct MergedManifest {
     /// Relative path inside the bundle → absolute source path. Later bundles
     /// overwrite earlier ones on path collision.
     pub files: BTreeMap<PathBuf, PathBuf>,
+    /// Per-bundle `rules/*.md` ingested with frontmatter split out. Adapters
+    /// choose between writing them as separate files (Claude) or appending
+    /// the bodies into AGENTS.md (fallback). Stored in the order rules were
+    /// collected: bundles in declaration order, files within a bundle sorted
+    /// by relative path.
+    pub rules: Vec<RuleFile>,
     /// ICM configuration to emit into agent-native MCP config. `None` means
     /// no ICM integration is materialized.
     pub icm: Option<Icm>,
@@ -32,6 +40,7 @@ const COPIED_SUBDIRS: &[&str] = &["skills", "plugins", "hooks"];
 pub fn merge(bundles: &[BundleRef]) -> anyhow::Result<MergedManifest> {
     let mut agents_parts = Vec::new();
     let mut files = BTreeMap::new();
+    let mut rule_files: Vec<RuleFile> = Vec::new();
     for b in bundles {
         let am = b.path.join("AGENTS.md");
         if am.exists() {
@@ -44,10 +53,12 @@ pub fn merge(bundles: &[BundleRef]) -> anyhow::Result<MergedManifest> {
             }
             walk(&b.path, &dir, &mut files)?;
         }
+        rule_files.extend(rules::collect_from_bundle(&b.path, &b.name)?);
     }
     Ok(MergedManifest {
         agents_md: agents_md::concat(&agents_parts),
         files,
+        rules: rule_files,
         ..MergedManifest::default()
     })
 }

@@ -1,14 +1,23 @@
-use crate::config::Config;
+use crate::adapter::AgentAdapter;
+use crate::adapter::claude_code::ClaudeCodeAdapter;
+use crate::config::{Bundle, Config};
+use crate::merge::{BundleRef, MergedManifest};
 use crate::paths;
+use crate::scope::ActiveScopes;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+
+/// Version string shown by `--version`. Built by `build.rs` as
+/// `"<pkg-version> (<short-hash>[-dirty])"`, falling back to bare pkg version
+/// when the build had no `.git` directory (e.g. crates.io tarball builds).
+const VERSION: &str = env!("LLMENV_VERSION");
 
 #[derive(Parser)]
 #[command(
     name = "llmenv",
-    version,
+    version = VERSION,
     about = "Universal scope-aware environment for AI coding agents"
 )]
 struct Cli {
@@ -40,6 +49,8 @@ enum Command {
     },
     /// Initialize llmenv configuration
     Init {
+        /// Directory to initialize (defaults to the standard config dir)
+        path: Option<std::path::PathBuf>,
         /// Repository to clone config from (optional)
         #[arg(long)]
         repo: Option<String>,
@@ -47,10 +58,13 @@ enum Command {
     /// Show current environment status
     Status,
     /// List available scopes
+    #[command(alias = "scopes")]
     ScopeLs,
     /// List available tags
+    #[command(alias = "tags")]
     TagLs,
     /// List available bundles
+    #[command(alias = "bundles")]
     BundleLs,
     /// Sync config with GitHub (git add, commit, push)
     Sync,
@@ -69,8 +83,8 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Hook { shell }) => {
             run_hook(&shell)?;
         }
-        Some(Command::Init { repo }) => {
-            run_init(repo)?;
+        Some(Command::Init { path, repo }) => {
+            run_init(path, repo)?;
         }
         Some(Command::Status) => {
             run_status()?;
@@ -124,6 +138,87 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
         }
     } else {
         eprintln!("⚠ Config directory is not a git repo");
+    }
+
+    // Orphan detection: anything declared but unreachable from the
+    // scope→tag→bundle wiring is dead config. Use current env so marker-only
+    // signals (tags/enable_bundles from an active marker) count as live.
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    let emitted = all_emitted_tags(&config);
+    let consumed = all_consumed_tags(&config);
+    let marker_enabled = marker_enabled_bundle_names(&active);
+
+    let mut orphan_count: usize = 0;
+    for s in &config.scope.network {
+        if !s.tags.iter().any(|t| consumed.contains(t)) {
+            eprintln!(
+                "⚠ orphan scope network:{}: no bundle consumes its tags",
+                s.id
+            );
+            orphan_count += 1;
+        }
+    }
+    for s in &config.scope.host {
+        if !s.tags.iter().any(|t| consumed.contains(t)) {
+            eprintln!("⚠ orphan scope host:{}: no bundle consumes its tags", s.id);
+            orphan_count += 1;
+        }
+    }
+    for s in &config.scope.user {
+        if !s.tags.iter().any(|t| consumed.contains(t)) {
+            eprintln!("⚠ orphan scope user:{}: no bundle consumes its tags", s.id);
+            orphan_count += 1;
+        }
+    }
+    for s in &config.scope.project {
+        if !s.tags.iter().any(|t| consumed.contains(t)) {
+            eprintln!(
+                "⚠ orphan scope project:{}: no bundle consumes its tags",
+                s.id
+            );
+            orphan_count += 1;
+        }
+    }
+    for b in &config.bundle {
+        let has_emitted_tag = b.tags.iter().any(|t| emitted.contains(t));
+        if !has_emitted_tag && !marker_enabled.contains(&b.name) {
+            eprintln!(
+                "⚠ orphan bundle {}: no scope emits its tags and no marker enables it",
+                b.name
+            );
+            orphan_count += 1;
+        }
+    }
+    // Tag orphans: declared but missing emitter or consumer.
+    let mut tag_universe: HashSet<String> = HashSet::new();
+    tag_universe.extend(emitted.iter().cloned());
+    tag_universe.extend(consumed.iter().cloned());
+    tag_universe.extend(active.tags.iter().cloned());
+    let mut tag_orphans: Vec<String> = tag_universe
+        .into_iter()
+        .filter(|t| {
+            let emitted_anywhere = emitted.contains(t) || active.tags.contains(t);
+            let consumed_anywhere = consumed.contains(t);
+            !(emitted_anywhere && consumed_anywhere)
+        })
+        .collect();
+    tag_orphans.sort();
+    for t in &tag_orphans {
+        let emitted_anywhere = emitted.contains(t) || active.tags.contains(t);
+        let reason = if !emitted_anywhere {
+            "no scope emits it"
+        } else {
+            "no bundle consumes it"
+        };
+        eprintln!("⚠ orphan tag {}: {}", t, reason);
+        orphan_count += 1;
+    }
+
+    if orphan_count == 0 {
+        eprintln!("✓ No orphan scopes/tags/bundles");
+    } else {
+        eprintln!("⚠ Found {} orphan item(s)", orphan_count);
     }
 
     eprintln!("✓ Doctor check complete.");
@@ -241,28 +336,30 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
 fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
+    let config_dir = paths::config_dir()?;
+
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
 
     // When this host's active scope tags include `icm.server_tag`, ensure
     // the local `mcp-proxy` is alive before agents try to reach it. Failures
     // here are logged but non-fatal — the export must still emit env vars so
     // the shell hook stays usable.
-    if let Some(icm) = &config.icm {
-        let env = crate::scope::matcher::Env::detect();
-        let active = crate::scope::evaluate(&config, &env);
-        if active.tags.contains(&icm.server_tag) {
-            match crate::mcp::proxy::default_pid_path() {
-                Ok(pid_path) => {
-                    if let Err(e) = crate::mcp::proxy::ensure_running(
-                        &icm.server_bind,
-                        &pid_path,
-                        crate::mcp::proxy::spawn_mcp_proxy,
-                    ) {
-                        eprintln!("warning: failed to ensure mcp-proxy running: {e}");
-                    }
+    if let Some(icm) = &config.icm
+        && active.tags.contains(&icm.server_tag)
+    {
+        match crate::mcp::proxy::default_pid_path() {
+            Ok(pid_path) => {
+                if let Err(e) = crate::mcp::proxy::ensure_running(
+                    &icm.server_bind,
+                    &pid_path,
+                    crate::mcp::proxy::spawn_mcp_proxy,
+                ) {
+                    eprintln!("warning: failed to ensure mcp-proxy running: {e}");
                 }
-                Err(e) => {
-                    eprintln!("warning: cannot locate mcp-proxy pidfile: {e}");
-                }
+            }
+            Err(e) => {
+                eprintln!("warning: cannot locate mcp-proxy pidfile: {e}");
             }
         }
     }
@@ -270,7 +367,6 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed
     let interval_secs = config.settings.sync_interval_minutes * 60;
     let state_dir = paths::state_dir()?;
-    let config_dir = paths::config_dir()?;
     if let Err(e) = crate::sync::maybe_pull(
         &config_dir,
         &state_dir,
@@ -279,13 +375,33 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         tracing::debug!("throttled pull failed (non-fatal): {e}");
     }
 
+    // A bundle fires when either:
+    //   - one of its tags is in the active tag set (normal tag-based firing), OR
+    //   - an active scope manually enables it by name via `enable_bundles`
+    //     in a marker file.
+    // The optional --tag filter still gates either path.
+    let manually_enabled: BTreeSet<&str> = active
+        .scopes
+        .iter()
+        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+        .collect();
+    let firing: Vec<&Bundle> = config
+        .bundle
+        .iter()
+        .filter(|b| {
+            if let Some(t) = &tag
+                && !b.tags.contains(t)
+            {
+                return false;
+            }
+            b.tags.iter().any(|bt| active.tags.contains(bt))
+                || manually_enabled.contains(b.name.as_str())
+        })
+        .collect();
+
+    // Collect env vars from firing bundles only.
     let mut vars = std::collections::BTreeMap::new();
-    for bundle in &config.bundle {
-        if let Some(ref t) = tag
-            && !bundle.tags.contains(t)
-        {
-            continue;
-        }
+    for bundle in &firing {
         for (key, value) in &bundle.vars {
             vars.insert(key.clone(), value.clone());
         }
@@ -298,12 +414,156 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         eprintln!("warning: scope filtering not yet implemented, exporting all matching tags");
     }
 
+    // Merge + materialize the agent config directory and let the adapter
+    // emit env vars pointing the agent at it. Failures here are logged but
+    // non-fatal: env vars from bundles still flow through.
+    match build_and_materialize(&config, &config_dir, &active, &firing) {
+        Ok(Some((cache_path, extra_vars))) => {
+            tracing::debug!("materialized agent config at {}", cache_path.display());
+            for (k, v) in extra_vars {
+                vars.insert(k, v);
+            }
+        }
+        Ok(None) => {
+            tracing::debug!("no bundle content directories — skipping materialize");
+        }
+        Err(e) => {
+            eprintln!("warning: agent materialization failed: {e}");
+        }
+    }
+
+    // Introspection vars: comma-separated, deterministic order. Scopes get
+    // a `<kind>:<id>` prefix so the kind is visible without re-running
+    // `llmenv scope ls`. Tags come from a BTreeSet (already sorted); bundles
+    // are emitted in declaration order.
+    let scopes_csv = active
+        .scopes
+        .iter()
+        .map(|s| format!("{}:{}", s.kind, s.id))
+        .collect::<Vec<_>>()
+        .join(",");
+    let tags_csv = active.tags.iter().cloned().collect::<Vec<_>>().join(",");
+    let bundles_csv = firing
+        .iter()
+        .map(|b| b.name.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    vars.insert("LLMENV_ACTIVE_SCOPES".into(), scopes_csv);
+    vars.insert("LLMENV_ACTIVE_TAGS".into(), tags_csv);
+    vars.insert("LLMENV_ACTIVE_BUNDLES".into(), bundles_csv);
+
+    // LLMENV_ACTIVE_PROJECT / LLMENV_PROJECT_ROOT: deepest matched project
+    // scope wins (most specific for nested project layouts). Both vars are
+    // skipped when no project scope is active.
+    let winning_project = active
+        .scopes
+        .iter()
+        .filter(|s| s.kind == "project")
+        .filter_map(|s| s.project_root.as_ref().map(|r| (s, r)))
+        .max_by_key(|(_, r)| r.as_os_str().len());
+    if let Some((scope, root)) = winning_project {
+        vars.insert("LLMENV_ACTIVE_PROJECT".into(), scope.id.clone());
+        vars.insert(
+            "LLMENV_PROJECT_ROOT".into(),
+            root.to_string_lossy().into_owned(),
+        );
+    }
+
     for (key, value) in vars {
         validate_var_name(&key)?;
         println!("export {}={}", key, shell_escape(&value));
     }
 
     Ok(())
+}
+
+type Materialized = (PathBuf, Vec<(String, String)>);
+
+/// Build BundleRefs for firing bundles in scope-precedence order, merge them
+/// into a manifest, materialize through the Claude Code adapter, and return
+/// the env vars the adapter wants exported. Returns `Ok(None)` when no
+/// firing bundle has a content directory on disk.
+fn build_and_materialize(
+    config: &Config,
+    config_dir: &Path,
+    active: &ActiveScopes,
+    firing: &[&Bundle],
+) -> anyhow::Result<Option<Materialized>> {
+    let refs = build_bundle_refs(config_dir, active, firing);
+    if refs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut manifest: MergedManifest = crate::merge::merge(&refs)?;
+    if let Some(icm) = &config.icm {
+        manifest.icm = Some(icm.clone());
+        manifest.icm_is_server = active.tags.contains(&icm.server_tag);
+    }
+
+    let cache_root = expand_tilde(&config.settings.cache_dir)?;
+    let adapter = ClaudeCodeAdapter;
+    let adapter_root = cache_root.join(adapter.name());
+    let cache_path = crate::materialize::materialize(&manifest, &adapter_root)?;
+
+    // Run the adapter writer too — materialize copies raw bundle files, but
+    // only the adapter writes the agent-native rules file (CLAUDE.md), the
+    // MCP config, and settings.json. Idempotent per the adapter contract.
+    adapter.materialize(&manifest, &cache_path)?;
+
+    let env_vars = adapter.env_vars(&cache_path)?;
+    Ok(Some((cache_path, env_vars)))
+}
+
+/// Resolve firing bundles to on-disk `BundleRef`s in scope precedence order
+/// (network → host → user → project), then unscoped tags in declaration
+/// order. Bundles with no content directory under `<config_dir>/bundles/<name>/`
+/// are dropped silently — vars-only bundles are valid.
+fn build_bundle_refs(
+    config_dir: &Path,
+    active: &ActiveScopes,
+    firing: &[&Bundle],
+) -> Vec<BundleRef> {
+    const PRECEDENCE: &[&str] = &["network", "host", "user", "project"];
+
+    let bundles_dir = config_dir.join("bundles");
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut refs: Vec<BundleRef> = Vec::new();
+
+    let push_ref = |name: &str, refs: &mut Vec<BundleRef>, seen: &mut BTreeSet<String>| {
+        if seen.contains(name) {
+            return;
+        }
+        let path = bundles_dir.join(name);
+        if !path.exists() {
+            return;
+        }
+        seen.insert(name.to_owned());
+        refs.push(BundleRef {
+            name: name.to_owned(),
+            path,
+        });
+    };
+
+    for kind in PRECEDENCE {
+        // Tags emitted by scopes of this kind.
+        let kind_tags: BTreeSet<&str> = active
+            .scopes
+            .iter()
+            .filter(|s| s.kind == *kind)
+            .flat_map(|s| s.tags.iter().map(String::as_str))
+            .collect();
+        for bundle in firing {
+            if bundle.tags.iter().any(|t| kind_tags.contains(t.as_str())) {
+                push_ref(&bundle.name, &mut refs, &mut seen);
+            }
+        }
+    }
+    // Any firing bundle not already placed (shouldn't happen — every firing
+    // bundle has at least one tag in active.tags — but defensive).
+    for bundle in firing {
+        push_ref(&bundle.name, &mut refs, &mut seen);
+    }
+    refs
 }
 
 fn run_hook(shell: &str) -> anyhow::Result<()> {
@@ -336,41 +596,63 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_init(repo: Option<String>) -> anyhow::Result<()> {
-    let config_dir = paths::config_dir()?;
-    std::fs::create_dir_all(&config_dir)?;
+fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::Result<()> {
+    let config_dir = match path {
+        Some(p) => expand_tilde(p.to_string_lossy().as_ref())?,
+        None => paths::config_dir()?,
+    };
+    std::fs::create_dir_all(&config_dir)
+        .with_context(|| format!("creating config dir {}", config_dir.display()))?;
 
     if let Some(_repo_url) = repo {
         anyhow::bail!("Git clone not yet implemented");
-    } else {
-        let config_path = config_dir.join("config.toml");
-        if !config_path.exists() {
-            let template = r#"[settings]
+    }
+
+    let config_path = config_dir.join("config.toml");
+    if config_path.exists() {
+        eprintln!("Config already exists at {}", config_path.display());
+        return Ok(());
+    }
+
+    let template = r#"[settings]
 cache_dir = "~/.cache/llmenv"
 sync_interval_minutes = 60
 
-[scope.network]
+# Scopes are arrays of tables — uncomment and fill in as needed.
+# [[scope.network]]
+# id = "home"
+# match = { ssid = "MyHomeWiFi" }
+# tags = ["home"]
 
-[scope.host]
+# [[scope.host]]
+# id = "laptop"
+# match = { hostname = "my-laptop" }
+# tags = ["laptop"]
 
-[scope.user]
+# [[scope.user]]
+# id = "me"
+# match = { user = "alice" }
+# tags = ["me"]
 
-[scope.project]
+# [[scope.project]]
+# id = "myapp"
+# match = { marker = ".llmenvrc" }
+# tags = ["myapp"]
 
+# Bundles fire when one of their tags is emitted by a matching scope.
 [[bundle]]
 name = "base"
-tags = []
+tags = ["me"]
 
 [bundle.vars]
+AGENT = "claude"
 "#;
-            std::fs::write(&config_path, template)?;
-            eprintln!("Created template config at {}", config_path.display());
+    std::fs::write(&config_path, template)
+        .with_context(|| format!("writing template to {}", config_path.display()))?;
+    eprintln!("Created template config at {}", config_path.display());
 
-            // Validate the created config
-            Config::load(&config_path)?;
-            eprintln!("✓ Config validated successfully");
-        }
-    }
+    Config::load(&config_path)?;
+    eprintln!("✓ Config validated successfully");
 
     Ok(())
 }
@@ -396,72 +678,175 @@ fn run_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tags emitted by all configured scopes (regardless of whether they match
+/// the current env). A tag is "emitted" if it appears in any scope's static
+/// `tags` list. Marker-declared tags are not included here — those are only
+/// known when the marker actually matches.
+fn all_emitted_tags(config: &Config) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for s in &config.scope.network {
+        out.extend(s.tags.iter().cloned());
+    }
+    for s in &config.scope.host {
+        out.extend(s.tags.iter().cloned());
+    }
+    for s in &config.scope.user {
+        out.extend(s.tags.iter().cloned());
+    }
+    for s in &config.scope.project {
+        out.extend(s.tags.iter().cloned());
+    }
+    out
+}
+
+/// Tags consumed by any configured bundle.
+fn all_consumed_tags(config: &Config) -> HashSet<String> {
+    config
+        .bundle
+        .iter()
+        .flat_map(|b| b.tags.iter().cloned())
+        .collect()
+}
+
+/// Bundle names referenced via marker `enable_bundles` in the currently
+/// active scopes.
+fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
+    active
+        .scopes
+        .iter()
+        .flat_map(|s| s.enable_bundles.iter().cloned())
+        .collect()
+}
+
+/// Annotation suffix for a listing row.
+fn annotate(active: bool, orphan: bool) -> &'static str {
+    if active {
+        ""
+    } else if orphan {
+        " (orphan)"
+    } else {
+        " (inactive)"
+    }
+}
+
 fn run_scope_ls() -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    let consumed = all_consumed_tags(&config);
 
-    let mut scopes = Vec::new();
-    for scope in &config.scope.network {
-        scopes.push(format!("network:{}", scope.id));
+    let active_ids: HashSet<(&str, &str)> = active
+        .scopes
+        .iter()
+        .map(|s| (s.kind, s.id.as_str()))
+        .collect();
+
+    let mut rows: Vec<(String, bool, bool)> = Vec::new();
+    let push = |rows: &mut Vec<(String, bool, bool)>,
+                kind: &str,
+                id: &str,
+                tags: &[String],
+                active_ids: &HashSet<(&str, &str)>,
+                consumed: &HashSet<String>| {
+        let is_active = active_ids.contains(&(kind, id));
+        let is_orphan = !tags.iter().any(|t| consumed.contains(t));
+        rows.push((format!("{}:{}", kind, id), is_active, is_orphan));
+    };
+    for s in &config.scope.network {
+        push(&mut rows, "network", &s.id, &s.tags, &active_ids, &consumed);
     }
-    for scope in &config.scope.host {
-        scopes.push(format!("host:{}", scope.id));
+    for s in &config.scope.host {
+        push(&mut rows, "host", &s.id, &s.tags, &active_ids, &consumed);
     }
-    for scope in &config.scope.user {
-        scopes.push(format!("user:{}", scope.id));
+    for s in &config.scope.user {
+        push(&mut rows, "user", &s.id, &s.tags, &active_ids, &consumed);
     }
-    for scope in &config.scope.project {
-        scopes.push(format!("project:{}", scope.id));
+    for s in &config.scope.project {
+        push(&mut rows, "project", &s.id, &s.tags, &active_ids, &consumed);
     }
 
-    scopes.sort();
-    for scope in scopes {
-        println!("{}", scope);
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, is_active, is_orphan) in rows {
+        let mark = if is_active { "*" } else { " " };
+        println!("{} {}{}", mark, name, annotate(is_active, is_orphan));
     }
-
     Ok(())
 }
 
 fn run_tag_ls() -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
 
-    let mut tags = HashSet::new();
-    for scope in &config.scope.network {
-        tags.extend(scope.tags.iter().cloned());
-    }
-    for scope in &config.scope.host {
-        tags.extend(scope.tags.iter().cloned());
-    }
-    for scope in &config.scope.user {
-        tags.extend(scope.tags.iter().cloned());
-    }
-    for scope in &config.scope.project {
-        tags.extend(scope.tags.iter().cloned());
-    }
-    for bundle in &config.bundle {
-        tags.extend(bundle.tags.iter().cloned());
-    }
+    let emitted = all_emitted_tags(&config);
+    let consumed = all_consumed_tags(&config);
 
-    let mut tag_list: Vec<_> = tags.into_iter().collect();
-    tag_list.sort();
-    for tag in tag_list {
-        println!("{}", tag);
-    }
+    // Universe: every tag referenced anywhere (scopes static, bundles, and
+    // marker-supplied tags currently in `active.tags`).
+    let mut universe: HashSet<String> = HashSet::new();
+    universe.extend(emitted.iter().cloned());
+    universe.extend(consumed.iter().cloned());
+    universe.extend(active.tags.iter().cloned());
 
+    let mut tags: Vec<String> = universe.into_iter().collect();
+    tags.sort();
+    for tag in tags {
+        let is_active = active.tags.contains(&tag);
+        // Orphan if no scope emits it OR no bundle consumes it. (Marker-only
+        // tags are emitted by virtue of being in `active.tags` even when not
+        // in `emitted`.)
+        let emitted_anywhere = emitted.contains(&tag) || active.tags.contains(&tag);
+        let consumed_anywhere = consumed.contains(&tag);
+        let is_orphan = !(emitted_anywhere && consumed_anywhere);
+        let mark = if is_active { "*" } else { " " };
+        println!("{} {}{}", mark, tag, annotate(is_active, is_orphan));
+    }
     Ok(())
 }
 
 fn run_bundle_ls() -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
 
-    let mut bundles: Vec<_> = config.bundle.iter().map(|b| b.name.clone()).collect();
-    bundles.sort();
-    for bundle in bundles {
-        println!("{}", bundle);
+    let emitted = all_emitted_tags(&config);
+    let marker_enabled = marker_enabled_bundle_names(&active);
+
+    // A bundle "fires" iff one of its tags intersects active.tags OR its name
+    // appears in any active marker's enable_bundles list. Mirrors the filter
+    // used by run_export.
+    let firing_names: HashSet<&str> = config
+        .bundle
+        .iter()
+        .filter(|b| {
+            b.tags.iter().any(|t| active.tags.contains(t))
+                || marker_enabled.contains(b.name.as_str())
+        })
+        .map(|b| b.name.as_str())
+        .collect();
+
+    let mut rows: Vec<(String, bool, bool)> = config
+        .bundle
+        .iter()
+        .map(|b| {
+            let is_active = firing_names.contains(b.name.as_str());
+            // Orphan: no scope emits any of its tags AND it isn't marker-enabled
+            // by any currently active marker. Bundles with no tags at all are
+            // also orphans unless marker-enabled.
+            let has_emitted_tag = b.tags.iter().any(|t| emitted.contains(t));
+            let is_orphan = !has_emitted_tag && !marker_enabled.contains(&b.name);
+            (b.name.clone(), is_active, is_orphan)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, is_active, is_orphan) in rows {
+        let mark = if is_active { "*" } else { " " };
+        println!("{} {}{}", mark, name, annotate(is_active, is_orphan));
     }
-
     Ok(())
 }
 
