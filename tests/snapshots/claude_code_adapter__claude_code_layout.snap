@@ -3,5 +3,5 @@ source: tests/claude_code_adapter.rs
 expression: files
 ---
 - CLAUDE.md
-- skills/clippy.md
-- skills/hello.md
+- skills/clippy/SKILL.md
+- skills/hello/SKILL.md

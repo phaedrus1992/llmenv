@@ -16,15 +16,15 @@ fn merges_two_bundles_with_provenance() {
         m.agents_md
             .contains("<!-- # from bundle: rust-defaults -->")
     );
-    // base/skills/hello.md + rust-defaults/skills/clippy.md
+    // base/skills/hello/SKILL.md + rust-defaults/skills/clippy/SKILL.md
     assert_eq!(m.files.len(), 2);
     let keys: Vec<String> = m
         .files
         .keys()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    assert!(keys.iter().any(|k| k.ends_with("skills/hello.md")));
-    assert!(keys.iter().any(|k| k.ends_with("skills/clippy.md")));
+    assert!(keys.iter().any(|k| k.ends_with("skills/hello/SKILL.md")));
+    assert!(keys.iter().any(|k| k.ends_with("skills/clippy/SKILL.md")));
 }
 
 #[test]
