@@ -29,9 +29,9 @@ git push origin main vX.Y.Z  # Push to main branch
 ### GitHub Releases
 
 Pre-built binaries are attached to each release on GitHub:
-- `llme-linux-x86_64` — Linux x86_64
-- `llme-macos-x86_64` — macOS Intel (x86_64)
-- `llme-macos-aarch64` — macOS Apple Silicon (arm64)
+- `llmenv-linux-x86_64` — Linux x86_64
+- `llmenv-macos-x86_64` — macOS Intel (x86_64)
+- `llmenv-macos-aarch64` — macOS Apple Silicon (arm64)
 - `checksums.txt` — SHA256 checksums for all binaries
 
 ### Verify Binary Integrity
@@ -46,10 +46,10 @@ All binaries are automatically checksummed during the release build.
 
 ### crates.io
 
-The Rust crate is published to [crates.io](https://crates.io/crates/llme). Install with:
+The Rust crate is published to [crates.io](https://crates.io/crates/llmenv). Install with:
 
 ```bash
-cargo install llme
+cargo install llmenv
 ```
 
 **Prerequisites:**
@@ -63,13 +63,13 @@ A Homebrew tap is maintained at [phaedrus1992/homebrew-tap](https://github.com/p
 **Install:**
 
 ```bash
-brew install phaedrus1992/tap/llme
+brew install phaedrus1992/tap/llmenv
 ```
 
 **Update:**
 
 ```bash
-brew upgrade llme
+brew upgrade llmenv
 ```
 
 ## Maintenance
@@ -89,7 +89,7 @@ To add a new platform (e.g., Windows, aarch64 Linux):
    ```
 
 3. Update Homebrew formula if a new macOS target is added:
-   - Modify Formula/llme.rb in `phaedrus1992/homebrew-tap`
+   - Modify Formula/llmenv.rb in `phaedrus1992/homebrew-tap`
    - Add conditional blocks for the new architecture
 
 ### Rollback
@@ -125,7 +125,7 @@ The following enhancements are tracked for future releases:
 - Enables users to verify binaries were built from claimed source by GitHub Actions
 
 ### Homebrew Automation
-- Auto-generate and update Formula/llme.rb SHA256 hashes after release
+- Auto-generate and update Formula/llmenv.rb SHA256 hashes after release
 - Reduce manual steps and error potential in the homebrew-tap repo
 - Trigger automation from llmenv release workflow
 

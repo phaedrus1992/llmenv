@@ -1,8 +1,8 @@
-use llme::config::{
+use llmenv::config::{
     Config, HostMatch, HostScope, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope, Scopes,
     UserMatch, UserScope,
 };
-use llme::scope::{Env, evaluate};
+use llmenv::scope::{Env, evaluate};
 
 fn cfg() -> Config {
     Config {
@@ -211,7 +211,7 @@ fn project_matcher_uses_marker_file() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let nested = tmp.path().join("a/b/c");
     std::fs::create_dir_all(&nested).expect("mkdir");
-    std::fs::write(tmp.path().join("a/.llme-marker"), "").expect("write");
+    std::fs::write(tmp.path().join("a/.llmenv-marker"), "").expect("write");
 
     let cfg = Config {
         scope: Scopes {
@@ -219,7 +219,7 @@ fn project_matcher_uses_marker_file() {
                 id: "p".into(),
                 r#match: ProjectMatch {
                     path_prefix: None,
-                    marker_file: Some(".llme-marker".into()),
+                    marker_file: Some(".llmenv-marker".into()),
                 },
                 tags: vec!["marked".into()],
             }],

@@ -1,4 +1,4 @@
-use llme::merge::{BundleRef, merge};
+use llmenv::merge::{BundleRef, merge};
 use std::path::PathBuf;
 
 fn bundle(name: &str) -> BundleRef {

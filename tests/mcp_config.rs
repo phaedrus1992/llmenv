@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use llme::adapter::AgentAdapter;
-use llme::adapter::claude_code::ClaudeCodeAdapter;
-use llme::config::Icm;
-use llme::merge::{BundleRef, merge};
+use llmenv::adapter::AgentAdapter;
+use llmenv::adapter::claude_code::ClaudeCodeAdapter;
+use llmenv::config::Icm;
+use llmenv::merge::{BundleRef, merge};
 use tempfile::tempdir;
 
 fn fixture_bundle(name: &str) -> BundleRef {

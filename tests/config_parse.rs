@@ -1,4 +1,4 @@
-use llme::config::Config;
+use llmenv::config::Config;
 
 #[test]
 fn parses_fixture() {
