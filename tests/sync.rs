@@ -51,6 +51,13 @@ fn sync_maybe_pull_pulls_when_interval_elapsed() {
     let state_dir = tmp.path();
     let repo_dir = tmp.path();
 
+    // Initialize a git repo so .git directory exists
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(repo_dir)
+        .status()
+        .unwrap();
+
     let old_time = SystemTime::now() - Duration::from_secs(7200);
     sync::write_state(state_dir, old_time).unwrap();
 
