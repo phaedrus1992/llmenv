@@ -46,35 +46,41 @@ pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
 }
 
 /// Format an active state marker (e.g., "*") in green.
+#[allow(dead_code)]
 pub fn active_marker() -> &'static str {
     "* "
 }
 
 /// Format an inactive annotation (e.g., "(inactive)") in yellow/dim.
+#[allow(dead_code)]
 pub fn inactive_annotation() -> &'static str {
     "(inactive)"
 }
 
 #[allow(dead_code)]
 /// Format an orphan annotation (e.g., "(orphan)") in red.
+#[allow(dead_code)]
 pub fn orphan_annotation() -> &'static str {
     "(orphan)"
 }
 
 #[allow(dead_code)]
 /// Format a doctor "pass" symbol (✓) in green.
+#[allow(dead_code)]
 pub fn doctor_pass() -> &'static str {
     "✓ "
 }
 
 #[allow(dead_code)]
 /// Format a doctor "warning" symbol (⚠) in yellow.
+#[allow(dead_code)]
 pub fn doctor_warning() -> &'static str {
     "⚠ "
 }
 
 #[allow(dead_code)]
 /// Format a doctor "fail" symbol (✗) in red.
+#[allow(dead_code)]
 pub fn doctor_fail() -> &'static str {
     "✗ "
 }
