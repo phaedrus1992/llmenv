@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-26
+
+### Added
+
+- **CLI color support (foundation)** — `--color <auto|always|never>` mode with
+  `should_use_color()` honoring `NO_COLOR` and `CLICOLOR_FORCE` env vars plus TTY
+  detection. Color glyph helpers centralized in `src/cli/style.rs`. Emission at
+  individual call sites is tracked in #62.
+- **`llmenv prune` command (foundation)** — new subcommand with `--all`,
+  `--older-than <duration>`, and `--dry-run` flags. `--all` and `--older-than` are
+  mutually exclusive; durations are parsed via `humantime`. Filesystem pruning logic
+  is tracked in #63.
+
 ## [1.0.0] - 2026-05-26
 
 ### Added

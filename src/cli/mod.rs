@@ -9,6 +9,13 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod style;
+
+pub use style::{
+    ColorMode, active_marker, doctor_fail, doctor_pass, doctor_warning, inactive_annotation,
+    orphan_annotation, should_use_color,
+};
+
 /// Version string shown by `--version`. Built by `build.rs` as
 /// `"<pkg-version> (<short-hash>[-dirty])"`, falling back to bare pkg version
 /// when the build had no `.git` directory (e.g. crates.io tarball builds).
@@ -68,6 +75,18 @@ enum Command {
     BundleLs,
     /// Sync config with GitHub (git add, commit, push)
     Sync,
+    /// Clean stale cache folders
+    Prune {
+        /// Remove ALL cache folders unconditionally (next export re-materializes all environments)
+        #[arg(long)]
+        all: bool,
+        /// Remove ONLY current-version cache folders older than this duration (e.g., "14d", "1w")
+        #[arg(long)]
+        older_than: Option<String>,
+        /// Preview deletions without removing (applies to both --all and --older-than)
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -100,6 +119,13 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Sync) => {
             run_sync()?;
+        }
+        Some(Command::Prune {
+            all,
+            older_than,
+            dry_run,
+        }) => {
+            run_prune(all, older_than, dry_run)?;
         }
         None => {
             eprintln!("Usage: llmenv [COMMAND]");
@@ -883,6 +909,33 @@ fn run_sync() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Result<()> {
+    // Validate flag combinations
+    if all && older_than.is_some() {
+        anyhow::bail!("--all and --older-than are mutually exclusive");
+    }
+
+    // Validate duration format if provided
+    if let Some(duration_str) = &older_than {
+        humantime::parse_duration(duration_str)
+            .with_context(|| format!("failed to parse --older-than duration: {}", duration_str))?;
+    }
+
+    // TODO: Implement prune logic
+    // - Call materialize::cache::prune() with appropriate flags
+    // - SECURITY: Ensure materialize::cache::prune() validates:
+    //   1. All paths stay within cache root (no .. traversal)
+    //   2. Symlinks are not followed (or at least validated)
+    //   3. --dry-run prevents all writes
+    // - Print summary
+
+    eprintln!(
+        "prune stub: all={}, older_than={:?}, dry_run={}",
+        all, older_than, dry_run
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,14 +986,18 @@ mod tests {
 
     #[test]
     fn expand_tilde_home() {
-        let home = std::env::var("HOME").unwrap();
+        let home = std::env::var("HOME")
+            .context("HOME env var not set")
+            .unwrap();
         let result = expand_tilde("~/test").unwrap();
         assert_eq!(result, PathBuf::from(format!("{}/test", home)));
     }
 
     #[test]
     fn expand_tilde_tilde_only() {
-        let home = std::env::var("HOME").unwrap();
+        let home = std::env::var("HOME")
+            .context("HOME env var not set")
+            .unwrap();
         let result = expand_tilde("~").unwrap();
         assert_eq!(result, PathBuf::from(&home));
     }
