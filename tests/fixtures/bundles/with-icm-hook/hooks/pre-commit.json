@@ -1,0 +1,5 @@
+{
+  "matcher": "PreToolUse",
+  "command": "mcp://{{ICM_MCP}}/recall",
+  "args": ["last-decisions"]
+}

@@ -183,6 +183,31 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
 
+    // When this host's active scope tags include `icm.server_tag`, ensure
+    // the local `mcp-proxy` is alive before agents try to reach it. Failures
+    // here are logged but non-fatal — the export must still emit env vars so
+    // the shell hook stays usable.
+    if let Some(icm) = &config.icm {
+        let env = crate::scope::matcher::Env::detect();
+        let active = crate::scope::evaluate(&config, &env);
+        if active.tags.contains(&icm.server_tag) {
+            match crate::mcp::proxy::default_pid_path() {
+                Ok(pid_path) => {
+                    if let Err(e) = crate::mcp::proxy::ensure_running(
+                        &icm.server_bind,
+                        &pid_path,
+                        crate::mcp::proxy::spawn_mcp_proxy,
+                    ) {
+                        eprintln!("warning: failed to ensure mcp-proxy running: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warning: cannot locate mcp-proxy pidfile: {e}");
+                }
+            }
+        }
+    }
+
     let mut vars = std::collections::BTreeMap::new();
     for bundle in &config.bundle {
         if let Some(ref t) = tag
