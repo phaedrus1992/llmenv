@@ -84,7 +84,9 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
 
         // Check for required fields in frontmatter (simple check: lines starting with "name:" or "description:")
         let has_name = content.lines().any(|l| l.trim().starts_with("name:"));
-        let has_description = content.lines().any(|l| l.trim().starts_with("description:"));
+        let has_description = content
+            .lines()
+            .any(|l| l.trim().starts_with("description:"));
 
         if !has_name || !has_description {
             return Err(anyhow::anyhow!(
