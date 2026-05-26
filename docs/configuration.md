@@ -68,7 +68,7 @@ Match based on project markers (files in current directory):
 ```toml
 [[scope.project]]
 id = "myapp"
-match = { marker = ".llmerc" }
+match = { marker = ".llmenvrc" }
 tags = ["myapp", "myapp-dev"]
 ```
 
@@ -128,7 +128,7 @@ tags = ["office", "office-ci"]
 
 [[scope.project]]
 id = "llmenv"
-match = { marker = ".llmerc" }
+match = { marker = ".llmenvrc" }
 tags = ["llmenv-dev"]
 
 [[bundle]]

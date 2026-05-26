@@ -58,7 +58,7 @@ tags = ["office"]
 
 [[scope.project]]
 id = "myapp"
-match = { marker = ".llmerc" }
+match = { marker = ".llmenvrc" }
 tags = ["myapp-dev"]
 
 [[bundle]]

@@ -40,6 +40,8 @@ enum Command {
     },
     /// Initialize llmenv configuration
     Init {
+        /// Directory to initialize (defaults to the standard config dir)
+        path: Option<std::path::PathBuf>,
         /// Repository to clone config from (optional)
         #[arg(long)]
         repo: Option<String>,
@@ -69,8 +71,8 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Hook { shell }) => {
             run_hook(&shell)?;
         }
-        Some(Command::Init { repo }) => {
-            run_init(repo)?;
+        Some(Command::Init { path, repo }) => {
+            run_init(path, repo)?;
         }
         Some(Command::Status) => {
             run_status()?;
@@ -336,41 +338,66 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_init(repo: Option<String>) -> anyhow::Result<()> {
-    let config_dir = paths::config_dir()?;
-    std::fs::create_dir_all(&config_dir)?;
+fn run_init(
+    path: Option<std::path::PathBuf>,
+    repo: Option<String>,
+) -> anyhow::Result<()> {
+    let config_dir = match path {
+        Some(p) => expand_tilde(p.to_string_lossy().as_ref())?,
+        None => paths::config_dir()?,
+    };
+    std::fs::create_dir_all(&config_dir)
+        .with_context(|| format!("creating config dir {}", config_dir.display()))?;
 
     if let Some(_repo_url) = repo {
         anyhow::bail!("Git clone not yet implemented");
-    } else {
-        let config_path = config_dir.join("config.toml");
-        if !config_path.exists() {
-            let template = r#"[settings]
+    }
+
+    let config_path = config_dir.join("config.toml");
+    if config_path.exists() {
+        eprintln!("Config already exists at {}", config_path.display());
+        return Ok(());
+    }
+
+    let template = r#"[settings]
 cache_dir = "~/.cache/llmenv"
 sync_interval_minutes = 60
 
-[scope.network]
+# Scopes are arrays of tables — uncomment and fill in as needed.
+# [[scope.network]]
+# id = "home"
+# match = { ssid = "MyHomeWiFi" }
+# tags = ["home"]
 
-[scope.host]
+# [[scope.host]]
+# id = "laptop"
+# match = { hostname = "my-laptop" }
+# tags = ["laptop"]
 
-[scope.user]
+# [[scope.user]]
+# id = "me"
+# match = { user = "alice" }
+# tags = ["me"]
 
-[scope.project]
+# [[scope.project]]
+# id = "myapp"
+# match = { marker = ".llmenvrc" }
+# tags = ["myapp"]
 
+# Bundles fire when one of their tags is emitted by a matching scope.
 [[bundle]]
 name = "base"
-tags = []
+tags = ["me"]
 
 [bundle.vars]
+AGENT = "claude"
 "#;
-            std::fs::write(&config_path, template)?;
-            eprintln!("Created template config at {}", config_path.display());
+    std::fs::write(&config_path, template)
+        .with_context(|| format!("writing template to {}", config_path.display()))?;
+    eprintln!("Created template config at {}", config_path.display());
 
-            // Validate the created config
-            Config::load(&config_path)?;
-            eprintln!("✓ Config validated successfully");
-        }
-    }
+    Config::load(&config_path)?;
+    eprintln!("✓ Config validated successfully");
 
     Ok(())
 }

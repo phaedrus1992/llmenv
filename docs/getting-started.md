@@ -86,7 +86,7 @@ tags = ["office", "ci-enabled"]
 
 [[scope.project]]
 id = "myproject"
-match = { marker = ".llmerc" }
+match = { marker = ".llmenvrc" }
 tags = ["project-local"]
 
 [[bundle]]

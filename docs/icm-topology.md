@@ -25,7 +25,7 @@ Then add the `server_tag` to scopes where the MCP server should be available:
 ```toml
 [[scope.project]]
 id = "myapp"
-match = { marker = ".llmerc" }
+match = { marker = ".llmenvrc" }
 tags = ["myapp", "icm-server"]  # Activates MCP when in this project
 ```
 
@@ -41,7 +41,7 @@ tags = ["myapp", "icm-server"]  # Activates MCP when in this project
 ```
 Current environment:
   - WiFi: "OfficeWiFi" → matches scope.network[0] → tags: ["office", "icm-server"]
-  - Project: ".llmerc" detected → matches scope.project[0] → tags: ["myapp"]
+  - Project: ".llmenvrc" detected → matches scope.project[0] → tags: ["myapp"]
 
 Active tags: ["office", "myapp", "icm-server"]
 
@@ -119,7 +119,7 @@ hostname
 whoami
 
 # Project markers
-ls -la | grep .llmerc
+ls -la | grep .llmenvrc
 ```
 
 ## Architecture
