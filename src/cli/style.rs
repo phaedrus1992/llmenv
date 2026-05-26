@@ -1,6 +1,8 @@
 //! CLI styling and color support.
 //! Centralized color palette and TTY-aware color emission.
 
+use anstream::println as anstream_println;
+
 /// Color mode: auto-detect, always on, or always off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorMode {
@@ -45,34 +47,58 @@ pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
     }
 }
 
-/// Format an active state marker (e.g., "*") in green.
-pub fn active_marker() -> &'static str {
-    "* "
+/// Format an active state marker (e.g., "*") with optional green color.
+pub fn active_marker(use_color: bool) -> String {
+    if use_color {
+        "{green}* {reset}".to_string()
+    } else {
+        "* ".to_string()
+    }
 }
 
-/// Format an inactive annotation (e.g., "(inactive)") in yellow/dim.
-pub fn inactive_annotation() -> &'static str {
-    "(inactive)"
+/// Format an inactive annotation (e.g., "(inactive)") with optional yellow color.
+pub fn inactive_annotation(use_color: bool) -> String {
+    if use_color {
+        "{yellow}(inactive){reset}".to_string()
+    } else {
+        "(inactive)".to_string()
+    }
 }
 
-/// Format an orphan annotation (e.g., "(orphan)") in red.
-pub fn orphan_annotation() -> &'static str {
-    "(orphan)"
+/// Format an orphan annotation (e.g., "(orphan)") with optional red color.
+pub fn orphan_annotation(use_color: bool) -> String {
+    if use_color {
+        "{red}(orphan){reset}".to_string()
+    } else {
+        "(orphan)".to_string()
+    }
 }
 
-/// Format a doctor "pass" symbol (✓) in green.
-pub fn doctor_pass() -> &'static str {
-    "✓ "
+/// Format a doctor "pass" symbol (✓) with optional green color.
+pub fn doctor_pass(use_color: bool) -> String {
+    if use_color {
+        "{green}✓ {reset}".to_string()
+    } else {
+        "✓ ".to_string()
+    }
 }
 
-/// Format a doctor "warning" symbol (⚠) in yellow.
-pub fn doctor_warning() -> &'static str {
-    "⚠ "
+/// Format a doctor "warning" symbol (⚠) with optional yellow color.
+pub fn doctor_warning(use_color: bool) -> String {
+    if use_color {
+        "{yellow}⚠ {reset}".to_string()
+    } else {
+        "⚠ ".to_string()
+    }
 }
 
-/// Format a doctor "fail" symbol (✗) in red.
-pub fn doctor_fail() -> &'static str {
-    "✗ "
+/// Format a doctor "fail" symbol (✗) with optional red color.
+pub fn doctor_fail(use_color: bool) -> String {
+    if use_color {
+        "{red}✗ {reset}".to_string()
+    } else {
+        "✗ ".to_string()
+    }
 }
 
 #[cfg(test)]
