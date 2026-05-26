@@ -38,7 +38,7 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
 }
 
 pub fn config_path() -> anyhow::Result<PathBuf> {
-    Ok(config_dir()?.join("config.toml"))
+    Ok(config_dir()?.join("config.yaml"))
 }
 
 pub fn state_dir() -> anyhow::Result<PathBuf> {

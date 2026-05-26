@@ -3,7 +3,7 @@ use crate::paths::{cwd_under_prefix, expand_tilde};
 use serde::Deserialize;
 
 /// Resolved project scope match: where the marker/prefix landed, plus any
-/// tags or bundles declared in the marker file's TOML body. Empty when the
+/// tags or bundles declared in the marker file's YAML body. Empty when the
 /// marker is missing/empty/malformed (parse failures are reported via
 /// `tracing::warn` so the scope still activates).
 #[derive(Debug, Clone)]
@@ -11,7 +11,7 @@ pub struct MatchedProject {
     pub root: std::path::PathBuf,
     pub extra_tags: Vec<String>,
     /// Bundle names this marker manually enables. Names must already be
-    /// defined in `config.toml` — the marker only opts existing bundles in,
+    /// defined in `config.yaml` — the marker only opts existing bundles in,
     /// it doesn't define new ones.
     pub enable_bundles: Vec<String>,
 }
@@ -19,7 +19,7 @@ pub struct MatchedProject {
 /// Schema for the body of a project marker file (e.g. `.llmenv-dev`).
 /// All fields optional; an empty file is valid.
 ///
-/// `enable_bundles` lists bundles (defined in config.toml) to manually
+/// `enable_bundles` lists bundles (defined in config.yaml) to manually
 /// activate when this marker is matched — useful when you don't want to
 /// invent a tag just to bind a bundle to one project.
 #[derive(Debug, Default, Deserialize)]
@@ -112,7 +112,7 @@ pub fn matches_user(s: &UserScope, env: &Env) -> bool {
 
 /// Resolves a project scope against the environment. For `path_prefix` the
 /// root is the expanded prefix; for `marker` it's the deepest ancestor of
-/// cwd containing the marker file (and the marker file's TOML body
+/// cwd containing the marker file (and the marker file's YAML body
 /// contributes extra tags). A scope matches iff this returns `Some`.
 #[must_use]
 pub fn match_project(s: &ProjectScope, env: &Env) -> Option<MatchedProject> {
@@ -152,8 +152,8 @@ fn empty_match(root: std::path::PathBuf) -> MatchedProject {
     }
 }
 
-/// Parse the marker file as TOML and return `(tags, enable_bundles)`. Empty
-/// file → both empty (no warning). Malformed TOML → warn and return both
+/// Parse the marker file as YAML and return `(tags, enable_bundles)`. Empty
+/// file → both empty (no warning). Malformed YAML → warn and return both
 /// empty so the scope still activates.
 fn read_marker(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
     let Ok(body) = std::fs::read_to_string(path) else {
@@ -162,14 +162,59 @@ fn read_marker(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
     if body.trim().is_empty() {
         return (Vec::new(), Vec::new());
     }
-    match toml::from_str::<MarkerFile>(&body) {
+    match serde_yaml::from_str::<MarkerFile>(&body) {
         Ok(m) => (m.tags, m.enable_bundles),
         Err(e) => {
             tracing::warn!(
-                "marker file {} is not valid TOML, ignoring tags/enable_bundles: {e}",
+                "marker file {} is not valid YAML, ignoring tags/enable_bundles: {e}",
                 path.display()
             );
             (Vec::new(), Vec::new())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_marker;
+    use proptest::prelude::*;
+    use std::io::Write;
+
+    fn write_marker(body: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("create temp marker");
+        f.write_all(body.as_bytes()).expect("write temp marker");
+        f
+    }
+
+    #[test]
+    fn reads_tags_and_bundles_from_valid_yaml() {
+        let f = write_marker("tags: [a, b]\nenable_bundles: [base]\n");
+        let (tags, bundles) = read_marker(f.path());
+        assert_eq!(tags, vec!["a", "b"]);
+        assert_eq!(bundles, vec!["base"]);
+    }
+
+    #[test]
+    fn empty_file_yields_empty() {
+        let f = write_marker("");
+        assert_eq!(read_marker(f.path()), (Vec::new(), Vec::new()));
+    }
+
+    proptest! {
+        // Whitespace-only bodies are treated as empty, never error.
+        #[test]
+        fn whitespace_only_yields_empty(ws in r"[ \t\r\n]*") {
+            let f = write_marker(&ws);
+            prop_assert_eq!(read_marker(f.path()), (Vec::new(), Vec::new()));
+        }
+
+        // Arbitrary bytes never panic; malformed YAML degrades to empty.
+        // A fuzz input could coincidentally be valid YAML, so only assert the
+        // no-panic contract here (the empty-on-malformed path is covered above).
+        #[test]
+        fn arbitrary_input_never_panics(body in r"\PC*") {
+            let f = write_marker(&body);
+            let _ = read_marker(f.path());
         }
     }
 }

@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Automatic process lifecycle management
   - Server binding configuration
 
+### Changed
+
+- **Config format is now YAML** — configuration lives at
+  `~/.config/llmenv/config.yaml` (was `config.toml`), `llmenv init` emits YAML,
+  and project marker files are parsed as YAML. The list-heavy scope/bundle schema
+  reads far more compactly in YAML. Dropped the `toml` dependency and migrated off
+  the deprecated `serde_yaml` crate to the maintained `serde_yaml_ng` fork. (#76)
+
 ### Fixed
 
 - Improved error messages with context using `anyhow`
