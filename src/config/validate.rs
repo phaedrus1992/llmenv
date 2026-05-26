@@ -227,7 +227,7 @@ mod tests {
                         id: id.clone(),
                         r#match: ProjectMatch {
                             path_prefix: None,
-                            marker_file: None,
+                            marker: None,
                         },
                         tags: vec![],
                     })
@@ -591,7 +591,7 @@ mod tests {
                     id: "proj1".to_string(),
                     r#match: ProjectMatch {
                         path_prefix: Some("/foo/../bar".to_string()),
-                        marker_file: None,
+                        marker: None,
                     },
                     tags: vec!["tag1".to_string()],
                 }],
@@ -614,7 +614,7 @@ mod tests {
                     id: "proj1".to_string(),
                     r#match: ProjectMatch {
                         path_prefix: Some("/foo\0bar".to_string()),
-                        marker_file: None,
+                        marker: None,
                     },
                     tags: vec!["tag1".to_string()],
                 }],

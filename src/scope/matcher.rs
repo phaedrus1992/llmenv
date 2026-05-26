@@ -1,5 +1,34 @@
 use crate::config::{HostScope, NetworkScope, ProjectScope, UserScope};
 use crate::paths::{cwd_under_prefix, expand_tilde};
+use serde::Deserialize;
+
+/// Resolved project scope match: where the marker/prefix landed, plus any
+/// tags or bundles declared in the marker file's TOML body. Empty when the
+/// marker is missing/empty/malformed (parse failures are reported via
+/// `tracing::warn` so the scope still activates).
+#[derive(Debug, Clone)]
+pub struct MatchedProject {
+    pub root: std::path::PathBuf,
+    pub extra_tags: Vec<String>,
+    /// Bundle names this marker manually enables. Names must already be
+    /// defined in `config.toml` — the marker only opts existing bundles in,
+    /// it doesn't define new ones.
+    pub enable_bundles: Vec<String>,
+}
+
+/// Schema for the body of a project marker file (e.g. `.llmenv-dev`).
+/// All fields optional; an empty file is valid.
+///
+/// `enable_bundles` lists bundles (defined in config.toml) to manually
+/// activate when this marker is matched — useful when you don't want to
+/// invent a tag just to bind a bundle to one project.
+#[derive(Debug, Default, Deserialize)]
+struct MarkerFile {
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    enable_bundles: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Env {
@@ -81,24 +110,66 @@ pub fn matches_user(s: &UserScope, env: &Env) -> bool {
     s.r#match.user.as_deref().is_some_and(|u| u == env.user)
 }
 
+/// Resolves a project scope against the environment. For `path_prefix` the
+/// root is the expanded prefix; for `marker` it's the deepest ancestor of
+/// cwd containing the marker file (and the marker file's TOML body
+/// contributes extra tags). A scope matches iff this returns `Some`.
 #[must_use]
-pub fn matches_project(s: &ProjectScope, env: &Env) -> bool {
+pub fn match_project(s: &ProjectScope, env: &Env) -> Option<MatchedProject> {
     if let Some(p) = s.r#match.path_prefix.as_deref() {
         let expanded = expand_tilde(p);
         if cwd_under_prefix(&env.cwd, &expanded) {
-            return true;
+            return Some(empty_match(std::path::PathBuf::from(expanded)));
         }
     }
-    if let Some(marker) = s.r#match.marker_file.as_deref() {
+    if let Some(marker) = s.r#match.marker.as_deref() {
         let mut cur = std::path::PathBuf::from(&env.cwd);
         loop {
-            if cur.join(marker).exists() {
-                return true;
+            let marker_path = cur.join(marker);
+            if marker_path.exists() {
+                let (extra_tags, enable_bundles) = read_marker(&marker_path);
+                return Some(MatchedProject {
+                    root: cur,
+                    extra_tags,
+                    enable_bundles,
+                });
             }
             if !cur.pop() {
                 break;
             }
         }
     }
-    false
+    None
+}
+
+/// Returns either an empty `MatchedProject` for `path_prefix` matches or a
+/// helper to build one with empty tags.
+fn empty_match(root: std::path::PathBuf) -> MatchedProject {
+    MatchedProject {
+        root,
+        extra_tags: Vec::new(),
+        enable_bundles: Vec::new(),
+    }
+}
+
+/// Parse the marker file as TOML and return `(tags, enable_bundles)`. Empty
+/// file → both empty (no warning). Malformed TOML → warn and return both
+/// empty so the scope still activates.
+fn read_marker(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return (Vec::new(), Vec::new());
+    };
+    if body.trim().is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    match toml::from_str::<MarkerFile>(&body) {
+        Ok(m) => (m.tags, m.enable_bundles),
+        Err(e) => {
+            tracing::warn!(
+                "marker file {} is not valid TOML, ignoring tags/enable_bundles: {e}",
+                path.display()
+            );
+            (Vec::new(), Vec::new())
+        }
+    }
 }

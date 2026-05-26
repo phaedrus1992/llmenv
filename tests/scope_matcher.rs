@@ -25,7 +25,7 @@ fn cfg() -> Config {
                 id: "p".into(),
                 r#match: ProjectMatch {
                     path_prefix: Some("/home/breed/git/x".into()),
-                    marker_file: None,
+                    marker: None,
                 },
                 tags: vec!["x".into()],
             }],
@@ -145,7 +145,7 @@ fn project_path_prefix_respects_component_boundary() {
                 id: "p".into(),
                 r#match: ProjectMatch {
                     path_prefix: Some("/home/breed/git/x".into()),
-                    marker_file: None,
+                    marker: None,
                 },
                 tags: vec!["x".into()],
             }],
@@ -207,7 +207,7 @@ fn network_matcher_is_case_insensitive() {
 }
 
 #[test]
-fn project_matcher_uses_marker_file() {
+fn project_matcher_uses_marker() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let nested = tmp.path().join("a/b/c");
     std::fs::create_dir_all(&nested).expect("mkdir");
@@ -219,7 +219,7 @@ fn project_matcher_uses_marker_file() {
                 id: "p".into(),
                 r#match: ProjectMatch {
                     path_prefix: None,
-                    marker_file: Some(".llmenv-marker".into()),
+                    marker: Some(".llmenv-marker".into()),
                 },
                 tags: vec!["marked".into()],
             }],

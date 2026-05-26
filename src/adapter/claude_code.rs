@@ -37,6 +37,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
         std::fs::create_dir_all(out)?;
         std::fs::write(out.join("CLAUDE.md"), &manifest.agents_md)?;
 
+        // Claude Code has a native rules-directory convention, so write each
+        // `rules/*.md` file verbatim (frontmatter preserved) into `<out>/rules/`.
+        // Adapters that lack this convention should instead use
+        // `merge::agents_md::concat_with_rules` to inline the bodies.
+        for r in &manifest.rules {
+            let dest = out.join(&r.rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dest, &r.raw)?;
+        }
+
         // Copy all files from the manifest. JSON hook templates get
         // `{{ICM_MCP}}` substituted so bundle hooks can reference the MCP
         // server by name without hard-coding it.
