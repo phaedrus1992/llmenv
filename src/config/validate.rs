@@ -268,9 +268,9 @@ mod tests {
 
     proptest! {
         #[test]
-        fn prop_config_toml_roundtrip(config in arb_config()) {
-            let toml_str = toml::to_string(&config).unwrap_or_else(|e| panic!("serialize failed: {}", e));
-            let deserialized: Config = toml::from_str(&toml_str).unwrap_or_else(|e| panic!("deserialize failed: {}", e));
+        fn prop_config_yaml_roundtrip(config in arb_config()) {
+            let yaml_str = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("serialize failed: {}", e));
+            let deserialized: Config = serde_yaml::from_str(&yaml_str).unwrap_or_else(|e| panic!("deserialize failed: {}", e));
             prop_assert_eq!(config, deserialized, "roundtrip should preserve config");
         }
 

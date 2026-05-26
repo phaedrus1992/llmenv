@@ -12,21 +12,22 @@ The **ICM topology** refers to the deployment of an MCP server that bridges Clau
 
 ## Configuration
 
-Add the `[icm]` section to your config:
+Add the `icm:` section to your config:
 
-```toml
-[icm]
-server_tag = "icm-server"              # Tag that activates the server
-server_bind = "127.0.0.1:9092"         # Server address (stdio or TCP)
+```yaml
+icm:
+  server_tag: icm-server               # Tag that activates the server
+  server_bind: "127.0.0.1:9092"        # Server address (stdio or TCP)
 ```
 
 Then add the `server_tag` to scopes where the MCP server should be available:
 
-```toml
-[[scope.project]]
-id = "myapp"
-match = { marker = ".llmenvrc" }
-tags = ["myapp", "icm-server"]  # Activates MCP when in this project
+```yaml
+scope:
+  project:
+    - id: myapp
+      match: { marker: ".llmenvrc" }
+      tags: [myapp, icm-server]  # Activates MCP when in this project
 ```
 
 ## How It Works

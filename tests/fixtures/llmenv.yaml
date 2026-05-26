@@ -1,0 +1,37 @@
+settings:
+  cache_dir: "~/.cache/llmenv"
+  sync_interval_minutes: 15
+
+scope:
+  network:
+    - id: home
+      match:
+        gateway_mac: "aa:bb:cc:dd:ee:ff"
+      tags: [home]
+  host:
+    - id: fixed
+      match:
+        hostname: fixed
+      tags: [icm-server]
+  user:
+    - id: breed
+      match:
+        user: breed
+      tags: [base]
+  project:
+    - id: phaedrus
+      match:
+        path_prefix: "~/git/phaedrus"
+      tags: [phaedrus, rust]
+
+bundle:
+  - name: base
+    tags: [base]
+  - name: rust-defaults
+    tags: [rust]
+
+icm:
+  server_tag: icm-server
+  server_bind: "0.0.0.0:7878"
+  client_url: "http://fixed.local:7878"
+  default_topics: ["context-{project}", preferences]

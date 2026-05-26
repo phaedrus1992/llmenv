@@ -175,7 +175,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     eprintln!("{pass} Configuration loaded from {}", config_path.display());
 
     // Check that config parses
-    eprintln!("{pass} Config is valid TOML");
+    eprintln!("{pass} Config is valid YAML");
 
     // Check cache directory is writable
     let cache_dir = expand_tilde(&config.settings.cache_dir)?;
@@ -673,44 +673,41 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
         anyhow::bail!("Git clone not yet implemented");
     }
 
-    let config_path = config_dir.join("config.toml");
+    let config_path = config_dir.join("config.yaml");
     if config_path.exists() {
         eprintln!("Config already exists at {}", config_path.display());
         return Ok(());
     }
 
-    let template = r#"[settings]
-cache_dir = "~/.cache/llmenv"
-sync_interval_minutes = 60
+    let template = r#"settings:
+  cache_dir: "~/.cache/llmenv"
+  sync_interval_minutes: 60
 
-# Scopes are arrays of tables — uncomment and fill in as needed.
-# [[scope.network]]
-# id = "home"
-# match = { ssid = "MyHomeWiFi" }
-# tags = ["home"]
-
-# [[scope.host]]
-# id = "laptop"
-# match = { hostname = "my-laptop" }
-# tags = ["laptop"]
-
-# [[scope.user]]
-# id = "me"
-# match = { user = "alice" }
-# tags = ["me"]
-
-# [[scope.project]]
-# id = "myapp"
-# match = { marker = ".llmenvrc" }
-# tags = ["myapp"]
+# Scopes are lists — uncomment and fill in as needed.
+# scope:
+#   network:
+#     - id: home
+#       match: { ssid: "MyHomeWiFi" }
+#       tags: [home]
+#   host:
+#     - id: laptop
+#       match: { hostname: "my-laptop" }
+#       tags: [laptop]
+#   user:
+#     - id: me
+#       match: { user: "alice" }
+#       tags: [me]
+#   project:
+#     - id: myapp
+#       match: { marker: ".llmenvrc" }
+#       tags: [myapp]
 
 # Bundles fire when one of their tags is emitted by a matching scope.
-[[bundle]]
-name = "base"
-tags = ["me"]
-
-[bundle.vars]
-AGENT = "claude"
+bundle:
+  - name: base
+    tags: [me]
+    vars:
+      AGENT: "claude"
 "#;
     std::fs::write(&config_path, template)
         .with_context(|| format!("writing template to {}", config_path.display()))?;
