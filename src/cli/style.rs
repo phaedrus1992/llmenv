@@ -1,7 +1,5 @@
-/// CLI styling and color support.
-/// Centralized color palette and TTY-aware color emission.
-
-use std::io::IsTerminal;
+//! CLI styling and color support.
+//! Centralized color palette and TTY-aware color emission.
 
 /// Color mode: auto-detect, always on, or always off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,31 +41,37 @@ pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
     }
 }
 
+#[allow(dead_code)]
 /// Format an active state marker (e.g., "*") in green.
 pub fn active_marker() -> &'static str {
     "* "
 }
 
+#[allow(dead_code)]
 /// Format an inactive annotation (e.g., "(inactive)") in yellow/dim.
 pub fn inactive_annotation() -> &'static str {
     "(inactive)"
 }
 
+#[allow(dead_code)]
 /// Format an orphan annotation (e.g., "(orphan)") in red.
 pub fn orphan_annotation() -> &'static str {
     "(orphan)"
 }
 
+#[allow(dead_code)]
 /// Format a doctor "pass" symbol (✓) in green.
 pub fn doctor_pass() -> &'static str {
     "✓ "
 }
 
+#[allow(dead_code)]
 /// Format a doctor "warning" symbol (⚠) in yellow.
 pub fn doctor_warning() -> &'static str {
     "⚠ "
 }
 
+#[allow(dead_code)]
 /// Format a doctor "fail" symbol (✗) in red.
 pub fn doctor_fail() -> &'static str {
     "✗ "

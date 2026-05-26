@@ -906,11 +906,7 @@ fn run_sync() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_prune(
-    all: bool,
-    older_than: Option<String>,
-    dry_run: bool,
-) -> anyhow::Result<()> {
+fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Result<()> {
     // Validate flag combinations
     if all && older_than.is_some() {
         anyhow::bail!("--all and --older-than are mutually exclusive");
@@ -921,7 +917,10 @@ fn run_prune(
     // - Call materialize::cache::prune() with appropriate flags
     // - Print summary
 
-    eprintln!("prune stub: all={}, older_than={:?}, dry_run={}", all, older_than, dry_run);
+    eprintln!(
+        "prune stub: all={}, older_than={:?}, dry_run={}",
+        all, older_than, dry_run
+    );
     Ok(())
 }
 
