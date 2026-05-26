@@ -4,22 +4,25 @@ llmenv follows semantic versioning and automates release distribution via GitHub
 
 ## Overview
 
-Releases are triggered by pushing a version tag (`v*`) to the main repository. The release workflow:
+Releases are triggered by pushing a version tag (`v*`) to the **main branch only**. The release workflow:
 
 1. **Builds binaries** for macOS (arm64, x86_64) and Linux (x86_64)
-2. **Publishes to crates.io** (requires valid `CARGO_REGISTRY_TOKEN` secret)
-3. **Creates a GitHub Release** with pre-built binaries attached
+2. **Generates SHA256 checksums** for all binaries (automatic)
+3. **Publishes to crates.io** (requires valid `CARGO_REGISTRY_TOKEN` secret)
+4. **Creates a GitHub Release** with pre-built binaries and checksums attached
 
 ## Version Tags
 
-Create a tag in the format `vX.Y.Z`:
+Create a tag in the format `vX.Y.Z` and push it to the **main branch**:
 
 ```bash
 # Update version in Cargo.toml
 cargo build --release  # Test locally first
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
-git push origin vX.Y.Z
+git push origin main vX.Y.Z  # Push to main branch
 ```
+
+**Important:** Tags must be pushed from the main branch. Releases triggered from feature branches are blocked by the workflow.
 
 ## Binary Distribution
 
@@ -29,8 +32,17 @@ Pre-built binaries are attached to each release on GitHub:
 - `llme-linux-x86_64` — Linux x86_64
 - `llme-macos-x86_64` — macOS Intel (x86_64)
 - `llme-macos-aarch64` — macOS Apple Silicon (arm64)
+- `checksums.txt` — SHA256 checksums for all binaries
 
-Users can download directly or use Homebrew (see below).
+### Verify Binary Integrity
+
+Each release includes a `checksums.txt` file. Verify downloaded binaries:
+
+```bash
+sha256sum -c checksums.txt
+```
+
+All binaries are automatically checksummed during the release build.
 
 ### crates.io
 
@@ -98,16 +110,42 @@ The release workflow requires:
 
 Set this in the repository settings under Secrets and variables → Actions.
 
+**Security notes:**
+- The token is passed via environment variable (never command-line arguments)
+- GitHub Actions automatically masks secret values in logs
+- Always use fine-grained tokens with minimal scope (publish-only)
+
+## Future Work: SLSA Provenance and Homebrew Automation
+
+The following enhancements are tracked for future releases:
+
+### SLSA Build Provenance
+- Integrate `slsa-framework/slsa-github-generator` for cryptographic proof of build chain
+- Attach SLSA provenance to GitHub releases
+- Enables users to verify binaries were built from claimed source by GitHub Actions
+
+### Homebrew Automation
+- Auto-generate and update Formula/llme.rb SHA256 hashes after release
+- Reduce manual steps and error potential in the homebrew-tap repo
+- Trigger automation from llmenv release workflow
+
 ## Troubleshooting
+
+**Release workflow doesn't trigger**
+- Verify tag was pushed to the **main branch**
+- Workflow only runs when tag is pushed to main, not feature branches
+- Check GitHub Actions tab for workflow run details
 
 **Publish fails with "unauthorized"**
 - Verify `CARGO_REGISTRY_TOKEN` is valid and has `publish` scope
 - Check token hasn't expired
 
 **Binary artifacts missing from release**
-- Check the `build-binaries` job succeeded
-- Verify the artifact paths match in `create-release`
+- Check the `build-binaries` job succeeded in Actions tab
+- Verify artifact paths match in `create-release`
+- Checksums should always be generated automatically
 
-**Homebrew formula install fails**
-- Ensure binary SHA256 hashes in Formula/llme.rb match the release binaries
-- Run `brew audit --online llme` to validate the formula
+**Checksum verification fails**
+- Ensure you're on the same system/shell as the release CI
+- Download the binary and checksums.txt from the same release
+- Run `sha256sum -c checksums.txt` in the download directory
