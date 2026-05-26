@@ -1,11 +1,16 @@
 use std::path::Path;
 
+use serde_json::json;
+
 use super::AgentAdapter;
 use crate::merge::MergedManifest;
 
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
 /// `out` as its config root.
+///
+/// Skills are structured as directories with a `SKILL.md` file containing YAML
+/// frontmatter (at minimum `name` and `description`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClaudeCodeAdapter;
 
@@ -24,6 +29,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(out)?;
         std::fs::write(out.join("CLAUDE.md"), &manifest.agents_md)?;
+
+        // Copy all files from the manifest
         for (rel, abs) in &manifest.files {
             let dest = out.join(rel);
             if let Some(parent) = dest.parent() {
@@ -31,6 +38,96 @@ impl AgentAdapter for ClaudeCodeAdapter {
             }
             std::fs::copy(abs, &dest)?;
         }
+
+        // Validate that skills are properly structured with SKILL.md frontmatter
+        validate_skills(out)?;
+
+        // Generate settings.json from hook/permission bundles
+        generate_settings_json(out)?;
+
         Ok(())
     }
+}
+
+/// Validates that all skills in the materialized directory have SKILL.md with required frontmatter.
+fn validate_skills(out: &Path) -> anyhow::Result<()> {
+    let skills_dir = out.join("skills");
+    if !skills_dir.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(&skills_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Skip non-directories
+        if !path.is_dir() {
+            continue;
+        }
+
+        let skill_md = path.join("SKILL.md");
+        if !skill_md.exists() {
+            return Err(anyhow::anyhow!(
+                "Skill directory {} missing SKILL.md",
+                path.display()
+            ));
+        }
+
+        let content = std::fs::read_to_string(&skill_md)?;
+
+        if let Some(frontmatter_end) = content.find("\n---\n").or_else(|| {
+            if content.ends_with("---") {
+                Some(content.len() - 3)
+            } else {
+                None
+            }
+        }) {
+            let frontmatter_str = &content[3..frontmatter_end];
+            match serde_yaml::from_str::<serde_yaml::Mapping>(frontmatter_str) {
+                Ok(mapping) => {
+                    let has_name = mapping.get("name").is_some();
+                    let has_description = mapping.get("description").is_some();
+
+                    if !has_name || !has_description {
+                        return Err(anyhow::anyhow!(
+                            "Skill {} SKILL.md missing required frontmatter fields (name and description)",
+                            path.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Skill {} SKILL.md has invalid YAML frontmatter: {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "Skill {} SKILL.md missing YAML frontmatter (must start with --- and end with ---)",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Generates settings.json from hook/permission contributions in the materialized directory.
+///
+/// Currently creates a minimal settings.json placeholder. Full hook/permission merging
+/// (issue #34) is deferred to a follow-up PR.
+fn generate_settings_json(out: &Path) -> anyhow::Result<()> {
+    let settings = json!({
+        "hooks": [],
+        "permissions": [],
+        "mcp": []
+    });
+
+    let settings_path = out.join("settings.json");
+    let json_str = serde_json::to_string_pretty(&settings)?;
+    std::fs::write(settings_path, json_str)?;
+
+    Ok(())
 }
