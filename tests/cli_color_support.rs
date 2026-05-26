@@ -53,8 +53,8 @@ fn test_should_use_color_auto_with_tty() {
 #[test]
 fn test_color_marker_functions() {
     use llmenv::cli::{
-        active_marker, inactive_annotation, orphan_annotation, doctor_pass, doctor_warning,
-        doctor_fail,
+        active_marker, doctor_fail, doctor_pass, doctor_warning, inactive_annotation,
+        orphan_annotation,
     };
 
     // Verify marker functions return non-empty strings
