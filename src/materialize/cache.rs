@@ -9,6 +9,26 @@ use crate::merge::MergedManifest;
 /// (little-endian u64) before its bytes so concatenation cannot ambiguate
 /// boundaries — i.e. `{agents_md="ABC", files={"DE":"FG"}}` and
 /// `{agents_md="ABCD", files={"E":"FG"}}` must hash differently.
+/// Filesystem-safe version tag baked in by `build.rs`. Format:
+/// `{pkg_version}-{git_short_hash}` (or bare `{pkg_version}` when built outside
+/// a git checkout). No `-dirty` suffix — all dev builds at a given HEAD share
+/// a bucket so iterating doesn't fragment the cache.
+///
+/// Used as the *prefix* of the materialized folder name (not mixed into the
+/// content hash) so manual cleanup is obvious: `ls ~/.cache/llmenv/claude-code`
+/// groups folders by binary version, and pruning means removing anything not
+/// starting with the current tag.
+pub const VERSION_TAG: &str = env!("LLMENV_VERSION_TAG");
+
+/// Compose the on-disk folder name: `{VERSION_TAG}-{content_hash}`. Splitting
+/// the version off the content hash keeps the hash a function of inputs only,
+/// so two folders that differ in version prefix but share the same content
+/// hash are byte-identical — useful for diffing across upgrades.
+#[must_use]
+pub fn folder_name(content_hash: &str) -> String {
+    format!("{VERSION_TAG}-{content_hash}")
+}
+
 pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
     let mut h = Sha256::new();
     update_len_prefixed(&mut h, m.agents_md.as_bytes());
@@ -18,6 +38,16 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
         update_len_prefixed(&mut h, rel_str.as_bytes());
         let bytes = std::fs::read(abs)?;
         update_len_prefixed(&mut h, &bytes);
+    }
+    // Mix in rules so adding/editing a `rules/*.md` invalidates the cache.
+    // Hash the raw text — covers both frontmatter and body without needing
+    // a second pass and matches what gets written to disk for Claude.
+    h.update((m.rules.len() as u64).to_le_bytes());
+    for r in &m.rules {
+        update_len_prefixed(&mut h, r.bundle.as_bytes());
+        let rel_str = r.rel.to_string_lossy();
+        update_len_prefixed(&mut h, rel_str.as_bytes());
+        update_len_prefixed(&mut h, r.raw.as_bytes());
     }
     // Mix in ICM config so a change in MCP wiring invalidates the cache.
     // Serialize as JSON for a deterministic byte representation.

@@ -93,7 +93,8 @@ pub struct ProjectScope {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProjectMatch {
     pub path_prefix: Option<String>,
-    pub marker_file: Option<String>,
+    #[serde(alias = "marker_file")]
+    pub marker: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
