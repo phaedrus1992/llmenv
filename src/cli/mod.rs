@@ -116,7 +116,10 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
     let config_dir = paths::config_dir()?;
     if is_git_repo(&config_dir) {
         match check_git_remote(&config_dir) {
-            Ok(remote) => eprintln!("✓ Git remote reachable: {}", remote),
+            Ok(remote) => {
+                let safe_url = sanitize_git_url(&remote);
+                eprintln!("✓ Git remote reachable: {}", safe_url);
+            }
             Err(e) => eprintln!("⚠ Git remote check failed: {}", e),
         }
     } else {
@@ -127,13 +130,22 @@ fn run_doctor(gc: bool) -> anyhow::Result<()> {
 
     if gc {
         eprintln!("Running garbage collection...");
-        let cache_retention_hours = config.settings.cache_retention_hours.unwrap_or(168);
-        let retention = std::time::Duration::from_secs(cache_retention_hours * 3600);
-        match crate::materialize::cache::gc(&cache_dir, retention) {
-            Ok(report) => {
-                eprintln!("✓ GC complete: removed {} entries, kept {}", report.removed.len(), report.kept);
+        match std::fs::metadata(&cache_dir) {
+            Ok(meta) => {
+                if meta.permissions().readonly() {
+                    eprintln!("⚠ GC failed: cache directory is read-only");
+                } else {
+                    let cache_retention_hours = config.settings.cache_retention_hours.unwrap_or(168);
+                    let retention = std::time::Duration::from_secs(cache_retention_hours * 3600);
+                    match crate::materialize::cache::gc(&cache_dir, retention) {
+                        Ok(report) => {
+                            eprintln!("✓ GC complete: removed {} entries, kept {}", report.removed.len(), report.kept);
+                        }
+                        Err(e) => eprintln!("⚠ GC failed: {}", e),
+                    }
+                }
             }
-            Err(e) => eprintln!("⚠ GC failed: {}", e),
+            Err(e) => eprintln!("⚠ GC failed to stat cache directory: {}", e),
         }
     }
 
@@ -151,12 +163,14 @@ fn expand_tilde(path: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn is_git_repo(dir: &Path) -> bool {
-    std::process::Command::new("git")
+    match std::process::Command::new("git")
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
 }
 
 fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
@@ -172,6 +186,22 @@ fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
 
     let remote = String::from_utf8(output.stdout)?.trim().to_string();
     Ok(remote)
+}
+
+fn sanitize_git_url(url: &str) -> String {
+    if let Some(at_pos) = url.find('@') {
+        if let Some(proto_end) = url.find("://") {
+            if at_pos > proto_end {
+                let (proto, rest) = url.split_at(proto_end + 3);
+                if let Some(host_start) = rest.find('@') {
+                    return format!("{}***@{}", proto, &rest[host_start + 1..]);
+                }
+            }
+        } else {
+            return format!("***{}", &url[at_pos..]);
+        }
+    }
+    url.to_string()
 }
 
 fn shell_escape(s: &str) -> String {
@@ -529,5 +559,26 @@ mod tests {
     fn expand_tilde_no_tilde() {
         let result = expand_tilde("/absolute/path").unwrap();
         assert_eq!(result, PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn sanitize_git_url_http_with_credentials() {
+        let url = "https://user:password@github.com/owner/repo.git";
+        let sanitized = sanitize_git_url(url);
+        assert_eq!(sanitized, "https://***@github.com/owner/repo.git");
+    }
+
+    #[test]
+    fn sanitize_git_url_ssh() {
+        let url = "git@github.com:owner/repo.git";
+        let sanitized = sanitize_git_url(url);
+        assert_eq!(sanitized, "***@github.com:owner/repo.git");
+    }
+
+    #[test]
+    fn sanitize_git_url_no_credentials() {
+        let url = "https://github.com/owner/repo.git";
+        let sanitized = sanitize_git_url(url);
+        assert_eq!(sanitized, url);
     }
 }
