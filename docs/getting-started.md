@@ -29,7 +29,7 @@ Create your first llmenv configuration:
 llmenv init
 ```
 
-This creates `~/.config/llmenv/config.toml` with a template structure. You can customize it to match your environment.
+This creates `~/.config/llmenv/config.yaml` with a template structure. You can customize it to match your environment.
 
 ### 2. Set Up Shell Integration
 
@@ -74,27 +74,26 @@ See `docs/configuration.md` for complete schema documentation.
 
 A minimal example with network and project scopes:
 
-```toml
-[settings]
-cache_dir = "~/.cache/llmenv"
-sync_interval_minutes = 60
+```yaml
+settings:
+  cache_dir: "~/.cache/llmenv"
+  sync_interval_minutes: 60
 
-[[scope.network]]
-id = "office"
-match = { ssid = "OfficeWiFi" }
-tags = ["office", "ci-enabled"]
+scope:
+  network:
+    - id: office
+      match: { ssid: "OfficeWiFi" }
+      tags: [office, ci-enabled]
+  project:
+    - id: myproject
+      match: { marker: ".llmenvrc" }
+      tags: [project-local]
 
-[[scope.project]]
-id = "myproject"
-match = { marker = ".llmenvrc" }
-tags = ["project-local"]
-
-[[bundle]]
-name = "base"
-tags = []
-
-[bundle.vars]
-AGENT = "claude"
+bundle:
+  - name: base
+    tags: []
+    vars:
+      AGENT: "claude"
 ```
 
 ## Commands Reference

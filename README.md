@@ -32,7 +32,7 @@ llmenv init
 
 ### 3. Configure your environment
 
-Edit `~/.config/llmenv/config.toml` to add your scopes and bundles.
+Edit `~/.config/llmenv/config.yaml` to add your scopes and bundles.
 
 ### 4. Activate shell integration
 
@@ -50,33 +50,29 @@ llmenv doctor
 
 ## Example
 
-```toml
-[settings]
-cache_dir = "~/.cache/llmenv"
+```yaml
+settings:
+  cache_dir: "~/.cache/llmenv"
 
-[[scope.network]]
-id = "office"
-match = { ssid = "OfficeWiFi" }
-tags = ["office"]
+scope:
+  network:
+    - id: office
+      match: { ssid: "OfficeWiFi" }
+      tags: [office]
+  project:
+    - id: myapp
+      match: { marker: ".llmenvrc" }
+      tags: [myapp-dev]
 
-[[scope.project]]
-id = "myapp"
-match = { marker = ".llmenvrc" }
-tags = ["myapp-dev"]
-
-[[bundle]]
-name = "base"
-tags = []
-
-[bundle.vars]
-AGENT = "claude"
-
-[[bundle]]
-name = "office-config"
-tags = ["office"]
-
-[bundle.vars]
-OFFICE_PROXY = "proxy.internal"
+bundle:
+  - name: base
+    tags: []
+    vars:
+      AGENT: "claude"
+  - name: office-config
+    tags: [office]
+    vars:
+      OFFICE_PROXY: "proxy.internal"
 ```
 
 As you move to the office WiFi or into the `myapp` project, the corresponding bundles automatically activate.
