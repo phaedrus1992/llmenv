@@ -15,9 +15,9 @@ fn sync_state_records_and_reads_last_pull() {
 
     // Should be approximately equal (within 1 second due to system time precision)
     let read_time = read.unwrap();
-    let duration = now.duration_since(read_time).unwrap_or_else(|_| {
-        read_time.duration_since(now).unwrap()
-    });
+    let duration = now
+        .duration_since(read_time)
+        .unwrap_or_else(|_| read_time.duration_since(now).unwrap());
     assert!(duration < Duration::from_secs(1));
 }
 

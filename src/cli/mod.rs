@@ -1,6 +1,6 @@
-use anyhow::Context;
 use crate::config::Config;
 use crate::paths;
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
 use std::path::PathBuf;
