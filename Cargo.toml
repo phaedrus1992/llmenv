@@ -26,3 +26,4 @@ insta = { version = "1.47", features = ["yaml"] }
 tempfile = "3.27"
 predicates = "3.1"
 walkdir = "2.5"
+proptest = "1.5"
