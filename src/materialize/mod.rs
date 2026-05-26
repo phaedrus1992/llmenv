@@ -11,17 +11,18 @@ use crate::merge::MergedManifest;
 /// call is a no-op and the existing path is returned.
 pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<PathBuf> {
     let hash = cache::hash_manifest(m)?;
-    let dest = cache_root.join(&hash);
+    let folder = cache::folder_name(&hash);
+    let dest = cache_root.join(&folder);
     if dest.exists() {
         return Ok(dest);
     }
     std::fs::create_dir_all(cache_root)?;
 
-    // Per-call staging directory: `<hash>.<pid>.<nanos>.tmp`. Each concurrent
+    // Per-call staging directory: `<folder>.<pid>.<nanos>.tmp`. Each concurrent
     // writer gets its own staging path, so they cannot clobber each other on
     // the way in. GC sweeps anything ending in `.tmp` regardless of age.
     let staging = cache_root.join(format!(
-        "{hash}.{pid}.{nanos}.tmp",
+        "{folder}.{pid}.{nanos}.tmp",
         pid = std::process::id(),
         nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -29,7 +30,8 @@ pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<Path
             .unwrap_or(0)
     ));
     std::fs::create_dir(&staging)?;
-    std::fs::write(staging.join("AGENTS.md"), &m.agents_md)?;
+    // Rules text (m.agents_md) is rendered by the per-agent adapter under its
+    // native filename (CLAUDE.md, AGENTS.md, etc.) — not written here.
     for (rel, abs) in &m.files {
         let out = staging.join(rel);
         if let Some(parent) = out.parent() {
