@@ -4,9 +4,9 @@ permissions:
     - { tool: Bash, pattern: "cargo *" }
   deny:
     - { tool: Read, paths: ["./.env", "./.env.*"] }
-  native:
-    claude_code:
-      deny: ["WebFetch(domain:internal.example.com)"]
+native_permissions:
+  claude_code:
+    deny: ["WebFetch(domain:internal.example.com)"]
 hooks:
   - event: PreToolUse
     matcher: Bash

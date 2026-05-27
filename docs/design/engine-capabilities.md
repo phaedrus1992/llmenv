@@ -59,24 +59,27 @@ schema MUST offer:
 - **(b)** an *engine-specific* `native` override that drops to that engine's own
   language and is emitted verbatim.
 
-The override lives next to the feature it overrides: `permissions.native.<engine>`
-for permission rules, `hooks.native.<engine>` for hook registrations, and so on.
-The top-level `native.<engine>` block (D3) is the catch-all for keys that belong
-to *no* modeled feature. A feature that has only layer (a) is **incomplete** —
-the long tail of platform-specific needs has nowhere to go. Today only
-`permissions` satisfies both layers; hooks, plugins, and MCP have (a) but not
-(b), and the top-level `native` block is parsed but not yet wired through to the
-adapter. These are tracked gaps (see *Implementation status*).
+The override is a **top-level sibling** of the feature it overrides, named
+`native_<feature>`: `native_permissions` for permission rules, `native_hooks`
+for hook registrations, `native_plugins`, `native_mcp`. Each is a per-engine map
+(`{ <engine>: <fragment> }`). This uniform `native_<feature>` shape is used for
+every feature — no feature nests a `native:` key inside itself. The top-level
+`native.<engine>` block (D3) is the separate catch-all for keys that belong to
+*no* modeled feature. A feature that has only layer (a) is **incomplete** — the
+long tail of platform-specific needs has nowhere to go. All modeled features
+(permissions, hooks, plugins, MCP) now satisfy both layers (see
+*Implementation status*).
 
 ## Decisions
 
 These were settled in design discussion (2026-05-27):
 
-### D1 — Permission rule grammar: neutral + `native` override
+### D1 — Permission rule grammar: neutral + `native_permissions` override
 
 Portable rules use a **neutral structured form** the adapter renders to its
-engine's syntax. Rules that don't translate live in a **per-engine `native`**
-override list.
+engine's syntax. Rules that don't translate live in a **per-engine
+`native_permissions`** override (a top-level sibling of `permissions`, not nested
+inside it).
 
 ```yaml
 permissions:
@@ -86,18 +89,20 @@ permissions:
     - { tool: Read, paths: ["./src"] }
   deny:
     - { tool: Read, paths: ["./.env", "./.env.*"] }
-  # engine-specific rules that have no neutral equivalent
-  native:
-    claude_code:
-      deny: ["WebFetch(domain:internal.example.com)"]
+# engine-specific rules that have no neutral equivalent
+native_permissions:
+  claude_code:
+    deny: ["WebFetch(domain:internal.example.com)"]
 ```
 
 The neutral `{tool, pattern}` / `{tool, paths}` form covers the common case
 (tool + glob, tool + path roots). The Claude `Bash(...)`/`Read(./.env)` string
-grammar is **generated** by the adapter, never authored. `native` is a per-engine
-list of native rule strings appended verbatim — escape hatch for the long tail.
-The word **`native`** is used everywhere for this "drop to the engine's own
-language" move (here, and the top-level `native:` block in D3).
+grammar is **generated** by the adapter, never authored. `native_permissions` is
+a per-engine map of native rule strings appended verbatim — escape hatch for the
+long tail. The word **`native`** is used everywhere for this "drop to the
+engine's own language" move: the `native_<feature>` siblings (here, plus
+`native_hooks`/`native_plugins`/`native_mcp`) and the top-level catch-all
+`native:` block in D3.
 
 ### D2 — Attach point: bundle-contributed fragments via `bundle.yaml`
 
@@ -141,7 +146,7 @@ merges across contributors (bundles + top-level) is determined by its **shape**:
 - **Lists** (`allow`/`ask`/`deny`, `hooks`, `plugins`) → **concatenate + dedup**.
   Order-independent union; matches Claude Code's own array-merge. No winner
   problem.
-- **Scalars** (`default_mode`, and scalars inside `native`) → **highest-precedence
+- **Scalars** (`default_mode`, and scalars inside any `native_*` fragment) → **highest-precedence
   scope wins** (managed > local > project > user), matching Claude Code's own
   scalar override.
 
@@ -173,6 +178,15 @@ follow the same precedence rule as D2. Generic capabilities (Layer 1) win on
 conflict with a `native` key that a modeled capability also produces — or
 hard-error (see O3).
 
+**Enforced as a hard-error (#102):** the catch-all is overlaid *last* over the
+whole rendered config, so a modeled-feature key here (e.g. `permissions`,
+`hooks`) would silently clobber the security-rendered output — erasing the
+permission `deny` array would bypass the deny-never-weakened invariant. The
+adapter therefore rejects any modeled-feature key found in the top-level
+`native.<engine>` fragment, naming the offending key and pointing at the
+`native_<feature>` sibling (which merges in the safe direction). The catch-all
+is strictly for keys *no* modeled feature owns.
+
 ## Hooks: finish the existing machinery
 
 Hook *files* are already copied and `{{ICM_MCP}}`-substituted
@@ -196,11 +210,16 @@ implementation.
 - New `Capabilities` struct (`permissions`, `hooks`, `plugins`) reused in two
   places: a top-level `Config` field, and a new `bundle.yaml` parsed during
   `merge()`. **Identical shape** in both.
-- New `Permissions`, `Hook`, `Plugin` structs. `Permissions` carries
-  `default_mode` (scalar), `allow`/`ask`/`deny` (lists of neutral rules), and
-  `native: BTreeMap<String, _>` (per-engine raw rule strings).
+- New `Permissions`, `Hook`, `Plugin` structs. `Permissions` carries only the
+  neutral layer: `default_mode` (scalar) and `allow`/`ask`/`deny` (lists of
+  neutral rules). The per-engine override is **not** nested here — it lives in
+  the top-level `Capabilities.native_permissions` sibling.
+- New `native_<feature>` sibling maps on `Capabilities`:
+  `native_permissions: BTreeMap<String, NativePermissionRules>` (typed per-engine
+  rule strings) and `native_hooks`/`native_plugins`/`native_mcp:
+  BTreeMap<String, serde_yaml::Value>` (opaque per-engine fragments).
 - New `native` top-level map: `BTreeMap<String, serde_yaml::Value>` (opaque
-  passthrough per engine).
+  catch-all passthrough per engine, distinct from the per-feature siblings).
 - New `marketplace` top-level list (absorbs #59).
 - `BundleRef`/`merge()` (`src/merge/mod.rs`) gain a `bundle.yaml` read; the
   `MergedManifest` carries merged `Capabilities`.
@@ -218,12 +237,16 @@ bundle fragments compose identically.
 1. Takes the already-merged `Capabilities` + top-level `native.claude_code` from
    the manifest (merge happened in `merge()`, not here).
 2. Renders neutral permission rules → Claude string grammar; appends
-   `permissions.native.claude_code` rule strings verbatim.
+   `native_permissions.claude_code` rule strings verbatim.
 3. Renders hook registrations into the `hooks` object. `{event, matcher,
    handler}` → `hooks.{Event}: [{ matcher, hooks: [handler] }]`. Resolves
    bundle-relative `command` paths against the install location.
-4. Deep-merges top-level `native.claude_code` passthrough (capabilities win, or
-   hard-error per O3).
+4. Deep-merges each per-feature native fragment onto the generated subtree via
+   `util::merge_json` (native is the higher-precedence overlay): `native_hooks`
+   onto the `hooks` object, `native_plugins` onto settings top-level, `native_mcp`
+   onto the `mcp.json` doc. `mcp.json` is emitted when there are resolved servers
+   *or* a `native_mcp` fragment. The top-level `native.claude_code` catch-all is
+   overlaid onto the whole settings object **last** (highest precedence).
 5. Emits a correctly-shaped `settings.json` (object-valued `hooks` and
    `permissions`; **no `mcp` key**). Optionally emit `$schema`.
 
@@ -234,10 +257,16 @@ bundle fragments compose identically.
 - **O2** — Neutral `default_mode` vocabulary: adopt Claude's
   (`acceptEdits`/`plan`/`default`/`bypassPermissions`) as the neutral set, or
   invent engine-neutral names? Claude's are reasonable defaults.
-- **O3** — Conflict policy between modeled capability and top-level
-  `native.<engine>` passthrough: capabilities-win vs. hard-error. Lean hard-error
-  (loud beats silent). Note this is distinct from the same-precedence scalar
-  collision in D2, which is already decided as hard-error.
+- **O3** — Conflict policy between modeled capability and `native` passthrough.
+  *Partially resolved:* the **mergeable** case is a deep-merge, not a conflict —
+  lists union+dedup (`allow: [a,b,c]` + native `[c,d]` → `[a,b,c,d]`), disjoint
+  object keys union, nested objects recurse, scalars resolve native-wins (native
+  is an intentional override). This is implemented via `util::merge_json` /
+  `merge_yaml`. A **true conflict** is same-*identity*-different-*content* — e.g.
+  two MCP servers both named `foo` with different commands — which a structural
+  merge silently overwrites. Per-type identity rules and hard-error detection for
+  that case are specced + deferred to **#103** (distinct from the same-precedence
+  scalar collision in D2, already a hard-error).
 - **O4** — Does ICM/memory replace Claude's auto memory? If so emit
   `autoMemoryEnabled: false` via the `native` escape hatch by default.
 
@@ -246,7 +275,7 @@ bundle fragments compose identically.
 1. Schema: rename `settings`→`cache`; add `Capabilities`/`Permissions`/`Hook`/
    `Plugin` structs + top-level `native` block; teach `merge()` to read
    `bundle.yaml`; add the shared value-shape merge routine.
-2. Permissions generator (neutral→string + `permissions.native`), correct
+2. Permissions generator (neutral→string + `native_permissions`), correct
    `settings.json` shape, drop bogus `mcp` key.
 3. Hooks generator — wire the already-copied files in (bundle-relative paths).
 4. Top-level `native.<engine>` passthrough merge.
@@ -258,12 +287,13 @@ Tracking the two-layer invariant (generic + per-engine `native`) per feature:
 
 | Feature | (a) generic | (b) native override | Notes |
 |---------|-------------|---------------------|-------|
-| Permissions | done | done (`permissions.native.<engine>`) | rendered into `settings.json`; native wins over conflicting neutral rule |
-| Hooks | done | **missing** | `hooks` list renders; no `hooks.native.<engine>` for engine-only events/handlers |
-| Plugins | done | **missing** | `plugins` list; no per-engine override path |
-| MCP servers | done | **missing** | `mcp` list resolves; no `mcp.native.<engine>` |
-| Top-level `native` (catch-all) | n/a | **parsed, not wired** | `Config.native` deserializes but never reaches `merge()` → `MergedManifest` → adapter |
+| Permissions | done | done (`native_permissions.<engine>`) | rendered into `settings.json`; native wins over conflicting neutral rule |
+| Hooks | done | done (`native_hooks.<engine>`) | fragment deep-merged onto the `hooks` object; shared events concat entries |
+| Plugins | done | done (`native_plugins.<engine>`) | fragment deep-merged onto settings top-level |
+| MCP servers | done | done (`native_mcp.<engine>`) | fragment deep-merged onto `mcp.json`; doc emitted even with no resolved servers |
+| Top-level `native` (catch-all) | n/a | done | `Config.native` threads through `merge()` → `MergedManifest.native` |
 
-Open gaps tracked in their own issues — see the issue tracker (milestone M4.5)
-for the top-level `native` passthrough wiring and the per-feature `native`
-override for hooks/plugins/MCP.
+All four modeled features now satisfy both layers via the uniform
+`native_<feature>` sibling shape (#97), and the top-level `native` catch-all is
+wired through (#96). Cross-bundle merge of the opaque fragments uses the
+value-shape rule (`util::merge_yaml`); adapter overlay uses `util::merge_json`.
