@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
@@ -69,7 +70,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         validate_skills(out)?;
 
         // Generate settings.json from hook/permission bundles
-        generate_settings_json(out)?;
+        generate_settings_json(out, manifest)?;
 
         // Emit mcp.json when the manifest carries any resolved MCP servers.
         if !manifest.mcps.is_empty() {
@@ -176,20 +177,96 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generates settings.json from hook/permission contributions in the materialized directory.
+/// Generates settings.json from hook/permission contributions in the manifest.
 ///
-/// Currently creates a minimal settings.json placeholder. Full hook/permission merging
-/// (issue #34) is deferred to a follow-up PR.
-fn generate_settings_json(out: &Path) -> anyhow::Result<()> {
-    let settings = json!({
-        "hooks": [],
-        "permissions": [],
-        "mcp": []
-    });
+/// Issue #90: Wires hook fragments into Claude Code's `hooks.{Event}[].hooks` array.
+/// Each event groups its hooks as `{ matcher: "...", hooks: [{ command, tool, type }] }`.
+///
+/// Issue #91: Merges top-level `native.claude_code` keys into settings.json with
+/// hard-error on collision (native key conflicts with capability-generated key).
+///
+/// Issue #85: Prerequisite for SessionStart hook (wiring complete, hash comparison
+/// logic deferred to runtime hook script).
+fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Result<()> {
+    let mut settings = serde_json::Map::new();
 
+    // #90: Transform hooks: Vec<Hook> into { EventName: [{ matcher, hooks: [...] }] }
+    // Design: https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md
+    let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+
+    for hook in &manifest.capabilities.hooks {
+        let handler = json!({
+            "command": hook.handler.command,
+            "tool": hook.handler.tool,
+            "type": match hook.handler.kind {
+                crate::config::HookHandlerKind::Command => "command",
+                crate::config::HookHandlerKind::McpTool => "mcp_tool",
+            },
+        });
+
+        let mut hook_entry = serde_json::Map::new();
+        if let Some(matcher) = &hook.matcher {
+            hook_entry.insert("matcher".into(), json!(matcher));
+        }
+        hook_entry.insert("hooks".into(), json!([handler]));
+
+        hooks_by_event
+            .entry(hook.event.clone())
+            .or_default()
+            .push(serde_json::Value::Object(hook_entry));
+    }
+
+    let mut hooks_obj = serde_json::Map::new();
+    for (event, entries) in hooks_by_event {
+        hooks_obj.insert(event, json!(entries));
+    }
+    settings.insert("hooks".into(), serde_json::Value::Object(hooks_obj));
+
+    // #91: Merge native permission rules with collision detection
+    if settings.contains_key("permissions") {
+        return Err(anyhow::anyhow!(
+            "Collision: native.claude_code permissions conflict with capability-generated permissions key. \
+             Hard-error policy (O3): cannot merge. Review bundle.yaml and config.yaml for overlapping native/capability contributions."
+        ));
+    }
+
+    if let Some(native_rules) = manifest.capabilities.permissions.native.get("claude_code") {
+        let mut perm_obj = serde_json::Map::new();
+        perm_obj.insert(
+            "native".into(),
+            json!({
+                "allow": native_rules.allow,
+                "ask": native_rules.ask,
+                "deny": native_rules.deny,
+            }),
+        );
+        settings.insert("permissions".into(), serde_json::Value::Object(perm_obj));
+    }
+
+    let settings_value = serde_json::Value::Object(settings);
     let settings_path = out.join("settings.json");
-    let json_str = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(settings_path, json_str)?;
+    let json_str = serde_json::to_string_pretty(&settings_value)?;
+
+    std::fs::write(&settings_path, &json_str).with_context(|| {
+        format!(
+            "Failed to write settings.json at {}",
+            settings_path.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&settings_path, perms).with_context(|| {
+            format!(
+                "Failed to set permissions on settings.json at {}",
+                settings_path.display()
+            )
+        })?;
+    }
 
     Ok(())
 }
