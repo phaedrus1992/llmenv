@@ -3,8 +3,10 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::{
-    Bundle, Cache, HostEntry, HostMatch, HostScope, McpServer, McpTransport, Memory, NetworkMatch,
-    NetworkScope, ProjectMatch, ProjectScope, Scopes, UserMatch, UserScope,
+    Bundle, Cache, Capabilities, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch,
+    HostScope, McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch, NetworkScope,
+    PermissionMode, PermissionRule, Permissions, ProjectMatch, ProjectScope, Scopes, UserMatch,
+    UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -261,6 +263,91 @@ mod tests {
         )
     }
 
+    fn arb_permission_mode() -> impl Strategy<Value = PermissionMode> {
+        prop_oneof![
+            Just(PermissionMode::AcceptEdits),
+            Just(PermissionMode::Plan),
+            Just(PermissionMode::Default),
+            Just(PermissionMode::BypassPermissions),
+        ]
+    }
+
+    fn arb_permission_rule() -> impl Strategy<Value = PermissionRule> {
+        (
+            arb_string(),
+            arb_opt_string(),
+            prop::collection::vec(arb_string(), 0..3),
+        )
+            .prop_map(|(tool, pattern, paths)| PermissionRule {
+                tool,
+                pattern,
+                paths,
+            })
+    }
+
+    fn arb_native_rules() -> impl Strategy<Value = NativePermissionRules> {
+        (
+            prop::collection::vec(arb_string(), 0..3),
+            prop::collection::vec(arb_string(), 0..3),
+            prop::collection::vec(arb_string(), 0..3),
+        )
+            .prop_map(|(allow, ask, deny)| NativePermissionRules { allow, ask, deny })
+    }
+
+    fn arb_permissions() -> impl Strategy<Value = Permissions> {
+        (
+            prop::option::of(arb_permission_mode()),
+            prop::collection::vec(arb_permission_rule(), 0..3),
+            prop::collection::vec(arb_permission_rule(), 0..3),
+            prop::collection::vec(arb_permission_rule(), 0..3),
+            prop::collection::btree_map(arb_string(), arb_native_rules(), 0..3),
+        )
+            .prop_map(|(default_mode, allow, ask, deny, native)| Permissions {
+                default_mode,
+                allow,
+                ask,
+                deny,
+                native,
+            })
+    }
+
+    fn arb_hook() -> impl Strategy<Value = Hook> {
+        (
+            arb_string(),
+            arb_opt_string(),
+            prop_oneof![
+                arb_opt_string().prop_map(|command| HookHandler {
+                    kind: HookHandlerKind::Command,
+                    command,
+                    tool: None,
+                }),
+                arb_opt_string().prop_map(|tool| HookHandler {
+                    kind: HookHandlerKind::McpTool,
+                    command: None,
+                    tool,
+                }),
+            ],
+        )
+            .prop_map(|(event, matcher, handler)| Hook {
+                event,
+                matcher,
+                handler,
+            })
+    }
+
+    fn arb_capabilities() -> impl Strategy<Value = Capabilities> {
+        (
+            arb_permissions(),
+            prop::collection::vec(arb_hook(), 0..3),
+            prop::collection::vec(arb_string(), 0..3),
+        )
+            .prop_map(|(permissions, hooks, plugins)| Capabilities {
+                permissions,
+                hooks,
+                plugins,
+            })
+    }
+
     fn arb_transport() -> impl Strategy<Value = McpTransport> {
         prop_oneof![
             Just(McpTransport::Stdio),
@@ -404,9 +491,18 @@ mod tests {
                 arb_string().prop_map(|addr| HostEntry { addr }),
                 0..3,
             ),
+            arb_capabilities(),
         )
             .prop_map(
-                |(cache, (network, host_scopes, user, project), bundle, mcp, memory, host)| {
+                |(
+                    cache,
+                    (network, host_scopes, user, project),
+                    bundle,
+                    mcp,
+                    memory,
+                    host,
+                    capabilities,
+                )| {
                     Config {
                         cache,
                         scope: Scopes {
@@ -415,7 +511,7 @@ mod tests {
                             user,
                             project,
                         },
-                        capabilities: Default::default(),
+                        capabilities,
                         native: Default::default(),
                         bundle,
                         mcp,
