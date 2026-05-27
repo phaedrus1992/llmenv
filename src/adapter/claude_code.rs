@@ -143,13 +143,22 @@ fn is_hook_json(rel: &Path) -> bool {
 /// #97: a per-engine `native_mcp` fragment (mcp.json-shaped opaque YAML) is
 /// overlaid onto the doc so engine-only keys (e.g. `enabledMcpjsonServers`)
 /// merge in. Native is the higher-precedence overlay.
+///
+/// #103: Detects true same-identity-different-content conflicts: if two MCP
+/// server definitions have the same name but different command/args/url,
+/// hard-errors naming both contributors and the conflicting name. This prevents
+/// silent overwrites that hide real mistakes.
 fn write_mcp_json(
     out: &Path,
     mcps: &[ResolvedMcp],
     native: Option<&serde_yaml::Value>,
 ) -> anyhow::Result<()> {
     let mut servers = serde_json::Map::new();
-    for m in mcps {
+    // Track which server came from which resolved entry for conflict reporting.
+    let mut server_sources: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    for (idx, m) in mcps.iter().enumerate() {
         let entry = match &m.kind {
             ResolvedKind::Stdio { command, args, env } => {
                 let mut obj = json!({ "command": command, "args": args });
@@ -160,6 +169,25 @@ fn write_mcp_json(
             }
             ResolvedKind::Remote { url, .. } => json!({ "url": url }),
         };
+
+        // O3: Detect true same-identity-different-content conflicts.
+        // If the server name already exists and the content differs, hard-error.
+        if let Some(&prev_idx) = server_sources.get(&m.name)
+            && let Some(existing_entry) = servers.get(&m.name)
+            && existing_entry != &entry
+        {
+            anyhow::bail!(
+                "true semantic conflict: MCP server '{}' defined twice with \
+                 different content. First definition (entry #{}) differs from \
+                 second definition (entry #{}). Resolve by removing or renaming \
+                 one server definition.",
+                m.name,
+                prev_idx,
+                idx,
+            );
+        }
+
+        server_sources.insert(m.name.clone(), idx);
         servers.insert(m.name.clone(), entry);
     }
     let mut doc = json!({ "mcpServers": servers });
