@@ -3,8 +3,8 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::{
-    Bundle, HostMatch, HostScope, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope, Scopes,
-    Settings, UserMatch, UserScope,
+    Bundle, HostMatch, HostScope, Icm, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope,
+    Scopes, Settings, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -187,19 +187,52 @@ mod tests {
         r"[a-zA-Z0-9_-]{1,20}"
     }
 
+    // Some(arb)/None so the round-trip exercises both branches of every
+    // Option<String> match field rather than only the None default.
+    fn arb_opt_string() -> impl Strategy<Value = Option<String>> {
+        prop::option::of(arb_string())
+    }
+
+    fn arb_settings() -> impl Strategy<Value = Settings> {
+        (arb_string(), 0u64..120, prop::option::of(0u64..10_000)).prop_map(
+            |(cache_dir, sync_interval_minutes, cache_retention_hours)| Settings {
+                cache_dir,
+                sync_interval_minutes,
+                cache_retention_hours,
+            },
+        )
+    }
+
+    fn arb_icm() -> impl Strategy<Value = Option<Icm>> {
+        prop::option::of(
+            (
+                arb_string(),
+                arb_string(),
+                arb_string(),
+                prop::collection::vec(arb_string(), 0..3),
+            )
+                .prop_map(|(server_tag, server_bind, client_url, default_topics)| Icm {
+                    server_tag,
+                    server_bind,
+                    client_url,
+                    default_topics,
+                }),
+        )
+    }
+
     fn arb_config() -> impl Strategy<Value = Config> {
         (
-            Just(Settings::default()),
-            prop::collection::vec(arb_string(), 0..10).prop_map(|ids| {
+            arb_settings(),
+            prop::collection::vec((arb_string(), arb_opt_string(), arb_opt_string(), arb_opt_string()), 0..10).prop_map(|ids| {
                 let network = ids
                     .iter()
                     .take(2)
-                    .map(|id| NetworkScope {
+                    .map(|(id, gateway_mac, ssid, cidr)| NetworkScope {
                         id: id.clone(),
                         r#match: NetworkMatch {
-                            gateway_mac: None,
-                            ssid: None,
-                            cidr: None,
+                            gateway_mac: gateway_mac.clone(),
+                            ssid: ssid.clone(),
+                            cidr: cidr.clone(),
                         },
                         tags: vec![],
                     })
@@ -208,9 +241,11 @@ mod tests {
                     .iter()
                     .skip(2)
                     .take(2)
-                    .map(|id| HostScope {
+                    .map(|(id, hostname, _, _)| HostScope {
                         id: id.clone(),
-                        r#match: HostMatch { hostname: None },
+                        r#match: HostMatch {
+                            hostname: hostname.clone(),
+                        },
                         tags: vec![],
                     })
                     .collect();
@@ -218,9 +253,9 @@ mod tests {
                     .iter()
                     .skip(4)
                     .take(2)
-                    .map(|id| UserScope {
+                    .map(|(id, user, _, _)| UserScope {
                         id: id.clone(),
-                        r#match: UserMatch { user: None },
+                        r#match: UserMatch { user: user.clone() },
                         tags: vec![],
                     })
                     .collect();
@@ -228,11 +263,11 @@ mod tests {
                     .iter()
                     .skip(6)
                     .take(2)
-                    .map(|id| ProjectScope {
+                    .map(|(id, path_prefix, marker, _)| ProjectScope {
                         id: id.clone(),
                         r#match: ProjectMatch {
-                            path_prefix: None,
-                            marker: None,
+                            path_prefix: path_prefix.clone(),
+                            marker: marker.clone(),
                         },
                         tags: vec![],
                     })
@@ -254,7 +289,7 @@ mod tests {
                     })
                     .collect()
             }),
-            Just(None),
+            arb_icm(),
         )
             .prop_map(
                 |(settings, (network, host, user, project), bundle, icm)| Config {
