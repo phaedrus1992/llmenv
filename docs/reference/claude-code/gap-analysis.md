@@ -42,13 +42,19 @@ Every value is structurally wrong against the real schema:
 - `permissions` must be an **object**: `{ allow:[], ask:[], deny:[], defaultMode, … }`.
 - `mcp` **is not a settings key** at all — remove it.
 
-So even the three keys it does emit don't match Claude Code's format. This is
-tracked as issue #34 ("Full hook/permission merging").
+So even the three keys it does emit don't match Claude Code's format.
+
+> **Status note (verified 2026-05-27):** Issue #34 ("Full hook/permission
+> merging") is marked **CLOSED/COMPLETED** (2026-05-26), but the fix was never
+> landed — `generate_settings_json` (`claude_code.rs:183`) still emits the
+> wrong-shaped stub, and `schema.rs` still has no Claude Code settings
+> vocabulary. **#34 needs to be reopened** (or a new issue filed); the work it
+> describes remains entirely undone.
 
 ## Why the copied hooks are inert
 
 `materialize` copies `hooks/*.json` and substitutes `{{ICM_MCP}}`
-(`claude_code.rs:54-66`), so bundles ship hook scripts. But a hook only fires if a
+(`claude_code.rs:52-61`), so bundles ship hook scripts. But a hook only fires if a
 `settings.json` `hooks` entry references it at an event/matcher. Since
 `generate_settings_json` writes an empty (and mis-shaped) `hooks`, **the copied
 hook files do nothing.** Closing #34 is what makes the existing hook-copy
