@@ -35,7 +35,8 @@ Key structural facts about llmenv:
 
 ## The headline gap
 
-`generate_settings_json` is a placeholder (issue #34). It emits a JSON object with
+`generate_settings_json` is a placeholder (issue #34, closed-but-unimplemented —
+see [gap-analysis](./gap-analysis.md)). It emits a JSON object with
 three keys — and **`mcp` is not even a real `settings.json` key** (MCP servers
 live in `mcp.json` / `.mcp.json` / `~/.claude.json`, never in `settings.json`).
 Meanwhile Claude Code's `settings.json` exposes ~120 user-relevant keys. Every
