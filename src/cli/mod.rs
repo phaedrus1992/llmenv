@@ -653,7 +653,10 @@ fn build_bundle_refs(
     for (tier, kind) in PRECEDENCE.iter().enumerate() {
         // Earlier tiers (network) outrank later ones (project) for scalar
         // capability resolution, matching the placement-precedence order.
-        let precedence = (PRECEDENCE.len() - tier) as u8;
+        // `tier` ranges 0..PRECEDENCE.len() (4), so the rank is 1..=4 — always
+        // in u8 range. try_from over `as` so a future PRECEDENCE growth past 255
+        // tiers fails loudly instead of silently wrapping.
+        let precedence = u8::try_from(PRECEDENCE.len() - tier).unwrap_or(u8::MAX);
         // Tags emitted by scopes of this kind.
         let kind_tags: BTreeSet<&str> = active
             .scopes

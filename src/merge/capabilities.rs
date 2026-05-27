@@ -321,4 +321,136 @@ mod tests {
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.permissions.default_mode, None);
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        fn arb_rule() -> impl Strategy<Value = PermissionRule> {
+            ("[A-Za-z]{1,6}", "[a-z*]{1,6}").prop_map(|(tool, pat)| PermissionRule {
+                tool,
+                pattern: Some(pat),
+                paths: Vec::new(),
+            })
+        }
+
+        // Contributors carrying only list fields (allow rules + plugins), so the
+        // scalar default_mode never forces a same-precedence conflict. precedence
+        // is irrelevant to list merging and left at a constant.
+        fn arb_list_contributor() -> impl Strategy<Value = CapabilityContributor> {
+            (
+                "[a-z]{1,4}",
+                prop::collection::vec(arb_rule(), 0..4),
+                prop::collection::vec("[a-z:]{1,6}", 0..4),
+            )
+                .prop_map(|(name, allow, plugins)| CapabilityContributor {
+                    name,
+                    precedence: 1,
+                    capabilities: Capabilities {
+                        permissions: Permissions {
+                            allow,
+                            ..Default::default()
+                        },
+                        plugins,
+                        ..Default::default()
+                    },
+                })
+        }
+
+        fn allow_set(caps: &Capabilities) -> BTreeSet<PermissionRule> {
+            caps.permissions.allow.iter().cloned().collect()
+        }
+
+        fn plugin_set(caps: &Capabilities) -> BTreeSet<String> {
+            caps.plugins.iter().cloned().collect()
+        }
+
+        proptest! {
+            // Merging is idempotent: feeding the merged output back through
+            // merge_capabilities as a single contributor changes nothing.
+            #[test]
+            fn merge_is_idempotent(
+                contribs in prop::collection::vec(arb_list_contributor(), 0..5)
+            ) {
+                let once = merge_capabilities(&contribs).unwrap();
+                let again = merge_capabilities(&[CapabilityContributor {
+                    name: "merged".into(),
+                    precedence: 1,
+                    capabilities: once.clone(),
+                }])
+                .unwrap();
+                prop_assert_eq!(once, again);
+            }
+
+            // List union is order-independent: permuting contributors yields the
+            // same *set* of allow rules and plugins (first-seen order may differ,
+            // but membership is invariant).
+            #[test]
+            fn list_union_is_order_independent(
+                contribs in prop::collection::vec(arb_list_contributor(), 0..5)
+            ) {
+                let forward = merge_capabilities(&contribs).unwrap();
+                let mut reversed = contribs.clone();
+                reversed.reverse();
+                let backward = merge_capabilities(&reversed).unwrap();
+                prop_assert_eq!(allow_set(&forward), allow_set(&backward));
+                prop_assert_eq!(plugin_set(&forward), plugin_set(&backward));
+            }
+
+            // Output lists carry no duplicates.
+            #[test]
+            fn merged_lists_have_no_duplicates(
+                contribs in prop::collection::vec(arb_list_contributor(), 0..5)
+            ) {
+                let out = merge_capabilities(&contribs).unwrap();
+                let allow_len = out.permissions.allow.len();
+                prop_assert_eq!(allow_len, allow_set(&out).len());
+                let plugin_len = out.plugins.len();
+                prop_assert_eq!(plugin_len, plugin_set(&out).len());
+            }
+
+            // The strictly-highest-precedence contributor's default_mode always
+            // wins, regardless of input order or how many lower contributors set
+            // a (possibly different) mode.
+            #[test]
+            fn highest_precedence_mode_wins(
+                lows in prop::collection::vec(0u8..50, 0..5),
+                winner_bump in 1u8..50,
+            ) {
+                let winner_prec = 50u8 + winner_bump;
+                let mut contribs: Vec<CapabilityContributor> = lows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &p)| CapabilityContributor {
+                        name: format!("low{i}"),
+                        precedence: p,
+                        capabilities: Capabilities {
+                            permissions: Permissions {
+                                default_mode: Some(PermissionMode::Default),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                contribs.push(CapabilityContributor {
+                    name: "winner".into(),
+                    precedence: winner_prec,
+                    capabilities: Capabilities {
+                        permissions: Permissions {
+                            default_mode: Some(PermissionMode::BypassPermissions),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                });
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(
+                    out.permissions.default_mode,
+                    Some(PermissionMode::BypassPermissions)
+                );
+            }
+        }
+    }
 }

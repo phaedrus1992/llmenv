@@ -4,17 +4,17 @@ llmenv configuration is defined in YAML format at `~/.config/llmenv/config.yaml`
 
 ## Top-Level Sections
 
-- `settings:` — Global behavior (cache, sync intervals)
+- `cache:` — Global behavior (cache directory, sync intervals)
 - `scope:` — Scope definitions (network, host, user, project)
 - `bundle:` — Environment variable bundles
 - `mcp:` — MCP server declarations (optional)
 - `memory:` — llmenv's memory backend topology (optional)
 - `host:` — Host address table, used by the memory backend (optional)
 
-## Settings
+## Cache
 
 ```yaml
-settings:
+cache:
   cache_dir: "~/.cache/llmenv"          # Where to store cached manifests
   sync_interval_minutes: 60             # How often to pull config from GitHub
   cache_retention_hours: 168            # GC retention (default: 7 days)
@@ -163,7 +163,7 @@ misread:
 ## Complete Example
 
 ```yaml
-settings:
+cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 60
   cache_retention_hours: 168

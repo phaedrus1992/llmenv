@@ -51,7 +51,7 @@ llmenv doctor
 ## Example
 
 ```yaml
-settings:
+cache:
   cache_dir: "~/.cache/llmenv"
 
 scope:
