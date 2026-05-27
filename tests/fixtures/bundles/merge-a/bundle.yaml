@@ -1,0 +1,10 @@
+hooks:
+  - event: PreToolUse
+    matcher: Bash
+    handler: { type: command, command: "hooks/guard.sh" }
+permissions:
+  allow:
+    - { tool: Bash, pattern: "cargo *" }
+  native:
+    claude_code:
+      deny: ["WebFetch(domain:internal.example.com)"]

@@ -1,0 +1,20 @@
+hooks:
+  # Identical to merge-a's hook — must dedup by (event, matcher, command).
+  - event: PreToolUse
+    matcher: Bash
+    handler: { type: command, command: "hooks/guard.sh" }
+  # Distinct hook — must survive.
+  - event: PreToolUse
+    matcher: Edit
+    handler: { type: command, command: "hooks/fmt.sh" }
+permissions:
+  allow:
+    # Duplicate of merge-a's allow rule — must dedup.
+    - { tool: Bash, pattern: "cargo *" }
+    # Distinct rule — must survive.
+    - { tool: Read, paths: ["./src"] }
+  deny:
+    - { tool: Read, paths: ["./.env"] }
+  native:
+    claude_code:
+      deny: ["WebFetch(domain:other.example.com)"]

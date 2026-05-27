@@ -1,8 +1,0 @@
-# Hook contributions from this bundle
-[[hook]]
-event = "UserPromptSubmit"
-command = "echo 'base hook'"
-
-[[permission]]
-action = "allow"
-tool = "Bash"
