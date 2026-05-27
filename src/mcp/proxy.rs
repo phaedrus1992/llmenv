@@ -135,25 +135,75 @@ pub fn default_pid_path() -> anyhow::Result<PathBuf> {
     ))
 }
 
-/// Production spawner: launches `mcp-proxy --port <port> -- icm mcp-server`
-/// and returns its pid. `bind` is `host:port`; only the port is forwarded to
-/// `mcp-proxy` (the proxy binds to all interfaces by default — we trust the
-/// network scope to gate access).
+/// Builds the `mcp-proxy` invocation, preferring a `mcp-proxy` already on
+/// `PATH` and falling back to `uvx mcp-proxy` when it isn't installed. Returns
+/// the program plus its leading args; the caller appends `--port`/target.
 ///
 /// # Errors
-/// Returns an error if `bind` has no `:port` suffix or the child cannot be
-/// spawned.
+/// Returns an error when neither `mcp-proxy` nor `uvx` is on `PATH` — the
+/// memory backend can't be exposed on the network without one of them.
+fn mcp_proxy_command() -> anyhow::Result<(&'static str, Vec<&'static str>)> {
+    if on_path("mcp-proxy") {
+        Ok(("mcp-proxy", vec![]))
+    } else if on_path("uvx") {
+        Ok(("uvx", vec!["mcp-proxy"]))
+    } else {
+        Err(anyhow::anyhow!(
+            "neither `mcp-proxy` nor `uvx` found on PATH; install one to run the \
+             memory server, or disable the `memory` config block"
+        ))
+    }
+}
+
+/// True when `program` resolves to an executable on `PATH`. Scans `$PATH`
+/// entries directly rather than shelling out, so it works without a shell and
+/// is unaffected by `command`/`which` availability.
+fn on_path(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(program);
+        is_executable(&candidate)
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Production spawner: launches `mcp-proxy --port <port> -- icm serve` (or
+/// `uvx mcp-proxy ...` when `mcp-proxy` isn't on `PATH`) and returns its pid.
+/// `bind` is `host:port`; only the port is forwarded to `mcp-proxy` (the proxy
+/// binds to all interfaces by default — we trust the network scope to gate
+/// access). `icm serve` is the stdio-only memory daemon it bridges onto the
+/// network.
+///
+/// # Errors
+/// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor
+/// `uvx` is on `PATH`, or if the child cannot be spawned.
 pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
     let port = bind
         .rsplit_once(':')
         .map(|(_, p)| p)
         .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
-    let child = Command::new("mcp-proxy")
+    let (program, leading) = mcp_proxy_command()?;
+    let child = Command::new(program)
+        .args(leading)
         .arg("--port")
         .arg(port)
         .arg("--")
         .arg("icm")
-        .arg("mcp-server")
+        .arg("serve")
         .spawn()?;
     Ok(child.id())
 }
@@ -198,7 +248,76 @@ pub fn is_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
+        #[expect(
+            unused_variables,
+            reason = "pid is only used on Unix for the kill(2) signal-0 liveness check"
+        )]
         let _ = pid;
         false
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::is_executable;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn is_executable_true_only_for_executable_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let exe = dir.path().join("tool");
+        std::fs::write(&exe, b"#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(is_executable(&exe), "0o755 file should be executable");
+
+        let plain = dir.path().join("data");
+        std::fs::write(&plain, b"x").expect("write");
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(
+            !is_executable(&plain),
+            "0o644 file should not be executable"
+        );
+
+        assert!(
+            !is_executable(&dir.path().join("missing")),
+            "missing path should not be executable"
+        );
+
+        assert!(
+            !is_executable(dir.path()),
+            "a directory should not count as an executable file"
+        );
+    }
+
+    mod props {
+        use super::super::{read_pidfile, write_pidfile_atomic};
+        use proptest::prelude::*;
+
+        proptest! {
+            // Any pid written via the atomic writer reads back unchanged.
+            #[test]
+            fn pidfile_write_read_roundtrips(pid in any::<u32>()) {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let path = dir.path().join("mcp-proxy.pid");
+                write_pidfile_atomic(&path, pid).expect("write");
+                let read = read_pidfile(&path).expect("read");
+                prop_assert_eq!(read, Some(pid));
+            }
+
+            // Non-numeric pidfile contents are never silently misparsed into a
+            // bogus pid: read_pidfile either errors or reports an absent pid
+            // (e.g. when the content trims to empty), but never yields Some.
+            #[test]
+            fn pidfile_parse_never_invents_a_pid(s in "[^0-9]{1,12}") {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let path = dir.path().join("mcp-proxy.pid");
+                std::fs::write(&path, &s).expect("write");
+                match read_pidfile(&path) {
+                    Ok(None) | Err(_) => {}
+                    Ok(Some(pid)) => prop_assert!(false, "parsed bogus pid {pid} from {s:?}"),
+                }
+            }
+        }
     }
 }

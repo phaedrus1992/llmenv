@@ -30,8 +30,18 @@ bundle:
   - name: rust-defaults
     tags: [rust]
 
-icm:
-  server_tag: icm-server
-  server_bind: "0.0.0.0:7878"
-  client_url: "http://fixed.local:7878"
+host:
+  fixed:
+    addr: "fixed.local"
+
+mcp:
+  - name: playwright
+    tags: [base]
+    command: npx
+    args: ["-y", "@playwright/mcp@latest"]
+
+memory:
+  server_host: fixed
+  port: 7878
+  tags: [base]
   default_topics: ["context-{project}", preferences]
