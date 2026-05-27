@@ -76,10 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **`cache_dir` traversal detection now parses path components** instead of
-  substring matching, so traversal that the old check missed — e.g. a trailing
-  `foo/..` with no slash — is rejected. New `paths::has_parent_component` helper
-  backs the check. (#65)
+- **Path traversal detection now parses path components** instead of substring
+  matching, so traversal the old checks missed — e.g. a trailing `foo/..` with
+  no slash — is rejected. New `paths::has_parent_component` helper backs both
+  `cache_dir` (#65) and `project.path_prefix` validation. (#65)
 - Improved error messages with context using `anyhow`
 - Fixed shell variable name validation
 - Added proper escaping for shell metacharacters in exported variables
