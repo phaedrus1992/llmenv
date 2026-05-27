@@ -50,17 +50,46 @@ inline `settings`), `enabledPlugins`, plus managed controls
 
 Plugins are loadable from `.zip` archives and URLs (recent feature).
 
-## Gaps vs llmenv
+## How llmenv models plugins (#59)
 
-- **Entirely unmodeled and arguably out of scope.** llmenv *is itself* a config
-  generator — it materializes the same component types plugins distribute
-  (skills, agents, hooks, MCP). Whether llmenv should also generate
-  `enabledPlugins` / `extraKnownMarketplaces` entries is a design question, not an
-  obvious gap.
-- Possible overlap to resolve in a design doc: a user might want llmenv to declare
-  *which plugins are enabled* per scope (e.g. enable a rust plugin on rust
-  projects). That maps to the `enabledPlugins` / marketplace settings keys and
-  would ride on the `settings.json` generator.
+llmenv declares marketplaces and plugin collections at the top level of
+`config.yaml`, selected onto a scope by tag intersection — the same model as
+`[[bundle]]` and `[[mcp]]`:
+
+```yaml
+marketplace:
+  - name: superpowers
+    source: "https://github.com/obra/superpowers"   # git URL → cloned
+  - name: dev-commons
+    source: "~/git/dev-commons"                      # local path → used in place
+
+plugin-collection:
+  - name: rust-tools
+    tags: [rust]
+    plugins: ["superpowers:tdd", "dev-commons:rust-tooling"]  # marketplace:plugin
+```
+
+A collection fires when any of its `tags` intersect the active scope tags. The
+union of fired collections' plugins (deduplicated) is materialized.
+
+**Marketplace caching.** Git sources are cloned once into
+`<cache_dir>/marketplaces/<name>/` and shared across scopes; `llmenv plugin sync`
+fast-forwards them. The resolved git HEAD is mixed into the materialized scope
+hash so a marketplace update re-renders the scope. Local-path sources are used in
+place (no clone). `llmenv export` never hits the network — it uses whatever is
+already cached.
+
+**Rendering.** The Claude Code adapter writes into `settings.json`:
+- `extraKnownMarketplaces` — keyed by marketplace name, `source: directory`
+  pointing at llmenv's local clone, so Claude loads the synced checkout instead
+  of re-fetching. Unsynced marketplaces are skipped.
+- `enabledPlugins` — keyed `<plugin>@<marketplace>`, all `true`. llmenv never
+  authors a `false` (disabled) entry.
+
+The internal model (`ResolvedPlugin { marketplace, plugin }` +
+`ResolvedMarketplace { name, source, install_location, head }`) is engine-agnostic
+so a future Codex adapter can render the same data into its own format.
+
 - `strictPluginOnlyCustomization` (M) is notable: in an enterprise that sets it,
   user/project skills/agents/hooks/MCP are blocked — only plugins and managed
   settings work. Not relevant to a personal project, but it bounds where

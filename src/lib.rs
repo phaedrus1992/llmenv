@@ -6,6 +6,7 @@ pub mod materialize;
 pub mod mcp;
 pub mod merge;
 pub mod paths;
+pub mod plugins;
 pub mod scope;
 pub mod sync;
 pub mod util;
