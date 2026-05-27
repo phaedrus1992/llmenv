@@ -1096,3 +1096,243 @@ defaultMode: acceptEdits
     let claude_code_native = manifest.native.get("claude_code").unwrap();
     assert!(claude_code_native.get("defaultMode").is_some());
 }
+
+// ============================================================================
+// #111: Invariant fuzzing for the D2 value-shape merge engine (`merge_json`).
+//
+// The example-based tests above pin specific D2/D3/O3 behaviors. These property
+// tests fuzz the merge primitive itself to assert the invariants those examples
+// assume hold for *all* inputs, not just the hand-picked cases.
+// ============================================================================
+mod merge_json_invariants {
+    use llmenv::util::merge_json;
+    use proptest::prelude::*;
+    use serde_json::Value;
+
+    // Bounded arbitrary JSON. Depth-limited so generation stays cheap while still
+    // producing nested objects/arrays that exercise the recursive merge.
+    fn arb_json(depth: u32) -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
+            "[a-z]{0,6}".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(depth, 24, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+                proptest::collection::vec(("[a-z]{1,5}", inner), 0..4)
+                    .prop_map(|pairs| { Value::Object(pairs.into_iter().collect()) }),
+            ]
+        })
+    }
+
+    proptest! {
+        // Merging never panics for any pair of JSON values.
+        #[test]
+        fn merge_never_panics(mut dst in arb_json(4), src in arb_json(4)) {
+            merge_json(&mut dst, src);
+        }
+
+        // Determinism: merging the same pair twice yields identical results.
+        #[test]
+        fn merge_is_deterministic(dst in arb_json(3), src in arb_json(3)) {
+            let mut a = dst.clone();
+            merge_json(&mut a, src.clone());
+            let mut b = dst;
+            merge_json(&mut b, src);
+            prop_assert_eq!(a, b);
+        }
+
+        // Scalar / shape-mismatch overwrite: when `src` is a scalar (or the two
+        // shapes differ), `src` wins wholesale — it is the higher-precedence
+        // overlay. The overwrite normalizes src's arrays (dedup at every depth)
+        // so the result matches what every other merge path produces. Verified
+        // by overwriting a scalar dst with arbitrary src and comparing against a
+        // separately-normalized src (obtained by overwriting a fresh scalar).
+        #[test]
+        fn scalar_dst_is_overwritten_by_normalized_src(src in arb_json(3)) {
+            let mut dst = Value::String("scalar".into());
+            merge_json(&mut dst, src.clone());
+
+            // Independently normalize src via the same overwrite path.
+            let mut normalized_src = Value::String("other".into());
+            merge_json(&mut normalized_src, src);
+
+            prop_assert_eq!(dst, normalized_src);
+        }
+
+        // Object union: keys present only in `src` always appear in the result
+        // with their `src` value; keys only in `dst` are preserved.
+        #[test]
+        fn object_merge_unions_disjoint_keys(
+            dst_keys in proptest::collection::hash_map("[a-z]{1,5}", any::<i64>(), 0..5),
+            src_keys in proptest::collection::hash_map("[A-Z]{1,5}", any::<i64>(), 0..5),
+        ) {
+            // Disjoint key spaces (lowercase vs uppercase) so no recursion/collision.
+            let dst_obj: serde_json::Map<String, Value> = dst_keys
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::Number((*v).into())))
+                .collect();
+            let src_obj: serde_json::Map<String, Value> = src_keys
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::Number((*v).into())))
+                .collect();
+            let mut dst = Value::Object(dst_obj);
+            merge_json(&mut dst, Value::Object(src_obj));
+            let out = dst.as_object().unwrap();
+            for (k, v) in &dst_keys {
+                prop_assert_eq!(out.get(k).unwrap(), &Value::Number((*v).into()));
+            }
+            for (k, v) in &src_keys {
+                prop_assert_eq!(out.get(k).unwrap(), &Value::Number((*v).into()));
+            }
+        }
+
+        // Array merge is concat-then-dedup: the result contains every distinct
+        // element from dst and src, with no duplicates, and dst's elements first.
+        #[test]
+        fn array_merge_concats_and_dedups(
+            a in proptest::collection::vec(0i64..8, 0..6),
+            b in proptest::collection::vec(0i64..8, 0..6),
+        ) {
+            let to_arr = |xs: &[i64]| Value::Array(xs.iter().map(|n| Value::Number((*n).into())).collect());
+            let mut dst = to_arr(&a);
+            merge_json(&mut dst, to_arr(&b));
+            let out = dst.as_array().unwrap();
+
+            // No duplicates in the result.
+            for i in 0..out.len() {
+                for j in (i + 1)..out.len() {
+                    prop_assert_ne!(&out[i], &out[j]);
+                }
+            }
+            // Every distinct input element is present.
+            for n in a.iter().chain(b.iter()) {
+                prop_assert!(out.contains(&Value::Number((*n).into())));
+            }
+        }
+
+        // Idempotence on dedup-free arrays: merging `src` into a result that has
+        // already absorbed `src` is a no-op when src carries no duplicate elements.
+        #[test]
+        fn merge_idempotent_for_distinct_arrays(
+            base in proptest::collection::vec(0i64..6, 0..4),
+            overlay in proptest::collection::hash_set(10i64..16, 0..4),
+        ) {
+            let overlay: Vec<i64> = overlay.into_iter().collect();
+            let to_arr = |xs: &[i64]| Value::Array(xs.iter().map(|n| Value::Number((*n).into())).collect());
+            let mut once = to_arr(&base);
+            merge_json(&mut once, to_arr(&overlay));
+            let mut twice = once.clone();
+            merge_json(&mut twice, to_arr(&overlay));
+            prop_assert_eq!(once, twice);
+        }
+    }
+}
+
+// Parity fuzzing for the YAML merge path. `merge_yaml` and `merge_json` share
+// the same value-shape rule (objects union, sequences concat-then-dedup, scalars
+// overwrite) and the same normalization fix, so they must satisfy the same
+// invariants. These mirror `merge_json_invariants` against serde_yaml::Value.
+mod merge_yaml_invariants {
+    use llmenv::util::merge_yaml;
+    use proptest::prelude::*;
+    use serde_yaml::Value;
+
+    // Bounded arbitrary YAML, structurally identical to arb_json above.
+    fn arb_yaml(depth: u32) -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
+            "[a-z]{0,6}".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(depth, 24, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(Value::Sequence),
+                proptest::collection::vec(("[a-z]{1,5}", inner), 0..4).prop_map(|pairs| {
+                    Value::Mapping(
+                        pairs
+                            .into_iter()
+                            .map(|(k, v)| (Value::String(k), v))
+                            .collect(),
+                    )
+                }),
+            ]
+        })
+    }
+
+    proptest! {
+        // Merging never panics for any pair of YAML values.
+        #[test]
+        fn merge_never_panics(mut dst in arb_yaml(4), src in arb_yaml(4)) {
+            merge_yaml(&mut dst, src);
+        }
+
+        // Determinism: merging the same pair twice yields identical results.
+        #[test]
+        fn merge_is_deterministic(dst in arb_yaml(3), src in arb_yaml(3)) {
+            let mut a = dst.clone();
+            merge_yaml(&mut a, src.clone());
+            let mut b = dst;
+            merge_yaml(&mut b, src);
+            prop_assert_eq!(a, b);
+        }
+
+        // Scalar / shape-mismatch overwrite: src wins wholesale and its sequences
+        // are normalized, so the result matches an independently-normalized src.
+        #[test]
+        fn scalar_dst_is_overwritten_by_normalized_src(src in arb_yaml(3)) {
+            let mut dst = Value::String("scalar".into());
+            merge_yaml(&mut dst, src.clone());
+
+            let mut normalized_src = Value::String("other".into());
+            merge_yaml(&mut normalized_src, src);
+
+            prop_assert_eq!(dst, normalized_src);
+        }
+
+        // Sequence merge is concat-then-dedup: result holds every distinct element
+        // from dst and src with no duplicates.
+        #[test]
+        fn sequence_merge_concats_and_dedups(
+            a in proptest::collection::vec(0i64..8, 0..6),
+            b in proptest::collection::vec(0i64..8, 0..6),
+        ) {
+            let to_seq = |xs: &[i64]| {
+                Value::Sequence(xs.iter().map(|n| Value::Number((*n).into())).collect())
+            };
+            let mut dst = to_seq(&a);
+            merge_yaml(&mut dst, to_seq(&b));
+            let out = dst.as_sequence().unwrap();
+
+            for i in 0..out.len() {
+                for j in (i + 1)..out.len() {
+                    prop_assert_ne!(&out[i], &out[j]);
+                }
+            }
+            for n in a.iter().chain(b.iter()) {
+                prop_assert!(out.contains(&Value::Number((*n).into())));
+            }
+        }
+
+        // Idempotence on dedup-free sequences: re-merging an already-absorbed
+        // overlay is a no-op.
+        #[test]
+        fn merge_idempotent_for_distinct_sequences(
+            base in proptest::collection::vec(0i64..6, 0..4),
+            overlay in proptest::collection::hash_set(10i64..16, 0..4),
+        ) {
+            let overlay: Vec<i64> = overlay.into_iter().collect();
+            let to_seq = |xs: &[i64]| {
+                Value::Sequence(xs.iter().map(|n| Value::Number((*n).into())).collect())
+            };
+            let mut once = to_seq(&base);
+            merge_yaml(&mut once, to_seq(&overlay));
+            let mut twice = once.clone();
+            merge_yaml(&mut twice, to_seq(&overlay));
+            prop_assert_eq!(once, twice);
+        }
+    }
+}

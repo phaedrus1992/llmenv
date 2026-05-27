@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use crate::config::{Capabilities, NativePermissionRules, PermissionMode, Permissions};
-use crate::util::{dedup, merge_yaml};
+use crate::util::{dedup, merge_yaml, normalize_yaml};
 
 /// A single source of capability fragments. `precedence` encodes scope rank
 /// (higher wins for scalars); `name` is used only in collision errors.
@@ -107,7 +107,13 @@ fn merge_native_feature(
             match merged.get_mut(engine) {
                 Some(existing) => merge_yaml(existing, fragment.clone()),
                 None => {
-                    merged.insert(engine.clone(), fragment.clone());
+                    // Normalize on first insert so the result matches what the
+                    // merge path produces — otherwise a fragment with duplicate
+                    // sequence elements keeps them on insert but loses them on a
+                    // later merge, making this function non-idempotent.
+                    let mut fragment = fragment.clone();
+                    normalize_yaml(&mut fragment);
+                    merged.insert(engine.clone(), fragment);
                 }
             }
         }
@@ -416,6 +422,46 @@ mod tests {
                 contribs in prop::collection::vec(arb_list_contributor(), 0..5)
             ) {
                 let once = merge_capabilities(&contribs).unwrap();
+                let again = merge_capabilities(&[CapabilityContributor {
+                    name: "merged".into(),
+                    precedence: 1,
+                    capabilities: once.clone(),
+                }])
+                .unwrap();
+                prop_assert_eq!(once, again);
+            }
+
+            // native_* fragments are normalized on first insert, so a single
+            // contributor whose fragment carries duplicate sequence elements
+            // produces the same output as re-merging that output. This guards the
+            // insert-path normalization (the merge path was always normalized).
+            #[test]
+            fn native_fragment_insert_is_idempotent(
+                items in prop::collection::vec("[a-z]{1,4}", 0..6),
+            ) {
+                let seq = serde_yaml::Value::Sequence(
+                    items
+                        .iter()
+                        .map(|s| serde_yaml::Value::String(s.clone()))
+                        .collect(),
+                );
+                let mut frag = serde_yaml::Mapping::new();
+                frag.insert(serde_yaml::Value::String("list".into()), seq);
+                let fragment = serde_yaml::Value::Mapping(frag);
+
+                let mut native_hooks = BTreeMap::new();
+                native_hooks.insert("claude_code".to_owned(), fragment);
+
+                let contrib = CapabilityContributor {
+                    name: "only".into(),
+                    precedence: 1,
+                    capabilities: Capabilities {
+                        native_hooks,
+                        ..Default::default()
+                    },
+                };
+
+                let once = merge_capabilities(&[contrib]).unwrap();
                 let again = merge_capabilities(&[CapabilityContributor {
                     name: "merged".into(),
                     precedence: 1,

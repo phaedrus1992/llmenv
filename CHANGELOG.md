@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deep-merge non-idempotence** — `util::merge_json` / `merge_yaml` and
+  `merge::capabilities::merge_native_feature` could keep duplicate
+  sequence/array elements on the insert and scalar-overwrite paths that a later
+  merge would dedup away, so `merge(merge(x)) != merge(x)`. All write paths now
+  normalize (dedup at every depth) on insert, making the merge fully idempotent.
+  Surfaced by new property-based tests covering the Claude Code adapter
+  serialization/validation paths and the merge engine. (#107, #108, #109, #110,
+  #111)
+
 ### Added
 
 - **Per-feature `native` overrides + top-level passthrough** — completes the
