@@ -9,13 +9,14 @@ fn fixture_bundle(name: &str) -> BundleRef {
     BundleRef {
         name: name.into(),
         path: PathBuf::from(format!("tests/fixtures/bundles/{name}")),
+        precedence: 1,
     }
 }
 
 #[test]
 fn claude_code_layout() {
     let bundles = vec![fixture_bundle("base"), fixture_bundle("rust-defaults")];
-    let m = merge(&bundles).expect("merge");
+    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
     let tmp = tempdir().expect("tempdir");
     let adapter = ClaudeCodeAdapter;
     adapter
@@ -41,7 +42,7 @@ fn claude_code_layout() {
 #[test]
 fn claude_md_matches_merged_agents_md() {
     let bundles = vec![fixture_bundle("base"), fixture_bundle("rust-defaults")];
-    let m = merge(&bundles).expect("merge");
+    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -84,7 +85,7 @@ fn name_is_stable() {
 #[test]
 fn plugins_are_materialized() {
     let bundles = vec![fixture_bundle("with-plugin")];
-    let m = merge(&bundles).expect("merge");
+    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -106,7 +107,7 @@ fn skills_with_frontmatter_are_validated() {
     // and that the adapter validates the required frontmatter.
     // Currently skills are single .md files; this test will fail until #33 is implemented.
     let bundles = vec![fixture_bundle("base")];
-    let m = merge(&bundles).expect("merge");
+    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())

@@ -39,7 +39,7 @@ mod tests {
     fn load_accepts_expanded_path() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("config.yaml");
-        std::fs::write(&p, "settings: {}\n").unwrap();
+        std::fs::write(&p, "cache: {}\n").unwrap();
         // An absolute (already-expanded) path must not trip the debug_assert.
         assert!(Config::load(&p).is_ok());
     }

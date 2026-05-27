@@ -9,13 +9,18 @@ fn fixture_bundle(name: &str) -> BundleRef {
     BundleRef {
         name: name.into(),
         path: PathBuf::from(format!("tests/fixtures/bundles/{name}")),
+        precedence: 1,
     }
 }
 
 #[test]
 fn materializes_deterministically() {
     let tmp = tempdir().expect("tempdir");
-    let m = merge(&[fixture_bundle("base")]).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge");
     let p1 = materialize(&m, tmp.path()).expect("materialize 1");
     let p2 = materialize(&m, tmp.path()).expect("materialize 2");
     assert_eq!(p1, p2, "same manifest hashes to same path");
@@ -28,9 +33,16 @@ fn materializes_deterministically() {
 #[test]
 fn different_manifests_produce_different_dirs() {
     let tmp = tempdir().expect("tempdir");
-    let m_base = merge(&[fixture_bundle("base")]).expect("merge base");
-    let m_both =
-        merge(&[fixture_bundle("base"), fixture_bundle("rust-defaults")]).expect("merge both");
+    let m_base = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge base");
+    let m_both = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base"), fixture_bundle("rust-defaults")],
+    )
+    .expect("merge both");
     let p1 = materialize(&m_base, tmp.path()).expect("materialize base");
     let p2 = materialize(&m_both, tmp.path()).expect("materialize both");
     assert_ne!(p1, p2);
@@ -39,7 +51,11 @@ fn different_manifests_produce_different_dirs() {
 #[test]
 fn no_tmp_stage_dir_after_success() {
     let tmp = tempdir().expect("tempdir");
-    let m = merge(&[fixture_bundle("base")]).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge");
     let _ = materialize(&m, tmp.path()).expect("materialize");
     for entry in std::fs::read_dir(tmp.path()).expect("read_dir") {
         let p = entry.expect("entry").path();
