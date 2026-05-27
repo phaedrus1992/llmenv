@@ -14,15 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sequence/array elements on the insert and scalar-overwrite paths that a later
   merge would dedup away, so `merge(merge(x)) != merge(x)`. All write paths now
   normalize (dedup at every depth) on insert, making the merge fully idempotent.
-  Surfaced by new property tests. (#107, #111)
-
-### Tested
-
-- **Property-based testing coverage** — added `proptest` coverage for the Claude
-  Code adapter (`overlay_native`, `reject_modeled_keys_in_catch_all`,
-  `is_hook_json`, `write_mcp_json`) and merge-engine invariant fuzzing for both
-  `merge_json` and `merge_yaml` (never-panics, determinism, scalar-overwrite
-  normalization, concat-then-dedup, idempotence). (#107, #108, #109, #110, #111)
+  Surfaced by new property-based tests covering the Claude Code adapter
+  serialization/validation paths and the merge engine. (#107, #108, #109, #110,
+  #111)
 
 ### Added
 
