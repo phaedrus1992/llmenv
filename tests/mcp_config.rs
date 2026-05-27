@@ -14,6 +14,7 @@ fn fixture_bundle(name: &str) -> BundleRef {
     BundleRef {
         name: name.into(),
         path: PathBuf::from(format!("tests/fixtures/bundles/{name}")),
+        precedence: 1,
     }
 }
 
@@ -45,7 +46,11 @@ fn remote(name: &str, url: &str) -> ResolvedMcp {
 
 #[test]
 fn mcp_json_emitted_when_mcps_present() {
-    let mut m = merge(&[fixture_bundle("base")]).expect("merge");
+    let mut m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge");
     m.mcps = vec![remote("icm", "http://icm.lan:8765")];
     let tmp = tempdir().expect("tempdir");
 
@@ -61,7 +66,11 @@ fn mcp_json_emitted_when_mcps_present() {
 
 #[test]
 fn mcp_json_registers_remote_client_url() {
-    let mut m = merge(&[fixture_bundle("base")]).expect("merge");
+    let mut m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge");
     m.mcps = vec![remote("icm", "http://icm.lan:8765")];
     let tmp = tempdir().expect("tempdir");
 
@@ -80,7 +89,11 @@ fn mcp_json_registers_remote_client_url() {
 
 #[test]
 fn mcp_json_registers_stdio_command() {
-    let mut m = merge(&[fixture_bundle("base")]).expect("merge");
+    let mut m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge");
     m.mcps = vec![stdio("icm", "icm", &["mcp-server"])];
     let tmp = tempdir().expect("tempdir");
 
@@ -96,7 +109,11 @@ fn mcp_json_registers_stdio_command() {
 
 #[test]
 fn mcp_json_renders_multiple_servers() {
-    let mut m = merge(&[fixture_bundle("base")]).expect("merge");
+    let mut m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge");
     m.mcps = vec![
         stdio("playwright", "npx", &["-y", "@playwright/mcp@latest"]),
         remote("icm", "http://icm.lan:8765"),
@@ -116,7 +133,11 @@ fn mcp_json_renders_multiple_servers() {
 
 #[test]
 fn hook_template_substitutes_icm_mcp_placeholder() {
-    let m = merge(&[fixture_bundle("with-icm-hook")]).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("with-icm-hook")],
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
 
     ClaudeCodeAdapter
@@ -137,7 +158,11 @@ fn hook_template_substitutes_icm_mcp_placeholder() {
 
 #[test]
 fn hook_without_template_is_passed_through_unchanged() {
-    let m = merge(&[fixture_bundle("with-icm-hook")]).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("with-icm-hook")],
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
 
     ClaudeCodeAdapter
@@ -156,7 +181,11 @@ fn hook_without_template_is_passed_through_unchanged() {
 
 #[test]
 fn mcp_json_absent_when_no_mcps() {
-    let m = merge(&[fixture_bundle("base")]).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
 
     ClaudeCodeAdapter

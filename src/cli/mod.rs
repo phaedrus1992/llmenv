@@ -184,7 +184,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     eprintln!("{pass} Config is valid YAML");
 
     // Check cache directory is writable
-    let cache_dir = expand_tilde(&config.settings.cache_dir)?;
+    let cache_dir = expand_tilde(&config.cache.cache_dir)?;
     std::fs::create_dir_all(&cache_dir).context("cache directory not writable")?;
     eprintln!(
         "{pass} Cache directory is writable: {}",
@@ -324,8 +324,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
                 if meta.permissions().readonly() {
                     eprintln!("{warn} GC failed: cache directory is read-only");
                 } else {
-                    let cache_retention_hours =
-                        config.settings.cache_retention_hours.unwrap_or(168);
+                    let cache_retention_hours = config.cache.cache_retention_hours.unwrap_or(168);
                     let retention = std::time::Duration::from_secs(cache_retention_hours * 3600);
                     match crate::materialize::cache::gc(&cache_dir, retention) {
                         Ok(report) => {
@@ -467,7 +466,7 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     }
 
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed
-    let interval_secs = config.settings.sync_interval_minutes * 60;
+    let interval_secs = config.cache.sync_interval_minutes * 60;
     let state_dir = paths::state_dir()?;
     if let Err(e) = crate::sync::maybe_pull(
         &config_dir,
@@ -596,11 +595,11 @@ fn build_and_materialize(
         return Ok(None);
     }
 
-    let mut manifest: MergedManifest = crate::merge::merge(&refs)?;
+    let mut manifest: MergedManifest = crate::merge::merge(&config.capabilities, &refs)?;
     manifest.mcps =
         crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
 
-    let cache_root = expand_tilde(&config.settings.cache_dir)?;
+    let cache_root = expand_tilde(&config.cache.cache_dir)?;
     let adapter = ClaudeCodeAdapter;
     let adapter_root = cache_root.join(adapter.name());
     let cache_path = crate::materialize::materialize(&manifest, &adapter_root)?;
@@ -634,22 +633,27 @@ fn build_bundle_refs(
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut refs: Vec<BundleRef> = Vec::new();
 
-    let push_ref = |name: &str, refs: &mut Vec<BundleRef>, seen: &mut BTreeSet<String>| {
-        if seen.contains(name) {
-            return;
-        }
-        let path = bundles_dir.join(name);
-        if !path.exists() {
-            return;
-        }
-        seen.insert(name.to_owned());
-        refs.push(BundleRef {
-            name: name.to_owned(),
-            path,
-        });
-    };
+    let push_ref =
+        |name: &str, precedence: u8, refs: &mut Vec<BundleRef>, seen: &mut BTreeSet<String>| {
+            if seen.contains(name) {
+                return;
+            }
+            let path = bundles_dir.join(name);
+            if !path.exists() {
+                return;
+            }
+            seen.insert(name.to_owned());
+            refs.push(BundleRef {
+                name: name.to_owned(),
+                path,
+                precedence,
+            });
+        };
 
-    for kind in PRECEDENCE {
+    for (tier, kind) in PRECEDENCE.iter().enumerate() {
+        // Earlier tiers (network) outrank later ones (project) for scalar
+        // capability resolution, matching the placement-precedence order.
+        let precedence = (PRECEDENCE.len() - tier) as u8;
         // Tags emitted by scopes of this kind.
         let kind_tags: BTreeSet<&str> = active
             .scopes
@@ -659,14 +663,14 @@ fn build_bundle_refs(
             .collect();
         for bundle in firing {
             if bundle.tags.iter().any(|t| kind_tags.contains(t.as_str())) {
-                push_ref(&bundle.name, &mut refs, &mut seen);
+                push_ref(&bundle.name, precedence, &mut refs, &mut seen);
             }
         }
     }
     // Any firing bundle not already placed (shouldn't happen — every firing
-    // bundle has at least one tag in active.tags — but defensive).
+    // bundle has at least one tag in active.tags — but defensive). Lowest rank.
     for bundle in firing {
-        push_ref(&bundle.name, &mut refs, &mut seen);
+        push_ref(&bundle.name, 0, &mut refs, &mut seen);
     }
     refs
 }
@@ -719,7 +723,7 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
         return Ok(());
     }
 
-    let template = r#"settings:
+    let template = r#"cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 60
 
@@ -1155,7 +1159,7 @@ fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Re
 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let cache_dir = expand_tilde(&config.settings.cache_dir)?;
+    let cache_dir = expand_tilde(&config.cache.cache_dir)?;
 
     let report = crate::materialize::cache::prune(&cache_dir, mode, dry_run)?;
 
