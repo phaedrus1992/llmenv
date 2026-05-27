@@ -126,6 +126,23 @@ With this, `laptop` always emits `home`, so its agents always get the memory
 client URL — even when the network can't be auto-detected. The host that
 matches `server_host` additionally launches the local proxy.
 
+## Security considerations
+
+The memory backend has no transport security and no access control:
+
+- The proxy binds to `0.0.0.0:<port>` (all interfaces), and every client
+  connects over plaintext **`http://`** — there is no TLS, so anything stored
+  in memory crosses the wire in the clear.
+- There is no authentication. Any host that can reach `<addr>:<port>` can read
+  and write the memory backend. Access is gated **only** by network reachability
+  — that is the trust model.
+
+Deploy it only on a network you trust (home LAN, a private VPN, a firewalled
+subnet). Do not expose the port to the public internet, and do not point the
+`host:` `addr` at a publicly routable address. If you need to bridge hosts
+across an untrusted network, tunnel the port over SSH or a VPN rather than
+opening it directly.
+
 ## Diagnostics
 
 List the MCP servers that resolve for the current environment:
