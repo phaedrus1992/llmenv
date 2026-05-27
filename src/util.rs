@@ -62,8 +62,9 @@ pub fn merge_yaml(dst: &mut serde_yaml::Value, src: serde_yaml::Value) {
 
 /// Recursively dedup every sequence in a YAML value so it matches what
 /// [`merge_yaml`] produces. Used on insert/overwrite paths to keep the merge
-/// idempotent.
-fn normalize_yaml(value: &mut serde_yaml::Value) {
+/// idempotent — including by callers (e.g. `merge::capabilities`) that insert a
+/// fragment into a fresh map without routing it through [`merge_yaml`].
+pub(crate) fn normalize_yaml(value: &mut serde_yaml::Value) {
     use serde_yaml::Value;
     match value {
         Value::Sequence(items) => {
