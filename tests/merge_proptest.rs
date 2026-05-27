@@ -1,5 +1,5 @@
-use proptest::prelude::*;
 use llmenv::config::{Bundle, Config};
+use proptest::prelude::*;
 
 fn dedup<T: PartialEq>(items: Vec<T>) -> Vec<T> {
     let mut unique = Vec::new();
