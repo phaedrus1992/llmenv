@@ -78,7 +78,9 @@ fn is_valid_path_prefix(path: &str) -> bool {
     if path.is_empty() || path.len() > 4096 {
         return false;
     }
-    !path.contains('\0') && !path.contains("../") && !path.contains("/..\\")
+    // Parse components rather than substring-match so `foo/..` (no trailing
+    // slash) and host-OS separators are caught, matching is_safe_cache_dir.
+    !path.contains('\0') && !crate::paths::has_parent_component(path)
 }
 
 fn is_valid_var_name(name: &str) -> bool {
@@ -593,6 +595,31 @@ mod tests {
                     id: "proj1".to_string(),
                     r#match: ProjectMatch {
                         path_prefix: Some("/foo/../bar".to_string()),
+                        marker: None,
+                    },
+                    tags: vec!["tag1".to_string()],
+                }],
+            },
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_path_prefix_trailing_parent_no_slash() {
+        // `foo/..` has no "../" substring but is a real traversal — semantic
+        // parsing must reject it (variant of #65, found in pre-pr-review).
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes {
+                network: vec![],
+                host: vec![],
+                user: vec![],
+                project: vec![ProjectScope {
+                    id: "proj1".to_string(),
+                    r#match: ProjectMatch {
+                        path_prefix: Some("/foo/bar/..".to_string()),
                         marker: None,
                     },
                     tags: vec!["tag1".to_string()],
