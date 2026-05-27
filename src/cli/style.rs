@@ -55,7 +55,7 @@ where
         ColorMode::Always => true,
         ColorMode::Never => false,
         ColorMode::Auto => {
-            // Check NO_COLOR env var first (unconditional disable)
+            // Check NO_COLOR env var first (unconditional disable, any value disables)
             if get_env("NO_COLOR").is_some() {
                 return false;
             }
@@ -153,6 +153,22 @@ mod tests {
             Some(ColorMode::Auto),
             true,
             &no_color_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_no_color_empty_string() {
+        let no_color_empty_env = |name: &str| -> Option<String> {
+            match name {
+                "NO_COLOR" => Some(String::new()),
+                _ => None,
+            }
+        };
+        // NO_COLOR with empty string should still disable colors (presence matters, not value)
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &no_color_empty_env
         ));
     }
 
