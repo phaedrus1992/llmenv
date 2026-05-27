@@ -54,7 +54,7 @@ So even the three keys it does emit don't match Claude Code's format.
 ## Why the copied hooks are inert
 
 `materialize` copies `hooks/*.json` and substitutes `{{ICM_MCP}}`
-(`claude_code.rs:54-66`), so bundles ship hook scripts. But a hook only fires if a
+(`claude_code.rs:52-61`), so bundles ship hook scripts. But a hook only fires if a
 `settings.json` `hooks` entry references it at an event/matcher. Since
 `generate_settings_json` writes an empty (and mis-shaped) `hooks`, **the copied
 hook files do nothing.** Closing #34 is what makes the existing hook-copy
