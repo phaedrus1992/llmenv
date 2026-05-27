@@ -571,7 +571,6 @@ mod tests {
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use proptest::prelude::*;
-    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     proptest! {
@@ -746,8 +745,28 @@ mod tests {
             for m in &mcps {
                 let entry = servers.get(&m.name).unwrap();
                 match &m.kind {
-                    ResolvedKind::Stdio { command, .. } => {
+                    ResolvedKind::Stdio { command, args, env } => {
                         prop_assert_eq!(entry.get("command").unwrap(), command);
+                        // args always serialize as an array (possibly empty).
+                        let got_args: Vec<&str> = entry
+                            .get("args")
+                            .and_then(|v| v.as_array())
+                            .unwrap()
+                            .iter()
+                            .map(|v| v.as_str().unwrap())
+                            .collect();
+                        prop_assert_eq!(got_args, args.iter().map(String::as_str).collect::<Vec<_>>());
+                        // env is present iff non-empty; when present, every pair
+                        // round-trips.
+                        if env.is_empty() {
+                            prop_assert!(entry.get("env").is_none());
+                        } else {
+                            let got_env = entry.get("env").and_then(|v| v.as_object()).unwrap();
+                            prop_assert_eq!(got_env.len(), env.len());
+                            for (k, v) in env {
+                                prop_assert_eq!(got_env.get(k).unwrap().as_str().unwrap(), v);
+                            }
+                        }
                     }
                     ResolvedKind::Remote { url, .. } => {
                         prop_assert_eq!(entry.get("url").unwrap(), url);
@@ -828,14 +847,13 @@ mod tests {
             "[a-z][a-z0-9_-]{0,10}",
             "[a-z]{1,8}",
             proptest::collection::vec("[a-z]{0,6}", 0..3),
+            // Sometimes empty, sometimes populated — exercises both the
+            // env-omitted and env-serialized branches of write_mcp_json.
+            proptest::collection::btree_map("[A-Z][A-Z_]{0,5}", "[a-z0-9]{0,8}", 0..3),
         )
-            .prop_map(|(name, command, args)| ResolvedMcp {
+            .prop_map(|(name, command, args, env)| ResolvedMcp {
                 name,
-                kind: ResolvedKind::Stdio {
-                    command,
-                    args,
-                    env: BTreeMap::new(),
-                },
+                kind: ResolvedKind::Stdio { command, args, env },
             });
         let remote =
             ("[a-z][a-z0-9_-]{0,10}", "https://[a-z]{1,8}\\.test").prop_map(|(name, url)| {
