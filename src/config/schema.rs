@@ -85,18 +85,46 @@ pub struct Capabilities {
     /// Plugin ids as `<marketplace>:<plugin>`. A list — concatenates.
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// Per-engine native permission rule lists, keyed by engine name. The
+    /// engine-only override for permissions — raw rule strings in the engine's
+    /// own grammar, appended verbatim. Sibling to the neutral `permissions`
+    /// block (every feature's native override is a top-level `native_*` map).
+    #[serde(default)]
+    pub native_permissions: std::collections::BTreeMap<String, NativePermissionRules>,
+    /// Per-engine native hook fragments, keyed by engine name. The engine-only
+    /// layer-(b) override for hooks — engine-specific events/handlers that have
+    /// no neutral equivalent, emitted verbatim. Opaque to llmenv.
+    #[serde(default)]
+    pub native_hooks: std::collections::BTreeMap<String, serde_yaml::Value>,
+    /// Per-engine native plugin fragments, keyed by engine name. The engine-only
+    /// override for plugins (e.g. a Claude-only plugin flag). Opaque to llmenv.
+    #[serde(default)]
+    pub native_plugins: std::collections::BTreeMap<String, serde_yaml::Value>,
+    /// Per-engine native MCP fragments, keyed by engine name. The engine-only
+    /// override for MCP (e.g. `enabledMcpjsonServers`, a transport quirk).
+    /// Opaque to llmenv.
+    #[serde(default)]
+    pub native_mcp: std::collections::BTreeMap<String, serde_yaml::Value>,
 }
 
 impl Capabilities {
     /// True when no capability is declared — lets callers skip empty fragments.
     pub fn is_empty(&self) -> bool {
-        self.permissions.is_empty() && self.hooks.is_empty() && self.plugins.is_empty()
+        self.permissions.is_empty()
+            && self.hooks.is_empty()
+            && self.plugins.is_empty()
+            && self.native_permissions.is_empty()
+            && self.native_hooks.is_empty()
+            && self.native_plugins.is_empty()
+            && self.native_mcp.is_empty()
     }
 }
 
-/// Permission rules over tools and paths. `default_mode` is a scalar (resolved by
-/// scope precedence); `allow`/`ask`/`deny` are lists (concatenated). `native`
-/// carries per-engine raw rule strings appended verbatim by the adapter.
+/// Neutral permission rules over tools and paths. `default_mode` is a scalar
+/// (resolved by scope precedence); `allow`/`ask`/`deny` are lists (concatenated).
+/// The per-engine raw rule override lives in the sibling `native_permissions`
+/// map on [`Capabilities`], not here — matching every other feature's
+/// `native_*` override shape.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct Permissions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,9 +135,6 @@ pub struct Permissions {
     pub ask: Vec<PermissionRule>,
     #[serde(default)]
     pub deny: Vec<PermissionRule>,
-    /// Per-engine raw rule lists, keyed by engine name. Opaque to llmenv.
-    #[serde(default)]
-    pub native: std::collections::BTreeMap<String, NativePermissionRules>,
 }
 
 impl Permissions {
@@ -118,7 +143,6 @@ impl Permissions {
             && self.allow.is_empty()
             && self.ask.is_empty()
             && self.deny.is_empty()
-            && self.native.is_empty()
     }
 }
 

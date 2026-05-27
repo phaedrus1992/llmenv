@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use llmenv::adapter::AgentAdapter;
@@ -13,10 +14,19 @@ fn fixture_bundle(name: &str) -> BundleRef {
     }
 }
 
+fn empty_native() -> BTreeMap<String, serde_yaml::Value> {
+    BTreeMap::new()
+}
+
 #[test]
 fn claude_code_layout() {
     let bundles = vec![fixture_bundle("base"), fixture_bundle("rust-defaults")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     let adapter = ClaudeCodeAdapter;
     adapter
@@ -42,7 +52,12 @@ fn claude_code_layout() {
 #[test]
 fn claude_md_matches_merged_agents_md() {
     let bundles = vec![fixture_bundle("base"), fixture_bundle("rust-defaults")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -85,7 +100,12 @@ fn name_is_stable() {
 #[test]
 fn plugins_are_materialized() {
     let bundles = vec![fixture_bundle("with-plugin")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -107,7 +127,12 @@ fn skills_with_frontmatter_are_validated() {
     // and that the adapter validates the required frontmatter.
     // Currently skills are single .md files; this test will fail until #33 is implemented.
     let bundles = vec![fixture_bundle("base")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -246,7 +271,12 @@ fn rejects_skill_with_invalid_yaml_frontmatter() {
 #[test]
 fn hooks_generator_renders_bundle_hooks_into_settings_json() {
     let bundles = vec![fixture_bundle("base")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -301,7 +331,12 @@ fn hooks_generator_renders_bundle_hooks_into_settings_json() {
 #[test]
 fn hooks_generator_resolves_bundle_relative_paths() {
     let bundles = vec![fixture_bundle("base")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -341,7 +376,12 @@ fn hooks_generator_resolves_bundle_relative_paths() {
 #[test]
 fn native_passthrough_merges_engine_native_into_settings() {
     let bundles = vec![fixture_bundle("base")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -387,7 +427,12 @@ fn native_passthrough_merges_engine_native_into_settings() {
 #[test]
 fn native_rule_overrides_conflicting_neutral_rule() {
     let bundles = vec![fixture_bundle("native-wins")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -424,7 +469,12 @@ fn native_rule_overrides_conflicting_neutral_rule() {
 #[test]
 fn native_allow_does_not_suppress_neutral_deny() {
     let bundles = vec![fixture_bundle("native-allow-vs-neutral-deny")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -446,6 +496,150 @@ fn native_allow_does_not_suppress_neutral_deny() {
     );
 }
 
+// Issue #97: native_hooks["claude_code"] is a settings.json `hooks`-shaped
+// fragment that deep-merges into the generated hooks object. Engine-only hook
+// events appear verbatim; events shared with generic hooks concat their entries.
+#[test]
+fn native_hooks_merge_into_settings_hooks() {
+    let mut native_hooks = BTreeMap::new();
+    native_hooks.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>(
+            "PreCompact:\n  - hooks:\n      - type: command\n        command: /bin/engine-only.sh\n",
+        )
+        .expect("parse native hooks"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        capabilities: llmenv::config::Capabilities {
+            native_hooks,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+
+    let pre_compact = parsed["hooks"]["PreCompact"]
+        .as_array()
+        .expect("native PreCompact event rendered into hooks");
+    let cmd = pre_compact[0]["hooks"][0]["command"]
+        .as_str()
+        .expect("native hook command");
+    assert_eq!(cmd, "/bin/engine-only.sh");
+}
+
+// Issue #97: native_plugins["claude_code"] is a settings.json fragment that
+// deep-merges at the top level (e.g. extra plugin settings Claude understands
+// but llmenv has no neutral representation for).
+#[test]
+fn native_plugins_merge_into_settings() {
+    let mut native_plugins = BTreeMap::new();
+    native_plugins.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>("enabledPlugins:\n  \"extra@market\": true\n")
+            .expect("parse native plugins"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        capabilities: llmenv::config::Capabilities {
+            native_plugins,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+
+    assert_eq!(
+        parsed["enabledPlugins"]["extra@market"],
+        serde_json::Value::Bool(true),
+        "native plugin setting merged into settings.json"
+    );
+}
+
+// Issue #97: native_mcp["claude_code"] is an mcp.json fragment that deep-merges
+// into the generated mcp.json doc (e.g. enabledMcpjsonServers, which llmenv has
+// no neutral representation for). mcp.json is emitted even with no resolved MCPs
+// when a native_mcp fragment exists.
+#[test]
+fn native_mcp_merge_into_mcp_json() {
+    let mut native_mcp = BTreeMap::new();
+    native_mcp.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>("enabledMcpjsonServers:\n  - stdio_server\n")
+            .expect("parse native mcp"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        capabilities: llmenv::config::Capabilities {
+            native_mcp,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let mcp_json =
+        std::fs::read_to_string(tmp.path().join("mcp.json")).expect("mcp.json emitted for native");
+    let parsed: serde_json::Value = serde_json::from_str(&mcp_json).expect("parse mcp.json");
+
+    let enabled = parsed["enabledMcpjsonServers"]
+        .as_array()
+        .expect("native enabledMcpjsonServers rendered");
+    assert_eq!(enabled[0], serde_json::Value::String("stdio_server".into()));
+}
+
+// Issue #96: the top-level `native.claude_code` catch-all (keys no modeled
+// feature produces) deep-merges into settings.json after modeled capabilities.
+#[test]
+fn top_level_native_passthrough_merges_into_settings() {
+    let mut native = BTreeMap::new();
+    native.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>(
+            "alwaysThinkingEnabled: false\noutputStyle: Explanatory\n",
+        )
+        .expect("parse native"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        native,
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+
+    assert_eq!(
+        parsed["alwaysThinkingEnabled"],
+        serde_json::Value::Bool(false)
+    );
+    assert_eq!(
+        parsed["outputStyle"],
+        serde_json::Value::String("Explanatory".into())
+    );
+}
+
 // Issue #85: SessionStart hook prerequisite — wiring complete, hash comparison deferred
 #[test]
 fn session_start_hook_emitted_in_settings_json() {
@@ -455,7 +649,12 @@ fn session_start_hook_emitted_in_settings_json() {
     // This test verifies the hooks structure supports SessionStart registration.
 
     let bundles = vec![fixture_bundle("base")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -491,7 +690,12 @@ fn session_start_hook_emitted_in_settings_json() {
 #[test]
 fn two_bundles_merge_into_deterministic_settings_json() {
     let bundles = vec![fixture_bundle("merge-a"), fixture_bundle("merge-b")];
-    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
@@ -523,8 +727,18 @@ fn bundle_order_does_not_change_merged_membership() {
     let forward = vec![fixture_bundle("merge-a"), fixture_bundle("merge-b")];
     let backward = vec![fixture_bundle("merge-b"), fixture_bundle("merge-a")];
 
-    let mf = merge(&llmenv::config::Capabilities::default(), &forward).expect("merge fwd");
-    let mb = merge(&llmenv::config::Capabilities::default(), &backward).expect("merge bwd");
+    let mf = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &forward,
+    )
+    .expect("merge fwd");
+    let mb = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &backward,
+    )
+    .expect("merge bwd");
 
     // Same number of hooks regardless of order (dedup is order-independent).
     assert_eq!(mf.capabilities.hooks.len(), mb.capabilities.hooks.len());

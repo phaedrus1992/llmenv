@@ -15,6 +15,6 @@ permissions:
     - { tool: Read, paths: ["./src"] }
   deny:
     - { tool: Read, paths: ["./.env"] }
-  native:
-    claude_code:
-      deny: ["WebFetch(domain:other.example.com)"]
+native_permissions:
+  claude_code:
+    deny: ["WebFetch(domain:other.example.com)"]

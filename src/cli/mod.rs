@@ -648,7 +648,8 @@ fn build_and_materialize(
         return Ok(None);
     }
 
-    let mut manifest: MergedManifest = crate::merge::merge(&config.capabilities, &refs)?;
+    let mut manifest: MergedManifest =
+        crate::merge::merge(&config.capabilities, &config.native, &refs)?;
     manifest.mcps =
         crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
 

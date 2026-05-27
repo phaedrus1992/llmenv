@@ -1,5 +1,6 @@
 use llmenv::config::Capabilities;
 use llmenv::merge::{BundleRef, merge};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 fn bundle(name: &str) -> BundleRef {
@@ -10,10 +11,15 @@ fn bundle(name: &str) -> BundleRef {
     }
 }
 
+fn empty_native() -> BTreeMap<String, serde_yaml::Value> {
+    BTreeMap::new()
+}
+
 #[test]
 fn merges_two_bundles_with_provenance() {
     let m = merge(
         &Capabilities::default(),
+        &empty_native(),
         &[bundle("base"), bundle("rust-defaults")],
     )
     .expect("merge");
@@ -35,7 +41,7 @@ fn merges_two_bundles_with_provenance() {
 
 #[test]
 fn empty_bundle_list_yields_empty_manifest() {
-    let m = merge(&Capabilities::default(), &[]).expect("merge");
+    let m = merge(&Capabilities::default(), &empty_native(), &[]).expect("merge");
     assert!(m.agents_md.is_empty());
     assert!(m.files.is_empty());
     assert!(m.capabilities.is_empty());
@@ -44,13 +50,23 @@ fn empty_bundle_list_yields_empty_manifest() {
 #[test]
 fn bundle_without_bundle_yaml_contributes_no_capabilities() {
     // rust-defaults has only AGENTS.md + skills, no bundle.yaml.
-    let m = merge(&Capabilities::default(), &[bundle("rust-defaults")]).expect("merge");
+    let m = merge(
+        &Capabilities::default(),
+        &empty_native(),
+        &[bundle("rust-defaults")],
+    )
+    .expect("merge");
     assert!(m.capabilities.is_empty());
 }
 
 #[test]
 fn bundle_yaml_is_read_into_merged_capabilities() {
-    let m = merge(&Capabilities::default(), &[bundle("with-capabilities")]).expect("merge");
+    let m = merge(
+        &Capabilities::default(),
+        &empty_native(),
+        &[bundle("with-capabilities")],
+    )
+    .expect("merge");
     let caps = &m.capabilities;
     assert_eq!(
         caps.permissions.default_mode,
@@ -58,7 +74,7 @@ fn bundle_yaml_is_read_into_merged_capabilities() {
     );
     assert_eq!(caps.permissions.allow.len(), 1);
     assert_eq!(caps.permissions.deny.len(), 1);
-    assert_eq!(caps.permissions.native["claude_code"].deny.len(), 1);
+    assert_eq!(caps.native_permissions["claude_code"].deny.len(), 1);
     assert_eq!(caps.hooks.len(), 1);
     assert_eq!(caps.plugins, vec!["superpowers:superpowers".to_string()]);
 }
@@ -77,7 +93,7 @@ fn top_level_capabilities_merge_with_bundle_fragments() {
         },
         ..Default::default()
     };
-    let m = merge(&top, &[bundle("with-capabilities")]).expect("merge");
+    let m = merge(&top, &empty_native(), &[bundle("with-capabilities")]).expect("merge");
     // 1 from top-level + 1 from the bundle = 2 allow rules.
     assert_eq!(m.capabilities.permissions.allow.len(), 2);
 }
@@ -86,11 +102,13 @@ fn top_level_capabilities_merge_with_bundle_fragments() {
 fn agents_md_order_follows_bundle_order() {
     let a = merge(
         &Capabilities::default(),
+        &empty_native(),
         &[bundle("base"), bundle("rust-defaults")],
     )
     .expect("merge");
     let b = merge(
         &Capabilities::default(),
+        &empty_native(),
         &[bundle("rust-defaults"), bundle("base")],
     )
     .expect("merge");
@@ -116,6 +134,7 @@ fn later_bundle_overwrites_on_path_collision() {
 
     let m = merge(
         &Capabilities::default(),
+        &empty_native(),
         &[
             BundleRef {
                 name: "a".into(),

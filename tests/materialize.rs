@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -13,11 +14,16 @@ fn fixture_bundle(name: &str) -> BundleRef {
     }
 }
 
+fn empty_native() -> BTreeMap<String, serde_yaml::Value> {
+    BTreeMap::new()
+}
+
 #[test]
 fn materializes_deterministically() {
     let tmp = tempdir().expect("tempdir");
     let m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -35,11 +41,13 @@ fn different_manifests_produce_different_dirs() {
     let tmp = tempdir().expect("tempdir");
     let m_base = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge base");
     let m_both = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base"), fixture_bundle("rust-defaults")],
     )
     .expect("merge both");
@@ -53,6 +61,7 @@ fn no_tmp_stage_dir_after_success() {
     let tmp = tempdir().expect("tempdir");
     let m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");

@@ -18,6 +18,10 @@ fn fixture_bundle(name: &str) -> BundleRef {
     }
 }
 
+fn empty_native() -> BTreeMap<String, serde_yaml::Value> {
+    BTreeMap::new()
+}
+
 fn read_mcp_json(out: &std::path::Path) -> serde_json::Value {
     let s = std::fs::read_to_string(out.join("mcp.json")).expect("read mcp.json");
     serde_json::from_str(&s).expect("parse mcp.json")
@@ -48,6 +52,7 @@ fn remote(name: &str, url: &str) -> ResolvedMcp {
 fn mcp_json_emitted_when_mcps_present() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -68,6 +73,7 @@ fn mcp_json_emitted_when_mcps_present() {
 fn mcp_json_registers_remote_client_url() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -91,6 +97,7 @@ fn mcp_json_registers_remote_client_url() {
 fn mcp_json_registers_stdio_command() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -111,6 +118,7 @@ fn mcp_json_registers_stdio_command() {
 fn mcp_json_renders_multiple_servers() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -135,6 +143,7 @@ fn mcp_json_renders_multiple_servers() {
 fn hook_template_substitutes_icm_mcp_placeholder() {
     let m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("with-icm-hook")],
     )
     .expect("merge");
@@ -160,6 +169,7 @@ fn hook_template_substitutes_icm_mcp_placeholder() {
 fn hook_without_template_is_passed_through_unchanged() {
     let m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("with-icm-hook")],
     )
     .expect("merge");
@@ -183,6 +193,7 @@ fn hook_without_template_is_passed_through_unchanged() {
 fn mcp_json_absent_when_no_mcps() {
     let m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
