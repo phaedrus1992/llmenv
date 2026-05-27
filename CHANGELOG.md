@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Per-feature `native` overrides + top-level passthrough** — completes the
+  two-layer engine-capabilities model: every modeled feature now has both an
+  engine-neutral generic form and an engine-specific `native` override emitted
+  verbatim. New top-level `native_<feature>` sibling maps (`native_permissions`,
+  `native_hooks`, `native_plugins`, `native_mcp`), each a per-engine fragment;
+  the Claude Code adapter deep-merges each onto its rendered subtree
+  (`native_hooks` → `hooks`, `native_plugins` → settings top level, `native_mcp`
+  → `mcp.json`). The top-level `native.<engine>` catch-all (for keys no modeled
+  feature owns, e.g. `alwaysThinkingEnabled`) threads through `merge()` and is
+  overlaid onto `settings.json` last. A modeled-feature key (`permissions`,
+  `hooks`) in the catch-all now hard-errors instead of silently clobbering the
+  security-rendered output (which would bypass the deny-never-weakened
+  invariant) — it belongs in the `native_<feature>` sibling. Adds
+  `util::merge_json` for the adapter-side overlay. (#96, #97, #102)
+
 - **Plugin + marketplace support** — `marketplace:` and `plugin-collection:` are
   now first-class top-level config blocks, selected onto a scope by tag
   intersection (same model as bundles and MCP servers). Plugins are written as

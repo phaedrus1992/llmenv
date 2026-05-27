@@ -5,6 +5,6 @@ hooks:
 permissions:
   allow:
     - { tool: Bash, pattern: "cargo *" }
-  native:
-    claude_code:
-      deny: ["WebFetch(domain:internal.example.com)"]
+native_permissions:
+  claude_code:
+    deny: ["WebFetch(domain:internal.example.com)"]

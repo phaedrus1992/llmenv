@@ -49,6 +49,10 @@ pub struct MergedManifest {
     /// the top-level config and every selected bundle's `bundle.yaml`, by value
     /// shape. Adapters translate these into engine-native config.
     pub capabilities: Capabilities,
+    /// Per-engine opaque passthrough values (e.g. `claude_code: {alwaysThinkingEnabled: true}`).
+    /// These are merged verbatim into the engine's native config by adapters.
+    /// Source: top-level `config.yaml` `native:` block.
+    pub native: std::collections::BTreeMap<String, serde_yaml::Value>,
 }
 
 const COPIED_SUBDIRS: &[&str] = &["skills", "plugins", "hooks"];
@@ -57,7 +61,11 @@ const COPIED_SUBDIRS: &[&str] = &["skills", "plugins", "hooks"];
 /// from the selecting scope kind and is always below this.
 const TOP_LEVEL_PRECEDENCE: u8 = u8::MAX;
 
-pub fn merge(top_level: &Capabilities, bundles: &[BundleRef]) -> anyhow::Result<MergedManifest> {
+pub fn merge(
+    top_level: &Capabilities,
+    native: &BTreeMap<String, serde_yaml::Value>,
+    bundles: &[BundleRef],
+) -> anyhow::Result<MergedManifest> {
     let mut agents_parts = Vec::new();
     let mut files = BTreeMap::new();
     let mut rule_files: Vec<RuleFile> = Vec::new();
@@ -98,6 +106,7 @@ pub fn merge(top_level: &Capabilities, bundles: &[BundleRef]) -> anyhow::Result<
         agents_md: agents_md::concat(&agents_parts),
         files,
         rules: rule_files,
+        native: native.clone(),
         capabilities: merge_capabilities(&contributors)?,
         ..MergedManifest::default()
     })
