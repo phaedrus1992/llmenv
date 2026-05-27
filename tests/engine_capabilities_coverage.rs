@@ -278,25 +278,27 @@ fn o3_true_conflict_same_identity_different_content_mcp_servers() {
     // Create a MergedManifest with two MCP servers having the same name but different commands.
     // This simulates merging two bundles that both declare a server named "my-server"
     // with different implementations.
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    manifest.mcps = vec![
-        ResolvedMcp {
-            name: "my-server".into(),
-            kind: ResolvedKind::Stdio {
-                command: "python3".into(),
-                args: vec!["-m".into(), "my_server_v1".into()],
-                env: Default::default(),
+    let manifest = llmenv::merge::MergedManifest {
+        mcps: vec![
+            ResolvedMcp {
+                name: "my-server".into(),
+                kind: ResolvedKind::Stdio {
+                    command: "python3".into(),
+                    args: vec!["-m".into(), "my_server_v1".into()],
+                    env: Default::default(),
+                },
             },
-        },
-        ResolvedMcp {
-            name: "my-server".into(),
-            kind: ResolvedKind::Stdio {
-                command: "python3".into(),
-                args: vec!["-m".into(), "my_server_v2".into()], // Different args!
-                env: Default::default(),
+            ResolvedMcp {
+                name: "my-server".into(),
+                kind: ResolvedKind::Stdio {
+                    command: "python3".into(),
+                    args: vec!["-m".into(), "my_server_v2".into()], // Different args!
+                    env: Default::default(),
+                },
             },
-        },
-    ];
+        ],
+        ..Default::default()
+    };
 
     // Materialization should hard-error due to same-identity-different-content conflict.
     let result = ClaudeCodeAdapter.materialize(&manifest, tmp.path());
@@ -497,17 +499,19 @@ fn d2_value_shape_merge_shape_mismatch_src_wins() {
 
     // Create manifest where native hooks is a scalar but capabilities.hooks is a list
     // (or vice versa). The native shape should win.
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    manifest.native = {
-        let mut m = BTreeMap::new();
-        // native.claude_code.hooks as a string (shape mismatch)
-        m.insert(
-            "claude_code".into(),
-            serde_yaml::Value::String("simple-hook".into()),
-        );
-        m
+    let manifest = llmenv::merge::MergedManifest {
+        native: {
+            let mut m = BTreeMap::new();
+            // native.claude_code.hooks as a string (shape mismatch)
+            m.insert(
+                "claude_code".into(),
+                serde_yaml::Value::String("simple-hook".into()),
+            );
+            m
+        },
+        capabilities: llmenv::config::Capabilities::default(),
+        ..Default::default()
     };
-    manifest.capabilities = llmenv::config::Capabilities::default();
 
     let result = ClaudeCodeAdapter.materialize(&manifest, tmp.path());
     // Shape mismatch should be handled gracefully (either src-wins or dropped)
@@ -737,15 +741,17 @@ fn d3_mcp_json_emitted_when_resolved_servers() {
     // This test verifies merge produces a manifest with mcp servers; file emission is adapter responsibility.
     use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp};
 
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    manifest.mcps = vec![ResolvedMcp {
-        name: "test-server".into(),
-        kind: ResolvedKind::Stdio {
-            command: "python3".into(),
-            args: vec!["-m".into(), "test".into()],
-            env: Default::default(),
-        },
-    }];
+    let manifest = llmenv::merge::MergedManifest {
+        mcps: vec![ResolvedMcp {
+            name: "test-server".into(),
+            kind: ResolvedKind::Stdio {
+                command: "python3".into(),
+                args: vec!["-m".into(), "test".into()],
+                env: Default::default(),
+            },
+        }],
+        ..Default::default()
+    };
 
     // Verify the manifest carries resolved servers
     assert_eq!(manifest.mcps.len(), 1);
@@ -757,22 +763,24 @@ fn d3_mcp_json_emitted_when_native_mcp_fragment() {
     // Test: manifest carries native_mcp fragment when present.
     // Per D3: "`mcp.json` is emitted when there are resolved servers *or* a `native_mcp` fragment."
     // This test verifies merge produces a manifest with mcp data; file emission tested in adapter.
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    manifest.native = {
-        let mut m = BTreeMap::new();
-        m.insert(
-            "claude_code".into(),
-            serde_yaml::from_str(
-                r#"
+    let manifest = llmenv::merge::MergedManifest {
+        native: {
+            let mut m = BTreeMap::new();
+            m.insert(
+                "claude_code".into(),
+                serde_yaml::from_str(
+                    r#"
 mcp:
   servers:
     my-server:
       command: python3
 "#,
-            )
-            .expect("parse yaml"),
-        );
-        m
+                )
+                .expect("parse yaml"),
+            );
+            m
+        },
+        ..Default::default()
     };
 
     assert!(
@@ -817,14 +825,16 @@ fn d3_settings_json_permission_object_shape_all_arrays_emitted() {
     /// settings.json rendering is an adapter responsibility.
     use llmenv::config::{Capabilities, PermissionRule, Permissions};
 
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    manifest.capabilities = Capabilities {
-        permissions: Permissions {
-            allow: vec![PermissionRule {
-                tool: "Read".into(),
-                pattern: Some("./src".into()),
-                paths: Vec::new(),
-            }],
+    let manifest = llmenv::merge::MergedManifest {
+        capabilities: Capabilities {
+            permissions: Permissions {
+                allow: vec![PermissionRule {
+                    tool: "Read".into(),
+                    pattern: Some("./src".into()),
+                    paths: Vec::new(),
+                }],
+                ..Default::default()
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -852,14 +862,14 @@ fn d3_native_fragment_for_other_engine_dropped_not_rendered() {
     // Test: native fragment for an engine other than claude_code is preserved in manifest.
     // Per issue #104: "Native fragment for an engine other than `claude_code` is **dropped** by the Claude adapter (not rendered) — tested?"
     // This test verifies merge preserves non-claude_code native fragments; adapter is responsible for filtering.
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    manifest.native = {
-        let mut m = BTreeMap::new();
-        m.insert(
-            "other_engine".into(),
-            serde_yaml::Value::String("should-be-dropped-by-adapter".into()),
-        );
-        m
+    let mut native = BTreeMap::new();
+    native.insert(
+        "other_engine".into(),
+        serde_yaml::Value::String("should-be-dropped-by-adapter".into()),
+    );
+    let manifest = llmenv::merge::MergedManifest {
+        native,
+        ..Default::default()
     };
 
     // Verify merge preserved the native entry (adapter will filter it)
@@ -880,22 +890,22 @@ fn d3_hard_error_native_top_level_contains_modeled_feature_key() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
 
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    manifest.native = {
-        let mut m = BTreeMap::new();
-        // Inject a modeled-feature key (should hard-error)
-        m.insert(
-            "claude_code".into(),
-            serde_yaml::from_str(
-                r#"
+    let mut native = BTreeMap::new();
+    // Inject a modeled-feature key (should hard-error)
+    native.insert(
+        "claude_code".into(),
+        serde_yaml::from_str(
+            r#"
 permissions:
   allow:
     - Read
 "#,
-            )
-            .expect("parse yaml"),
-        );
-        m
+        )
+        .expect("parse yaml"),
+    );
+    let manifest = llmenv::merge::MergedManifest {
+        native,
+        ..Default::default()
     };
 
     let result = ClaudeCodeAdapter.materialize(&manifest, tmp.path());
@@ -921,33 +931,31 @@ fn integration_native_wins_overrides_neutral_in_merged_settings() {
     /// This test verifies merge preserves both native and modeled data correctly.
     use llmenv::config::{Capabilities, PermissionMode, PermissionRule, Permissions};
 
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    // Modeled: allow Read
-    manifest.capabilities = Capabilities {
-        permissions: Permissions {
-            allow: vec![PermissionRule {
-                tool: "Read".into(),
-                pattern: Some("./src".into()),
-                paths: Vec::new(),
-            }],
-            default_mode: Some(PermissionMode::BypassPermissions),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    // Native: should be preserved verbatim
-    manifest.native = {
-        let mut m = BTreeMap::new();
-        m.insert(
-            "claude_code".into(),
-            serde_yaml::from_str(
-                r#"
+    let mut native = BTreeMap::new();
+    native.insert(
+        "claude_code".into(),
+        serde_yaml::from_str(
+            r#"
 defaultMode: acceptEdits
 "#,
-            )
-            .expect("parse yaml"),
-        );
-        m
+        )
+        .expect("parse yaml"),
+    );
+    let manifest = llmenv::merge::MergedManifest {
+        capabilities: Capabilities {
+            permissions: Permissions {
+                allow: vec![PermissionRule {
+                    tool: "Read".into(),
+                    pattern: Some("./src".into()),
+                    paths: Vec::new(),
+                }],
+                default_mode: Some(PermissionMode::BypassPermissions),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        native,
+        ..Default::default()
     };
 
     // Verify both native and modeled data are present in manifest
@@ -963,17 +971,19 @@ fn integration_bundle_relative_hook_command_paths_resolved() {
     /// This test verifies merge preserves the path; resolution is adapter responsibility.
     use llmenv::config::{Capabilities, Hook, HookHandler, HookHandlerKind};
 
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    manifest.capabilities = Capabilities {
-        hooks: vec![Hook {
-            event: "pre-commit".into(),
-            matcher: None,
-            handler: HookHandler {
-                kind: HookHandlerKind::Command,
-                command: Some("hooks/check.sh".into()),
-                tool: None,
-            },
-        }],
+    let manifest = llmenv::merge::MergedManifest {
+        capabilities: Capabilities {
+            hooks: vec![Hook {
+                event: "pre-commit".into(),
+                matcher: None,
+                handler: HookHandler {
+                    kind: HookHandlerKind::Command,
+                    command: Some("hooks/check.sh".into()),
+                    tool: None,
+                },
+            }],
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -1050,33 +1060,31 @@ fn integration_top_level_native_block_overlaid_last_highest_precedence() {
     /// This test verifies merge preserves native values at top-level precedence.
     use llmenv::config::{Capabilities, PermissionMode, PermissionRule, Permissions};
 
-    let mut manifest = llmenv::merge::MergedManifest::default();
-    // Capabilities set default_mode to BypassPermissions
-    manifest.capabilities = Capabilities {
-        permissions: Permissions {
-            default_mode: Some(PermissionMode::BypassPermissions),
-            allow: vec![PermissionRule {
-                tool: "Read".into(),
-                pattern: Some("./src".into()),
-                paths: Vec::new(),
-            }],
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    // Native value for adapter to overlay
-    manifest.native = {
-        let mut m = BTreeMap::new();
-        m.insert(
-            "claude_code".into(),
-            serde_yaml::from_str(
-                r#"
+    let mut native = BTreeMap::new();
+    native.insert(
+        "claude_code".into(),
+        serde_yaml::from_str(
+            r#"
 defaultMode: acceptEdits
 "#,
-            )
-            .expect("parse yaml"),
-        );
-        m
+        )
+        .expect("parse yaml"),
+    );
+    let manifest = llmenv::merge::MergedManifest {
+        capabilities: Capabilities {
+            permissions: Permissions {
+                default_mode: Some(PermissionMode::BypassPermissions),
+                allow: vec![PermissionRule {
+                    tool: "Read".into(),
+                    pattern: Some("./src".into()),
+                    paths: Vec::new(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        native,
+        ..Default::default()
     };
 
     // Verify both modeled and native are present in manifest
