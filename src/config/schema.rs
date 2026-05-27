@@ -8,7 +8,23 @@ pub struct Config {
     pub scope: Scopes,
     #[serde(default)]
     pub bundle: Vec<Bundle>,
-    pub icm: Option<Icm>,
+    /// MCP servers, selected onto scopes by tag intersection (same model as
+    /// bundles). These are plain user-declared servers (stdio or remote);
+    /// llmenv's own memory backend is configured separately under `memory`.
+    #[serde(default)]
+    pub mcp: Vec<McpServer>,
+    /// llmenv's memory backend (ICM). A single optional topology: one host runs
+    /// the daemon, every other selected host connects to it as a network
+    /// client. Desugars into a resolved MCP server so it lands in the agent's
+    /// MCP config alongside the `mcp` entries.
+    #[serde(default)]
+    pub memory: Option<Memory>,
+    /// Static host directory mapping a host name to a reachable address. Used
+    /// by the `memory` topology to build a client URL pointing at the host
+    /// that runs the server. Keyed by host name (matched against host-scope
+    /// `id`s by convention, though any name the config references works).
+    #[serde(default)]
+    pub host: std::collections::BTreeMap<String, HostEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -106,11 +122,64 @@ pub struct Bundle {
     pub vars: std::collections::BTreeMap<String, String>,
 }
 
+/// A reachable address for a named host, used by the `memory` backend to
+/// construct a client URL pointing at whichever host runs the server.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Icm {
-    pub server_tag: String,
-    pub server_bind: String,
-    pub client_url: String,
+pub struct HostEntry {
+    /// Hostname, DNS name, or IP literal (e.g. `"still.local"`, `"10.0.0.4"`).
+    pub addr: String,
+}
+
+/// Transport for an MCP server. `stdio` launches a local subprocess; `http`
+/// and `sse` register a remote endpoint by URL.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    #[default]
+    Stdio,
+    Http,
+    Sse,
+}
+
+/// llmenv's memory backend topology. One host (`server_host`) runs the daemon
+/// locally over stdio (wrapped in `mcp-proxy` to expose it on the network);
+/// every other selected host connects to it as an HTTP client at
+/// `http://<addr>:<port>`. ICM is an implementation detail — the config
+/// vocabulary deliberately does not mention it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Memory {
+    /// Name of the host (key into the top-level `host:` table) that runs the
+    /// memory daemon.
+    pub server_host: String,
+    /// Port the proxy listens on and clients connect to.
+    pub port: u16,
+    /// Tags that activate the memory server, intersected with active scope
+    /// tags (same selection model as bundles and MCP servers).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Default memory topics, surfaced for documentation/tooling. Not consumed
+    /// by rendering today but preserved so config round-trips.
     #[serde(default)]
     pub default_topics: Vec<String>,
+}
+
+/// An MCP server definition. Selected onto a scope when any of its `tags`
+/// intersect the active scope tag set (identical to bundle selection).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct McpServer {
+    /// Registration name in the agent's MCP config (e.g. `"playwright"`).
+    pub name: String,
+    /// Tags that activate this server, intersected with active scope tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, rename = "type")]
+    pub transport: McpTransport,
+    /// Command to launch for `stdio` transport.
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Endpoint URL for `http`/`sse` transport.
+    pub url: Option<String>,
 }

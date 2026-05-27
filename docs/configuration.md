@@ -7,7 +7,9 @@ llmenv configuration is defined in YAML format at `~/.config/llmenv/config.yaml`
 - `settings:` — Global behavior (cache, sync intervals)
 - `scope:` — Scope definitions (network, host, user, project)
 - `bundle:` — Environment variable bundles
-- `icm:` — MCP server integration (optional)
+- `mcp:` — MCP server declarations (optional)
+- `memory:` — llmenv's memory backend topology (optional)
+- `host:` — Host address table, used by the memory backend (optional)
 
 ## Settings
 
@@ -100,17 +102,51 @@ bundle:
       PROJECT_ROOT: "/Users/alice/code/myapp"
 ```
 
-## MCP Server Integration (Optional)
+## MCP Servers (Optional)
 
-Configure MCP proxy for AI agent access to tools:
+MCP servers are declared under `mcp:` and attached to scopes via `tags` — the
+same selection model as bundles. A server is rendered into the agent config
+(for Claude Code, `mcp.json`) when any of its tags is active.
+
+A static server is **stdio** (a launch command) or **remote** (an HTTP/SSE URL):
 
 ```yaml
-icm:
-  server_tag: icm-server              # Tag that activates server
-  server_bind: "127.0.0.1:9092"       # Server address
+mcp:
+  - name: playwright
+    tags: [base]
+    type: stdio                        # stdio (default) | http | sse
+    command: npx
+    args: ["-y", "@playwright/mcp@latest"]
+
+  - name: weather
+    tags: [base]
+    type: http
+    url: "https://weather.example.com/mcp"
 ```
 
-The MCP proxy ensures model context protocol servers are available to Claude Code and other agents when the `server_tag` is active in your current scope.
+### Memory backend (`memory:`)
+
+`memory:` configures llmenv's own memory backend as a single network service:
+one host runs the daemon, and every agent — on every host — connects to it over
+the network. The server host's address is looked up in the top-level `host:`
+table.
+
+```yaml
+host:
+  fixed:
+    addr: "fixed.local"
+
+memory:
+  server_host: fixed                   # key into the `host:` table
+  port: 7878
+  tags: [base]                         # activates the backend, like a bundle
+  default_topics: ["context-{project}", preferences]
+```
+
+On the host matching `server_host`, llmenv launches a local `mcp-proxy` bound to
+`0.0.0.0:<port>` that bridges the stdio daemon onto the network. Every agent —
+including the one on the server host — is configured with a remote client at
+`http://<addr>:<port>`. See [icm-topology.md](icm-topology.md) for details.
 
 ## YAML Gotchas
 
@@ -153,9 +189,14 @@ bundle:
     vars:
       OFFICE_CI_URL: "https://ci.internal"
 
-icm:
-  server_tag: icm-server
-  server_bind: "127.0.0.1:9092"
+host:
+  fixed:
+    addr: "fixed.local"
+
+memory:
+  server_host: fixed
+  port: 7878
+  tags: [base]
 ```
 
 ## Validation
