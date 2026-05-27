@@ -78,7 +78,9 @@ fn is_valid_path_prefix(path: &str) -> bool {
     if path.is_empty() || path.len() > 4096 {
         return false;
     }
-    !path.contains('\0') && !path.contains("../") && !path.contains("/..\\")
+    // Parse components rather than substring-match so `foo/..` (no trailing
+    // slash) and host-OS separators are caught, matching is_safe_cache_dir.
+    !path.contains('\0') && !crate::paths::has_parent_component(path)
 }
 
 fn is_valid_var_name(name: &str) -> bool {
@@ -97,7 +99,9 @@ fn is_safe_cache_dir(dir: &str) -> bool {
     if dir.is_empty() || dir.len() > 4096 {
         return false;
     }
-    !dir.contains('\0') && !dir.contains("../") && !dir.contains("/..")
+    // Parse components rather than substring-match so traversal can't slip
+    // through as `foo/..` (no trailing slash) or via host-OS separators.
+    !dir.contains('\0') && !crate::paths::has_parent_component(dir)
 }
 
 impl Config {
@@ -603,6 +607,31 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_path_prefix_trailing_parent_no_slash() {
+        // `foo/..` has no "../" substring but is a real traversal — semantic
+        // parsing must reject it (variant of #65, found in pre-pr-review).
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes {
+                network: vec![],
+                host: vec![],
+                user: vec![],
+                project: vec![ProjectScope {
+                    id: "proj1".to_string(),
+                    r#match: ProjectMatch {
+                        path_prefix: Some("/foo/bar/..".to_string()),
+                        marker: None,
+                    },
+                    tags: vec!["tag1".to_string()],
+                }],
+            },
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn test_invalid_path_with_null_byte() {
         let config = Config {
             settings: Settings::default(),
@@ -683,6 +712,23 @@ mod tests {
         let config = Config {
             settings: Settings {
                 cache_dir: "~/.cache/../../../etc/passwd".to_string(),
+                sync_interval_minutes: 15,
+                cache_retention_hours: Some(168),
+            },
+            scope: Scopes::default(),
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cache_dir_trailing_parent_no_slash() {
+        // `foo/..` has no "../" or "/.." substring on the right side but is a
+        // real traversal — semantic parsing (#65) must reject it.
+        let config = Config {
+            settings: Settings {
+                cache_dir: "~/.cache/llmenv/..".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
             },
