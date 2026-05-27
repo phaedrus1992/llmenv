@@ -248,6 +248,10 @@ pub fn is_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
+        #[expect(
+            unused_variables,
+            reason = "pid is only used on Unix for the kill(2) signal-0 liveness check"
+        )]
         let _ = pid;
         false
     }
