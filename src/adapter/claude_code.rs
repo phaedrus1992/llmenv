@@ -177,16 +177,22 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generates settings.json from hook/permission contributions in the manifest.
+/// Generates settings.json from the already-merged hook + permission
+/// capabilities in the manifest.
 ///
-/// Issue #90: Wires hook fragments into Claude Code's `hooks.{Event}[].hooks` array.
-/// Each event groups its hooks as `{ matcher: "...", hooks: [{ command, tool, type }] }`.
+/// Hooks (#90): `Vec<Hook>` → `{ EventName: [{ matcher?, hooks: [handler] }] }`.
 ///
-/// Issue #91: Merges top-level `native.claude_code` keys into settings.json with
-/// hard-error on collision (native key conflicts with capability-generated key).
+/// Permissions (#34): neutral `{tool, pattern|paths}` rules render into Claude's
+/// `Tool(pattern)` string grammar and land in `permissions.{allow,ask,deny}`
+/// alongside the verbatim `native.claude_code` rule strings (one flat array per
+/// action — not a nested `native` object). `default_mode` maps to `defaultMode`.
+/// Native rules win: a rule string asserted natively in any action is dropped
+/// from neutral-contributed actions, so a native `deny` overrides a neutral
+/// `allow` for the same rule. Cross-bundle merge (concat + dedup, scope-ordered)
+/// already happened in [`crate::merge`]; this function only renders.
 ///
-/// Issue #85: Prerequisite for SessionStart hook (wiring complete, hash comparison
-/// logic deferred to runtime hook script).
+/// SessionStart (#85): the hook object shape supports it; hash-comparison logic
+/// lives in the runtime hook script.
 fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Result<()> {
     let mut settings = serde_json::Map::new();
 
@@ -223,24 +229,78 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     }
     settings.insert("hooks".into(), serde_json::Value::Object(hooks_obj));
 
-    // #91: Merge native permission rules with collision detection
-    if settings.contains_key("permissions") {
-        return Err(anyhow::anyhow!(
-            "Collision: native.claude_code permissions conflict with capability-generated permissions key. \
-             Hard-error policy (O3): cannot merge. Review bundle.yaml and config.yaml for overlapping native/capability contributions."
-        ));
-    }
+    // #34: Render neutral permission rules into Claude's string grammar
+    // (`Tool(pattern)` / `Tool(path)` / bare `Tool`), then append the per-engine
+    // `native.claude_code` rule strings verbatim into the same allow/ask/deny
+    // arrays. Native rules are not a separate object — Claude Code reads one flat
+    // array per action (see docs/reference/claude-code/permissions.md). They
+    // share the array because both are just permission rule strings; the only
+    // difference is neutral rules are generated and native ones are authored.
+    let perms = &manifest.capabilities.permissions;
+    let native = perms.native.get("claude_code");
 
-    if let Some(native_rules) = manifest.capabilities.permissions.native.get("claude_code") {
+    // Native rules win over neutral ones: when the same rule string is asserted
+    // natively in any action, it is authoritative and that string is dropped from
+    // every neutral-contributed action before merge. This lets a bundle's
+    // `native.claude_code.deny: ["WebFetch(domain:x)"]` override a neutral
+    // `allow: { tool: WebFetch, pattern: "domain:x" }` declared elsewhere —
+    // native deny wins, the neutral allow is suppressed. Within a single action,
+    // a native and neutral string that agree simply dedupe.
+    let native_strings: std::collections::BTreeSet<String> = native
+        .into_iter()
+        .flat_map(|n| {
+            n.allow
+                .iter()
+                .chain(n.ask.iter())
+                .chain(n.deny.iter())
+                .cloned()
+        })
+        .collect();
+
+    let render_action = |neutral: &[crate::config::PermissionRule],
+                         native_rules: &[String],
+                         native_owns: &std::collections::BTreeSet<String>| {
+        let mut out: Vec<String> = Vec::new();
+        for rule in neutral {
+            for s in render_permission_rule(rule) {
+                // Drop neutral strings that any native action claims — unless
+                // it's this action's own native list, which is appended below
+                // (so an agreeing native+neutral in the same action still emits).
+                if native_owns.contains(&s) && !native_rules.contains(&s) {
+                    continue;
+                }
+                out.push(s);
+            }
+        }
+        out.extend(native_rules.iter().cloned());
+        dedup_strings(&mut out);
+        out
+    };
+
+    let allow = render_action(
+        &perms.allow,
+        native.map_or(&[], |n| &n.allow),
+        &native_strings,
+    );
+    let ask = render_action(&perms.ask, native.map_or(&[], |n| &n.ask), &native_strings);
+    let deny = render_action(
+        &perms.deny,
+        native.map_or(&[], |n| &n.deny),
+        &native_strings,
+    );
+
+    let has_perms =
+        !allow.is_empty() || !ask.is_empty() || !deny.is_empty() || perms.default_mode.is_some();
+    if has_perms {
         let mut perm_obj = serde_json::Map::new();
-        perm_obj.insert(
-            "native".into(),
-            json!({
-                "allow": native_rules.allow,
-                "ask": native_rules.ask,
-                "deny": native_rules.deny,
-            }),
-        );
+        if let Some(mode) = perms.default_mode {
+            perm_obj.insert("defaultMode".into(), json!(permission_mode_str(mode)));
+        }
+        // Always emit the three arrays when any permission config exists, so the
+        // shape matches Claude Code's object schema even if one action is empty.
+        perm_obj.insert("allow".into(), json!(allow));
+        perm_obj.insert("ask".into(), json!(ask));
+        perm_obj.insert("deny".into(), json!(deny));
         settings.insert("permissions".into(), serde_json::Value::Object(perm_obj));
     }
 
@@ -269,4 +329,52 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     }
 
     Ok(())
+}
+
+/// Render a neutral permission rule into Claude Code's string grammar.
+///
+/// - `{tool: Bash, pattern: "cargo *"}` → `["Bash(cargo *)"]`
+/// - `{tool: Read, paths: ["./.env", "./.env.*"]}` → `["Read(./.env)", "Read(./.env.*)"]`
+///   (one string per path — Claude has no multi-path rule form).
+/// - `{tool: Bash}` (no pattern, no paths) → `["Bash"]` (tool-wide rule).
+///
+/// `pattern` and `paths` are mutually exclusive by the neutral schema's
+/// intent; if both are somehow set, `pattern` wins and `paths` is ignored — the
+/// neutral form documents pattern as the scalar case.
+fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
+    if let Some(pattern) = &rule.pattern {
+        return vec![format!("{}({})", rule.tool, pattern)];
+    }
+    if !rule.paths.is_empty() {
+        return rule
+            .paths
+            .iter()
+            .map(|p| format!("{}({})", rule.tool, p))
+            .collect();
+    }
+    vec![rule.tool.clone()]
+}
+
+/// Map the neutral `PermissionMode` onto Claude Code's `defaultMode` string.
+fn permission_mode_str(mode: crate::config::PermissionMode) -> &'static str {
+    use crate::config::PermissionMode;
+    match mode {
+        PermissionMode::AcceptEdits => "acceptEdits",
+        PermissionMode::Plan => "plan",
+        PermissionMode::Default => "default",
+        PermissionMode::BypassPermissions => "bypassPermissions",
+    }
+}
+
+/// Stable dedup of permission rule strings, preserving first-seen order so the
+/// emitted arrays are deterministic across runs.
+fn dedup_strings(items: &mut Vec<String>) {
+    let mut i = 0;
+    while i < items.len() {
+        if items[..i].contains(&items[i]) {
+            items.remove(i);
+        } else {
+            i += 1;
+        }
+    }
 }

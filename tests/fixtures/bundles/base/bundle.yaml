@@ -1,0 +1,11 @@
+hooks:
+  - event: UserPromptSubmit
+    handler: { type: command, command: "echo 'base hook'" }
+permissions:
+  allow:
+    - { tool: Bash }
+  deny:
+    - { tool: Read, paths: ["./.env", "./.env.*"] }
+  native:
+    claude_code:
+      deny: ["WebFetch(domain:internal.example.com)"]

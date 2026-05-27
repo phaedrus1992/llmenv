@@ -1,0 +1,9 @@
+permissions:
+  # Neutral rule wants to allow this domain...
+  allow:
+    - { tool: WebFetch, pattern: "domain:blocked.example.com" }
+  # ...but the native deny asserts the same string. Native wins: the rule must
+  # appear only in deny, suppressed from allow.
+  native:
+    claude_code:
+      deny: ["WebFetch(domain:blocked.example.com)"]

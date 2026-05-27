@@ -43,7 +43,8 @@ fn empty_bundle_list_yields_empty_manifest() {
 
 #[test]
 fn bundle_without_bundle_yaml_contributes_no_capabilities() {
-    let m = merge(&Capabilities::default(), &[bundle("base")]).expect("merge");
+    // rust-defaults has only AGENTS.md + skills, no bundle.yaml.
+    let m = merge(&Capabilities::default(), &[bundle("rust-defaults")]).expect("merge");
     assert!(m.capabilities.is_empty());
 }
 

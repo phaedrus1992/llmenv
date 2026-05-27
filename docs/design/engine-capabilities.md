@@ -14,8 +14,16 @@ wrong-shaped stub:
 ```
 
 Issue #34 ("generate settings.json from merged hook + permission bundles") was
-marked CLOSED/COMPLETED on 2026-05-26 but **never implemented** — the stub is
-still live and `src/config/schema.rs` has no vocabulary for any of it.
+once marked CLOSED/COMPLETED but never implemented. It is now implemented across
+#90 (hooks), #91 (native passthrough), and #34 itself (neutral permission
+rendering): bundles declare capabilities in `bundle.yaml` (the TOML proposal in
+the original ticket predates the YAML switch and is dropped), the cross-bundle
+merge lives in `crate::merge`, and `ClaudeCodeAdapter::generate_settings_json`
+renders neutral rules into Claude's string grammar. Resolved design questions:
+the schema is llme-neutral YAML (not native-shaped TOML); hooks dedup by the full
+`Hook` value (equivalent to the `(event, matcher, command)` tuple since handler
+kind/tool are determined by the command vs. tool field); native permission rules
+win over conflicting neutral rules.
 
 The naive fix — "model `settings.json`" — is wrong. `settings.json` is a
 Claude-Code-specific *container*. Codex has a different file with different
