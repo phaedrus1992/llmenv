@@ -31,6 +31,8 @@ pub enum ValidateError {
     CacheRetentionInvalid,
     #[error("duplicate mcp name: {0}")]
     DuplicateMcpName(String),
+    #[error("mcp name '{0}' is reserved for the memory backend")]
+    McpReservedName(String),
     #[error("mcp {0} has no tags")]
     McpNoTags(String),
     #[error("mcp {0}: stdio transport requires a `command`")]
@@ -197,6 +199,9 @@ impl Config {
         for m in &self.mcp {
             if m.tags.is_empty() {
                 return Err(ValidateError::McpNoTags(m.name.clone()));
+            }
+            if m.name == crate::mcp::resolve::MEMORY_MCP_NAME {
+                return Err(ValidateError::McpReservedName(m.name.clone()));
             }
             if !seen_mcp_names.insert(&m.name) {
                 return Err(ValidateError::DuplicateMcpName(m.name.clone()));
@@ -517,6 +522,32 @@ mod tests {
             host: Default::default(),
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_mcp_named_icm_is_rejected() {
+        // A user MCP named "icm" collides with the memory backend's reserved
+        // registration name; rendering both would silently drop one entry.
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![crate::config::McpServer {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                tags: vec!["tag1".to_string()],
+                transport: crate::config::McpTransport::Stdio,
+                command: Some("echo".to_string()),
+                args: vec![],
+                env: Default::default(),
+                url: None,
+            }],
+            memory: None,
+            host: Default::default(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::McpReservedName(_))
+        ));
     }
 
     #[test]
