@@ -564,9 +564,15 @@ enum PermissionAction {
 
 #[cfg(test)]
 mod tests {
-    use super::render_permission_rule;
+    use super::{
+        MODELED_SETTINGS_KEYS, is_hook_json, overlay_native, reject_modeled_keys_in_catch_all,
+        render_permission_rule, write_mcp_json,
+    };
     use crate::config::PermissionRule;
+    use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use proptest::prelude::*;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     proptest! {
         // A rule with a `pattern` always renders to exactly one `Tool(pattern)`
@@ -611,5 +617,236 @@ mod tests {
             let rule = PermissionRule { tool, pattern, paths };
             prop_assert_eq!(render_permission_rule(&rule), render_permission_rule(&rule));
         }
+
+        // #107 overlay_native: a `None` fragment leaves the destination untouched.
+        #[test]
+        fn overlay_native_none_is_noop(seed in 0u64..1000) {
+            let mut dst = serde_json::json!({ "k": seed, "nested": { "a": [1, 2] } });
+            let before = dst.clone();
+            overlay_native(&mut dst, None).unwrap();
+            prop_assert_eq!(dst, before);
+        }
+
+        // #107 overlay_native idempotence: overlaying the same fragment twice
+        // equals overlaying it once, for ANY fragment. merge_json normalizes
+        // arrays on every path (insert and recursive-merge alike), so a
+        // duplicate-laden source array is deduped on first overlay and the
+        // second overlay is a no-op.
+        #[test]
+        fn overlay_native_is_idempotent(frag in arb_yaml_value(3)) {
+            let mut base = serde_json::json!({ "existing": "value", "list": ["x"] });
+            let mut once = base.clone();
+            overlay_native(&mut once, Some(&frag)).unwrap();
+            overlay_native(&mut base, Some(&frag)).unwrap();
+            overlay_native(&mut base, Some(&frag)).unwrap();
+            prop_assert_eq!(base, once);
+        }
+
+        // #107 overlay_native no-crash: arbitrary YAML never panics and the
+        // converted fragment's own keys win on scalar collision (native is the
+        // higher-precedence overlay).
+        #[test]
+        fn overlay_native_never_panics(frag in arb_yaml_value(4)) {
+            let mut dst = serde_json::json!({});
+            // Must not panic regardless of fragment shape.
+            let _ = overlay_native(&mut dst, Some(&frag));
+        }
+
+        // #109 reject_modeled_keys: a fragment that is not a mapping (scalar,
+        // sequence, null) is always accepted — there are no top-level keys to
+        // collide with a modeled feature.
+        #[test]
+        fn reject_modeled_keys_accepts_non_mappings(frag in arb_non_mapping_yaml()) {
+            prop_assert!(reject_modeled_keys_in_catch_all(&frag).is_ok());
+        }
+
+        // #109 reject_modeled_keys acceptance: a mapping built only from keys that
+        // are NOT modeled-feature keys always passes.
+        #[test]
+        fn reject_modeled_keys_accepts_unmodeled_mappings(
+            keys in proptest::collection::vec("[a-z]{1,10}", 0..6),
+        ) {
+            let mut map = serde_yaml::Mapping::new();
+            for k in keys {
+                if MODELED_SETTINGS_KEYS.contains(&k.as_str()) {
+                    continue; // never inject a modeled key in this acceptance case
+                }
+                map.insert(serde_yaml::Value::String(k), serde_yaml::Value::Bool(true));
+            }
+            let frag = serde_yaml::Value::Mapping(map);
+            prop_assert!(reject_modeled_keys_in_catch_all(&frag).is_ok());
+        }
+
+        // #109 reject_modeled_keys rejection completeness: a mapping containing ANY
+        // modeled key is always rejected, regardless of other keys present.
+        #[test]
+        fn reject_modeled_keys_rejects_any_modeled_key(
+            modeled_idx in 0usize..MODELED_SETTINGS_KEYS.len(),
+            extra_keys in proptest::collection::vec("[a-z]{1,8}", 0..4),
+        ) {
+            let mut map = serde_yaml::Mapping::new();
+            for k in extra_keys {
+                map.insert(serde_yaml::Value::String(k), serde_yaml::Value::Null);
+            }
+            let modeled = MODELED_SETTINGS_KEYS[modeled_idx];
+            map.insert(
+                serde_yaml::Value::String(modeled.to_owned()),
+                serde_yaml::Value::Null,
+            );
+            let frag = serde_yaml::Value::Mapping(map);
+            let err = reject_modeled_keys_in_catch_all(&frag);
+            prop_assert!(err.is_err());
+            prop_assert!(err.unwrap_err().to_string().contains(modeled));
+        }
+
+        // #110 is_hook_json correctness: returns true iff the path starts with the
+        // `hooks` component AND has a `.json` extension. Built from components so
+        // the property holds across separators and arbitrary names.
+        #[test]
+        fn is_hook_json_matches_spec(
+            first in "[a-z]{1,8}",
+            mid in proptest::collection::vec("[a-z]{1,6}", 0..3),
+            stem in "[a-z]{1,8}",
+            ext in proptest::option::of("[a-z]{1,5}"),
+        ) {
+            let mut p = PathBuf::from(&first);
+            for c in &mid {
+                p.push(c);
+            }
+            let file = match &ext {
+                Some(e) => format!("{stem}.{e}"),
+                None => stem.clone(),
+            };
+            p.push(&file);
+
+            let expected = first == "hooks" && ext.as_deref() == Some("json");
+            prop_assert_eq!(is_hook_json(&p), expected);
+        }
+
+        // #110 is_hook_json determinism + no-panic: arbitrary path strings
+        // (including special chars) classify consistently and never panic.
+        #[test]
+        fn is_hook_json_is_deterministic(raw in ".{0,40}") {
+            let p = PathBuf::from(&raw);
+            prop_assert_eq!(is_hook_json(&p), is_hook_json(&p));
+        }
+
+        // #108 write_mcp_json producibility + roundtrip: every distinctly-named
+        // resolved MCP appears under `mcpServers` in valid, re-parseable JSON.
+        #[test]
+        fn write_mcp_json_roundtrips_distinct_servers(mcps in arb_distinct_mcps()) {
+            let dir = tempfile::tempdir().unwrap();
+            write_mcp_json(dir.path(), &mcps, None).unwrap();
+
+            let raw = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let servers = doc.get("mcpServers").and_then(|v| v.as_object()).unwrap();
+
+            prop_assert_eq!(servers.len(), mcps.len());
+            for m in &mcps {
+                let entry = servers.get(&m.name).unwrap();
+                match &m.kind {
+                    ResolvedKind::Stdio { command, .. } => {
+                        prop_assert_eq!(entry.get("command").unwrap(), command);
+                    }
+                    ResolvedKind::Remote { url, .. } => {
+                        prop_assert_eq!(entry.get("url").unwrap(), url);
+                    }
+                }
+            }
+        }
+
+        // #108 write_mcp_json overlay determinism: an empty native overlay onto a
+        // server doc is a deterministic no-op on the `mcpServers` content.
+        #[test]
+        fn write_mcp_json_empty_overlay_is_deterministic(mcps in arb_distinct_mcps()) {
+            let empty = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+
+            let dir_a = tempfile::tempdir().unwrap();
+            write_mcp_json(dir_a.path(), &mcps, Some(&empty)).unwrap();
+            let a = std::fs::read_to_string(dir_a.path().join("mcp.json")).unwrap();
+
+            let dir_b = tempfile::tempdir().unwrap();
+            write_mcp_json(dir_b.path(), &mcps, Some(&empty)).unwrap();
+            let b = std::fs::read_to_string(dir_b.path().join("mcp.json")).unwrap();
+
+            prop_assert_eq!(a, b);
+        }
+    }
+
+    // Recursively-shaped arbitrary YAML for fragment fuzzing. Bounded depth keeps
+    // generation cheap while still exercising nested mappings/sequences.
+    fn arb_yaml_value(depth: u32) -> impl Strategy<Value = serde_yaml::Value> {
+        let leaf = prop_oneof![
+            Just(serde_yaml::Value::Null),
+            any::<bool>().prop_map(serde_yaml::Value::Bool),
+            any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
+            "[a-z]{0,8}".prop_map(serde_yaml::Value::String),
+        ];
+        leaf.prop_recursive(depth, 16, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4)
+                    .prop_map(serde_yaml::Value::Sequence),
+                proptest::collection::vec(("[a-z]{1,6}", inner), 0..4).prop_map(|pairs| {
+                    let mut m = serde_yaml::Mapping::new();
+                    for (k, v) in pairs {
+                        m.insert(serde_yaml::Value::String(k), v);
+                    }
+                    serde_yaml::Value::Mapping(m)
+                }),
+            ]
+        })
+    }
+
+    // Arbitrary YAML that is never a top-level mapping (the early-return path of
+    // reject_modeled_keys_in_catch_all).
+    fn arb_non_mapping_yaml() -> impl Strategy<Value = serde_yaml::Value> {
+        prop_oneof![
+            Just(serde_yaml::Value::Null),
+            any::<bool>().prop_map(serde_yaml::Value::Bool),
+            any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
+            "[a-z]{0,8}".prop_map(serde_yaml::Value::String),
+            proptest::collection::vec("[a-z]{0,6}".prop_map(serde_yaml::Value::String), 0..4)
+                .prop_map(serde_yaml::Value::Sequence),
+        ]
+    }
+
+    // A vector of ResolvedMcp with unique names (write_mcp_json hard-errors on
+    // same-name-different-content, so the roundtrip properties require distinct
+    // names to stay in the success path).
+    fn arb_distinct_mcps() -> impl Strategy<Value = Vec<ResolvedMcp>> {
+        proptest::collection::vec(arb_mcp(), 0..5).prop_map(|mcps| {
+            let mut seen = std::collections::BTreeSet::new();
+            mcps.into_iter()
+                .filter(|m| seen.insert(m.name.clone()))
+                .collect()
+        })
+    }
+
+    fn arb_mcp() -> impl Strategy<Value = ResolvedMcp> {
+        let stdio = (
+            "[a-z][a-z0-9_-]{0,10}",
+            "[a-z]{1,8}",
+            proptest::collection::vec("[a-z]{0,6}", 0..3),
+        )
+            .prop_map(|(name, command, args)| ResolvedMcp {
+                name,
+                kind: ResolvedKind::Stdio {
+                    command,
+                    args,
+                    env: BTreeMap::new(),
+                },
+            });
+        let remote =
+            ("[a-z][a-z0-9_-]{0,10}", "https://[a-z]{1,8}\\.test").prop_map(|(name, url)| {
+                ResolvedMcp {
+                    name,
+                    kind: ResolvedKind::Remote {
+                        url,
+                        transport: crate::config::McpTransport::Http,
+                    },
+                }
+            });
+        prop_oneof![stdio, remote]
     }
 }

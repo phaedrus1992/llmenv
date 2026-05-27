@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a65d25e66efeb022f67509ef60256ce32a060085298a6e8bbb068be4f58a0dc5 # shrinks to frag = Mapping {"a": Sequence [Bool(true), Bool(true)]}
