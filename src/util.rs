@@ -30,10 +30,17 @@ pub fn merge_yaml(dst: &mut serde_yaml::Value, src: serde_yaml::Value) {
     use serde_yaml::Value;
     match (dst, src) {
         (Value::Mapping(d), Value::Mapping(s)) => {
-            for (k, v) in s {
+            for (k, mut v) in s {
                 match d.get_mut(&k) {
                     Some(existing) => merge_yaml(existing, v),
                     None => {
+                        // Normalize the freshly-inserted subtree the same way the
+                        // recursive-merge path would, so every sequence the merge
+                        // produces is dedup-free regardless of which path created
+                        // it. Without this, an inserted sequence keeps its own
+                        // duplicates while a merged one drops them, making the
+                        // overall merge non-idempotent.
+                        normalize_yaml(&mut v);
                         d.insert(k, v);
                     }
                 }
@@ -41,15 +48,37 @@ pub fn merge_yaml(dst: &mut serde_yaml::Value, src: serde_yaml::Value) {
         }
         (Value::Sequence(d), Value::Sequence(s)) => {
             d.extend(s);
-            let mut deduped: Vec<Value> = Vec::new();
-            for item in d.drain(..) {
-                if !deduped.contains(&item) {
-                    deduped.push(item);
-                }
+            for item in d.iter_mut() {
+                normalize_yaml(item);
             }
-            *d = deduped;
+            dedup(d);
         }
-        (dst, src) => *dst = src,
+        (dst, src) => {
+            *dst = src;
+            normalize_yaml(dst);
+        }
+    }
+}
+
+/// Recursively dedup every sequence in a YAML value so it matches what
+/// [`merge_yaml`] produces. Used on insert/overwrite paths to keep the merge
+/// idempotent — including by callers (e.g. `merge::capabilities`) that insert a
+/// fragment into a fresh map without routing it through [`merge_yaml`].
+pub(crate) fn normalize_yaml(value: &mut serde_yaml::Value) {
+    use serde_yaml::Value;
+    match value {
+        Value::Sequence(items) => {
+            for item in items.iter_mut() {
+                normalize_yaml(item);
+            }
+            dedup(items);
+        }
+        Value::Mapping(map) => {
+            for (_, v) in map.iter_mut() {
+                normalize_yaml(v);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -67,10 +96,14 @@ pub fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
     use serde_json::Value;
     match (dst, src) {
         (Value::Object(d), Value::Object(s)) => {
-            for (k, v) in s {
+            for (k, mut v) in s {
                 match d.get_mut(&k) {
                     Some(existing) => merge_json(existing, v),
                     None => {
+                        // Normalize the freshly-inserted subtree so every array
+                        // the merge produces is dedup-free regardless of which
+                        // path created it (see `merge_yaml` for the rationale).
+                        normalize_json(&mut v);
                         d.insert(k, v);
                     }
                 }
@@ -78,15 +111,36 @@ pub fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
         }
         (Value::Array(d), Value::Array(s)) => {
             d.extend(s);
-            let mut deduped: Vec<Value> = Vec::new();
-            for item in d.drain(..) {
-                if !deduped.contains(&item) {
-                    deduped.push(item);
-                }
+            for item in d.iter_mut() {
+                normalize_json(item);
             }
-            *d = deduped;
+            dedup(d);
         }
-        (dst, src) => *dst = src,
+        (dst, src) => {
+            *dst = src;
+            normalize_json(dst);
+        }
+    }
+}
+
+/// Recursively dedup every array in a JSON value so it matches what
+/// [`merge_json`] produces. Used on insert/overwrite paths to keep the merge
+/// idempotent.
+fn normalize_json(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                normalize_json(item);
+            }
+            dedup(items);
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                normalize_json(v);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -266,6 +320,59 @@ mod tests {
                 let mut seen = arr.clone();
                 dedup(&mut seen);
                 prop_assert_eq!(arr.len(), seen.len(), "no duplicates in merged array");
+            }
+
+            // Stronger idempotence: merging ANY src into ANY dst is idempotent —
+            // re-applying the same src to the merged result is a no-op. This holds
+            // even when src's own arrays carry duplicates, because the merge
+            // normalizes every array on insert as well as on recursive merge.
+            #[test]
+            fn merge_json_idempotent_for_arbitrary_pairs(
+                dst in arb_json(),
+                src in arb_json(),
+            ) {
+                let mut once = dst;
+                merge_json(&mut once, src.clone());
+                let mut twice = once.clone();
+                merge_json(&mut twice, src);
+                prop_assert_eq!(once, twice);
+            }
+
+            // Normalization is preserved: if `dst` is already dedup-free (the
+            // real-world invariant — every `dst` is itself a prior merge_json
+            // output), then merging arbitrary `src` keeps the output dedup-free at
+            // every depth. The insert path normalizes src subtrees just like the
+            // recursive-merge path, so output shape is independent of which path
+            // produced a value.
+            #[test]
+            fn merge_json_preserves_normalization(
+                dst in arb_json(),
+                src in arb_json(),
+            ) {
+                // Establish the precondition by normalizing dst via a self-merge
+                // into an empty object's key (merge_json is the normalizer).
+                let mut normalized = Value::Null;
+                merge_json(&mut normalized, dst);
+                prop_assume!(all_arrays_deduped(&normalized));
+
+                merge_json(&mut normalized, src);
+                prop_assert!(
+                    all_arrays_deduped(&normalized),
+                    "merge introduced a non-deduped array: {normalized}"
+                );
+            }
+        }
+
+        // True iff every array nested anywhere in `v` contains no duplicates.
+        fn all_arrays_deduped(v: &Value) -> bool {
+            match v {
+                Value::Array(items) => {
+                    let mut seen = items.clone();
+                    dedup(&mut seen);
+                    seen.len() == items.len() && items.iter().all(all_arrays_deduped)
+                }
+                Value::Object(map) => map.values().all(all_arrays_deduped),
+                _ => true,
             }
         }
     }
