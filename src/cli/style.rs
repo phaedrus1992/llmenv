@@ -33,19 +33,34 @@ pub enum ColorMode {
 /// # Returns
 /// true if colors should be emitted, false otherwise.
 pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
+    should_use_color_with_env(mode, is_tty, &|name| std::env::var(name).ok())
+}
+
+/// Determine whether to emit colors, with injectable env var provider for testing.
+///
+/// # Arguments
+/// * `mode` - Explicit color mode (None = Auto)
+/// * `is_tty` - Whether stdout is a terminal
+/// * `get_env` - Function to retrieve environment variables (for testing)
+///
+/// # Returns
+/// true if colors should be emitted, false otherwise.
+fn should_use_color_with_env<F>(mode: Option<ColorMode>, is_tty: bool, get_env: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
     let effective_mode = mode.unwrap_or(ColorMode::Auto);
 
     match effective_mode {
         ColorMode::Always => true,
         ColorMode::Never => false,
         ColorMode::Auto => {
-            // Check NO_COLOR env var first (unconditional disable)
-            if std::env::var("NO_COLOR").is_ok() {
+            // Check NO_COLOR env var first (unconditional disable, any value disables)
+            if get_env("NO_COLOR").is_some() {
                 return false;
             }
             // Then check CLICOLOR_FORCE (unconditional enable, must be non-empty per spec)
-            if std::env::var("CLICOLOR_FORCE")
-                .ok()
+            if get_env("CLICOLOR_FORCE")
                 .filter(|v| !v.is_empty())
                 .is_some()
             {
@@ -106,7 +121,71 @@ mod tests {
     #[test]
     fn test_should_use_color_auto_respects_tty() {
         assert!(!should_use_color(Some(ColorMode::Auto), false));
-        // TTY test would require mocking; skipped here
+        // TTY test now possible with controlled env via should_use_color_with_env
+    }
+
+    #[test]
+    fn test_should_use_color_auto_with_tty_isolated() {
+        let no_env = |_name: &str| -> Option<String> { None };
+        // With controlled env (no NO_COLOR, no CLICOLOR_FORCE), auto mode respects is_tty
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            false,
+            &no_env
+        ));
+        assert!(should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &no_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_no_color_overrides() {
+        let no_color_env = |name: &str| -> Option<String> {
+            match name {
+                "NO_COLOR" => Some("1".to_string()),
+                _ => None,
+            }
+        };
+        // NO_COLOR unconditionally disables colors even with is_tty=true
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &no_color_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_no_color_empty_string() {
+        let no_color_empty_env = |name: &str| -> Option<String> {
+            match name {
+                "NO_COLOR" => Some(String::new()),
+                _ => None,
+            }
+        };
+        // NO_COLOR with empty string should still disable colors (presence matters, not value)
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &no_color_empty_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_clicolor_force_overrides() {
+        let force_env = |name: &str| -> Option<String> {
+            match name {
+                "CLICOLOR_FORCE" => Some("1".to_string()),
+                _ => None,
+            }
+        };
+        // CLICOLOR_FORCE unconditionally enables colors even with is_tty=false
+        assert!(should_use_color_with_env(
+            Some(ColorMode::Auto),
+            false,
+            &force_env
+        ));
     }
 
     #[test]

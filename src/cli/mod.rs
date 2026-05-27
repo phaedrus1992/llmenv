@@ -623,6 +623,13 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         );
     }
 
+    // ICM context chunk: encode active tags/bundles for tag-scoped memory
+    // retrieval across projects. Agents can store memory under keyword
+    // "llmenv-tag:<tag>" and it will be retrieved in any scope with that tag.
+    let bundles_for_icm = firing.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
+    let icm_chunk = crate::icm::generate_context_chunk(&active, &bundles_for_icm);
+    vars.insert("LLMENV_ICM_CONTEXT".into(), icm_chunk);
+
     for (key, value) in vars {
         validate_var_name(&key)?;
         println!("export {}={}", key, shell_escape(&value));
