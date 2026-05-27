@@ -47,6 +47,27 @@ Two layers:
    verbatim into that engine's native config (e.g. `alwaysThinkingEnabled: false`
    → `settings.json`).
 
+### Invariant: every major feature gets both layers
+
+This is a structural requirement, not a per-feature judgement call. **There are
+always going to be platform-specific things people want to do** — a Claude-only
+permission grammar, a Codex-only hook event, an engine flag llmenv never models.
+So for *every* major feature (permissions, hooks, plugins, MCP servers, …) the
+schema MUST offer:
+
+- **(a)** a *generic, engine-neutral* way to declare it (translated per adapter), and
+- **(b)** an *engine-specific* `native` override that drops to that engine's own
+  language and is emitted verbatim.
+
+The override lives next to the feature it overrides: `permissions.native.<engine>`
+for permission rules, `hooks.native.<engine>` for hook registrations, and so on.
+The top-level `native.<engine>` block (D3) is the catch-all for keys that belong
+to *no* modeled feature. A feature that has only layer (a) is **incomplete** —
+the long tail of platform-specific needs has nowhere to go. Today only
+`permissions` satisfies both layers; hooks, plugins, and MCP have (a) but not
+(b), and the top-level `native` block is parsed but not yet wired through to the
+adapter. These are tracked gaps (see *Implementation status*).
+
 ## Decisions
 
 These were settled in design discussion (2026-05-27):
@@ -230,3 +251,19 @@ bundle fragments compose identically.
 3. Hooks generator — wire the already-copied files in (bundle-relative paths).
 4. Top-level `native.<engine>` passthrough merge.
 5. Plugins + marketplaces (absorbs #59, re-expressed in YAML).
+
+## Implementation status
+
+Tracking the two-layer invariant (generic + per-engine `native`) per feature:
+
+| Feature | (a) generic | (b) native override | Notes |
+|---------|-------------|---------------------|-------|
+| Permissions | done | done (`permissions.native.<engine>`) | rendered into `settings.json`; native wins over conflicting neutral rule |
+| Hooks | done | **missing** | `hooks` list renders; no `hooks.native.<engine>` for engine-only events/handlers |
+| Plugins | done | **missing** | `plugins` list; no per-engine override path |
+| MCP servers | done | **missing** | `mcp` list resolves; no `mcp.native.<engine>` |
+| Top-level `native` (catch-all) | n/a | **parsed, not wired** | `Config.native` deserializes but never reaches `merge()` → `MergedManifest` → adapter |
+
+Open gaps tracked in their own issues — see the issue tracker (milestone M4.5)
+for the top-level `native` passthrough wiring and the per-feature `native`
+override for hooks/plugins/MCP.
