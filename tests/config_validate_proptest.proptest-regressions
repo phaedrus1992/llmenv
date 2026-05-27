@@ -1,8 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 92dc04da2496df14ce47de171dca9dd1a40dd278233406566cee605f88745996 # shrinks to hostname = "invalid-.com"
-cc beb7bd72983191d68e0984b0ee5ae1121c30fb35ab48b9ec903fc934454b7b35 # shrinks to cidr = "192.168.1.0/33"
