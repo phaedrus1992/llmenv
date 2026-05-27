@@ -1,0 +1,10 @@
+permissions:
+  # Neutral rule denies this path — a security control.
+  deny:
+    - { tool: Read, pattern: "./secrets/**" }
+  # A native allow asserts the same string. A native ALLOW must never suppress a
+  # neutral DENY: deny is authoritative, and weakening it silently would be a
+  # security regression. The string must remain in deny.
+  native:
+    claude_code:
+      allow: ["Read(./secrets/**)"]
