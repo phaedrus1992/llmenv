@@ -374,6 +374,16 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Reject any var in `vars` whose name isn't a valid shell identifier.
+/// Applied to adapter-returned env vars before they propagate, so the
+/// `export NAME=...` contract holds regardless of which emission path runs.
+fn reject_invalid_var_names(vars: &[(String, String)]) -> anyhow::Result<()> {
+    for (name, _) in vars {
+        validate_var_name(name)?;
+    }
+    Ok(())
+}
+
 fn validate_var_name(name: &str) -> anyhow::Result<()> {
     // Shell variable names must match [A-Za-z_][A-Za-z0-9_]*
     if name.is_empty() {
@@ -576,6 +586,11 @@ fn build_and_materialize(
     adapter.materialize(&manifest, &cache_path)?;
 
     let env_vars = adapter.env_vars(&cache_path)?;
+    // Defense-in-depth (#67): validate adapter-returned var names at the
+    // source, not only at the final emission loop. A future emission path that
+    // doesn't route through run_export's validate step can't smuggle a name
+    // that would break the `export NAME=...` shell contract.
+    reject_invalid_var_names(&env_vars)?;
     Ok(Some((cache_path, env_vars)))
 }
 
@@ -1042,6 +1057,21 @@ mod tests {
         assert!(validate_var_name("my-var").is_err());
         assert!(validate_var_name("my var").is_err());
         assert!(validate_var_name("my$var").is_err());
+    }
+
+    #[test]
+    fn reject_invalid_var_names_passes_valid_and_fails_invalid() {
+        let ok = vec![
+            ("CLAUDE_CONFIG_DIR".to_string(), "/x".to_string()),
+            ("_PRIVATE".to_string(), "y".to_string()),
+        ];
+        assert!(reject_invalid_var_names(&ok).is_ok());
+
+        let bad = vec![("bad-name".to_string(), "v".to_string())];
+        assert!(reject_invalid_var_names(&bad).is_err());
+
+        let bad_leading_digit = vec![("1ABC".to_string(), "v".to_string())];
+        assert!(reject_invalid_var_names(&bad_leading_digit).is_err());
     }
 
     #[test]

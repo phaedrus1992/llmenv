@@ -76,9 +76,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`cache_dir` traversal detection now parses path components** instead of
+  substring matching, so traversal that the old check missed — e.g. a trailing
+  `foo/..` with no slash — is rejected. New `paths::has_parent_component` helper
+  backs the check. (#65)
 - Improved error messages with context using `anyhow`
 - Fixed shell variable name validation
 - Added proper escaping for shell metacharacters in exported variables
+
+### Security
+
+- **Adapter-returned env var names are validated at the source** (in
+  `build_and_materialize`) in addition to the final emission loop, so no future
+  emission path can smuggle a name that breaks the `export NAME=...` shell
+  contract. (#67)
+
+### Hardening
+
+- **Documented the cache-key invariant** in `materialize::cache::hash_manifest`:
+  the key is a function of (relative path, file contents) only and deliberately
+  excludes the absolute source path, so a bundle reached via a symlink or alias
+  reuses the cache rather than missing it. Guarded by a new regression test.
+  (#66)
 
 ### Documentation
 
@@ -88,3 +107,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Comprehensive security/performance/property-test audit
   (`docs/superpowers/specs/2026-05-26-comprehensive-audit.md`); follow-ups
   filed as #65–#73. (#56)
+- **Documented `Config::load`'s path-expansion contract** — callers must expand
+  `~` before calling; a `debug_assert` enforces this in debug builds. (#68)

@@ -97,7 +97,9 @@ fn is_safe_cache_dir(dir: &str) -> bool {
     if dir.is_empty() || dir.len() > 4096 {
         return false;
     }
-    !dir.contains('\0') && !dir.contains("../") && !dir.contains("/..")
+    // Parse components rather than substring-match so traversal can't slip
+    // through as `foo/..` (no trailing slash) or via host-OS separators.
+    !dir.contains('\0') && !crate::paths::has_parent_component(dir)
 }
 
 impl Config {
@@ -683,6 +685,23 @@ mod tests {
         let config = Config {
             settings: Settings {
                 cache_dir: "~/.cache/../../../etc/passwd".to_string(),
+                sync_interval_minutes: 15,
+                cache_retention_hours: Some(168),
+            },
+            scope: Scopes::default(),
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cache_dir_trailing_parent_no_slash() {
+        // `foo/..` has no "../" or "/.." substring on the right side but is a
+        // real traversal — semantic parsing (#65) must reject it.
+        let config = Config {
+            settings: Settings {
+                cache_dir: "~/.cache/llmenv/..".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
             },
