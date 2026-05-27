@@ -281,4 +281,67 @@ mod tests {
             other => panic!("expected remote, got {other:?}"),
         }
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        // A resolvable stdio server with a fixed command, parameterised on a
+        // unique name and a tag set, so resolution never fails on missing
+        // fields and we can reason purely about selection.
+        fn arb_server(idx: usize) -> impl Strategy<Value = McpServer> {
+            prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |ts| McpServer {
+                name: format!("srv-{idx}"),
+                tags: ts,
+                transport: McpTransport::Stdio,
+                command: Some("echo".into()),
+                args: vec![],
+                env: BTreeMap::new(),
+                url: None,
+            })
+        }
+
+        fn arb_config_and_tags() -> impl Strategy<Value = (Config, BTreeSet<String>)> {
+            let servers = (0usize..5).prop_flat_map(|n| (0..n).map(arb_server).collect::<Vec<_>>());
+            let active = prop::collection::btree_set("[a-z]{1,4}", 0..6);
+            (servers, active).prop_map(|(mcp, active)| {
+                let mut cfg = base_config();
+                cfg.mcp = mcp;
+                (cfg, active)
+            })
+        }
+
+        proptest! {
+            // resolve_mcps never invents entries: the output never exceeds the
+            // declared servers plus the (here unconfigured) memory backend.
+            #[test]
+            fn output_count_bounded_by_inputs((cfg, active) in arb_config_and_tags()) {
+                let resolved = resolve_mcps(&cfg, &active).expect("valid servers resolve");
+                prop_assert!(resolved.len() <= cfg.mcp.len());
+            }
+
+            // Every resolved static server corresponds to a declared server
+            // whose tag set intersects the active tags.
+            #[test]
+            fn every_selected_server_has_active_tag((cfg, active) in arb_config_and_tags()) {
+                let resolved = resolve_mcps(&cfg, &active).expect("valid servers resolve");
+                for r in &resolved {
+                    let src = cfg
+                        .mcp
+                        .iter()
+                        .find(|m| m.name == r.name)
+                        .expect("resolved name maps to a declared server");
+                    prop_assert!(src.tags.iter().any(|t| active.contains(t)));
+                }
+            }
+
+            // Resolution is a pure function of (config, tags).
+            #[test]
+            fn resolution_is_deterministic((cfg, active) in arb_config_and_tags()) {
+                let a = resolve_mcps(&cfg, &active).expect("resolve");
+                let b = resolve_mcps(&cfg, &active).expect("resolve");
+                prop_assert_eq!(a, b);
+            }
+        }
+    }
 }

@@ -289,4 +289,35 @@ mod tests {
             "a directory should not count as an executable file"
         );
     }
+
+    mod props {
+        use super::super::{read_pidfile, write_pidfile_atomic};
+        use proptest::prelude::*;
+
+        proptest! {
+            // Any pid written via the atomic writer reads back unchanged.
+            #[test]
+            fn pidfile_write_read_roundtrips(pid in any::<u32>()) {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let path = dir.path().join("mcp-proxy.pid");
+                write_pidfile_atomic(&path, pid).expect("write");
+                let read = read_pidfile(&path).expect("read");
+                prop_assert_eq!(read, Some(pid));
+            }
+
+            // Non-numeric pidfile contents are never silently misparsed into a
+            // bogus pid: read_pidfile either errors or reports an absent pid
+            // (e.g. when the content trims to empty), but never yields Some.
+            #[test]
+            fn pidfile_parse_never_invents_a_pid(s in "[^0-9]{1,12}") {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let path = dir.path().join("mcp-proxy.pid");
+                std::fs::write(&path, &s).expect("write");
+                match read_pidfile(&path) {
+                    Ok(None) | Err(_) => {}
+                    Ok(Some(pid)) => prop_assert!(false, "parsed bogus pid {pid} from {s:?}"),
+                }
+            }
+        }
+    }
 }
