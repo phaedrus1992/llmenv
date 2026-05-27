@@ -70,8 +70,16 @@ fn sync_path(m: &Marketplace) -> Result<MarketplaceState> {
         ));
     }
     // Canonicalize so the content token is stable regardless of how the path was
-    // written (symlinks, trailing slashes, `~`).
-    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+    // written (symlinks, trailing slashes, `~`). The location is mixed into the
+    // scope hash, so a fall-back to the non-canonical path would make the same
+    // config hash differently across runs — fail loudly instead.
+    let canonical = std::fs::canonicalize(&path).with_context(|| {
+        format!(
+            "marketplace '{}': canonicalizing path source {}",
+            m.name,
+            path.display()
+        )
+    })?;
     Ok(MarketplaceState {
         install_location: canonical,
         head: None,
@@ -100,8 +108,24 @@ fn sync_git(cache_dir: &Path, m: &Marketplace, refresh: bool) -> Result<Marketpl
 }
 
 fn git_clone(source: &str, dest: &Path) -> Result<()> {
+    // Reject sources git would parse as an option (`--upload-pack=…`) and the
+    // `ext::`/`fd::` transports that run arbitrary commands. The `--` separator
+    // below stops option parsing, but a leading-dash source still trips clone's
+    // arg parsing, and `--` does not neutralize the ext transport, so both are
+    // rejected up front.
+    if source.starts_with('-') {
+        return Err(anyhow::anyhow!(
+            "marketplace source may not start with '-': {source}"
+        ));
+    }
+    if source.starts_with("ext::") || source.starts_with("fd::") {
+        return Err(anyhow::anyhow!(
+            "marketplace source uses a disallowed git transport: {source}"
+        ));
+    }
     let status = Command::new("git")
-        .args(["clone", "--depth", "1", source])
+        .args(["clone", "--depth", "1", "--"])
+        .arg(source)
         .arg(dest)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -113,14 +137,25 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Fast-forward an existing clone to its upstream. Only invoked on an explicit
+/// refresh (`plugin sync`), never during `export`, so a fetch failure is a real
+/// sync failure the caller should report — not a silent best-effort. A failed
+/// `reset` (no upstream change / diverged) keeps the current checkout and is
+/// non-fatal: the clone is still usable, it just didn't advance.
 fn git_pull(repo: &Path) -> Result<()> {
-    // Fetch silently; a transient network failure shouldn't abort an export.
-    let _ = Command::new("git")
+    let fetch = Command::new("git")
         .args(["fetch", "--depth", "1"])
         .current_dir(repo)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .context("spawning git fetch")?;
+    if !fetch.success() {
+        return Err(anyhow::anyhow!(
+            "git fetch failed at {} (network or remote error)",
+            repo.display()
+        ));
+    }
     let status = Command::new("git")
         .args(["reset", "--hard", "@{u}"])
         .current_dir(repo)

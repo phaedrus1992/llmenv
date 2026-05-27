@@ -417,3 +417,84 @@ pub fn split_plugin_ref(s: &str) -> Option<(&str, &str)> {
     }
     Some((marketplace, plugin))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn classify_scp_style_is_git() {
+        assert_eq!(
+            classify_source("git@github.com:owner/repo"),
+            MarketplaceSource::Git
+        );
+    }
+
+    #[test]
+    fn split_plugin_ref_roundtrips() {
+        assert_eq!(
+            split_plugin_ref("superpowers:caveman"),
+            Some(("superpowers", "caveman"))
+        );
+    }
+
+    #[test]
+    fn split_plugin_ref_rejects_malformed() {
+        assert_eq!(split_plugin_ref("nocolon"), None);
+        assert_eq!(split_plugin_ref(":plugin"), None);
+        assert_eq!(split_plugin_ref("market:"), None);
+        assert_eq!(split_plugin_ref("a:b:c"), None);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_git_scheme_sources_classified_git(
+            scheme in prop_oneof![
+                Just("https://"),
+                Just("http://"),
+                Just("ssh://"),
+                Just("git://"),
+                Just("git+ssh://"),
+            ],
+            rest in "[a-z0-9./_-]{1,30}",
+        ) {
+            let source = format!("{scheme}{rest}");
+            prop_assert_eq!(classify_source(&source), MarketplaceSource::Git);
+        }
+
+        #[test]
+        fn prop_absolute_and_tilde_paths_classified_path(
+            prefix in prop_oneof![Just("/"), Just("~/"), Just("./"), Just("../")],
+            rest in "[a-z0-9._-]{0,30}",
+        ) {
+            let source = format!("{prefix}{rest}");
+            prop_assert_eq!(classify_source(&source), MarketplaceSource::Path);
+        }
+
+        #[test]
+        fn prop_classify_source_never_panics(source in ".{0,60}") {
+            // The classifier must total over arbitrary input.
+            let _ = classify_source(&source);
+        }
+
+        #[test]
+        fn prop_split_plugin_ref_roundtrip(
+            market in "[a-z0-9_-]{1,15}",
+            plugin in "[a-z0-9_-]{1,15}",
+        ) {
+            let s = format!("{market}:{plugin}");
+            prop_assert_eq!(split_plugin_ref(&s), Some((market.as_str(), plugin.as_str())));
+        }
+
+        #[test]
+        fn prop_split_plugin_ref_no_colon_is_none(s in "[a-z0-9_-]{0,30}") {
+            prop_assert_eq!(split_plugin_ref(&s), None);
+        }
+
+        #[test]
+        fn prop_split_plugin_ref_never_panics(s in ".{0,60}") {
+            let _ = split_plugin_ref(&s);
+        }
+    }
+}
