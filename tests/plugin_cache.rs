@@ -105,6 +105,37 @@ fn refresh_false_does_not_advance_existing_clone() {
 }
 
 #[test]
+fn ext_transport_source_is_rejected() {
+    // `ext::sh -c ...` runs an arbitrary command on clone; classify_source
+    // treats the colon form as git, so it reaches git_clone, which must reject
+    // it before spawning git.
+    let cache = tempdir().expect("cache");
+    let m = Marketplace {
+        name: "evil".into(),
+        source: "ext::sh -c id".into(),
+    };
+    let err = sync_marketplace(cache.path(), &m, false).expect_err("ext:: must be rejected");
+    assert!(
+        format!("{err:#}").contains("disallowed git transport"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn fd_transport_source_is_rejected() {
+    let cache = tempdir().expect("cache");
+    let m = Marketplace {
+        name: "evil".into(),
+        source: "fd::17".into(),
+    };
+    let err = sync_marketplace(cache.path(), &m, false).expect_err("fd:: must be rejected");
+    assert!(
+        format!("{err:#}").contains("disallowed git transport"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
 fn local_path_source_used_in_place_without_clone() {
     let src = tempdir().expect("src");
     init_source_repo(src.path());

@@ -47,6 +47,10 @@ pub enum ValidateError {
     MemoryNoTags,
     #[error("duplicate marketplace name: {0}")]
     DuplicateMarketplaceName(String),
+    #[error(
+        "invalid marketplace name '{0}' (must match [A-Za-z0-9._-]+, not '.'/'..', no leading '-')"
+    )]
+    InvalidMarketplaceName(String),
     #[error("marketplace {0} has an empty source")]
     MarketplaceEmptySource(String),
     #[error("duplicate plugin-collection name: {0}")]
@@ -65,6 +69,17 @@ pub enum ValidateError {
         plugin: String,
         marketplace: String,
     },
+}
+
+/// A marketplace name is safe to use as a single filesystem path component and
+/// as a JSON key: non-empty, only `[A-Za-z0-9._-]`, never `.`/`..`, and no
+/// leading `-` (which a CLI/git would treat as a flag).
+fn is_valid_marketplace_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." || name.starts_with('-') {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn is_valid_cidr(cidr: &str) -> bool {
@@ -219,6 +234,15 @@ impl Config {
         let mut seen_marketplace_names = std::collections::HashSet::new();
         let mut marketplace_names = std::collections::HashSet::new();
         for m in &self.marketplace {
+            // The name is used both as a single path component for the cache
+            // clone (`<cache>/marketplaces/<name>`) and as a JSON key in the
+            // rendered `extraKnownMarketplaces` / `enabledPlugins`. Constraining
+            // it to `[A-Za-z0-9._-]` (and rejecting `.`/`..`/leading-`-`) blocks
+            // path traversal out of the cache dir and keeps the `plugin@market`
+            // key unambiguous (no embedded `@`/`/`/control chars).
+            if !is_valid_marketplace_name(&m.name) {
+                return Err(ValidateError::InvalidMarketplaceName(m.name.clone()));
+            }
             if m.source.is_empty() {
                 return Err(ValidateError::MarketplaceEmptySource(m.name.clone()));
             }
@@ -1416,6 +1440,78 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    fn config_with_marketplace(name: &str, source: &str) -> Config {
+        Config {
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![],
+            memory: None,
+            marketplace: vec![Marketplace {
+                name: name.to_string(),
+                source: source.to_string(),
+            }],
+            plugin_collection: vec![],
+            host: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_marketplace_name_path_traversal_rejected() {
+        let config = config_with_marketplace("../../etc", "https://example.com/m");
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::InvalidMarketplaceName(_))
+        ));
+    }
+
+    #[test]
+    fn test_marketplace_name_dotdot_rejected() {
+        let config = config_with_marketplace("..", "https://example.com/m");
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::InvalidMarketplaceName(_))
+        ));
+    }
+
+    #[test]
+    fn test_marketplace_name_leading_dash_rejected() {
+        // A leading '-' would be parsed as a flag by git when cloning.
+        let config = config_with_marketplace("-rf", "https://example.com/m");
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::InvalidMarketplaceName(_))
+        ));
+    }
+
+    #[test]
+    fn test_marketplace_name_at_sign_rejected() {
+        // '@' would make the rendered `plugin@marketplace` key ambiguous.
+        let config = config_with_marketplace("foo@bar", "https://example.com/m");
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::InvalidMarketplaceName(_))
+        ));
+    }
+
+    #[test]
+    fn test_marketplace_name_slash_rejected() {
+        // '/' would escape the single cache path component.
+        let config = config_with_marketplace("foo/bar", "https://example.com/m");
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::InvalidMarketplaceName(_))
+        ));
+    }
+
+    #[test]
+    fn test_marketplace_name_valid_accepted() {
+        let config = config_with_marketplace("super-powers_2.0", "https://example.com/m");
+        assert!(config.validate().is_ok());
+    }
+
     // ===== Property tests against the real validators =====
     //
     // These call the private is_valid_* functions directly (rather than
@@ -1576,6 +1672,36 @@ mod tests {
         fn prop_cache_dir_over_max_length_rejected(len in 4097usize..5000) {
             let dir = "a".repeat(len);
             prop_assert!(!is_safe_cache_dir(&dir), "over-length cache dir accepted");
+        }
+
+        #[test]
+        fn prop_valid_marketplace_names_accepted(
+            name in "[A-Za-z0-9._][A-Za-z0-9._-]{0,30}",
+        ) {
+            // First char is not '-', and the whole thing is the allowed charset,
+            // so it must be accepted (the "." / ".." cases are excluded by the
+            // leading-char class never producing a bare "." or "..").
+            prop_assume!(name != "." && name != "..");
+            prop_assert!(is_valid_marketplace_name(&name), "valid name rejected: {name}");
+        }
+
+        #[test]
+        fn prop_marketplace_name_with_disallowed_char_rejected(
+            before in "[A-Za-z0-9._-]{0,10}",
+            bad in "[@/:\\\\ ]",
+            after in "[A-Za-z0-9._-]{0,10}",
+        ) {
+            let name = format!("{before}{bad}{after}");
+            prop_assert!(
+                !is_valid_marketplace_name(&name),
+                "name with disallowed char accepted: {name:?}"
+            );
+        }
+
+        #[test]
+        fn prop_marketplace_name_leading_dash_rejected(rest in "[A-Za-z0-9._-]{0,20}") {
+            let name = format!("-{rest}");
+            prop_assert!(!is_valid_marketplace_name(&name), "leading-dash name accepted: {name}");
         }
     }
 }
