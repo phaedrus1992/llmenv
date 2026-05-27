@@ -211,11 +211,13 @@ mod tests {
                 arb_string(),
                 prop::collection::vec(arb_string(), 0..3),
             )
-                .prop_map(|(server_tag, server_bind, client_url, default_topics)| Icm {
-                    server_tag,
-                    server_bind,
-                    client_url,
-                    default_topics,
+                .prop_map(|(server_tag, server_bind, client_url, default_topics)| {
+                    Icm {
+                        server_tag,
+                        server_bind,
+                        client_url,
+                        default_topics,
+                    }
                 }),
         )
     }
@@ -223,7 +225,16 @@ mod tests {
     fn arb_config() -> impl Strategy<Value = Config> {
         (
             arb_settings(),
-            prop::collection::vec((arb_string(), arb_opt_string(), arb_opt_string(), arb_opt_string()), 0..10).prop_map(|ids| {
+            prop::collection::vec(
+                (
+                    arb_string(),
+                    arb_opt_string(),
+                    arb_opt_string(),
+                    arb_opt_string(),
+                ),
+                0..10,
+            )
+            .prop_map(|ids| {
                 let network = ids
                     .iter()
                     .take(2)

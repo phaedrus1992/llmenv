@@ -1,6 +1,6 @@
-use proptest::prelude::*;
-use llmenv::config::{Config, Scopes, ProjectScope, ProjectMatch};
+use llmenv::config::{Config, ProjectMatch, ProjectScope, Scopes};
 use llmenv::scope::Env;
+use proptest::prelude::*;
 
 // ===== Path Prefix Matching =====
 
