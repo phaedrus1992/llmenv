@@ -3,8 +3,8 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::{
-    Bundle, HostMatch, HostScope, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope, Scopes,
-    Settings, UserMatch, UserScope,
+    Bundle, HostEntry, HostMatch, HostScope, McpServer, McpTransport, Memory, NetworkMatch,
+    NetworkScope, ProjectMatch, ProjectScope, Scopes, Settings, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -261,6 +261,52 @@ mod tests {
         )
     }
 
+    fn arb_transport() -> impl Strategy<Value = McpTransport> {
+        prop_oneof![
+            Just(McpTransport::Stdio),
+            Just(McpTransport::Http),
+            Just(McpTransport::Sse),
+        ]
+    }
+
+    fn arb_mcp_server() -> impl Strategy<Value = McpServer> {
+        (
+            arb_string(),
+            prop::collection::vec(arb_string(), 0..3),
+            arb_transport(),
+            arb_opt_string(),
+            prop::collection::vec(arb_string(), 0..3),
+            prop::collection::btree_map(arb_string(), arb_string(), 0..3),
+            arb_opt_string(),
+        )
+            .prop_map(
+                |(name, tags, transport, command, args, env, url)| McpServer {
+                    name,
+                    tags,
+                    transport,
+                    command,
+                    args,
+                    env,
+                    url,
+                },
+            )
+    }
+
+    fn arb_memory() -> impl Strategy<Value = Memory> {
+        (
+            arb_string(),
+            any::<u16>(),
+            prop::collection::vec(arb_string(), 0..3),
+            prop::collection::vec(arb_string(), 0..3),
+        )
+            .prop_map(|(server_host, port, tags, default_topics)| Memory {
+                server_host,
+                port,
+                tags,
+                default_topics,
+            })
+    }
+
     fn arb_config() -> impl Strategy<Value = Config> {
         (
             arb_settings(),
@@ -339,20 +385,41 @@ mod tests {
                     })
                     .collect()
             }),
+            prop::collection::vec(arb_mcp_server(), 0..3).prop_map(|servers: Vec<McpServer>| {
+                // Names must be unique and must avoid the reserved memory
+                // name so the config still passes validation; index-prefix
+                // them to guarantee both.
+                servers
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut s)| {
+                        s.name = format!("mcp-{}-{}", i, s.name);
+                        s
+                    })
+                    .collect()
+            }),
+            prop::option::of(arb_memory()),
+            prop::collection::btree_map(
+                arb_string(),
+                arb_string().prop_map(|addr| HostEntry { addr }),
+                0..3,
+            ),
         )
             .prop_map(
-                |(settings, (network, host_scopes, user, project), bundle)| Config {
-                    settings,
-                    scope: Scopes {
-                        network,
-                        host: host_scopes,
-                        user,
-                        project,
-                    },
-                    bundle,
-                    mcp: vec![],
-                    memory: None,
-                    host: Default::default(),
+                |(settings, (network, host_scopes, user, project), bundle, mcp, memory, host)| {
+                    Config {
+                        settings,
+                        scope: Scopes {
+                            network,
+                            host: host_scopes,
+                            user,
+                            project,
+                        },
+                        bundle,
+                        mcp,
+                        memory,
+                        host,
+                    }
                 },
             )
     }
