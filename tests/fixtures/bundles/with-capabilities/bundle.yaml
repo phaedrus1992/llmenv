@@ -1,0 +1,15 @@
+permissions:
+  default_mode: acceptEdits
+  allow:
+    - { tool: Bash, pattern: "cargo *" }
+  deny:
+    - { tool: Read, paths: ["./.env", "./.env.*"] }
+  native:
+    claude_code:
+      deny: ["WebFetch(domain:internal.example.com)"]
+hooks:
+  - event: PreToolUse
+    matcher: Bash
+    handler: { type: command, command: "hooks/check.sh" }
+plugins:
+  - "superpowers:superpowers"

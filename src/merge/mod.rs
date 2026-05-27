@@ -1,16 +1,23 @@
 pub mod agents_md;
+pub mod capabilities;
 pub mod rules;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::Capabilities;
 use crate::mcp::resolve::ResolvedMcp;
+use capabilities::{CapabilityContributor, merge_capabilities};
 use rules::RuleFile;
 
 #[derive(Debug, Clone)]
 pub struct BundleRef {
     pub name: String,
     pub path: PathBuf,
+    /// Scope-precedence rank for scalar capability resolution (higher wins).
+    /// Bundles selected by higher-precedence scopes get a higher rank; the
+    /// top-level config outranks every bundle.
+    pub precedence: u8,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -30,14 +37,32 @@ pub struct MergedManifest {
     /// render these into the agent-native MCP config (e.g. `mcp.json`). Empty
     /// means no MCP integration is materialized.
     pub mcps: Vec<ResolvedMcp>,
+    /// Engine-agnostic capabilities (permissions, hooks, plugins) merged across
+    /// the top-level config and every selected bundle's `bundle.yaml`, by value
+    /// shape. Adapters translate these into engine-native config.
+    pub capabilities: Capabilities,
 }
 
 const COPIED_SUBDIRS: &[&str] = &["skills", "plugins", "hooks"];
 
-pub fn merge(bundles: &[BundleRef]) -> anyhow::Result<MergedManifest> {
+/// Top-level config capabilities outrank every bundle. Bundle precedence comes
+/// from the selecting scope kind and is always below this.
+const TOP_LEVEL_PRECEDENCE: u8 = u8::MAX;
+
+pub fn merge(top_level: &Capabilities, bundles: &[BundleRef]) -> anyhow::Result<MergedManifest> {
     let mut agents_parts = Vec::new();
     let mut files = BTreeMap::new();
     let mut rule_files: Vec<RuleFile> = Vec::new();
+    let mut contributors: Vec<CapabilityContributor> = Vec::new();
+
+    if !top_level.is_empty() {
+        contributors.push(CapabilityContributor {
+            name: "config.yaml".to_string(),
+            precedence: TOP_LEVEL_PRECEDENCE,
+            capabilities: top_level.clone(),
+        });
+    }
+
     for b in bundles {
         let am = b.path.join("AGENTS.md");
         if am.exists() {
@@ -51,13 +76,38 @@ pub fn merge(bundles: &[BundleRef]) -> anyhow::Result<MergedManifest> {
             walk(&b.path, &dir, &mut files)?;
         }
         rule_files.extend(rules::collect_from_bundle(&b.path, &b.name)?);
+
+        if let Some(caps) = read_bundle_yaml(&b.path, &b.name)? {
+            contributors.push(CapabilityContributor {
+                name: format!("bundle '{}'", b.name),
+                precedence: b.precedence,
+                capabilities: caps,
+            });
+        }
     }
+
     Ok(MergedManifest {
         agents_md: agents_md::concat(&agents_parts),
         files,
         rules: rule_files,
+        capabilities: merge_capabilities(&contributors)?,
         ..MergedManifest::default()
     })
+}
+
+/// Read an optional `bundle.yaml` capability fragment from a bundle directory.
+/// Returns `None` when the file is absent — bundles carry capabilities only if
+/// they choose to.
+fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Capabilities>> {
+    let path = bundle_root.join("bundle.yaml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let s = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("bundle '{name}': reading {}: {e}", path.display()))?;
+    let caps: Capabilities = serde_yaml::from_str(&s)
+        .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
+    Ok(Some(caps))
 }
 
 /// Walk `dir` collecting regular files into `out`, keyed by their path

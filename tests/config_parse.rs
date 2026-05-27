@@ -4,7 +4,7 @@ use llmenv::config::Config;
 fn parses_fixture() {
     let s = std::fs::read_to_string("tests/fixtures/llmenv.yaml").unwrap();
     let cfg: Config = serde_yaml::from_str(&s).unwrap();
-    assert_eq!(cfg.settings.sync_interval_minutes, 15);
+    assert_eq!(cfg.cache.sync_interval_minutes, 15);
     assert_eq!(cfg.scope.host.len(), 1);
     assert_eq!(cfg.scope.host[0].id, "fixed");
     assert_eq!(cfg.bundle.len(), 2);

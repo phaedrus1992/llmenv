@@ -3,8 +3,10 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::{
-    Bundle, HostEntry, HostMatch, HostScope, McpServer, McpTransport, Memory, NetworkMatch,
-    NetworkScope, ProjectMatch, ProjectScope, Scopes, Settings, UserMatch, UserScope,
+    Bundle, Cache, Capabilities, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch,
+    HostScope, McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch, NetworkScope,
+    PermissionMode, PermissionRule, Permissions, ProjectMatch, ProjectScope, Scopes, UserMatch,
+    UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -121,12 +123,12 @@ fn is_safe_cache_dir(dir: &str) -> bool {
 
 impl Config {
     pub fn validate(&self) -> Result<(), ValidateError> {
-        if !is_safe_cache_dir(&self.settings.cache_dir) {
+        if !is_safe_cache_dir(&self.cache.cache_dir) {
             return Err(ValidateError::CacheDirTraversal(
-                self.settings.cache_dir.clone(),
+                self.cache.cache_dir.clone(),
             ));
         }
-        if let Some(hours) = self.settings.cache_retention_hours
+        if let Some(hours) = self.cache.cache_retention_hours
             && hours == 0
         {
             return Err(ValidateError::CacheRetentionInvalid);
@@ -251,14 +253,99 @@ mod tests {
         prop::option::of(arb_string())
     }
 
-    fn arb_settings() -> impl Strategy<Value = Settings> {
+    fn arb_cache() -> impl Strategy<Value = Cache> {
         (arb_string(), 0u64..120, prop::option::of(0u64..10_000)).prop_map(
-            |(cache_dir, sync_interval_minutes, cache_retention_hours)| Settings {
+            |(cache_dir, sync_interval_minutes, cache_retention_hours)| Cache {
                 cache_dir,
                 sync_interval_minutes,
                 cache_retention_hours,
             },
         )
+    }
+
+    fn arb_permission_mode() -> impl Strategy<Value = PermissionMode> {
+        prop_oneof![
+            Just(PermissionMode::AcceptEdits),
+            Just(PermissionMode::Plan),
+            Just(PermissionMode::Default),
+            Just(PermissionMode::BypassPermissions),
+        ]
+    }
+
+    fn arb_permission_rule() -> impl Strategy<Value = PermissionRule> {
+        (
+            arb_string(),
+            arb_opt_string(),
+            prop::collection::vec(arb_string(), 0..3),
+        )
+            .prop_map(|(tool, pattern, paths)| PermissionRule {
+                tool,
+                pattern,
+                paths,
+            })
+    }
+
+    fn arb_native_rules() -> impl Strategy<Value = NativePermissionRules> {
+        (
+            prop::collection::vec(arb_string(), 0..3),
+            prop::collection::vec(arb_string(), 0..3),
+            prop::collection::vec(arb_string(), 0..3),
+        )
+            .prop_map(|(allow, ask, deny)| NativePermissionRules { allow, ask, deny })
+    }
+
+    fn arb_permissions() -> impl Strategy<Value = Permissions> {
+        (
+            prop::option::of(arb_permission_mode()),
+            prop::collection::vec(arb_permission_rule(), 0..3),
+            prop::collection::vec(arb_permission_rule(), 0..3),
+            prop::collection::vec(arb_permission_rule(), 0..3),
+            prop::collection::btree_map(arb_string(), arb_native_rules(), 0..3),
+        )
+            .prop_map(|(default_mode, allow, ask, deny, native)| Permissions {
+                default_mode,
+                allow,
+                ask,
+                deny,
+                native,
+            })
+    }
+
+    fn arb_hook() -> impl Strategy<Value = Hook> {
+        (
+            arb_string(),
+            arb_opt_string(),
+            prop_oneof![
+                arb_opt_string().prop_map(|command| HookHandler {
+                    kind: HookHandlerKind::Command,
+                    command,
+                    tool: None,
+                }),
+                arb_opt_string().prop_map(|tool| HookHandler {
+                    kind: HookHandlerKind::McpTool,
+                    command: None,
+                    tool,
+                }),
+            ],
+        )
+            .prop_map(|(event, matcher, handler)| Hook {
+                event,
+                matcher,
+                handler,
+            })
+    }
+
+    fn arb_capabilities() -> impl Strategy<Value = Capabilities> {
+        (
+            arb_permissions(),
+            prop::collection::vec(arb_hook(), 0..3),
+            prop::collection::vec(arb_string(), 0..3),
+        )
+            .prop_map(|(permissions, hooks, plugins)| Capabilities {
+                permissions,
+                hooks,
+                plugins,
+            })
     }
 
     fn arb_transport() -> impl Strategy<Value = McpTransport> {
@@ -309,7 +396,7 @@ mod tests {
 
     fn arb_config() -> impl Strategy<Value = Config> {
         (
-            arb_settings(),
+            arb_cache(),
             prop::collection::vec(
                 (
                     arb_string(),
@@ -404,17 +491,28 @@ mod tests {
                 arb_string().prop_map(|addr| HostEntry { addr }),
                 0..3,
             ),
+            arb_capabilities(),
         )
             .prop_map(
-                |(settings, (network, host_scopes, user, project), bundle, mcp, memory, host)| {
+                |(
+                    cache,
+                    (network, host_scopes, user, project),
+                    bundle,
+                    mcp,
+                    memory,
+                    host,
+                    capabilities,
+                )| {
                     Config {
-                        settings,
+                        cache,
                         scope: Scopes {
                             network,
                             host: host_scopes,
                             user,
                             project,
                         },
+                        capabilities,
+                        native: Default::default(),
                         bundle,
                         mcp,
                         memory,
@@ -450,7 +548,9 @@ mod tests {
             ];
 
             let config = Config {
-                settings: Settings::default(),
+                cache: Cache::default(),
+                capabilities: Default::default(),
+                native: Default::default(),
                 scope: Scopes { network, host: vec![], user: vec![], project: vec![] },
                 bundle: vec![],
                 mcp: vec![],
@@ -474,7 +574,9 @@ mod tests {
                 bundles[0].tags.clear();
             }
             let config = Config {
-                settings: Settings::default(),
+                cache: Cache::default(),
+                capabilities: Default::default(),
+                native: Default::default(),
                 scope: Scopes::default(),
                 bundle: bundles,
                 mcp: vec![],
@@ -492,7 +594,9 @@ mod tests {
             name in arb_string(),
         ) {
             let config = Config {
-                settings: Settings::default(),
+                cache: Cache::default(),
+                capabilities: Default::default(),
+                native: Default::default(),
                 scope: Scopes::default(),
                 bundle: vec![
                     Bundle { name: name.clone(), tags: vec!["tag1".to_string()], vars: Default::default() },
@@ -512,7 +616,9 @@ mod tests {
     #[test]
     fn test_valid_config_passes_validation() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![NetworkScope {
                     id: "net1".to_string(),
@@ -542,7 +648,9 @@ mod tests {
     #[test]
     fn test_invalid_cidr_prefix_too_large() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![NetworkScope {
                     id: "net1".to_string(),
@@ -568,7 +676,9 @@ mod tests {
     #[test]
     fn test_invalid_cidr_malformed() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![NetworkScope {
                     id: "net1".to_string(),
@@ -596,7 +706,9 @@ mod tests {
         // A user MCP named "icm" collides with the memory backend's reserved
         // registration name; rendering both would silently drop one entry.
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![crate::config::McpServer {
@@ -620,7 +732,9 @@ mod tests {
     #[test]
     fn test_invalid_mac_incomplete() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![NetworkScope {
                     id: "net1".to_string(),
@@ -646,7 +760,9 @@ mod tests {
     #[test]
     fn test_invalid_mac_invalid_hex() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![NetworkScope {
                     id: "net1".to_string(),
@@ -672,7 +788,9 @@ mod tests {
     #[test]
     fn test_invalid_hostname_starts_with_hyphen() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![HostScope {
@@ -696,7 +814,9 @@ mod tests {
     #[test]
     fn test_invalid_hostname_ends_with_hyphen() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![HostScope {
@@ -720,7 +840,9 @@ mod tests {
     #[test]
     fn test_invalid_hostname_double_dot() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![HostScope {
@@ -746,7 +868,9 @@ mod tests {
         // RFC 1123: a single label may not exceed 63 octets.
         let long_label = "a".repeat(64);
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![HostScope {
@@ -771,7 +895,9 @@ mod tests {
     fn test_invalid_cidr_leading_zero_octet() {
         // Dotted-decimal forbids leading zeros ("01") even though they parse.
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![NetworkScope {
                     id: "net1".to_string(),
@@ -797,7 +923,9 @@ mod tests {
     #[test]
     fn test_invalid_hostname_label_ends_with_hyphen() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![HostScope {
@@ -821,7 +949,9 @@ mod tests {
     #[test]
     fn test_invalid_hostname_label_starts_with_hyphen() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![HostScope {
@@ -845,7 +975,9 @@ mod tests {
     #[test]
     fn test_invalid_path_with_traversal() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![],
@@ -872,7 +1004,9 @@ mod tests {
         // `foo/..` has no "../" substring but is a real traversal — semantic
         // parsing must reject it (variant of #65, found in pre-pr-review).
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![],
@@ -897,7 +1031,9 @@ mod tests {
     #[test]
     fn test_invalid_path_with_null_byte() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes {
                 network: vec![],
                 host: vec![],
@@ -924,7 +1060,9 @@ mod tests {
         let mut vars = std::collections::BTreeMap::new();
         vars.insert("123var".to_string(), "value".to_string());
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![Bundle {
                 name: "test".to_string(),
@@ -943,7 +1081,9 @@ mod tests {
         let mut vars = std::collections::BTreeMap::new();
         vars.insert("my-var".to_string(), "value".to_string());
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![Bundle {
                 name: "test".to_string(),
@@ -964,7 +1104,9 @@ mod tests {
         vars.insert("_private".to_string(), "value2".to_string());
         vars.insert("var123".to_string(), "value3".to_string());
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![Bundle {
                 name: "test".to_string(),
@@ -981,11 +1123,13 @@ mod tests {
     #[test]
     fn test_cache_dir_with_traversal() {
         let config = Config {
-            settings: Settings {
+            cache: Cache {
                 cache_dir: "~/.cache/../../../etc/passwd".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
             },
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![],
@@ -1000,11 +1144,13 @@ mod tests {
         // `foo/..` has no "../" or "/.." substring on the right side but is a
         // real traversal — semantic parsing (#65) must reject it.
         let config = Config {
-            settings: Settings {
+            cache: Cache {
                 cache_dir: "~/.cache/llmenv/..".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
             },
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![],
@@ -1017,11 +1163,13 @@ mod tests {
     #[test]
     fn test_cache_dir_with_null_byte() {
         let config = Config {
-            settings: Settings {
+            cache: Cache {
                 cache_dir: "~/.cache/llm\0env".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
             },
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![],
@@ -1034,7 +1182,9 @@ mod tests {
     #[test]
     fn test_cache_dir_valid() {
         let config = Config {
-            settings: Settings::default(),
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![],
@@ -1047,11 +1197,13 @@ mod tests {
     #[test]
     fn test_cache_retention_zero() {
         let config = Config {
-            settings: Settings {
+            cache: Cache {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(0),
             },
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![],
@@ -1064,11 +1216,13 @@ mod tests {
     #[test]
     fn test_cache_retention_valid() {
         let config = Config {
-            settings: Settings {
+            cache: Cache {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
             },
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![],
@@ -1081,11 +1235,13 @@ mod tests {
     #[test]
     fn test_cache_retention_none() {
         let config = Config {
-            settings: Settings {
+            cache: Cache {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: None,
             },
+            capabilities: Default::default(),
+            native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![],
