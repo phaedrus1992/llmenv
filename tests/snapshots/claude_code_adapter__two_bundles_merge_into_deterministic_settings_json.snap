@@ -1,0 +1,26 @@
+---
+source: tests/claude_code_adapter.rs
+assertion_line: 479
+expression: parsed
+---
+hooks:
+  PreToolUse:
+    - hooks:
+        - command: hooks/guard.sh
+          tool: ~
+          type: command
+      matcher: Bash
+    - hooks:
+        - command: hooks/fmt.sh
+          tool: ~
+          type: command
+      matcher: Edit
+permissions:
+  allow:
+    - Bash(cargo *)
+    - Read(./src)
+  ask: []
+  deny:
+    - Read(./.env)
+    - "WebFetch(domain:internal.example.com)"
+    - "WebFetch(domain:other.example.com)"

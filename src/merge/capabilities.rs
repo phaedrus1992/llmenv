@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use crate::config::{Capabilities, NativePermissionRules, PermissionMode, Permissions};
+use crate::util::dedup;
 
 /// A single source of capability fragments. `precedence` encodes scope rank
 /// (higher wins for scalars); `name` is used only in collision errors.
@@ -114,20 +115,6 @@ fn resolve_default_mode(
         }
     }
     Ok(winner.map(|(_, mode)| mode))
-}
-
-/// Stable dedup preserving first-seen order. Lists are small (rules, hooks,
-/// plugin ids), so the quadratic scan is fine and avoids requiring `Hash`/`Ord`
-/// on every element type.
-fn dedup<T: PartialEq>(items: &mut Vec<T>) {
-    let mut i = 0;
-    while i < items.len() {
-        if items[..i].contains(&items[i]) {
-            items.remove(i);
-        } else {
-            i += 1;
-        }
-    }
 }
 
 #[cfg(test)]
