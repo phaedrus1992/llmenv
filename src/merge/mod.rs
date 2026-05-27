@@ -4,7 +4,7 @@ pub mod rules;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::Icm;
+use crate::mcp::resolve::ResolvedMcp;
 use rules::RuleFile;
 
 #[derive(Debug, Clone)]
@@ -26,13 +26,10 @@ pub struct MergedManifest {
     /// collected: bundles in declaration order, files within a bundle sorted
     /// by relative path.
     pub rules: Vec<RuleFile>,
-    /// ICM configuration to emit into agent-native MCP config. `None` means
-    /// no ICM integration is materialized.
-    pub icm: Option<Icm>,
-    /// True when this host's active scope tags include `icm.server_tag` — the
-    /// adapter emits a local stdio MCP entry and the hook ensures `mcp-proxy`
-    /// is running. False means register an HTTP client pointing at `icm.client_url`.
-    pub icm_is_server: bool,
+    /// MCP servers resolved for this host, in declaration order. Adapters
+    /// render these into the agent-native MCP config (e.g. `mcp.json`). Empty
+    /// means no MCP integration is materialized.
+    pub mcps: Vec<ResolvedMcp>,
 }
 
 const COPIED_SUBDIRS: &[&str] = &["skills", "plugins", "hooks"];

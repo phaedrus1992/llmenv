@@ -3,8 +3,8 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::{
-    Bundle, HostMatch, HostScope, Icm, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope,
-    Scopes, Settings, UserMatch, UserScope,
+    Bundle, HostMatch, HostScope, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope, Scopes,
+    Settings, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -29,6 +29,18 @@ pub enum ValidateError {
     CacheDirTraversal(String),
     #[error("cache_retention_hours must be > 0")]
     CacheRetentionInvalid,
+    #[error("duplicate mcp name: {0}")]
+    DuplicateMcpName(String),
+    #[error("mcp {0} has no tags")]
+    McpNoTags(String),
+    #[error("mcp {0}: stdio transport requires a `command`")]
+    McpStdioMissingCommand(String),
+    #[error("mcp {0}: {1} transport requires a `url`")]
+    McpRemoteMissingUrl(String, String),
+    #[error("memory: server_host '{0}' has no entry in the `host:` table")]
+    MemoryUnknownServerHost(String),
+    #[error("memory has no tags")]
+    MemoryNoTags,
 }
 
 fn is_valid_cidr(cidr: &str) -> bool {
@@ -174,6 +186,47 @@ impl Config {
                 }
             }
         }
+        self.validate_mcps()?;
+        Ok(())
+    }
+
+    fn validate_mcps(&self) -> Result<(), ValidateError> {
+        use super::McpTransport;
+
+        let mut seen_mcp_names = std::collections::HashSet::new();
+        for m in &self.mcp {
+            if m.tags.is_empty() {
+                return Err(ValidateError::McpNoTags(m.name.clone()));
+            }
+            if !seen_mcp_names.insert(&m.name) {
+                return Err(ValidateError::DuplicateMcpName(m.name.clone()));
+            }
+            match m.transport {
+                McpTransport::Stdio => {
+                    if m.command.is_none() {
+                        return Err(ValidateError::McpStdioMissingCommand(m.name.clone()));
+                    }
+                }
+                McpTransport::Http | McpTransport::Sse => {
+                    if m.url.is_none() {
+                        return Err(ValidateError::McpRemoteMissingUrl(
+                            m.name.clone(),
+                            format!("{:?}", m.transport).to_lowercase(),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(mem) = &self.memory {
+            if mem.tags.is_empty() {
+                return Err(ValidateError::MemoryNoTags);
+            }
+            if !self.host.contains_key(&mem.server_host) {
+                return Err(ValidateError::MemoryUnknownServerHost(
+                    mem.server_host.clone(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -200,25 +253,6 @@ mod tests {
                 sync_interval_minutes,
                 cache_retention_hours,
             },
-        )
-    }
-
-    fn arb_icm() -> impl Strategy<Value = Option<Icm>> {
-        prop::option::of(
-            (
-                arb_string(),
-                arb_string(),
-                arb_string(),
-                prop::collection::vec(arb_string(), 0..3),
-            )
-                .prop_map(|(server_tag, server_bind, client_url, default_topics)| {
-                    Icm {
-                        server_tag,
-                        server_bind,
-                        client_url,
-                        default_topics,
-                    }
-                }),
         )
     }
 
@@ -300,19 +334,20 @@ mod tests {
                     })
                     .collect()
             }),
-            arb_icm(),
         )
             .prop_map(
-                |(settings, (network, host, user, project), bundle, icm)| Config {
+                |(settings, (network, host_scopes, user, project), bundle)| Config {
                     settings,
                     scope: Scopes {
                         network,
-                        host,
+                        host: host_scopes,
                         user,
                         project,
                     },
                     bundle,
-                    icm,
+                    mcp: vec![],
+                    memory: None,
+                    host: Default::default(),
                 },
             )
     }
@@ -346,7 +381,9 @@ mod tests {
                 settings: Settings::default(),
                 scope: Scopes { network, host: vec![], user: vec![], project: vec![] },
                 bundle: vec![],
-                icm: None,
+                mcp: vec![],
+                memory: None,
+                host: Default::default(),
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -368,7 +405,9 @@ mod tests {
                 settings: Settings::default(),
                 scope: Scopes::default(),
                 bundle: bundles,
-                icm: None,
+                mcp: vec![],
+                memory: None,
+                host: Default::default(),
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -387,7 +426,9 @@ mod tests {
                     Bundle { name: name.clone(), tags: vec!["tag1".to_string()], vars: Default::default() },
                     Bundle { name, tags: vec!["tag2".to_string()], vars: Default::default() },
                 ],
-                icm: None,
+                mcp: vec![],
+                memory: None,
+                host: Default::default(),
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -419,7 +460,9 @@ mod tests {
                 tags: vec!["prod".to_string()],
                 vars: Default::default(),
             }],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -443,7 +486,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -467,7 +512,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -491,7 +538,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -515,7 +564,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -537,7 +588,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -559,7 +612,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -581,7 +636,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -605,7 +662,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -630,7 +689,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -652,7 +713,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -674,7 +737,9 @@ mod tests {
                 project: vec![],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -697,7 +762,9 @@ mod tests {
                 }],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -722,7 +789,9 @@ mod tests {
                 }],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -745,7 +814,9 @@ mod tests {
                 }],
             },
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -762,7 +833,9 @@ mod tests {
                 tags: vec!["tag1".to_string()],
                 vars,
             }],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -779,7 +852,9 @@ mod tests {
                 tags: vec!["tag1".to_string()],
                 vars,
             }],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -798,7 +873,9 @@ mod tests {
                 tags: vec!["tag1".to_string()],
                 vars,
             }],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -813,7 +890,9 @@ mod tests {
             },
             scope: Scopes::default(),
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -830,7 +909,9 @@ mod tests {
             },
             scope: Scopes::default(),
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -845,7 +926,9 @@ mod tests {
             },
             scope: Scopes::default(),
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -856,7 +939,9 @@ mod tests {
             settings: Settings::default(),
             scope: Scopes::default(),
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -871,7 +956,9 @@ mod tests {
             },
             scope: Scopes::default(),
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -886,7 +973,9 @@ mod tests {
             },
             scope: Scopes::default(),
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -901,7 +990,9 @@ mod tests {
             },
             scope: Scopes::default(),
             bundle: vec![],
-            icm: None,
+            mcp: vec![],
+            memory: None,
+            host: Default::default(),
         };
         assert!(config.validate().is_ok());
     }

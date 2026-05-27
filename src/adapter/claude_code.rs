@@ -3,14 +3,13 @@ use std::path::Path;
 use serde_json::json;
 
 use super::AgentAdapter;
-use crate::config::Icm;
+use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
 
-/// Name used to register the ICM MCP server in Claude Code's `mcp.json`. Also
-/// the substitution value for `{{ICM_MCP}}` placeholders in bundle hook
-/// templates so bundle hooks can reference the MCP by name without knowing
-/// it ahead of time.
-pub const ICM_MCP_NAME: &str = "icm";
+/// Substitution value for `{{ICM_MCP}}` placeholders in bundle hook templates,
+/// so bundle hooks can reference the memory MCP server by name without knowing
+/// it ahead of time. Tracks the memory backend's registration name.
+const ICM_MCP_NAME: &str = MEMORY_MCP_NAME;
 
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
@@ -72,9 +71,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Generate settings.json from hook/permission bundles
         generate_settings_json(out)?;
 
-        // Emit mcp.json when the manifest carries ICM config
-        if let Some(icm) = &manifest.icm {
-            write_mcp_json(out, icm, manifest.icm_is_server)?;
+        // Emit mcp.json when the manifest carries any resolved MCP servers.
+        if !manifest.mcps.is_empty() {
+            write_mcp_json(out, &manifest.mcps)?;
         }
 
         Ok(())
@@ -88,29 +87,25 @@ fn is_hook_json(rel: &Path) -> bool {
     rel.starts_with("hooks") && rel.extension().is_some_and(|e| e == "json")
 }
 
-/// Writes `mcp.json` registering the ICM MCP server.
-///
-/// When `is_server` is true this host is the ICM server: register a local
-/// stdio entry that spawns `icm mcp-server` (the hook ensures `mcp-proxy` is
-/// running separately so other clients on the network can reach it).
-///
-/// When false: register an HTTP client pointing at `icm.client_url`.
-fn write_mcp_json(out: &Path, icm: &Icm, is_server: bool) -> anyhow::Result<()> {
-    let entry = if is_server {
-        json!({
-            "command": "icm",
-            "args": ["mcp-server"],
-        })
-    } else {
-        json!({
-            "url": icm.client_url,
-        })
-    };
-    let doc = json!({
-        "mcpServers": {
-            ICM_MCP_NAME: entry,
-        },
-    });
+/// Writes `mcp.json` registering every resolved MCP server under the
+/// `mcpServers` key. Stdio entries carry `command`/`args`/`env`; remote entries
+/// carry `url`. Entries are keyed by server name.
+fn write_mcp_json(out: &Path, mcps: &[ResolvedMcp]) -> anyhow::Result<()> {
+    let mut servers = serde_json::Map::new();
+    for m in mcps {
+        let entry = match &m.kind {
+            ResolvedKind::Stdio { command, args, env } => {
+                let mut obj = json!({ "command": command, "args": args });
+                if !env.is_empty() {
+                    obj["env"] = json!(env);
+                }
+                obj
+            }
+            ResolvedKind::Remote { url, .. } => json!({ "url": url }),
+        };
+        servers.insert(m.name.clone(), entry);
+    }
+    let doc = json!({ "mcpServers": servers });
     let path = out.join("mcp.json");
     std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
     Ok(())

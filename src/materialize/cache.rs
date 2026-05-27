@@ -53,11 +53,33 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
         update_len_prefixed(&mut h, rel_str.as_bytes());
         update_len_prefixed(&mut h, r.raw.as_bytes());
     }
-    // Mix in ICM config so a change in MCP wiring invalidates the cache.
-    // Serialize as JSON for a deterministic byte representation.
-    let icm_bytes = serde_json::to_vec(&m.icm)?;
-    update_len_prefixed(&mut h, &icm_bytes);
-    h.update([u8::from(m.icm_is_server)]);
+    // Mix in resolved MCP servers so any change in MCP wiring (selection,
+    // role resolution, transport) invalidates the cache. Each entry is hashed
+    // by its rendered shape, length-prefixed for unambiguous boundaries.
+    h.update((m.mcps.len() as u64).to_le_bytes());
+    for mcp in &m.mcps {
+        update_len_prefixed(&mut h, mcp.name.as_bytes());
+        match &mcp.kind {
+            crate::mcp::resolve::ResolvedKind::Stdio { command, args, env } => {
+                h.update([0u8]);
+                update_len_prefixed(&mut h, command.as_bytes());
+                h.update((args.len() as u64).to_le_bytes());
+                for a in args {
+                    update_len_prefixed(&mut h, a.as_bytes());
+                }
+                h.update((env.len() as u64).to_le_bytes());
+                for (k, v) in env {
+                    update_len_prefixed(&mut h, k.as_bytes());
+                    update_len_prefixed(&mut h, v.as_bytes());
+                }
+            }
+            crate::mcp::resolve::ResolvedKind::Remote { url, transport } => {
+                h.update([1u8]);
+                update_len_prefixed(&mut h, url.as_bytes());
+                update_len_prefixed(&mut h, format!("{transport:?}").as_bytes());
+            }
+        }
+    }
     Ok(hex::encode(h.finalize()))
 }
 

@@ -95,6 +95,9 @@ enum Command {
     /// List available bundles
     #[command(alias = "bundles")]
     BundleLs,
+    /// List selected MCP servers with their resolved role and transport
+    #[command(name = "mcp-ls", alias = "mcps")]
+    McpLs,
     /// Sync config with GitHub (git add, commit, push)
     Sync,
     /// Clean stale cache folders
@@ -143,6 +146,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::BundleLs) => {
             run_bundle_ls(use_color)?;
+        }
+        Some(Command::McpLs) => {
+            run_mcp_ls(use_color)?;
         }
         Some(Command::Sync) => {
             run_sync()?;
@@ -251,6 +257,29 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
             eprintln!(
                 "{warn} orphan bundle {}: no scope emits its tags and no marker enables it",
                 b.name
+            );
+            orphan_count += 1;
+        }
+    }
+    for m in &config.mcp {
+        let has_emitted_tag = m.tags.iter().any(|t| emitted.contains(t));
+        if !has_emitted_tag {
+            eprintln!("{warn} orphan mcp {}: no scope emits its tags", m.name);
+            orphan_count += 1;
+        }
+    }
+    if let Some(mem) = &config.memory {
+        let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
+        if !has_emitted_tag {
+            eprintln!("{warn} orphan memory: no scope emits its tags");
+            orphan_count += 1;
+        }
+        // The memory client URL is built from the server host's `host:` entry;
+        // a missing entry can never resolve — flag it early.
+        if !config.host.contains_key(&mem.server_host) {
+            eprintln!(
+                "{warn} memory: server_host '{}' has no entry in the host: table",
+                mem.server_host
             );
             orphan_count += 1;
         }
@@ -416,17 +445,15 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
 
-    // When this host's active scope tags include `icm.server_tag`, ensure
-    // the local `mcp-proxy` is alive before agents try to reach it. Failures
-    // here are logged but non-fatal — the export must still emit env vars so
-    // the shell hook stays usable.
-    if let Some(icm) = &config.icm
-        && active.tags.contains(&icm.server_tag)
-    {
+    // When the memory backend designates *this* host as its server, ensure the
+    // local `mcp-proxy` is alive before agents try to reach it. Failures here
+    // are logged but non-fatal — the export must still emit env vars so the
+    // shell hook stays usable.
+    if let Some(bind) = local_memory_server_bind(&config, &active) {
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
                 if let Err(e) = crate::mcp::proxy::ensure_running(
-                    &icm.server_bind,
+                    &bind,
                     &pid_path,
                     crate::mcp::proxy::spawn_mcp_proxy,
                 ) {
@@ -570,10 +597,8 @@ fn build_and_materialize(
     }
 
     let mut manifest: MergedManifest = crate::merge::merge(&refs)?;
-    if let Some(icm) = &config.icm {
-        manifest.icm = Some(icm.clone());
-        manifest.icm_is_server = active.tags.contains(&icm.server_tag);
-    }
+    manifest.mcps =
+        crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
 
     let cache_root = expand_tilde(&config.settings.cache_dir)?;
     let adapter = ClaudeCodeAdapter;
@@ -723,6 +748,25 @@ bundle:
     tags: [me]
     vars:
       AGENT: "claude"
+
+# MCP servers are selected by tag, like bundles, and rendered into the agent's
+# MCP config (mcp.json for Claude Code). Each is stdio (a command) or remote (a
+# url).
+# mcp:
+#   - name: playwright
+#     tags: [me]
+#     command: npx
+#     args: ["-y", "@playwright/mcp@latest"]
+
+# llmenv's memory backend: one host runs it, every host connects over the
+# network. `host:` maps the server host name to a reachable address.
+# host:
+#   my-laptop:
+#     addr: "my-laptop.local"
+# memory:
+#   server_host: my-laptop
+#   port: 7878
+#   tags: [me]
 "#;
     std::fs::write(&config_path, template)
         .with_context(|| format!("writing template to {}", config_path.display()))?;
@@ -780,12 +824,15 @@ fn all_emitted_tags(config: &Config) -> HashSet<String> {
     out
 }
 
-/// Tags consumed by any configured bundle.
+/// Tags consumed by any configured bundle, MCP server, or the memory backend.
+/// A scope whose tags are consumed by any of these is reachable, not an orphan.
 fn all_consumed_tags(config: &Config) -> HashSet<String> {
     config
         .bundle
         .iter()
         .flat_map(|b| b.tags.iter().cloned())
+        .chain(config.mcp.iter().flat_map(|m| m.tags.iter().cloned()))
+        .chain(config.memory.iter().flat_map(|m| m.tags.iter().cloned()))
         .collect()
 }
 
@@ -797,6 +844,37 @@ fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
         .iter()
         .flat_map(|s| s.enable_bundles.iter().cloned())
         .collect()
+}
+
+/// Ids of host-scopes that matched this host. Used to decide whether the
+/// memory backend runs locally: it does when its `server_host` is among these.
+fn active_host_ids(active: &ActiveScopes) -> BTreeSet<String> {
+    active
+        .scopes
+        .iter()
+        .filter(|s| s.kind == "host")
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// If the memory backend is selected and designates *this* host as its server,
+/// return the bind address (`0.0.0.0:<port>`) the `mcp-proxy` should listen on.
+/// `None` when this host is a memory client (or memory is unconfigured).
+///
+/// This host is the server when its `server_host` matches a matched host-scope
+/// id. Host scopes can match on hostname (auto-detected) but a host can also be
+/// placed into the topology manually by emitting the relevant tag from any
+/// scope — so a host whose network can't be auto-detected can still be made the
+/// server by tagging it explicitly.
+fn local_memory_server_bind(config: &Config, active: &ActiveScopes) -> Option<String> {
+    let mem = config.memory.as_ref()?;
+    let selected = mem.tags.iter().any(|t| active.tags.contains(t));
+    let is_server = active_host_ids(active).contains(&mem.server_host);
+    if selected && is_server {
+        Some(format!("0.0.0.0:{}", mem.port))
+    } else {
+        None
+    }
 }
 
 /// Annotation suffix for a listing row, colored when `use_color` is set.
@@ -952,6 +1030,71 @@ fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
             "{} {}{}",
             mark,
             name,
+            annotate(is_active, is_orphan, use_color)
+        );
+    }
+    Ok(())
+}
+
+/// List configured MCP servers, marking those selected by the active scope and
+/// annotating each with its resolved transport for this host. The memory
+/// backend is listed too (as `icm`). Orphans (no scope emits any of their tags)
+/// are flagged like bundles.
+fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
+    use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, resolve_mcps};
+
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    let emitted = all_emitted_tags(&config);
+
+    // Resolved entries (active host only) keyed by name, so we can annotate
+    // each selected server with its concrete transport.
+    let resolved =
+        resolve_mcps(&config, &active.tags).context("resolving MCP servers for listing")?;
+    let resolved_by_name: std::collections::HashMap<&str, &ResolvedKind> = resolved
+        .iter()
+        .map(|m| (m.name.as_str(), &m.kind))
+        .collect();
+
+    let detail_for = |name: &str, fallback: &str| match resolved_by_name.get(name) {
+        Some(ResolvedKind::Stdio { .. }) => "stdio server".to_string(),
+        Some(ResolvedKind::Remote { transport, .. }) => {
+            format!("{} client", format!("{transport:?}").to_lowercase())
+        }
+        None => fallback.to_string(),
+    };
+
+    let mut rows: Vec<(String, bool, bool, String)> = config
+        .mcp
+        .iter()
+        .map(|m| {
+            let is_active = m.tags.iter().any(|t| active.tags.contains(t));
+            let is_orphan = !m.tags.iter().any(|t| emitted.contains(t));
+            let detail = detail_for(&m.name, &format!("{:?}", m.transport).to_lowercase());
+            (m.name.clone(), is_active, is_orphan, detail)
+        })
+        .collect();
+    if let Some(mem) = &config.memory {
+        let is_active = mem.tags.iter().any(|t| active.tags.contains(t));
+        let is_orphan = !mem.tags.iter().any(|t| emitted.contains(t));
+        let detail = detail_for(MEMORY_MCP_NAME, "memory");
+        rows.push((MEMORY_MCP_NAME.to_string(), is_active, is_orphan, detail));
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, is_active, is_orphan, detail) in rows {
+        let mark = if is_active {
+            active_marker(use_color)
+        } else {
+            " ".to_string()
+        };
+        println!(
+            "{} {} ({}){}",
+            mark,
+            name,
+            detail,
             annotate(is_active, is_orphan, use_color)
         );
     }
