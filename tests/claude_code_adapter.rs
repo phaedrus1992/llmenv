@@ -417,6 +417,35 @@ fn native_rule_overrides_conflicting_neutral_rule() {
     );
 }
 
+// Issue #34: deny is authoritative. A native `allow` must NEVER suppress a
+// neutral `deny` of the same string — silently weakening a deny rule is a
+// security regression. The string must remain in deny; it may also appear in
+// allow (the native rule still emits), but the deny is never dropped.
+#[test]
+fn native_allow_does_not_suppress_neutral_deny() {
+    let bundles = vec![fixture_bundle("native-allow-vs-neutral-deny")];
+    let m = merge(&llmenv::config::Capabilities::default(), &bundles).expect("merge");
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+
+    let deny: Vec<&str> = parsed["permissions"]["deny"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    assert!(
+        deny.contains(&"Read(./secrets/**)"),
+        "neutral deny must not be suppressed by a native allow: {deny:?}"
+    );
+}
+
 // Issue #85: SessionStart hook prerequisite — wiring complete, hash comparison deferred
 #[test]
 fn session_start_hook_emitted_in_settings_json() {

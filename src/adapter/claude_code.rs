@@ -6,6 +6,7 @@ use serde_json::json;
 use super::AgentAdapter;
 use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
+use crate::util::dedup;
 
 /// Substitution value for `{{ICM_MCP}}` placeholders in bundle hook templates,
 /// so bundle hooks can reference the memory MCP server by name without knowing
@@ -186,10 +187,12 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
 /// `Tool(pattern)` string grammar and land in `permissions.{allow,ask,deny}`
 /// alongside the verbatim `native.claude_code` rule strings (one flat array per
 /// action — not a nested `native` object). `default_mode` maps to `defaultMode`.
-/// Native rules win: a rule string asserted natively in any action is dropped
-/// from neutral-contributed actions, so a native `deny` overrides a neutral
-/// `allow` for the same rule. Cross-bundle merge (concat + dedup, scope-ordered)
-/// already happened in [`crate::merge`]; this function only renders.
+/// Native rules win in the safe direction only — deny is authoritative
+/// (authority runs deny > ask > allow). A native `deny` suppresses a neutral
+/// `allow`/`ask` of the same string, but a native `allow` never suppresses a
+/// neutral `deny`: silently weakening a deny would be a security regression.
+/// Cross-bundle merge (concat + dedup, scope-ordered) already happened in
+/// [`crate::merge`]; this function only renders.
 ///
 /// SessionStart (#85): the hook object shape supports it; hash-comparison logic
 /// lives in the runtime hook script.
@@ -239,54 +242,68 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     let perms = &manifest.capabilities.permissions;
     let native = perms.native.get("claude_code");
 
-    // Native rules win over neutral ones: when the same rule string is asserted
-    // natively in any action, it is authoritative and that string is dropped from
-    // every neutral-contributed action before merge. This lets a bundle's
-    // `native.claude_code.deny: ["WebFetch(domain:x)"]` override a neutral
-    // `allow: { tool: WebFetch, pattern: "domain:x" }` declared elsewhere —
-    // native deny wins, the neutral allow is suppressed. Within a single action,
-    // a native and neutral string that agree simply dedupe.
-    let native_strings: std::collections::BTreeSet<String> = native
-        .into_iter()
-        .flat_map(|n| {
-            n.allow
-                .iter()
-                .chain(n.ask.iter())
-                .chain(n.deny.iter())
-                .cloned()
-        })
-        .collect();
+    // Native rules win over neutral ones, but only in the safe direction: deny is
+    // authoritative. Authority runs deny > ask > allow (most restrictive wins). A
+    // neutral string is dropped only when a *more authoritative* native action
+    // claims it — so a native `deny: ["WebFetch(domain:x)"]` suppresses a neutral
+    // `allow`/`ask` of the same string (native deny wins), but a native `allow`
+    // never suppresses a neutral `deny`. Silently weakening a deny would be a
+    // security regression. Within the same action, agreeing native+neutral strings
+    // simply dedupe (the native list is appended below).
+    // Only deny and ask can outrank a neutral rule (deny > ask > allow), so a
+    // native allow set is never a suppressor and isn't collected.
+    let native_ask: std::collections::BTreeSet<&str> = native.map_or_else(Default::default, |n| {
+        n.ask.iter().map(String::as_str).collect()
+    });
+    let native_deny: std::collections::BTreeSet<&str> = native.map_or_else(Default::default, |n| {
+        n.deny.iter().map(String::as_str).collect()
+    });
+
+    // For a neutral rule in `action`, the set of native strings that outrank it.
+    let suppressors = |action: PermissionAction| -> Vec<&std::collections::BTreeSet<&str>> {
+        match action {
+            PermissionAction::Allow => vec![&native_deny, &native_ask],
+            PermissionAction::Ask => vec![&native_deny],
+            PermissionAction::Deny => Vec::new(),
+        }
+    };
 
     let render_action = |neutral: &[crate::config::PermissionRule],
                          native_rules: &[String],
-                         native_owns: &std::collections::BTreeSet<String>| {
+                         action: PermissionAction| {
+        let outranking = suppressors(action);
         let mut out: Vec<String> = Vec::new();
         for rule in neutral {
             for s in render_permission_rule(rule) {
-                // Drop neutral strings that any native action claims — unless
-                // it's this action's own native list, which is appended below
-                // (so an agreeing native+neutral in the same action still emits).
-                if native_owns.contains(&s) && !native_rules.contains(&s) {
+                // Drop the neutral string only when a more authoritative native
+                // action asserts it — unless this action's own native list also
+                // asserts it (appended below, so an agreeing pair still emits).
+                let outranked = outranking.iter().any(|set| set.contains(s.as_str()));
+                if outranked && !native_rules.contains(&s) {
                     continue;
                 }
                 out.push(s);
             }
         }
         out.extend(native_rules.iter().cloned());
-        dedup_strings(&mut out);
+        dedup(&mut out);
         out
     };
 
     let allow = render_action(
         &perms.allow,
         native.map_or(&[], |n| &n.allow),
-        &native_strings,
+        PermissionAction::Allow,
     );
-    let ask = render_action(&perms.ask, native.map_or(&[], |n| &n.ask), &native_strings);
+    let ask = render_action(
+        &perms.ask,
+        native.map_or(&[], |n| &n.ask),
+        PermissionAction::Ask,
+    );
     let deny = render_action(
         &perms.deny,
         native.map_or(&[], |n| &n.deny),
-        &native_strings,
+        PermissionAction::Deny,
     );
 
     let has_perms =
@@ -366,15 +383,65 @@ fn permission_mode_str(mode: crate::config::PermissionMode) -> &'static str {
     }
 }
 
-/// Stable dedup of permission rule strings, preserving first-seen order so the
-/// emitted arrays are deterministic across runs.
-fn dedup_strings(items: &mut Vec<String>) {
-    let mut i = 0;
-    while i < items.len() {
-        if items[..i].contains(&items[i]) {
-            items.remove(i);
-        } else {
-            i += 1;
+/// Which permission action a neutral rule belongs to. Authority for native-wins
+/// suppression runs deny > ask > allow (most restrictive wins), so a neutral
+/// rule is only ever suppressed by a native rule in a *more* authoritative
+/// action — a native deny can suppress a neutral allow, never the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionAction {
+    Allow,
+    Ask,
+    Deny,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_permission_rule;
+    use crate::config::PermissionRule;
+    use proptest::prelude::*;
+
+    proptest! {
+        // A rule with a `pattern` always renders to exactly one `Tool(pattern)`
+        // string, regardless of any `paths` (pattern wins per the neutral schema).
+        #[test]
+        fn pattern_renders_single_tool_pattern_string(
+            tool in "[A-Za-z]{1,12}",
+            pattern in "[^()]{0,20}",
+            paths in proptest::collection::vec("[^()]{0,10}", 0..3),
+        ) {
+            let rule = PermissionRule { tool: tool.clone(), pattern: Some(pattern.clone()), paths };
+            let out = render_permission_rule(&rule);
+            prop_assert_eq!(out, vec![format!("{tool}({pattern})")]);
+        }
+
+        // With no pattern, each path yields one `Tool(path)` string, in order.
+        #[test]
+        fn paths_render_one_string_each_in_order(
+            tool in "[A-Za-z]{1,12}",
+            paths in proptest::collection::vec("[^()]{1,10}", 1..5),
+        ) {
+            let rule = PermissionRule { tool: tool.clone(), pattern: None, paths: paths.clone() };
+            let out = render_permission_rule(&rule);
+            let expected: Vec<String> = paths.iter().map(|p| format!("{tool}({p})")).collect();
+            prop_assert_eq!(out, expected);
+        }
+
+        // No pattern and no paths → a bare tool-wide rule.
+        #[test]
+        fn bare_tool_renders_tool_name(tool in "[A-Za-z]{1,12}") {
+            let rule = PermissionRule { tool: tool.clone(), pattern: None, paths: Vec::new() };
+            prop_assert_eq!(render_permission_rule(&rule), vec![tool]);
+        }
+
+        // Rendering is deterministic: same input, same output, never panics.
+        #[test]
+        fn rendering_is_deterministic(
+            tool in "[A-Za-z]{1,12}",
+            pattern in proptest::option::of("[^()]{0,20}"),
+            paths in proptest::collection::vec("[^()]{0,10}", 0..4),
+        ) {
+            let rule = PermissionRule { tool, pattern, paths };
+            prop_assert_eq!(render_permission_rule(&rule), render_permission_rule(&rule));
         }
     }
 }
