@@ -970,5 +970,56 @@ mod tests {
             let path = format!("{before}/../{after}");
             prop_assert!(!is_valid_path_prefix(&path), "parent component accepted: {path}");
         }
+
+        #[test]
+        fn prop_valid_mac_addresses_accepted(octets in prop::array::uniform6(0u8..=255)) {
+            let mac = octets
+                .iter()
+                .map(|o| format!("{o:02x}"))
+                .collect::<Vec<_>>()
+                .join(":");
+            prop_assert!(is_valid_mac_address(&mac), "valid MAC rejected: {mac}");
+        }
+
+        #[test]
+        fn prop_mac_wrong_group_count_rejected(count in prop_oneof![0usize..6, 7usize..12]) {
+            let mac = vec!["aa"; count].join(":");
+            prop_assert!(!is_valid_mac_address(&mac), "MAC with {count} groups accepted");
+        }
+
+        #[test]
+        fn prop_mac_non_hex_rejected(
+            pos in 0usize..6,
+            bad in "[g-zG-Z]{2}",
+        ) {
+            let mut octets = vec!["aa".to_string(); 6];
+            octets[pos] = bad;
+            let mac = octets.join(":");
+            prop_assert!(!is_valid_mac_address(&mac), "non-hex MAC accepted: {mac}");
+        }
+
+        #[test]
+        fn prop_cache_dir_with_parent_component_rejected(
+            before in "[a-z0-9_-]{1,10}",
+            after in "[a-z0-9_-]{1,10}",
+        ) {
+            let dir = format!("{before}/../{after}");
+            prop_assert!(!is_safe_cache_dir(&dir), "parent component accepted: {dir}");
+        }
+
+        #[test]
+        fn prop_cache_dir_with_null_byte_rejected(
+            before in "[a-z0-9/_-]{0,20}",
+            after in "[a-z0-9/_-]{0,20}",
+        ) {
+            let dir = format!("{before}\0{after}");
+            prop_assert!(!is_safe_cache_dir(&dir), "null byte accepted in cache dir");
+        }
+
+        #[test]
+        fn prop_cache_dir_over_max_length_rejected(len in 4097usize..5000) {
+            let dir = "a".repeat(len);
+            prop_assert!(!is_safe_cache_dir(&dir), "over-length cache dir accepted");
+        }
     }
 }
