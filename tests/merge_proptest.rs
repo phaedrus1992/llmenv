@@ -1,6 +1,21 @@
 use proptest::prelude::*;
 use llmenv::config::{Bundle, Config};
 
+fn dedup<T: PartialEq>(items: Vec<T>) -> Vec<T> {
+    let mut unique = Vec::new();
+    for item in items {
+        if !unique.contains(&item) {
+            unique.push(item);
+        }
+    }
+    unique
+}
+
+fn yaml_roundtrip(cfg: &Config) -> Config {
+    let yaml = serde_yaml::to_string(cfg).expect("serialize");
+    serde_yaml::from_str(&yaml).expect("deserialize")
+}
+
 // ===== Merge Determinism =====
 
 #[test]
@@ -49,13 +64,7 @@ fn prop_bundle_order_preserved_through_serialization() {
     proptest!(|(
         names in prop::collection::vec("[a-z0-9]{1,8}", 1..5)
     )| {
-        let mut unique_names = vec![];
-        for name in names {
-            if !unique_names.contains(&name) {
-                unique_names.push(name);
-            }
-        }
-
+        let unique_names = dedup(names);
         if unique_names.is_empty() {
             return Ok(());
         }
@@ -74,8 +83,7 @@ fn prop_bundle_order_preserved_through_serialization() {
             ..Default::default()
         };
 
-        let yaml = serde_yaml::to_string(&cfg).expect("serialize");
-        let cfg_parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+        let cfg_parsed = yaml_roundtrip(&cfg);
 
         assert_eq!(cfg_parsed.bundle.len(), cfg.bundle.len());
         for (orig, parsed) in cfg.bundle.iter().zip(cfg_parsed.bundle.iter()) {
@@ -92,12 +100,7 @@ fn prop_bundle_tags_preserved_through_roundtrip() {
         name in "[a-z0-9]{1,10}",
         tags in prop::collection::vec("[a-z0-9]{1,8}", 1..5)
     )| {
-        let mut unique_tags = vec![];
-        for tag in tags {
-            if !unique_tags.contains(&tag) {
-                unique_tags.push(tag);
-            }
-        }
+        let unique_tags = dedup(tags);
 
         let bundle = Bundle {
             name: name.clone(),
@@ -110,8 +113,7 @@ fn prop_bundle_tags_preserved_through_roundtrip() {
             ..Default::default()
         };
 
-        let yaml = serde_yaml::to_string(&cfg).expect("serialize");
-        let cfg_parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+        let cfg_parsed = yaml_roundtrip(&cfg);
 
         assert_eq!(cfg_parsed.bundle.len(), 1);
         let parsed_bundle = &cfg_parsed.bundle[0];
@@ -155,8 +157,7 @@ fn prop_bundle_merge_preserves_all_data() {
             ..Default::default()
         };
 
-        let yaml = serde_yaml::to_string(&cfg).expect("serialize");
-        let cfg_parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+        let cfg_parsed = yaml_roundtrip(&cfg);
 
         assert!(cfg_parsed.bundle.iter().any(|b| b.name == name1));
         assert!(cfg_parsed.bundle.iter().any(|b| b.name == name2));
@@ -170,13 +171,7 @@ fn prop_bundle_concat_is_stable() {
     proptest!(|(
         names in prop::collection::vec("[a-z0-9]{1,8}", 2..4)
     )| {
-        let mut unique_names = vec![];
-        for name in names {
-            if !unique_names.contains(&name) {
-                unique_names.push(name);
-            }
-        }
-
+        let unique_names = dedup(names);
         if unique_names.len() < 2 {
             return Ok(());
         }
