@@ -147,7 +147,7 @@ hard-error (see O3).
 ## Hooks: finish the existing machinery
 
 Hook *files* are already copied and `{{ICM_MCP}}`-substituted
-(`claude_code.rs:54-66`), but nothing registers them. The `hooks` fragment in
+(`claude_code.rs:52-61`, `is_hook_json`), but nothing registers them. The `hooks` fragment in
 D2 (`bundle.yaml`) is the missing registration. For Claude Code, `{event, matcher, handler}` renders to
 `hooks.{Event}: [{ matcher, hooks: [handler] }]`. Engines lacking a given event
 drop that registration. Handler types mirror Claude Code's (`command`,
