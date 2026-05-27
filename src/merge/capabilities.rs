@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use crate::config::{Capabilities, NativePermissionRules, PermissionMode, Permissions};
-use crate::util::dedup;
+use crate::util::{dedup, merge_yaml};
 
 /// A single source of capability fragments. `precedence` encodes scope rank
 /// (higher wins for scalars); `name` is used only in collision errors.
@@ -40,7 +40,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
-    let mut native: BTreeMap<String, NativePermissionRules> = BTreeMap::new();
+    let mut native_permissions: BTreeMap<String, NativePermissionRules> = BTreeMap::new();
 
     for c in contributors {
         let caps = &c.capabilities;
@@ -49,8 +49,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         allow.extend(caps.permissions.allow.iter().cloned());
         ask.extend(caps.permissions.ask.iter().cloned());
         deny.extend(caps.permissions.deny.iter().cloned());
-        for (engine, rules) in &caps.permissions.native {
-            let slot = native.entry(engine.clone()).or_default();
+        for (engine, rules) in &caps.native_permissions {
+            let slot = native_permissions.entry(engine.clone()).or_default();
             slot.allow.extend(rules.allow.iter().cloned());
             slot.ask.extend(rules.ask.iter().cloned());
             slot.deny.extend(rules.deny.iter().cloned());
@@ -62,13 +62,16 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     dedup(&mut allow);
     dedup(&mut ask);
     dedup(&mut deny);
-    for rules in native.values_mut() {
+    for rules in native_permissions.values_mut() {
         dedup(&mut rules.allow);
         dedup(&mut rules.ask);
         dedup(&mut rules.deny);
     }
 
     let default_mode = resolve_default_mode(contributors)?;
+    let native_hooks = merge_native_feature(contributors, |c| &c.native_hooks);
+    let native_plugins = merge_native_feature(contributors, |c| &c.native_plugins);
+    let native_mcp = merge_native_feature(contributors, |c| &c.native_mcp);
 
     Ok(Capabilities {
         permissions: Permissions {
@@ -76,11 +79,40 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             allow,
             ask,
             deny,
-            native,
         },
         hooks,
         plugins,
+        native_permissions,
+        native_hooks,
+        native_plugins,
+        native_mcp,
     })
+}
+
+/// Merge one of the per-engine opaque `native_*` maps across all contributors.
+///
+/// Each engine's fragment is deep-merged ([`merge_yaml`]) in ascending
+/// precedence order so the highest-precedence contributor wins on any scalar
+/// collision (sequences concat, mappings union — see `merge_yaml`).
+fn merge_native_feature(
+    contributors: &[CapabilityContributor],
+    select: impl Fn(&Capabilities) -> &BTreeMap<String, serde_yaml::Value>,
+) -> BTreeMap<String, serde_yaml::Value> {
+    let mut ordered: Vec<&CapabilityContributor> = contributors.iter().collect();
+    ordered.sort_by_key(|c| c.precedence);
+
+    let mut merged: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+    for c in ordered {
+        for (engine, fragment) in select(&c.capabilities) {
+            match merged.get_mut(engine) {
+                Some(existing) => merge_yaml(existing, fragment.clone()),
+                None => {
+                    merged.insert(engine.clone(), fragment.clone());
+                }
+            }
+        }
+    }
+    merged
 }
 
 /// Resolve the `default_mode` scalar across contributors: highest precedence
@@ -217,6 +249,35 @@ mod tests {
     }
 
     #[test]
+    fn native_feature_maps_merge_per_engine() {
+        // native_hooks/native_plugins/native_mcp are per-engine opaque YAML
+        // fragments. Across contributors, the same engine's mapping deep-merges
+        // (keys union, sequences concat).
+        fn caps_with_native_hooks(engine: &str, yaml: &str) -> Capabilities {
+            let mut m = BTreeMap::new();
+            m.insert(engine.to_string(), serde_yaml::from_str(yaml).unwrap());
+            Capabilities {
+                native_hooks: m,
+                ..Default::default()
+            }
+        }
+        let a = caps_with_native_hooks("claude_code", "seq: [one]\nscalar_a: 1");
+        let b = caps_with_native_hooks("claude_code", "seq: [two]\nscalar_b: 2");
+        let out = merge_capabilities(&[contributor("a", 0, a), contributor("b", 1, b)]).unwrap();
+        let merged = &out.native_hooks["claude_code"];
+        let map = merged.as_mapping().expect("mapping");
+        // sequences under the same key concatenate
+        let seq = map
+            .get(serde_yaml::Value::String("seq".into()))
+            .and_then(|v| v.as_sequence())
+            .expect("seq");
+        assert_eq!(seq.len(), 2, "sequences concat: {seq:?}");
+        // disjoint scalar keys both survive
+        assert!(map.contains_key(serde_yaml::Value::String("scalar_a".into())));
+        assert!(map.contains_key(serde_yaml::Value::String("scalar_b".into())));
+    }
+
+    #[test]
     fn native_rule_lists_merge_per_engine() {
         let mut native_a = BTreeMap::new();
         native_a.insert(
@@ -235,22 +296,16 @@ mod tests {
             },
         );
         let caps_a = Capabilities {
-            permissions: Permissions {
-                native: native_a,
-                ..Default::default()
-            },
+            native_permissions: native_a,
             ..Default::default()
         };
         let caps_b = Capabilities {
-            permissions: Permissions {
-                native: native_b,
-                ..Default::default()
-            },
+            native_permissions: native_b,
             ..Default::default()
         };
         let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 0, caps_b)])
             .unwrap();
-        assert_eq!(out.permissions.native["claude_code"].deny.len(), 2);
+        assert_eq!(out.native_permissions["claude_code"].deny.len(), 2);
     }
 
     fn with_mode(mode: PermissionMode) -> Capabilities {

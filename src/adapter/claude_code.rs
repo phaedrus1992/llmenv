@@ -6,7 +6,7 @@ use serde_json::json;
 use super::AgentAdapter;
 use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
-use crate::util::dedup;
+use crate::util::{dedup, merge_json};
 
 /// Substitution value for `{{ICM_MCP}}` placeholders in bundle hook templates,
 /// so bundle hooks can reference the memory MCP server by name without knowing
@@ -73,13 +73,31 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Generate settings.json from hook/permission bundles
         generate_settings_json(out, manifest)?;
 
-        // Emit mcp.json when the manifest carries any resolved MCP servers.
-        if !manifest.mcps.is_empty() {
-            write_mcp_json(out, &manifest.mcps)?;
+        // Emit mcp.json when the manifest carries resolved MCP servers or a
+        // per-engine `native_mcp` fragment (#97) to overlay onto the doc.
+        let native_mcp = manifest.capabilities.native_mcp.get("claude_code");
+        if !manifest.mcps.is_empty() || native_mcp.is_some() {
+            write_mcp_json(out, &manifest.mcps, native_mcp)?;
         }
 
         Ok(())
     }
+}
+
+/// Deep-merge a per-engine `native_*` fragment (opaque YAML) into an
+/// already-built JSON config subtree. The fragment is converted to JSON and
+/// overlaid via [`merge_json`], so it is the higher-precedence contributor
+/// (native overrides win on scalar collision). A `None` fragment is a no-op.
+fn overlay_native(
+    dst: &mut serde_json::Value,
+    fragment: Option<&serde_yaml::Value>,
+) -> anyhow::Result<()> {
+    if let Some(frag) = fragment {
+        let as_json: serde_json::Value =
+            serde_json::to_value(frag).context("converting native fragment to JSON")?;
+        merge_json(dst, as_json);
+    }
+    Ok(())
 }
 
 /// True if `rel` is a JSON file under the bundle's `hooks/` subtree —
@@ -92,7 +110,15 @@ fn is_hook_json(rel: &Path) -> bool {
 /// Writes `mcp.json` registering every resolved MCP server under the
 /// `mcpServers` key. Stdio entries carry `command`/`args`/`env`; remote entries
 /// carry `url`. Entries are keyed by server name.
-fn write_mcp_json(out: &Path, mcps: &[ResolvedMcp]) -> anyhow::Result<()> {
+///
+/// #97: a per-engine `native_mcp` fragment (mcp.json-shaped opaque YAML) is
+/// overlaid onto the doc so engine-only keys (e.g. `enabledMcpjsonServers`)
+/// merge in. Native is the higher-precedence overlay.
+fn write_mcp_json(
+    out: &Path,
+    mcps: &[ResolvedMcp],
+    native: Option<&serde_yaml::Value>,
+) -> anyhow::Result<()> {
     let mut servers = serde_json::Map::new();
     for m in mcps {
         let entry = match &m.kind {
@@ -107,7 +133,8 @@ fn write_mcp_json(out: &Path, mcps: &[ResolvedMcp]) -> anyhow::Result<()> {
         };
         servers.insert(m.name.clone(), entry);
     }
-    let doc = json!({ "mcpServers": servers });
+    let mut doc = json!({ "mcpServers": servers });
+    overlay_native(&mut doc, native)?;
     let path = out.join("mcp.json");
     std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
     Ok(())
@@ -230,7 +257,15 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     for (event, entries) in hooks_by_event {
         hooks_obj.insert(event, json!(entries));
     }
-    settings.insert("hooks".into(), serde_json::Value::Object(hooks_obj));
+    // #97: overlay the per-engine `native_hooks` fragment (a `hooks`-shaped
+    // settings.json object) so engine-only events and handlers merge in. Shared
+    // events concat their entry arrays; native is the higher-precedence overlay.
+    let mut hooks_value = serde_json::Value::Object(hooks_obj);
+    overlay_native(
+        &mut hooks_value,
+        manifest.capabilities.native_hooks.get("claude_code"),
+    )?;
+    settings.insert("hooks".into(), hooks_value);
 
     // #34: Render neutral permission rules into Claude's string grammar
     // (`Tool(pattern)` / `Tool(path)` / bare `Tool`), then append the per-engine
@@ -240,7 +275,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // share the array because both are just permission rule strings; the only
     // difference is neutral rules are generated and native ones are authored.
     let perms = &manifest.capabilities.permissions;
-    let native = perms.native.get("claude_code");
+    let native = manifest.capabilities.native_permissions.get("claude_code");
 
     // Native rules win over neutral ones, but only in the safe direction: deny is
     // authoritative. Authority runs deny > ask > allow (most restrictive wins). A
@@ -327,7 +362,19 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // keyed `<plugin>@<marketplace>` and force-enabled.
     render_plugins(&mut settings, manifest);
 
-    let settings_value = serde_json::Value::Object(settings);
+    // #97: overlay the per-engine `native_plugins` fragment at the settings top
+    // level (plugin-related keys Claude understands but llmenv has no neutral
+    // form for, e.g. extra `enabledPlugins` entries).
+    let mut settings_value = serde_json::Value::Object(settings);
+    overlay_native(
+        &mut settings_value,
+        manifest.capabilities.native_plugins.get("claude_code"),
+    )?;
+
+    // #96: overlay the top-level `native.claude_code` catch-all last — opaque
+    // keys that belong to no modeled feature (e.g. `alwaysThinkingEnabled`).
+    // It is the highest-precedence layer, applied after every modeled render.
+    overlay_native(&mut settings_value, manifest.native.get("claude_code"))?;
     let settings_path = out.join("settings.json");
     let json_str = serde_json::to_string_pretty(&settings_value)?;
 

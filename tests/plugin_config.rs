@@ -2,6 +2,7 @@
 //! marketplaces into `settings.json` (`enabledPlugins` and
 //! `extraKnownMarketplaces`).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use llmenv::adapter::AgentAdapter;
@@ -16,6 +17,10 @@ fn fixture_bundle(name: &str) -> BundleRef {
         path: PathBuf::from(format!("tests/fixtures/bundles/{name}")),
         precedence: 1,
     }
+}
+
+fn empty_native() -> BTreeMap<String, serde_yaml::Value> {
+    BTreeMap::new()
 }
 
 fn read_settings(out: &std::path::Path) -> serde_json::Value {
@@ -44,6 +49,7 @@ fn marketplace(name: &str, location: &str, head: Option<&str>) -> ResolvedMarket
 fn enabled_plugins_keyed_plugin_at_marketplace() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -70,6 +76,7 @@ fn enabled_plugins_keyed_plugin_at_marketplace() {
 fn marketplace_rendered_as_directory_source_at_install_location() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -98,6 +105,7 @@ fn marketplace_rendered_as_directory_source_at_install_location() {
 fn unsynced_marketplace_is_skipped() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -125,6 +133,7 @@ fn unsynced_marketplace_is_skipped() {
 fn no_plugin_keys_when_manifest_empty() {
     let m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
@@ -143,6 +152,7 @@ fn no_plugin_keys_when_manifest_empty() {
 fn multiple_plugins_across_marketplaces() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
+        &empty_native(),
         &[fixture_bundle("base")],
     )
     .expect("merge");
