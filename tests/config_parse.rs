@@ -8,7 +8,13 @@ fn parses_fixture() {
     assert_eq!(cfg.scope.host.len(), 1);
     assert_eq!(cfg.scope.host[0].id, "fixed");
     assert_eq!(cfg.bundle.len(), 2);
-    assert_eq!(cfg.icm.as_ref().unwrap().server_tag, "icm-server");
+    assert_eq!(cfg.host.len(), 1);
+    assert_eq!(cfg.host["fixed"].addr, "fixed.local");
+    assert_eq!(cfg.mcp.len(), 1);
+    assert_eq!(cfg.mcp[0].name, "playwright");
+    let mem = cfg.memory.as_ref().expect("memory block");
+    assert_eq!(mem.server_host, "fixed");
+    assert_eq!(mem.port, 7878);
 }
 
 #[test]
