@@ -100,6 +100,35 @@ fn overlay_native(
     Ok(())
 }
 
+/// Top-level settings.json keys that a modeled capability renders. The
+/// top-level `native` catch-all (D3) is for keys NO modeled feature owns, so
+/// these must never appear there — they belong in the `native_<feature>`
+/// sibling, which merges in the safe direction (e.g. native deny can't weaken a
+/// neutral deny). `enabledPlugins`/`extraKnownMarketplaces` (plugins) and the
+/// separate `mcp.json` doc use distinct keys and aren't catch-all collisions.
+const MODELED_SETTINGS_KEYS: [&str; 2] = ["permissions", "hooks"];
+
+/// Reject a top-level `native.<engine>` catch-all fragment that contains a
+/// modeled-feature key. Overlaying such a key last would silently clobber the
+/// security-rendered output (see the call site). Returns an error naming the
+/// offending key and pointing at the correct `native_<feature>` sibling.
+fn reject_modeled_keys_in_catch_all(fragment: &serde_yaml::Value) -> anyhow::Result<()> {
+    let Some(map) = fragment.as_mapping() else {
+        return Ok(());
+    };
+    for key in MODELED_SETTINGS_KEYS {
+        if map.contains_key(serde_yaml::Value::String(key.into())) {
+            anyhow::bail!(
+                "top-level `native.claude_code` carries the modeled-feature key \
+                 `{key}`, which would silently clobber the rendered `{key}` \
+                 (a security regression for permissions). Move it to the \
+                 `native_{key}` sibling instead, which merges in the safe direction."
+            );
+        }
+    }
+    Ok(())
+}
+
 /// True if `rel` is a JSON file under the bundle's `hooks/` subtree —
 /// these files are template-rendered rather than byte-copied so bundle hooks
 /// can reference the ICM MCP via `{{ICM_MCP}}`.
@@ -374,6 +403,17 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // #96: overlay the top-level `native.claude_code` catch-all last — opaque
     // keys that belong to no modeled feature (e.g. `alwaysThinkingEnabled`).
     // It is the highest-precedence layer, applied after every modeled render.
+    //
+    // Security guard (#102): the catch-all is for keys NO modeled feature owns.
+    // A modeled-feature key here (`permissions`, `hooks`) would overlay LAST over
+    // the security-rendered output, silently clobbering it — e.g. erasing the
+    // permission `deny` array, bypassing the deny-never-weakened invariant. Per
+    // design D3 ("Layer 1 wins, or hard-error"), reject it loudly. The key
+    // belongs in the `native_<feature>` sibling, which merges in the safe
+    // direction.
+    if let Some(native) = manifest.native.get("claude_code") {
+        reject_modeled_keys_in_catch_all(native)?;
+    }
     overlay_native(&mut settings_value, manifest.native.get("claude_code"))?;
     let settings_path = out.join("settings.json");
     let json_str = serde_json::to_string_pretty(&settings_value)?;

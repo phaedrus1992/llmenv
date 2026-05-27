@@ -178,6 +178,15 @@ follow the same precedence rule as D2. Generic capabilities (Layer 1) win on
 conflict with a `native` key that a modeled capability also produces — or
 hard-error (see O3).
 
+**Enforced as a hard-error (#102):** the catch-all is overlaid *last* over the
+whole rendered config, so a modeled-feature key here (e.g. `permissions`,
+`hooks`) would silently clobber the security-rendered output — erasing the
+permission `deny` array would bypass the deny-never-weakened invariant. The
+adapter therefore rejects any modeled-feature key found in the top-level
+`native.<engine>` fragment, naming the offending key and pointing at the
+`native_<feature>` sibling (which merges in the safe direction). The catch-all
+is strictly for keys *no* modeled feature owns.
+
 ## Hooks: finish the existing machinery
 
 Hook *files* are already copied and `{{ICM_MCP}}`-substituted

@@ -640,6 +640,60 @@ fn top_level_native_passthrough_merges_into_settings() {
     );
 }
 
+// Issue #96/#102 (security): the top-level `native.claude_code` catch-all is for
+// keys that belong to NO modeled feature. A modeled-feature key (`permissions`,
+// `hooks`) appearing there would be overlaid LAST over the rendered settings,
+// silently clobbering the security-rendered output — e.g. erasing the
+// permission `deny` array, bypassing the deny-never-weakened invariant. Per
+// design D3 ("Layer 1 wins, or hard-error"), this must hard-error, not silently
+// honor the catch-all. The key belongs in the `native_<feature>` sibling.
+#[test]
+fn top_level_native_with_modeled_key_hard_errors() {
+    let mut native = BTreeMap::new();
+    native.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>("permissions:\n  deny: null\n")
+            .expect("parse native"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        native,
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    let err = ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect_err("modeled key in top-level native must hard-error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("permissions") && msg.contains("native"),
+        "error must name the offending modeled key and point at native_<feature>: {msg}"
+    );
+}
+
+// Issue #96/#102: the guard above only fires for modeled-feature keys. A
+// genuine catch-all key (no modeled feature owns it) must still pass through.
+#[test]
+fn top_level_native_with_hooks_key_hard_errors() {
+    let mut native = BTreeMap::new();
+    native.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>("hooks:\n  PreToolUse: []\n")
+            .expect("parse native"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        native,
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    let err = ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect_err("hooks key in top-level native must hard-error");
+    assert!(
+        err.to_string().contains("hooks"),
+        "error must name the offending modeled key: {err}"
+    );
+}
+
 // Issue #85: SessionStart hook prerequisite — wiring complete, hash comparison deferred
 #[test]
 fn session_start_hook_emitted_in_settings_json() {

@@ -200,4 +200,73 @@ mod tests {
         dedup(&mut v);
         assert_eq!(v, once);
     }
+
+    mod props {
+        use super::{dedup, merge_json};
+        use proptest::prelude::*;
+        use serde_json::Value;
+
+        // A small recursive JSON generator: scalars, then arrays/objects of them.
+        fn arb_json() -> impl Strategy<Value = Value> {
+            let leaf = prop_oneof![
+                Just(Value::Null),
+                any::<bool>().prop_map(Value::Bool),
+                any::<i32>().prop_map(Value::from),
+                "[a-z]{0,4}".prop_map(Value::String),
+            ];
+            leaf.prop_recursive(3, 16, 4, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+                    prop::collection::vec(("[a-z]{1,4}", inner), 0..4)
+                        .prop_map(|kvs| { Value::Object(kvs.into_iter().collect()) }),
+                ]
+            })
+        }
+
+        proptest! {
+            // merge_json never panics on arbitrary input pairs.
+            #[test]
+            fn merge_json_total(mut dst in arb_json(), src in arb_json()) {
+                merge_json(&mut dst, src);
+            }
+
+            // Disjoint object keys survive the merge; shared keys take src's value
+            // when both are scalars (src wins on scalar collision).
+            #[test]
+            fn merge_json_src_scalar_wins_on_shared_key(
+                key in "[a-z]{1,4}",
+                a in any::<i32>(),
+                b in any::<i32>(),
+            ) {
+                let mut dst = serde_json::json!({ &key: a });
+                merge_json(&mut dst, serde_json::json!({ &key: b }));
+                prop_assert_eq!(&dst[&key], &Value::from(b));
+            }
+
+            // Merging an object into itself is idempotent once arrays are
+            // dedup-stable: re-merging the result changes nothing.
+            #[test]
+            fn merge_json_idempotent(v in arb_json()) {
+                let mut once = v.clone();
+                merge_json(&mut once, v.clone());
+                let mut twice = once.clone();
+                merge_json(&mut twice, once.clone());
+                prop_assert_eq!(once, twice);
+            }
+
+            // Array merge output carries no duplicates (concat + dedup).
+            #[test]
+            fn merge_json_arrays_dedup(
+                a in prop::collection::vec(0i32..5, 0..6),
+                b in prop::collection::vec(0i32..5, 0..6),
+            ) {
+                let mut dst = Value::Array(a.iter().map(|n| Value::from(*n)).collect());
+                merge_json(&mut dst, Value::Array(b.iter().map(|n| Value::from(*n)).collect()));
+                let arr = dst.as_array().unwrap();
+                let mut seen = arr.clone();
+                dedup(&mut seen);
+                prop_assert_eq!(arr.len(), seen.len(), "no duplicates in merged array");
+            }
+        }
+    }
 }
