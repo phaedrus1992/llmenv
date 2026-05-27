@@ -75,7 +75,7 @@ See `docs/configuration.md` for complete schema documentation.
 A minimal example with network and project scopes:
 
 ```yaml
-settings:
+cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 60
 

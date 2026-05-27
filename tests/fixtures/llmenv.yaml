@@ -1,4 +1,4 @@
-settings:
+cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 15
 
