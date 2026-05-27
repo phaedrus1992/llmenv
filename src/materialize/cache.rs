@@ -39,6 +39,10 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
         let bytes = std::fs::read(abs)?;
         update_len_prefixed(&mut h, &bytes);
     }
+    // Note: the cache key is a function of (relative path, file contents) only.
+    // The absolute `abs` source path is deliberately NOT hashed, so a bundle
+    // reachable via a symlink or alias produces the same key as the canonical
+    // path and reuses the cache (#66).
     // Mix in rules so adding/editing a `rules/*.md` invalidates the cache.
     // Hash the raw text — covers both frontmatter and body without needing
     // a second pass and matches what gets written to disk for Claude.
@@ -251,6 +255,41 @@ mod tests {
         fs::create_dir_all(&p).unwrap();
         fs::write(p.join("file.txt"), b"x").unwrap();
         p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_manifest_is_stable_across_symlinked_source_paths() {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        let file = real.join("AGENTS.md");
+        fs::write(&file, b"content").unwrap();
+
+        // Same file reached via a symlinked directory — a different absolute
+        // path that resolves to the same bytes at the same relative key.
+        let link = tmp.path().join("link");
+        symlink(&real, &link).unwrap();
+        let aliased = link.join("AGENTS.md");
+
+        let manifest_real = MergedManifest {
+            files: BTreeMap::from([(PathBuf::from("AGENTS.md"), file)]),
+            ..MergedManifest::default()
+        };
+        let manifest_aliased = MergedManifest {
+            files: BTreeMap::from([(PathBuf::from("AGENTS.md"), aliased)]),
+            ..MergedManifest::default()
+        };
+
+        // #66: cache key is (relative path, contents) only — the absolute
+        // source path must not perturb it, so the two hash identically.
+        assert_eq!(
+            hash_manifest(&manifest_real).unwrap(),
+            hash_manifest(&manifest_aliased).unwrap()
+        );
     }
 
     #[test]
