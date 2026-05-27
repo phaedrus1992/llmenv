@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`settings.json` permission rendering** — the Claude Code adapter now renders
+  engine-neutral permission rules (`{tool, pattern}` / `{tool, paths}`) into
+  Claude's `Tool(pattern)` string grammar, landing in flat
+  `permissions.{allow,ask,deny}` arrays alongside verbatim
+  `permissions.native.claude_code` rule strings. `default_mode` maps to
+  `defaultMode`. Native suppression is directional: a native `deny` overrides a
+  neutral `allow`/`ask` of the same string, but a native `allow` never weakens a
+  neutral `deny` (deny is authoritative). The two-layer invariant — every major
+  feature gets a generic form plus an engine-specific `native` override — is now
+  documented in `docs/design/engine-capabilities.md`. (#34)
+
 - **CLI color support** — `--color <auto|always|never>` mode with
   `should_use_color()` honoring `NO_COLOR` and `CLICOLOR_FORCE` env vars plus TTY
   detection. Color glyph helpers centralized in `src/cli/style.rs`. `tag-ls`,
