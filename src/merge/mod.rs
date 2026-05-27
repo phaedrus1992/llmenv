@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Capabilities;
 use crate::mcp::resolve::ResolvedMcp;
+use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
 use capabilities::{CapabilityContributor, merge_capabilities};
 use rules::RuleFile;
 
@@ -37,6 +38,13 @@ pub struct MergedManifest {
     /// render these into the agent-native MCP config (e.g. `mcp.json`). Empty
     /// means no MCP integration is materialized.
     pub mcps: Vec<ResolvedMcp>,
+    /// Plugins resolved for this host, deduplicated, in stable order. Adapters
+    /// that support plugins render these into the agent-native plugin config.
+    /// Empty means no plugin integration is materialized.
+    pub plugins: Vec<ResolvedPlugin>,
+    /// Marketplaces referenced by `plugins`, with their synced install location
+    /// and content token. Rendered into the agent-native marketplace registry.
+    pub marketplaces: Vec<ResolvedMarketplace>,
     /// Engine-agnostic capabilities (permissions, hooks, plugins) merged across
     /// the top-level config and every selected bundle's `bundle.yaml`, by value
     /// shape. Adapters translate these into engine-native config.

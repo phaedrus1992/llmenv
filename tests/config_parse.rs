@@ -15,6 +15,11 @@ fn parses_fixture() {
     let mem = cfg.memory.as_ref().expect("memory block");
     assert_eq!(mem.server_host, "fixed");
     assert_eq!(mem.port, 7878);
+    assert_eq!(cfg.marketplace.len(), 2);
+    assert_eq!(cfg.marketplace[0].name, "superpowers");
+    assert_eq!(cfg.plugin_collection.len(), 2);
+    assert_eq!(cfg.plugin_collection[1].name, "rust-tools");
+    assert_eq!(cfg.plugin_collection[1].plugins.len(), 2);
 }
 
 #[test]

@@ -40,6 +40,20 @@ mcp:
     command: npx
     args: ["-y", "@playwright/mcp@latest"]
 
+marketplace:
+  - name: superpowers
+    source: "https://github.com/obra/superpowers"
+  - name: dev-commons
+    source: "~/git/dev-commons"
+
+plugin-collection:
+  - name: core
+    tags: [base]
+    plugins: ["superpowers:caveman"]
+  - name: rust-tools
+    tags: [rust]
+    plugins: ["dev-commons:rust-tooling", "superpowers:tdd"]
+
 memory:
   server_host: fixed
   port: 7878

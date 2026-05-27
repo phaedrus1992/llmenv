@@ -321,6 +321,12 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         settings.insert("permissions".into(), serde_json::Value::Object(perm_obj));
     }
 
+    // Plugins (#59): declare marketplaces + enabled plugins into settings.json.
+    // llmenv owns the marketplace clone in its cache, so each marketplace points
+    // Claude at that checkout via a `directory` source (no re-fetch). Plugins are
+    // keyed `<plugin>@<marketplace>` and force-enabled.
+    render_plugins(&mut settings, manifest);
+
     let settings_value = serde_json::Value::Object(settings);
     let settings_path = out.join("settings.json");
     let json_str = serde_json::to_string_pretty(&settings_value)?;
@@ -346,6 +352,53 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     }
 
     Ok(())
+}
+
+/// Render the manifest's resolved marketplaces + plugins into `settings`.
+///
+/// - `extraKnownMarketplaces`: keyed by marketplace name. Source is `directory`
+///   pointing at llmenv's local clone (`install_location`) so Claude loads the
+///   already-synced checkout instead of re-fetching. A marketplace with no
+///   install location (never synced) is skipped.
+/// - `enabledPlugins`: keyed `<plugin>@<marketplace>`, all `true`. llmenv only
+///   emits plugins it wants on; it never authors a `false` (disabled) entry.
+///
+/// Both keys are omitted entirely when empty so a plugin-free scope produces no
+/// plugin settings.
+fn render_plugins(
+    settings: &mut serde_json::Map<String, serde_json::Value>,
+    manifest: &MergedManifest,
+) {
+    if manifest.marketplaces.is_empty() && manifest.plugins.is_empty() {
+        return;
+    }
+
+    let mut markets = serde_json::Map::new();
+    for mk in &manifest.marketplaces {
+        let Some(location) = &mk.install_location else {
+            continue;
+        };
+        markets.insert(
+            mk.name.clone(),
+            json!({
+                "source": { "source": "directory", "path": location },
+            }),
+        );
+    }
+    if !markets.is_empty() {
+        settings.insert(
+            "extraKnownMarketplaces".into(),
+            serde_json::Value::Object(markets),
+        );
+    }
+
+    let mut enabled = serde_json::Map::new();
+    for p in &manifest.plugins {
+        enabled.insert(format!("{}@{}", p.plugin, p.marketplace), json!(true));
+    }
+    if !enabled.is_empty() {
+        settings.insert("enabledPlugins".into(), serde_json::Value::Object(enabled));
+    }
 }
 
 /// Render a neutral permission rule into Claude Code's string grammar.
