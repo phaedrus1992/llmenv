@@ -3,8 +3,8 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::{
-    Bundle, HostMatch, HostScope, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope, Scopes,
-    Settings, UserMatch, UserScope,
+    Bundle, HostMatch, HostScope, Icm, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope,
+    Scopes, Settings, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -41,12 +41,13 @@ fn is_valid_cidr(cidr: &str) -> bool {
         return false;
     }
     for octet in octets {
-        match octet.parse::<u16>() {
-            Ok(n) if n <= 255 => {}
-            _ => return false,
+        // Reject leading zeros ("01") which u8::parse would otherwise accept;
+        // RFC 4632 dotted-decimal forbids them and they invite octal confusion.
+        if (octet.len() > 1 && octet.starts_with('0')) || octet.parse::<u8>().is_err() {
+            return false;
         }
     }
-    matches!(parts[1].parse::<u32>(), Ok(n) if n <= 32)
+    matches!(parts[1].parse::<u8>(), Ok(n) if n <= 32)
 }
 
 fn is_valid_mac_address(mac: &str) -> bool {
@@ -60,18 +61,18 @@ fn is_valid_mac_address(mac: &str) -> bool {
 }
 
 fn is_valid_hostname(hostname: &str) -> bool {
+    // RFC 1123 §2.1 / RFC 952: total length <= 253 octets, each label
+    // 1..=63 octets, labels are alphanumeric plus interior hyphens.
     if hostname.is_empty() || hostname.len() > 253 {
         return false;
     }
-    hostname
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-        && !hostname.starts_with('-')
-        && !hostname.ends_with('-')
-        && !hostname.contains("..")
-        && hostname
-            .split('.')
-            .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
+    hostname.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
 }
 
 fn is_valid_path_prefix(path: &str) -> bool {
@@ -186,19 +187,63 @@ mod tests {
         r"[a-zA-Z0-9_-]{1,20}"
     }
 
+    // Some(arb)/None so the round-trip exercises both branches of every
+    // Option<String> match field rather than only the None default.
+    fn arb_opt_string() -> impl Strategy<Value = Option<String>> {
+        prop::option::of(arb_string())
+    }
+
+    fn arb_settings() -> impl Strategy<Value = Settings> {
+        (arb_string(), 0u64..120, prop::option::of(0u64..10_000)).prop_map(
+            |(cache_dir, sync_interval_minutes, cache_retention_hours)| Settings {
+                cache_dir,
+                sync_interval_minutes,
+                cache_retention_hours,
+            },
+        )
+    }
+
+    fn arb_icm() -> impl Strategy<Value = Option<Icm>> {
+        prop::option::of(
+            (
+                arb_string(),
+                arb_string(),
+                arb_string(),
+                prop::collection::vec(arb_string(), 0..3),
+            )
+                .prop_map(|(server_tag, server_bind, client_url, default_topics)| {
+                    Icm {
+                        server_tag,
+                        server_bind,
+                        client_url,
+                        default_topics,
+                    }
+                }),
+        )
+    }
+
     fn arb_config() -> impl Strategy<Value = Config> {
         (
-            Just(Settings::default()),
-            prop::collection::vec(arb_string(), 0..10).prop_map(|ids| {
+            arb_settings(),
+            prop::collection::vec(
+                (
+                    arb_string(),
+                    arb_opt_string(),
+                    arb_opt_string(),
+                    arb_opt_string(),
+                ),
+                0..10,
+            )
+            .prop_map(|ids| {
                 let network = ids
                     .iter()
                     .take(2)
-                    .map(|id| NetworkScope {
+                    .map(|(id, gateway_mac, ssid, cidr)| NetworkScope {
                         id: id.clone(),
                         r#match: NetworkMatch {
-                            gateway_mac: None,
-                            ssid: None,
-                            cidr: None,
+                            gateway_mac: gateway_mac.clone(),
+                            ssid: ssid.clone(),
+                            cidr: cidr.clone(),
                         },
                         tags: vec![],
                     })
@@ -207,9 +252,11 @@ mod tests {
                     .iter()
                     .skip(2)
                     .take(2)
-                    .map(|id| HostScope {
+                    .map(|(id, hostname, _, _)| HostScope {
                         id: id.clone(),
-                        r#match: HostMatch { hostname: None },
+                        r#match: HostMatch {
+                            hostname: hostname.clone(),
+                        },
                         tags: vec![],
                     })
                     .collect();
@@ -217,9 +264,9 @@ mod tests {
                     .iter()
                     .skip(4)
                     .take(2)
-                    .map(|id| UserScope {
+                    .map(|(id, user, _, _)| UserScope {
                         id: id.clone(),
-                        r#match: UserMatch { user: None },
+                        r#match: UserMatch { user: user.clone() },
                         tags: vec![],
                     })
                     .collect();
@@ -227,11 +274,11 @@ mod tests {
                     .iter()
                     .skip(6)
                     .take(2)
-                    .map(|id| ProjectScope {
+                    .map(|(id, path_prefix, marker, _)| ProjectScope {
                         id: id.clone(),
                         r#match: ProjectMatch {
-                            path_prefix: None,
-                            marker: None,
+                            path_prefix: path_prefix.clone(),
+                            marker: marker.clone(),
                         },
                         tags: vec![],
                     })
@@ -253,7 +300,7 @@ mod tests {
                     })
                     .collect()
             }),
-            Just(None),
+            arb_icm(),
         )
             .prop_map(
                 |(settings, (network, host, user, project), bundle, icm)| Config {
@@ -540,6 +587,55 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_hostname_label_too_long() {
+        // RFC 1123: a single label may not exceed 63 octets.
+        let long_label = "a".repeat(64);
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes {
+                network: vec![],
+                host: vec![HostScope {
+                    id: "host1".to_string(),
+                    r#match: HostMatch {
+                        hostname: Some(format!("{long_label}.example.com")),
+                    },
+                    tags: vec!["tag1".to_string()],
+                }],
+                user: vec![],
+                project: vec![],
+            },
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_cidr_leading_zero_octet() {
+        // Dotted-decimal forbids leading zeros ("01") even though they parse.
+        let config = Config {
+            settings: Settings::default(),
+            scope: Scopes {
+                network: vec![NetworkScope {
+                    id: "net1".to_string(),
+                    r#match: NetworkMatch {
+                        gateway_mac: None,
+                        ssid: None,
+                        cidr: Some("01.168.1.0/24".to_string()),
+                    },
+                    tags: vec!["tag1".to_string()],
+                }],
+                host: vec![],
+                user: vec![],
+                project: vec![],
+            },
+            bundle: vec![],
+            icm: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn test_invalid_hostname_label_ends_with_hyphen() {
         let config = Config {
             settings: Settings::default(),
@@ -808,5 +904,168 @@ mod tests {
             icm: None,
         };
         assert!(config.validate().is_ok());
+    }
+
+    // ===== Property tests against the real validators =====
+    //
+    // These call the private is_valid_* functions directly (rather than
+    // re-implementing the rules in an external integration test) so a change to
+    // the validators is caught here instead of silently diverging from a copy.
+
+    // RFC 1123 hostname: 1..=63-octet labels, alnum + interior hyphens, total <= 253.
+    fn rfc1123_label() -> impl Strategy<Value = String> {
+        prop::string::string_regex("[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
+            .expect("valid label regex")
+    }
+
+    fn valid_hostname() -> impl Strategy<Value = String> {
+        prop::collection::vec(rfc1123_label(), 1..4)
+            .prop_map(|labels| labels.join("."))
+            .prop_filter("total length <= 253", |h| h.len() <= 253)
+    }
+
+    fn valid_cidr() -> impl Strategy<Value = String> {
+        (0u8..=255, 0u8..=255, 0u8..=255, 0u8..=255, 0u8..=32)
+            .prop_map(|(a, b, c, d, m)| format!("{a}.{b}.{c}.{d}/{m}"))
+    }
+
+    fn valid_var_name() -> impl Strategy<Value = String> {
+        prop::string::string_regex("[A-Za-z_][A-Za-z0-9_]*").expect("valid var name regex")
+    }
+
+    proptest! {
+        #[test]
+        fn prop_valid_hostnames_accepted(h in valid_hostname()) {
+            prop_assert!(is_valid_hostname(&h), "RFC 1123 hostname rejected: {h:?}");
+        }
+
+        #[test]
+        fn prop_label_over_63_octets_rejected(
+            prefix in rfc1123_label(),
+            extra in 0usize..40,
+        ) {
+            // Build a single label of 64..=63+40 octets; must be rejected even
+            // though it is otherwise alphanumeric.
+            let label = "a".repeat(64 + extra);
+            prop_assert!(!is_valid_hostname(&label), "64+ octet label accepted");
+            // The valid prefix alone must still pass, proving it's the length
+            // that's rejected, not the characters.
+            prop_assert!(is_valid_hostname(&prefix));
+        }
+
+        #[test]
+        fn prop_hostname_with_underscore_rejected(
+            a in rfc1123_label(),
+            b in rfc1123_label(),
+        ) {
+            let h = format!("{a}_{b}");
+            prop_assert!(!is_valid_hostname(&h), "underscore accepted in hostname: {h:?}");
+        }
+
+        #[test]
+        fn prop_valid_cidrs_accepted(c in valid_cidr()) {
+            prop_assert!(is_valid_cidr(&c), "valid CIDR rejected: {c}");
+        }
+
+        #[test]
+        fn prop_cidr_prefix_over_32_rejected(
+            a in 0u8..=255, b in 0u8..=255, c in 0u8..=255, d in 0u8..=255,
+            m in 33u16..=255,
+        ) {
+            let cidr = format!("{a}.{b}.{c}.{d}/{m}");
+            prop_assert!(!is_valid_cidr(&cidr), "prefix >32 accepted: {cidr}");
+        }
+
+        #[test]
+        fn prop_cidr_leading_zero_octet_rejected(
+            b in 0u8..=255, c in 0u8..=255, d in 0u8..=255, m in 0u8..=32,
+        ) {
+            // "01" is forbidden dotted-decimal even though u8 parse accepts it.
+            let cidr = format!("01.{b}.{c}.{d}/{m}");
+            prop_assert!(!is_valid_cidr(&cidr), "leading-zero octet accepted: {cidr}");
+        }
+
+        #[test]
+        fn prop_valid_var_names_accepted(name in valid_var_name()) {
+            prop_assert!(is_valid_var_name(&name), "valid var name rejected: {name}");
+        }
+
+        #[test]
+        fn prop_var_name_leading_digit_rejected(
+            d in 0u8..=9,
+            rest in "[A-Za-z0-9_]{0,10}",
+        ) {
+            let name = format!("{d}{rest}");
+            prop_assert!(!is_valid_var_name(&name), "leading-digit var name accepted: {name}");
+        }
+
+        #[test]
+        fn prop_path_prefix_with_null_byte_rejected(
+            before in "[a-z0-9/_-]{0,20}",
+            after in "[a-z0-9/_-]{0,20}",
+        ) {
+            let path = format!("{before}\0{after}");
+            prop_assert!(!is_valid_path_prefix(&path), "null byte accepted in path");
+        }
+
+        #[test]
+        fn prop_path_prefix_with_parent_component_rejected(
+            before in "[a-z0-9_-]{1,10}",
+            after in "[a-z0-9_-]{1,10}",
+        ) {
+            let path = format!("{before}/../{after}");
+            prop_assert!(!is_valid_path_prefix(&path), "parent component accepted: {path}");
+        }
+
+        #[test]
+        fn prop_valid_mac_addresses_accepted(octets in prop::array::uniform6(0u8..=255)) {
+            let mac = octets
+                .iter()
+                .map(|o| format!("{o:02x}"))
+                .collect::<Vec<_>>()
+                .join(":");
+            prop_assert!(is_valid_mac_address(&mac), "valid MAC rejected: {mac}");
+        }
+
+        #[test]
+        fn prop_mac_wrong_group_count_rejected(count in prop_oneof![0usize..6, 7usize..12]) {
+            let mac = vec!["aa"; count].join(":");
+            prop_assert!(!is_valid_mac_address(&mac), "MAC with {count} groups accepted");
+        }
+
+        #[test]
+        fn prop_mac_non_hex_rejected(
+            pos in 0usize..6,
+            bad in "[g-zG-Z]{2}",
+        ) {
+            let mut octets = vec!["aa".to_string(); 6];
+            octets[pos] = bad;
+            let mac = octets.join(":");
+            prop_assert!(!is_valid_mac_address(&mac), "non-hex MAC accepted: {mac}");
+        }
+
+        #[test]
+        fn prop_cache_dir_with_parent_component_rejected(
+            before in "[a-z0-9_-]{1,10}",
+            after in "[a-z0-9_-]{1,10}",
+        ) {
+            let dir = format!("{before}/../{after}");
+            prop_assert!(!is_safe_cache_dir(&dir), "parent component accepted: {dir}");
+        }
+
+        #[test]
+        fn prop_cache_dir_with_null_byte_rejected(
+            before in "[a-z0-9/_-]{0,20}",
+            after in "[a-z0-9/_-]{0,20}",
+        ) {
+            let dir = format!("{before}\0{after}");
+            prop_assert!(!is_safe_cache_dir(&dir), "null byte accepted in cache dir");
+        }
+
+        #[test]
+        fn prop_cache_dir_over_max_length_rejected(len in 4097usize..5000) {
+            let dir = "a".repeat(len);
+            prop_assert!(!is_safe_cache_dir(&dir), "over-length cache dir accepted");
+        }
     }
 }
