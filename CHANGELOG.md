@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Plugin + marketplace support** — `marketplace:` and `plugin-collection:` are
+  now first-class top-level config blocks, selected onto a scope by tag
+  intersection (same model as bundles and MCP servers). Plugins are written as
+  `marketplace:plugin` refs. Git marketplace sources are cloned once into
+  `<cache_dir>/marketplaces/<name>/` (shared across scopes, fast-forwarded by
+  `llmenv plugin sync`); local-path sources are used in place. The resolved git
+  HEAD is mixed into the materialized scope hash so a marketplace update
+  re-renders. The Claude Code adapter renders `extraKnownMarketplaces` (as
+  `directory` sources pointing at the local clone) and `enabledPlugins`
+  (`plugin@marketplace`, all enabled) into `settings.json`. New CLI commands:
+  `marketplace-ls`, `plugin-ls`, `plugin sync`; `doctor` flags orphan collections
+  and unreferenced marketplaces. The internal resolved model is engine-agnostic so
+  a future Codex adapter can reuse it. (#59)
+
 - **`settings.json` permission rendering** — the Claude Code adapter now renders
   engine-neutral permission rules (`{tool, pattern}` / `{tool, paths}`) into
   Claude's `Tool(pattern)` string grammar, landing in flat

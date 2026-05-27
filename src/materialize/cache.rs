@@ -80,6 +80,27 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
             }
         }
     }
+    // Mix in resolved plugins so changing the selected plugin set invalidates
+    // the cache. Each entry is hashed by `marketplace:plugin` (provenance is not
+    // hashed — it doesn't affect what gets rendered).
+    h.update((m.plugins.len() as u64).to_le_bytes());
+    for p in &m.plugins {
+        update_len_prefixed(&mut h, p.marketplace.as_bytes());
+        update_len_prefixed(&mut h, p.plugin.as_bytes());
+    }
+    // Mix in referenced marketplaces by name + source + content token (git HEAD,
+    // or install location for path sources). A marketplace update (new HEAD)
+    // therefore re-renders every scope that wires it.
+    h.update((m.marketplaces.len() as u64).to_le_bytes());
+    for mk in &m.marketplaces {
+        update_len_prefixed(&mut h, mk.name.as_bytes());
+        update_len_prefixed(&mut h, mk.source.as_bytes());
+        update_len_prefixed(&mut h, mk.head.as_deref().unwrap_or("").as_bytes());
+        update_len_prefixed(
+            &mut h,
+            mk.install_location.as_deref().unwrap_or("").as_bytes(),
+        );
+    }
     Ok(hex::encode(h.finalize()))
 }
 
