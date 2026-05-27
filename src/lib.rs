@@ -8,3 +8,4 @@ pub mod merge;
 pub mod paths;
 pub mod scope;
 pub mod sync;
+pub mod util;
