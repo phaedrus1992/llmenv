@@ -4,9 +4,9 @@ use thiserror::Error;
 #[cfg(test)]
 use super::{
     Bundle, Cache, Capabilities, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch,
-    HostScope, McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch, NetworkScope,
-    PermissionMode, PermissionRule, Permissions, ProjectMatch, ProjectScope, Scopes, UserMatch,
-    UserScope,
+    HostScope, Marketplace, McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch,
+    NetworkScope, PermissionMode, PermissionRule, Permissions, PluginCollection, ProjectMatch,
+    ProjectScope, Scopes, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -45,6 +45,26 @@ pub enum ValidateError {
     MemoryUnknownServerHost(String),
     #[error("memory has no tags")]
     MemoryNoTags,
+    #[error("duplicate marketplace name: {0}")]
+    DuplicateMarketplaceName(String),
+    #[error("marketplace {0} has an empty source")]
+    MarketplaceEmptySource(String),
+    #[error("duplicate plugin-collection name: {0}")]
+    DuplicatePluginCollectionName(String),
+    #[error("plugin-collection {0} has no tags")]
+    PluginCollectionNoTags(String),
+    #[error(
+        "plugin-collection {collection}: invalid plugin '{plugin}' (must be '<marketplace>:<plugin>')"
+    )]
+    InvalidPluginRef { collection: String, plugin: String },
+    #[error(
+        "plugin-collection {collection}: plugin '{plugin}' references unknown marketplace '{marketplace}'"
+    )]
+    UnknownPluginMarketplace {
+        collection: String,
+        plugin: String,
+        marketplace: String,
+    },
 }
 
 fn is_valid_cidr(cidr: &str) -> bool {
@@ -191,6 +211,47 @@ impl Config {
             }
         }
         self.validate_mcps()?;
+        self.validate_plugins()?;
+        Ok(())
+    }
+
+    fn validate_plugins(&self) -> Result<(), ValidateError> {
+        let mut seen_marketplace_names = std::collections::HashSet::new();
+        let mut marketplace_names = std::collections::HashSet::new();
+        for m in &self.marketplace {
+            if m.source.is_empty() {
+                return Err(ValidateError::MarketplaceEmptySource(m.name.clone()));
+            }
+            if !seen_marketplace_names.insert(&m.name) {
+                return Err(ValidateError::DuplicateMarketplaceName(m.name.clone()));
+            }
+            marketplace_names.insert(m.name.as_str());
+        }
+
+        let mut seen_collection_names = std::collections::HashSet::new();
+        for c in &self.plugin_collection {
+            if c.tags.is_empty() {
+                return Err(ValidateError::PluginCollectionNoTags(c.name.clone()));
+            }
+            if !seen_collection_names.insert(&c.name) {
+                return Err(ValidateError::DuplicatePluginCollectionName(c.name.clone()));
+            }
+            for plugin in &c.plugins {
+                let Some((marketplace, _)) = super::split_plugin_ref(plugin) else {
+                    return Err(ValidateError::InvalidPluginRef {
+                        collection: c.name.clone(),
+                        plugin: plugin.clone(),
+                    });
+                };
+                if !marketplace_names.contains(marketplace) {
+                    return Err(ValidateError::UnknownPluginMarketplace {
+                        collection: c.name.clone(),
+                        plugin: plugin.clone(),
+                        marketplace: marketplace.to_string(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -379,6 +440,26 @@ mod tests {
             )
     }
 
+    fn arb_marketplace() -> impl Strategy<Value = Marketplace> {
+        (arb_string(), arb_string()).prop_map(|(name, source)| Marketplace { name, source })
+    }
+
+    fn arb_plugin_collection() -> impl Strategy<Value = PluginCollection> {
+        (
+            arb_string(),
+            prop::collection::vec(arb_string(), 0..3),
+            prop::collection::vec(
+                (arb_string(), arb_string()).prop_map(|(m, p)| format!("{m}:{p}")),
+                0..3,
+            ),
+        )
+            .prop_map(|(name, tags, plugins)| PluginCollection {
+                name,
+                tags,
+                plugins,
+            })
+    }
+
     fn arb_memory() -> impl Strategy<Value = Memory> {
         (
             arb_string(),
@@ -492,6 +573,28 @@ mod tests {
                 0..3,
             ),
             arb_capabilities(),
+            prop::collection::vec(arb_marketplace(), 0..3).prop_map(|ms: Vec<Marketplace>| {
+                // Names must be unique so the config passes validation;
+                // index-prefix to guarantee it.
+                ms.into_iter()
+                    .enumerate()
+                    .map(|(i, mut m)| {
+                        m.name = format!("mkt-{i}-{}", m.name);
+                        m
+                    })
+                    .collect()
+            }),
+            prop::collection::vec(arb_plugin_collection(), 0..3).prop_map(
+                |cs: Vec<PluginCollection>| {
+                    cs.into_iter()
+                        .enumerate()
+                        .map(|(i, mut c)| {
+                            c.name = format!("col-{i}-{}", c.name);
+                            c
+                        })
+                        .collect()
+                },
+            ),
         )
             .prop_map(
                 |(
@@ -502,6 +605,8 @@ mod tests {
                     memory,
                     host,
                     capabilities,
+                    marketplace,
+                    plugin_collection,
                 )| {
                     Config {
                         cache,
@@ -516,6 +621,8 @@ mod tests {
                         bundle,
                         mcp,
                         memory,
+                        marketplace,
+                        plugin_collection,
                         host,
                     }
                 },
@@ -555,6 +662,8 @@ mod tests {
                 bundle: vec![],
                 mcp: vec![],
                 memory: None,
+                marketplace: vec![],
+                plugin_collection: vec![],
                 host: Default::default(),
             };
             prop_assert!(
@@ -581,6 +690,8 @@ mod tests {
                 bundle: bundles,
                 mcp: vec![],
                 memory: None,
+                marketplace: vec![],
+                plugin_collection: vec![],
                 host: Default::default(),
             };
             prop_assert!(
@@ -604,6 +715,8 @@ mod tests {
                 ],
                 mcp: vec![],
                 memory: None,
+                marketplace: vec![],
+                plugin_collection: vec![],
                 host: Default::default(),
             };
             prop_assert!(
@@ -640,6 +753,8 @@ mod tests {
             }],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -668,6 +783,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -696,6 +813,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -721,6 +840,8 @@ mod tests {
                 url: None,
             }],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(matches!(
@@ -752,6 +873,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -780,6 +903,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -806,6 +931,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -832,6 +959,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -858,6 +987,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -886,6 +1017,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -915,6 +1048,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -941,6 +1076,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -967,6 +1104,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -994,6 +1133,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1023,6 +1164,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1050,6 +1193,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1071,6 +1216,8 @@ mod tests {
             }],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1092,6 +1239,8 @@ mod tests {
             }],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1115,6 +1264,8 @@ mod tests {
             }],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -1134,6 +1285,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1155,6 +1308,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1174,6 +1329,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1189,6 +1346,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -1208,6 +1367,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1227,6 +1388,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -1246,6 +1409,8 @@ mod tests {
             bundle: vec![],
             mcp: vec![],
             memory: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
             host: Default::default(),
         };
         assert!(config.validate().is_ok());

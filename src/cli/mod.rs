@@ -98,6 +98,14 @@ enum Command {
     /// List selected MCP servers with their resolved role and transport
     #[command(name = "mcp-ls", alias = "mcps")]
     McpLs,
+    /// List configured plugin marketplaces, marking those referenced by selected plugins
+    #[command(name = "marketplace-ls", alias = "marketplaces")]
+    MarketplaceLs,
+    /// List configured plugins, marking those selected by the active scope
+    #[command(name = "plugin-ls", alias = "plugins")]
+    PluginLs,
+    /// Sync plugin marketplaces into the cache (clone or fast-forward)
+    PluginSync,
     /// Sync config with GitHub (git add, commit, push)
     Sync,
     /// Clean stale cache folders
@@ -149,6 +157,15 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::McpLs) => {
             run_mcp_ls(use_color)?;
+        }
+        Some(Command::MarketplaceLs) => {
+            run_marketplace_ls(use_color)?;
+        }
+        Some(Command::PluginLs) => {
+            run_plugin_ls(use_color)?;
+        }
+        Some(Command::PluginSync) => {
+            run_plugin_sync()?;
         }
         Some(Command::Sync) => {
             run_sync()?;
@@ -284,6 +301,42 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
             orphan_count += 1;
         }
     }
+    // Plugin orphans: a collection no scope can select, and a marketplace no
+    // selectable collection references. Mirror the bundle/mcp orphan checks.
+    {
+        use crate::config::split_plugin_ref;
+
+        // Marketplaces referenced by any collection whose tags are emitted
+        // somewhere — anything outside this set can never be pulled in.
+        let mut referenceable: HashSet<&str> = HashSet::new();
+        for c in &config.plugin_collection {
+            let selectable = c.tags.iter().any(|t| emitted.contains(t));
+            if !selectable {
+                eprintln!(
+                    "{warn} orphan plugin-collection {}: no scope emits its tags",
+                    c.name
+                );
+                orphan_count += 1;
+            }
+            if selectable {
+                referenceable.extend(
+                    c.plugins
+                        .iter()
+                        .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m)),
+                );
+            }
+        }
+        for m in &config.marketplace {
+            if !referenceable.contains(m.name.as_str()) {
+                eprintln!(
+                    "{warn} orphan marketplace {}: no selectable plugin references it",
+                    m.name
+                );
+                orphan_count += 1;
+            }
+        }
+    }
+
     // Tag orphans: declared but missing emitter or consumer.
     let mut tag_universe: HashSet<String> = HashSet::new();
     tag_universe.extend(emitted.iter().cloned());
@@ -310,7 +363,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     }
 
     if orphan_count == 0 {
-        eprintln!("{pass} No orphan scopes/tags/bundles");
+        eprintln!("{pass} No orphan scopes/tags/bundles/plugins");
     } else {
         eprintln!("{warn} Found {} orphan item(s)", orphan_count);
     }
@@ -600,6 +653,12 @@ fn build_and_materialize(
         crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
 
     let cache_root = expand_tilde(&config.cache.cache_dir)?;
+
+    let resolved = crate::plugins::resolve::resolve_plugins(config, &active.tags)
+        .context("resolving plugins")?;
+    manifest.plugins = resolved.plugins;
+    manifest.marketplaces = sync_marketplaces(config, &cache_root, resolved.marketplaces, false)?;
+
     let adapter = ClaudeCodeAdapter;
     let adapter_root = cache_root.join(adapter.name());
     let cache_path = crate::materialize::materialize(&manifest, &adapter_root)?;
@@ -616,6 +675,37 @@ fn build_and_materialize(
     // that would break the `export NAME=...` shell contract.
     reject_invalid_var_names(&env_vars)?;
     Ok(Some((cache_path, env_vars)))
+}
+
+/// Sync each resolved marketplace into the shared cache and fill in its
+/// `install_location` + `head`. `refresh` controls whether git sources are
+/// network-refreshed (`plugin sync`) or used as-is (`export`).
+fn sync_marketplaces(
+    config: &Config,
+    cache_root: &Path,
+    resolved: Vec<crate::plugins::resolve::ResolvedMarketplace>,
+    refresh: bool,
+) -> anyhow::Result<Vec<crate::plugins::resolve::ResolvedMarketplace>> {
+    let by_name: std::collections::HashMap<&str, &crate::config::Marketplace> = config
+        .marketplace
+        .iter()
+        .map(|m| (m.name.as_str(), m))
+        .collect();
+    let mut out = Vec::with_capacity(resolved.len());
+    for mut rm in resolved {
+        let Some(market) = by_name.get(rm.name.as_str()) else {
+            // resolve_plugins only emits declared marketplaces, so this is
+            // unreachable; skip rather than panic if config mutated mid-flight.
+            out.push(rm);
+            continue;
+        };
+        let state = crate::plugins::cache::sync_marketplace(cache_root, market, refresh)
+            .with_context(|| format!("syncing marketplace '{}'", rm.name))?;
+        rm.install_location = Some(state.install_location.to_string_lossy().into_owned());
+        rm.head = state.head;
+        out.push(rm);
+    }
+    Ok(out)
 }
 
 /// Resolve firing bundles to on-disk `BundleRef`s in scope precedence order
@@ -1103,6 +1193,138 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
             name,
             detail,
             annotate(is_active, is_orphan, use_color)
+        );
+    }
+    Ok(())
+}
+
+/// List configured marketplaces, marking those referenced by a plugin the
+/// active scope selects. A marketplace is an orphan when no plugin in any
+/// scope-emittable collection references it (nothing can ever pull it in).
+fn run_marketplace_ls(use_color: bool) -> anyhow::Result<()> {
+    use crate::config::split_plugin_ref;
+
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    let emitted = all_emitted_tags(&config);
+
+    // Marketplaces referenced by plugins in collections the active scope selects.
+    let active_refs: std::collections::HashSet<&str> = config
+        .plugin_collection
+        .iter()
+        .filter(|c| c.tags.iter().any(|t| active.tags.contains(t)))
+        .flat_map(|c| c.plugins.iter())
+        .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m))
+        .collect();
+    // Marketplaces referenced by any collection that *could* be selected by some
+    // scope (its tags are emitted somewhere). The complement is orphan.
+    let referenceable: std::collections::HashSet<&str> = config
+        .plugin_collection
+        .iter()
+        .filter(|c| c.tags.iter().any(|t| emitted.contains(t)))
+        .flat_map(|c| c.plugins.iter())
+        .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m))
+        .collect();
+
+    let mut rows: Vec<(String, bool, bool, String)> = config
+        .marketplace
+        .iter()
+        .map(|m| {
+            let is_active = active_refs.contains(m.name.as_str());
+            let is_orphan = !referenceable.contains(m.name.as_str());
+            let kind = match m.classify_source() {
+                crate::config::MarketplaceSource::Git => "git",
+                crate::config::MarketplaceSource::Path => "path",
+            };
+            (m.name.clone(), is_active, is_orphan, kind.to_string())
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, is_active, is_orphan, kind) in rows {
+        let mark = if is_active {
+            active_marker(use_color)
+        } else {
+            " ".to_string()
+        };
+        println!(
+            "{} {} ({}){}",
+            mark,
+            name,
+            kind,
+            annotate(is_active, is_orphan, use_color)
+        );
+    }
+    Ok(())
+}
+
+/// List configured plugins (flattened across collections), marking those the
+/// active scope selects. A plugin is an orphan when no scope emits any of its
+/// collection's tags.
+fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
+    use crate::config::split_plugin_ref;
+
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    let emitted = all_emitted_tags(&config);
+
+    // One row per (collection, plugin) pair so provenance is visible — the same
+    // plugin in two collections shows twice, mirroring the config as authored.
+    let mut rows: Vec<(String, bool, bool, String)> = Vec::new();
+    for collection in &config.plugin_collection {
+        let is_active = collection.tags.iter().any(|t| active.tags.contains(t));
+        let is_orphan = !collection.tags.iter().any(|t| emitted.contains(t));
+        for plugin in &collection.plugins {
+            let display = split_plugin_ref(plugin)
+                .map_or_else(|| plugin.clone(), |(m, p)| format!("{p}@{m}"));
+            rows.push((display, is_active, is_orphan, collection.name.clone()));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, is_active, is_orphan, collection) in rows {
+        let mark = if is_active {
+            active_marker(use_color)
+        } else {
+            " ".to_string()
+        };
+        println!(
+            "{} {} (from {}){}",
+            mark,
+            name,
+            collection,
+            annotate(is_active, is_orphan, use_color)
+        );
+    }
+    Ok(())
+}
+
+/// Sync every configured marketplace into the shared cache: git sources are
+/// cloned on first use and fast-forwarded on subsequent runs; path sources are
+/// resolved in place. Reports each marketplace's resolved location + HEAD.
+fn run_plugin_sync() -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let cache_root = expand_tilde(&config.cache.cache_dir)?;
+
+    if config.marketplace.is_empty() {
+        eprintln!("No marketplaces configured.");
+        return Ok(());
+    }
+
+    for m in &config.marketplace {
+        let state = crate::plugins::cache::sync_marketplace(&cache_root, m, true)
+            .with_context(|| format!("syncing marketplace '{}'", m.name))?;
+        let head = state.head.as_deref().unwrap_or("(local path)");
+        println!(
+            "✓ {} → {} [{}]",
+            m.name,
+            state.install_location.display(),
+            head
         );
     }
     Ok(())

@@ -31,6 +31,18 @@ pub struct Config {
     /// MCP config alongside the `mcp` entries.
     #[serde(default)]
     pub memory: Option<Memory>,
+    /// Agent plugin marketplaces, each a named source (git URL or local path).
+    /// Referenced by `plugin-collection` entries as the left half of a
+    /// `marketplace:plugin` identifier. Cloned once into the shared marketplace
+    /// cache and rendered into the agent's plugin config by adapters that
+    /// support plugins.
+    #[serde(default)]
+    pub marketplace: Vec<Marketplace>,
+    /// Named bags of plugins, selected onto scopes by tag intersection (same
+    /// model as bundles and MCP servers). The union of all selected
+    /// collections' plugins is what gets wired up for the active host.
+    #[serde(default, rename = "plugin-collection")]
+    pub plugin_collection: Vec<PluginCollection>,
     /// Static host directory mapping a host name to a reachable address. Used
     /// by the `memory` topology to build a client URL pointing at the host
     /// that runs the server. Keyed by host name (matched against host-scope
@@ -310,4 +322,98 @@ pub struct McpServer {
     pub env: std::collections::BTreeMap<String, String>,
     /// Endpoint URL for `http`/`sse` transport.
     pub url: Option<String>,
+}
+
+/// An agent plugin marketplace: a name plus a source the marketplace is fetched
+/// from. The `source` is interpreted by [`MarketplaceSource::classify`] as
+/// either a git URL (cloned into the shared cache) or a local path (used in
+/// place). Marketplaces are referenced from [`PluginCollection`] entries as the
+/// left half of a `marketplace:plugin` identifier.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Marketplace {
+    /// Registration name, referenced by `plugin-collection` plugin strings.
+    pub name: String,
+    /// Where the marketplace lives: a git URL (`https://…`, `git@…`,
+    /// `ssh://…`, `git://…`) or a local filesystem path (absolute, `~`-relative,
+    /// or `./`-relative).
+    pub source: String,
+}
+
+/// How a [`Marketplace::source`] string is fetched. A git URL is cloned into
+/// the shared marketplace cache and refreshed by `plugin sync`; a local path is
+/// used in place (no fetch, content-hashed by its current state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketplaceSource {
+    /// Remote git repository, cloned into `~/.cache/llmenv/marketplaces/<name>/`.
+    Git,
+    /// Local filesystem path, used in place.
+    Path,
+}
+
+impl Marketplace {
+    /// Classify [`Self::source`] as a git URL or a local path. Anything with a
+    /// recognised git scheme (`https://`, `http://`, `ssh://`, `git://`) or
+    /// scp-style `host:path` with no leading slash is treated as git; everything
+    /// else (absolute, `~`, `./`, `../`, bare relative) is a local path.
+    #[must_use]
+    pub fn classify_source(&self) -> MarketplaceSource {
+        classify_source(&self.source)
+    }
+}
+
+/// Classify a marketplace source string. Split out as a free function so both
+/// the schema accessor and validation can share one definition.
+#[must_use]
+pub fn classify_source(source: &str) -> MarketplaceSource {
+    const GIT_SCHEMES: &[&str] = &["https://", "http://", "ssh://", "git://", "git+ssh://"];
+    if GIT_SCHEMES.iter().any(|s| source.starts_with(s)) {
+        return MarketplaceSource::Git;
+    }
+    // Local-path forms take priority over scp-style detection so a Windows-style
+    // `C:\…` or a `~`/`./` path is never misread as `host:path`.
+    if source.starts_with('/')
+        || source.starts_with("~")
+        || source.starts_with("./")
+        || source.starts_with("../")
+    {
+        return MarketplaceSource::Path;
+    }
+    // scp-style `git@host:owner/repo` — a colon before any slash, with text on
+    // both sides — is git. Otherwise treat as a bare relative path.
+    if let Some(colon) = source.find(':') {
+        let before = &source[..colon];
+        let after = &source[colon + 1..];
+        if !before.is_empty() && !after.is_empty() && !before.contains('/') {
+            return MarketplaceSource::Git;
+        }
+    }
+    MarketplaceSource::Path
+}
+
+/// A named collection of plugins selected onto a scope by tag intersection
+/// (identical model to bundles and MCP servers). Each plugin is identified as
+/// `<marketplace>:<plugin>`, where `<marketplace>` references a top-level
+/// [`Marketplace`] by name.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PluginCollection {
+    /// Collection name, used in diagnostics and `plugin ls` provenance.
+    pub name: String,
+    /// Tags that activate this collection, intersected with active scope tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Plugins in this collection, each `<marketplace>:<plugin>`.
+    #[serde(default)]
+    pub plugins: Vec<String>,
+}
+
+/// Split a `<marketplace>:<plugin>` identifier into its two halves. Returns
+/// `None` when the string is not exactly one non-empty marketplace and one
+/// non-empty plugin separated by a single `:`.
+#[must_use]
+pub fn split_plugin_ref(s: &str) -> Option<(&str, &str)> {
+    let (marketplace, plugin) = s.split_once(':')?;
+    if marketplace.is_empty() || plugin.is_empty() || plugin.contains(':') {
+        return None;
+    }
+    Some((marketplace, plugin))
 }
