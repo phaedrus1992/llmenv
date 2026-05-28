@@ -2,7 +2,6 @@ name: Release
 
 on:
   push:
-    branches: [main]
     tags:
       - 'v*'
 
@@ -43,6 +42,10 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      - name: Install cross-compile target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "${TARGET}"
       # zizmor: ignore[cache-poisoning] — cache is skipped on tag pushes via `if:`
       # below; the conditional guard makes the cache-poisoning audit a false
       # positive (zizmor static analysis doesn't trace step-level conditionals).

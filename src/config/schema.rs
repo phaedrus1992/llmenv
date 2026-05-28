@@ -188,6 +188,8 @@ pub struct Hook {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matcher: Option<String>,
     pub handler: HookHandler,
+    #[serde(skip)]
+    pub bundle_origin: Option<std::path::PathBuf>,
 }
 
 /// A hook handler. `type` selects the mechanism; `command` is set for

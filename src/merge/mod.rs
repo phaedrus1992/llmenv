@@ -122,8 +122,24 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
     }
     let s = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("bundle '{name}': reading {}: {e}", path.display()))?;
-    let caps: Capabilities = serde_yaml::from_str(&s)
+    let mut caps: Capabilities = serde_yaml::from_str(&s)
         .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
+
+    // Resolve bundle-relative hook paths to absolute paths.
+    // This ensures settings.json contains absolute paths that work
+    // when the hook is run from a different cwd.
+    for hook in &mut caps.hooks {
+        if let Some(command) = &hook.handler.command {
+            // Check if this is a bundle-relative path (doesn't start with /, ~, or $)
+            if !command.starts_with('/') && !command.starts_with('~') && !command.starts_with('$') {
+                // This is a relative path; anchor it to the bundle directory
+                let abs_path = bundle_root.join(command);
+                hook.bundle_origin = Some(bundle_root.to_path_buf());
+                hook.handler.command = Some(abs_path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
     Ok(Some(caps))
 }
 
