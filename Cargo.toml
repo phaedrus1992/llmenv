@@ -31,3 +31,13 @@ tempfile = "3.27"
 predicates = "3.1"
 walkdir = "2.5"
 proptest = "1.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[[bench]]
+name = "cli_benchmark"
+harness = false
