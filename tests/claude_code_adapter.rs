@@ -1065,7 +1065,7 @@ fn bundle_order_does_not_change_merged_membership() {
 }
 
 // Issue #162: Bundle-relative hook paths are resolved to absolute paths at
-// merge time, ensuring hooks work when run from a different cwd.
+// adapter time, ensuring hooks work when run from a different cwd.
 #[test]
 fn bundle_relative_hook_paths_are_resolved() {
     let bundles = vec![fixture_bundle("with-relative-hook")];
@@ -1076,28 +1076,43 @@ fn bundle_relative_hook_paths_are_resolved() {
     )
     .expect("merge");
 
-    // Find the PostToolUse hook
+    // At merge time, the path is still bundle-relative
     let hook = m
         .capabilities
         .hooks
         .iter()
         .find(|h| h.event == "PostToolUse")
         .expect("PostToolUse hook");
-
-    // The command should have the relative path resolved to absolute
     let cmd = hook.handler.command.as_ref().expect("hook command");
-
-    // The hook command should NOT contain the relative path "hooks/test.sh"
-    // Instead, it should have the resolved absolute path
     assert!(
-        !cmd.contains("hooks/test.sh") || cmd.contains("with-relative-hook/hooks/test.sh"),
-        "relative path should be resolved to absolute: {}",
+        cmd.contains("hooks/test.sh"),
+        "merged hook command should be relative: {}",
         cmd
     );
-    // Check that the bundle-relative part was resolved
+
+    // After adapting to settings.json, the path is resolved
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+
+    // Find the PostToolUse hook in the rendered settings
+    let post_tool_use = parsed["hooks"]["PostToolUse"]
+        .as_array()
+        .expect("PostToolUse array");
+    let rendered_cmd = post_tool_use[0]["hooks"][0]["command"]
+        .as_str()
+        .expect("command string");
+
+    // The rendered command should have the path resolved to absolute
     assert!(
-        cmd.contains("with-relative-hook") || cmd.starts_with("tests/fixtures/bundles"),
-        "path should contain resolved bundle directory: {}",
-        cmd
+        rendered_cmd.contains("with-relative-hook/hooks/test.sh"),
+        "adapter should resolve path to absolute: {}",
+        rendered_cmd
     );
 }
