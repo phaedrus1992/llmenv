@@ -150,6 +150,10 @@ pub fn match_project(s: &ProjectScope, env: &Env) -> Option<MatchedProject> {
 
 /// Check if any file matching the glob pattern exists in the directory.
 fn glob_matches(dir: &std::path::Path, pattern: &str) -> bool {
+    if pattern.contains("..") {
+        return false;
+    }
+
     let pattern_path = if pattern.starts_with('/') || pattern.starts_with("./") {
         std::path::PathBuf::from(pattern)
     } else {
