@@ -131,8 +131,25 @@ pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<(
         return write_owner_only_atomic_in_dir(Path::new("."), file_name, path, content);
     }
     std::fs::create_dir_all(parent)?;
+    // Harden parent dir to 0o700 (owner-only). Without this, default umask
+    // 0o022 leaves the state dir at 0o755 (world-listable), leaking the
+    // existence and names of state files on shared systems. Failure is
+    // non-fatal — on platforms that don't support it (Windows), or if the
+    // dir was created by another process and we lack chmod rights, we still
+    // proceed with the file-level 0o600 protection.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
     write_owner_only_atomic_in_dir(parent, file_name, path, content)
 }
+
+/// Process-local counter used to disambiguate temp filenames when multiple
+/// calls within the same process land in the same nanosecond. Combined with
+/// `pid` and `nanos`, this guarantees uniqueness within a process and is
+/// extremely unlikely to collide across processes (different pids).
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn write_owner_only_atomic_in_dir(
     parent: &Path,
@@ -148,39 +165,61 @@ fn write_owner_only_atomic_in_dir(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let mut tmp_name = file_name.to_os_string();
-    tmp_name.push(format!(".{pid}.{nanos}.tmp"));
-    let tmp_path = parent.join(&tmp_name);
 
-    let result = (|| -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            file.write_all(content)?;
-            file.sync_all()?;
-        }
-        #[cfg(not(unix))]
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_path)?;
-            file.write_all(content)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp_path, final_path)?;
-        Ok(())
-    })();
+    // Retry on EEXIST up to a small number of times. A stale temp file (from
+    // a prior crashed process with the same pid+nanos slice) or in-process
+    // race could collide; the per-process counter and retry loop together
+    // guarantee progress without unbounded blocking.
+    let mut last_err: Option<std::io::Error> = None;
+    for _ in 0..8 {
+        let counter = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut tmp_name = file_name.to_os_string();
+        tmp_name.push(format!(".{pid}.{nanos}.{counter}.tmp"));
+        let tmp_path = parent.join(&tmp_name);
 
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+        let result = (|| -> std::io::Result<()> {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&tmp_path)?;
+                file.write_all(content)?;
+                file.sync_all()?;
+            }
+            #[cfg(not(unix))]
+            {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&tmp_path)?;
+                file.write_all(content)?;
+                file.sync_all()?;
+            }
+            std::fs::rename(&tmp_path, final_path)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+        }
     }
-    result
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "exhausted temp-file collision retries",
+        )
+    }))
 }
 
 #[cfg(test)]
@@ -373,5 +412,47 @@ mod tests {
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
         assert_eq!(expand_tilde("rel/path"), "rel/path");
         assert_eq!(expand_tilde(""), "");
+    }
+
+    // ===== Property tests for atomic-write byte roundtrip (#156 / #157) =====
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // Arbitrary byte payloads written through write_owner_only_atomic must
+        // round-trip exactly via fs::read. Catches truncation, encoding, or
+        // mid-write corruption regressions across the full u8 range including
+        // NUL bytes and high-bit values.
+        #[test]
+        fn atomic_write_byte_roundtrip(payload in proptest::collection::vec(any::<u8>(), 0..8192)) {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let path = dir.path().join("payload.bin");
+            write_owner_only_atomic(&path, &payload).expect("atomic write");
+            let read = std::fs::read(&path).expect("read");
+            prop_assert_eq!(payload, read);
+        }
+
+        // Repeated overwrites must end with the final payload exactly — no
+        // residual bytes from prior writes, no torn state, no permission
+        // escalation.
+        #[test]
+        fn atomic_write_overwrite_idempotent(
+            first in proptest::collection::vec(any::<u8>(), 0..4096),
+            second in proptest::collection::vec(any::<u8>(), 0..4096),
+        ) {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let path = dir.path().join("payload.bin");
+            write_owner_only_atomic(&path, &first).expect("write 1");
+            write_owner_only_atomic(&path, &second).expect("write 2");
+            let read = std::fs::read(&path).expect("read");
+            prop_assert_eq!(second, read);
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+                prop_assert_eq!(mode & 0o077, 0, "group/other bits set after overwrite: {:o}", mode);
+            }
+        }
     }
 }
