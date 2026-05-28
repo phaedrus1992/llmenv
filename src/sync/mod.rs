@@ -3,10 +3,21 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Git config flags to protect cloned repos from executing hooks or fsmonitors.
+/// Used by all git invocations to prevent a malicious config repo from running
+/// arbitrary code via git hooks or fsmonitors.
+const GIT_CONFIG_FLAGS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
 /// True if the repo's working tree has staged or unstaged changes.
 fn working_tree_dirty(repo: &Path) -> bool {
     Command::new("git")
         .args(["status", "--porcelain"])
+        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
         .stderr(Stdio::null())
         .output()
@@ -19,6 +30,7 @@ fn working_tree_dirty(repo: &Path) -> bool {
 fn has_unpushed_commits(repo: &Path) -> bool {
     let output = Command::new("git")
         .args(["rev-list", "--count", "@{u}..HEAD"])
+        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
         .stderr(Stdio::null())
         .output();
@@ -97,6 +109,7 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     // we don't want to spam every shell prompt while offline).
     let _ = Command::new("git")
         .args(["fetch"])
+        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -106,6 +119,7 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     // own one-line warning on failure rather than git's two-line message.
     let pull_status = Command::new("git")
         .args(["pull", "--ff-only"])
+        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -127,4 +141,22 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_config_flags_protect_against_hooks() {
+        assert_eq!(
+            GIT_CONFIG_FLAGS,
+            &[
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null"
+            ]
+        );
+    }
 }
