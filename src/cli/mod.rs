@@ -1106,6 +1106,18 @@ fn active_host_ids(active: &ActiveScopes) -> BTreeSet<String> {
         .collect()
 }
 
+/// True if the ICM memory backend is active: configured, selected by tags, and
+/// this host is the designated server.
+fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
+    if let Some(mem) = &config.memory {
+        let selected = mem.tags.iter().any(|t| active.tags.contains(t));
+        let is_server = active_host_ids(active).contains(&mem.server_host);
+        selected && is_server
+    } else {
+        false
+    }
+}
+
 /// If the memory backend is selected and designates *this* host as its server,
 /// return the bind address (`0.0.0.0:<port>`) the `mcp-proxy` should listen on.
 /// `None` when this host is a memory client (or memory is unconfigured).
@@ -1117,9 +1129,7 @@ fn active_host_ids(active: &ActiveScopes) -> BTreeSet<String> {
 /// server by tagging it explicitly.
 fn local_memory_server_bind(config: &Config, active: &ActiveScopes) -> Option<String> {
     let mem = config.memory.as_ref()?;
-    let selected = mem.tags.iter().any(|t| active.tags.contains(t));
-    let is_server = active_host_ids(active).contains(&mem.server_host);
-    if selected && is_server {
+    if is_memory_backend_active(config, active) {
         Some(format!("0.0.0.0:{}", mem.port))
     } else {
         None

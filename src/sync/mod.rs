@@ -15,6 +15,7 @@ const GIT_CONFIG_FLAGS: &[&str] = &[
 
 /// Sanitize a git remote URL for display, removing credentials.
 /// Converts `https://user:pass@host/repo.git` to `https://[redacted]@host/repo.git`
+#[allow(dead_code)]
 fn sanitize_git_url(url: &str) -> String {
     if let Some(at_pos) = url.find('@') {
         if let Some(scheme_end) = url.find("://") {
