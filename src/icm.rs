@@ -3,7 +3,22 @@
 //! crosses scope boundaries.
 
 use crate::scope::ActiveScopes;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 use tracing;
+
+/// Path to the ICM state file within state_dir.
+fn icm_state_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("icm.json")
+}
+
+/// Stored ICM tag/bundle memory.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct IcmMemory {
+    tags: Vec<String>,
+    bundles: Vec<String>,
+}
 
 /// Generate an ICM context chunk encoding the active tags/bundles.
 /// The chunk is formatted as a markdown block that agents can paste into ICM.
@@ -57,13 +72,22 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
 /// # Errors
 /// Returns an error if memory storage fails.
 pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Result<()> {
-    let tags_csv = active.tags.iter().cloned().collect::<Vec<_>>().join(",");
-    let bundles_csv = bundles.join(",");
+    let state_dir = crate::paths::state_dir()?;
+    fs::create_dir_all(&state_dir)?;
+
+    let memory = IcmMemory {
+        tags: active.tags.iter().cloned().collect::<Vec<_>>(),
+        bundles: bundles.to_vec(),
+    };
+
+    let path = icm_state_path(&state_dir);
+    let json = serde_json::to_string(&memory)?;
+    fs::write(path, json)?;
 
     tracing::debug!(
         "stored ICM tag memory: tags={}, bundles={}",
-        tags_csv,
-        bundles_csv
+        memory.tags.join(","),
+        memory.bundles.join(",")
     );
     Ok(())
 }
@@ -84,6 +108,37 @@ pub fn recall_tag_memory_hook() -> anyhow::Result<String> {
                  when the same tags/bundles are active.";
 
     Ok(chunk.to_string())
+}
+
+/// Recall the last stored tag/bundle memory.
+/// Used internally by tests to verify persistence.
+///
+/// # Errors
+/// Returns an error if memory retrieval fails.
+fn recall_stored_tag_memory() -> anyhow::Result<String> {
+    let state_dir = crate::paths::state_dir()?;
+    let path = icm_state_path(&state_dir);
+
+    if !path.exists() {
+        return Ok(String::new());
+    }
+
+    let json = fs::read_to_string(path)?;
+    let memory: IcmMemory = serde_json::from_str(&json)?;
+
+    let tags_str = if memory.tags.is_empty() {
+        "no tags".to_string()
+    } else {
+        memory.tags.join(", ")
+    };
+
+    let bundles_str = if memory.bundles.is_empty() {
+        "no bundles".to_string()
+    } else {
+        memory.bundles.join(", ")
+    };
+
+    Ok(format!("tags: {}, bundles: {}", tags_str, bundles_str))
 }
 
 #[cfg(test)]
@@ -148,5 +203,37 @@ mod tests {
         let content = result.unwrap();
         assert!(content.contains("llmenv-tag"));
         assert!(content.contains("keyword"));
+    }
+
+    #[test]
+    fn test_store_tag_memory_persists_to_icm() {
+        use std::env;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        unsafe {
+            env::set_var("LLMENV_STATE_DIR", temp_dir.path());
+        }
+
+        let mut tags = BTreeSet::new();
+        tags.insert("work".to_string());
+        tags.insert("rust".to_string());
+
+        let active = ActiveScopes {
+            scopes: vec![],
+            tags,
+        };
+
+        let bundles = vec!["backend".to_string()];
+        let result = store_tag_memory(&active, &bundles);
+        assert!(result.is_ok());
+
+        // Verify the memory was actually stored by checking for a marker file
+        // or by recalling and verifying content matches what was stored
+        let recalled = recall_stored_tag_memory();
+        assert!(recalled.is_ok());
+
+        let content = recalled.unwrap();
+        assert!(content.contains("work"));
+        assert!(content.contains("rust"));
+        assert!(content.contains("backend"));
     }
 }
