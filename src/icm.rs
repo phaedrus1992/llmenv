@@ -179,6 +179,52 @@ mod tests {
     }
 
     #[test]
+    fn test_context_chunk_includes_project_description() {
+        use crate::scope::ActiveScope;
+        let active = ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "myproj".into(),
+                kind: "project",
+                tags: vec![],
+                project_root: Some(std::path::PathBuf::from("/tmp/myproj")),
+                enable_bundles: vec![],
+                name: Some("MyProject".into()),
+                description: Some("A test project".into()),
+                unknown_fields: vec![],
+            }],
+            tags: BTreeSet::new(),
+        };
+        let chunk = generate_context_chunk(&active, &[]);
+        assert!(chunk.contains("MyProject"), "name must appear");
+        assert!(chunk.contains("A test project"), "description must appear");
+    }
+
+    #[test]
+    fn test_context_chunk_omits_description_when_absent() {
+        use crate::scope::ActiveScope;
+        let active = ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "myproj".into(),
+                kind: "project",
+                tags: vec![],
+                project_root: Some(std::path::PathBuf::from("/tmp/myproj")),
+                enable_bundles: vec![],
+                name: Some("MyProject".into()),
+                description: None,
+                unknown_fields: vec![],
+            }],
+            tags: BTreeSet::new(),
+        };
+        let chunk = generate_context_chunk(&active, &[]);
+        assert!(chunk.contains("MyProject"));
+        // No em-dash from the "name — description" separator.
+        assert!(
+            !chunk.contains("MyProject —"),
+            "no separator when description absent"
+        );
+    }
+
+    #[test]
     fn test_store_tag_memory_succeeds() {
         let mut tags = BTreeSet::new();
         tags.insert("work".to_string());

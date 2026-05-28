@@ -42,6 +42,10 @@ pub struct Env {
     pub user: String,
     pub cwd: String,
     pub gateway_mac: Option<String>,
+    /// User's home directory. The `.llmenv.yaml` discovery walk stops at
+    /// this boundary so a marker file dropped above $HOME (e.g. `/tmp` on a
+    /// shared host) cannot be picked up.
+    pub home: Option<std::path::PathBuf>,
 }
 
 impl Env {
@@ -52,6 +56,7 @@ impl Env {
             user: String::new(),
             cwd: String::new(),
             gateway_mac: None,
+            home: None,
         }
     }
 
@@ -72,6 +77,7 @@ impl Env {
                 tracing::warn!("current_dir() unavailable; project-scope matching disabled");
                 String::new()
             });
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         Self {
             // Hostname comparison is case-insensitive — `hostname(1)` and
             // /etc/hostname may differ in case across hosts.
@@ -79,6 +85,7 @@ impl Env {
             user,
             cwd,
             gateway_mac: super::network::detect_gateway_mac(),
+            home,
         }
     }
 }
@@ -121,6 +128,11 @@ pub fn matches_user(s: &UserScope, env: &Env) -> bool {
 /// (defaults applied, unknown fields collected). If YAML is malformed, log a
 /// warning and return a minimal `ResolvedProject` with id/name from the
 /// folder basename.
+///
+/// The walk is bounded at `$HOME`: a marker at `~/.llmenv.yaml` activates,
+/// but the walk does not ascend above home. This prevents a hostile marker
+/// dropped in e.g. `/tmp` (on a shared host) or `/Volumes/...` from being
+/// picked up. When `$HOME` is unknown, only the cwd itself is checked.
 #[must_use]
 pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
     let mut cur = std::path::PathBuf::from(&env.cwd);
@@ -156,6 +168,14 @@ pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
                 unknown_fields,
             });
         }
+        // Stop the walk once we've checked $HOME (or if home is unknown,
+        // after checking only cwd). This blocks markers above home from
+        // activating.
+        match &env.home {
+            Some(h) if cur == *h => break,
+            None => break,
+            _ => {}
+        }
         if !cur.pop() {
             break;
         }
@@ -163,8 +183,15 @@ pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
     None
 }
 
+/// Maximum length (in bytes) for the project description. Anything longer
+/// is truncated and a warning is logged. The description is surfaced into
+/// LLM context chunks; a hard cap prevents a malformed or hostile marker
+/// from bloating every prompt.
+const MAX_DESCRIPTION_BYTES: usize = 1024;
+
 /// Parse `.llmenv.yaml` file into a `ProjectFile`. Empty file → all defaults.
-/// Malformed YAML → log warning and return defaults.
+/// Malformed YAML → log warning and return defaults. The `description`
+/// field is truncated to `MAX_DESCRIPTION_BYTES` if oversized.
 fn read_project_file(path: &std::path::Path) -> ProjectFile {
     let Ok(body) = std::fs::read_to_string(path) else {
         return ProjectFile::default();
@@ -173,7 +200,24 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
         return ProjectFile::default();
     }
     match serde_yaml::from_str::<ProjectFile>(&body) {
-        Ok(pf) => pf,
+        Ok(mut pf) => {
+            if let Some(desc) = pf.description.as_mut()
+                && desc.len() > MAX_DESCRIPTION_BYTES
+            {
+                tracing::warn!(
+                    "project marker file {} has description >{} bytes; truncating",
+                    path.display(),
+                    MAX_DESCRIPTION_BYTES
+                );
+                // Truncate at a char boundary so the result remains valid UTF-8.
+                let mut cut = MAX_DESCRIPTION_BYTES;
+                while cut > 0 && !desc.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                desc.truncate(cut);
+            }
+            pf
+        }
         Err(e) => {
             tracing::warn!(
                 "project marker file {} is not valid YAML: {e}; using defaults",
@@ -196,6 +240,19 @@ mod tests {
         std::fs::write(&path, body).expect("write .llmenv.yaml");
     }
 
+    /// Build an `Env` with cwd inside `temp_dir`, treating `temp_dir`'s
+    /// parent as $HOME so the walk reaches markers at `temp_dir` (and
+    /// upward as long as we're under the boundary).
+    fn env_in(cwd: &Path, home: &Path) -> Env {
+        Env {
+            hostname: String::new(),
+            user: String::new(),
+            cwd: cwd.to_string_lossy().to_string(),
+            gateway_mac: None,
+            home: Some(home.to_path_buf()),
+        }
+    }
+
     #[test]
     fn discovers_project_with_all_fields() {
         let temp_dir = tempfile::TempDir::new().expect("tempdir");
@@ -203,12 +260,7 @@ mod tests {
             "id: myapp\nname: MyApp\ndescription: Test app\ntags: [a, b]\nenable_bundles: [base]\n";
         write_project_file(temp_dir.path(), yaml);
 
-        let env = Env {
-            hostname: String::new(),
-            user: String::new(),
-            cwd: temp_dir.path().to_string_lossy().to_string(),
-            gateway_mac: None,
-        };
+        let env = env_in(temp_dir.path(), temp_dir.path());
 
         let project = discover_project(&env).expect("discover");
         assert_eq!(project.id, "myapp");
@@ -224,12 +276,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().expect("tempdir");
         write_project_file(temp_dir.path(), "");
 
-        let env = Env {
-            hostname: String::new(),
-            user: String::new(),
-            cwd: temp_dir.path().to_string_lossy().to_string(),
-            gateway_mac: None,
-        };
+        let env = env_in(temp_dir.path(), temp_dir.path());
 
         let project = discover_project(&env).expect("discover");
         let basename = temp_dir.path().file_name().unwrap().to_string_lossy();
@@ -248,12 +295,7 @@ mod tests {
         std::fs::create_dir_all(&subdir).expect("mkdir");
         write_project_file(root, "id: found\n");
 
-        let env = Env {
-            hostname: String::new(),
-            user: String::new(),
-            cwd: subdir.to_string_lossy().to_string(),
-            gateway_mac: None,
-        };
+        let env = env_in(&subdir, root);
 
         let project = discover_project(&env).expect("discover");
         assert_eq!(project.id, "found");
@@ -261,14 +303,65 @@ mod tests {
     }
 
     #[test]
-    fn returns_none_when_no_marker_found() {
+    fn walk_stops_at_home_boundary() {
+        // Marker is above $HOME (in an ancestor of home) — must not be
+        // picked up even when cwd is below home.
         let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let above_home = temp_dir.path();
+        let home = above_home.join("home");
+        let workdir = home.join("project");
+        std::fs::create_dir_all(&workdir).expect("mkdir");
+        // Hostile marker above home.
+        write_project_file(above_home, "id: hostile\n");
+
+        let env = env_in(&workdir, &home);
+        assert!(
+            discover_project(&env).is_none(),
+            "marker above $HOME must not activate"
+        );
+    }
+
+    #[test]
+    fn walk_finds_marker_at_home() {
+        // Marker exactly at $HOME — must activate (boundary is inclusive).
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let home = temp_dir.path();
+        let workdir = home.join("project");
+        std::fs::create_dir_all(&workdir).expect("mkdir");
+        write_project_file(home, "id: home-project\n");
+
+        let env = env_in(&workdir, home);
+        let project = discover_project(&env).expect("discover");
+        assert_eq!(project.id, "home-project");
+        assert_eq!(project.root, home);
+    }
+
+    #[test]
+    fn no_walk_above_cwd_when_home_unknown() {
+        // With no HOME, only cwd itself is checked — no upward walk.
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let root = temp_dir.path();
+        let subdir = root.join("sub");
+        std::fs::create_dir_all(&subdir).expect("mkdir");
+        write_project_file(root, "id: parent\n");
+
         let env = Env {
             hostname: String::new(),
             user: String::new(),
-            cwd: temp_dir.path().to_string_lossy().to_string(),
+            cwd: subdir.to_string_lossy().to_string(),
             gateway_mac: None,
+            home: None,
         };
+        assert!(
+            discover_project(&env).is_none(),
+            "without HOME, walk must not ascend"
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_marker_found() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let env = env_in(temp_dir.path(), temp_dir.path());
 
         let project = discover_project(&env);
         assert!(project.is_none());
@@ -279,17 +372,27 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().expect("tempdir");
         write_project_file(temp_dir.path(), "not: [valid: yaml");
 
-        let env = Env {
-            hostname: String::new(),
-            user: String::new(),
-            cwd: temp_dir.path().to_string_lossy().to_string(),
-            gateway_mac: None,
-        };
+        let env = env_in(temp_dir.path(), temp_dir.path());
 
         let project = discover_project(&env).expect("discover");
         let basename = temp_dir.path().file_name().unwrap().to_string_lossy();
         assert_eq!(project.id, basename.as_ref());
         assert_eq!(project.name, basename.as_ref());
+    }
+
+    #[test]
+    fn long_description_is_truncated() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let huge = "a".repeat(super::MAX_DESCRIPTION_BYTES + 500);
+        write_project_file(temp_dir.path(), &format!("description: \"{huge}\"\n"));
+
+        let env = env_in(temp_dir.path(), temp_dir.path());
+        let project = discover_project(&env).expect("discover");
+        let desc = project.description.expect("description");
+        assert!(
+            desc.len() <= super::MAX_DESCRIPTION_BYTES,
+            "description must be capped"
+        );
     }
 
     #[test]
@@ -300,12 +403,7 @@ mod tests {
             "id: test\nunknown_field: value\nanother: 42\n",
         );
 
-        let env = Env {
-            hostname: String::new(),
-            user: String::new(),
-            cwd: temp_dir.path().to_string_lossy().to_string(),
-            gateway_mac: None,
-        };
+        let env = env_in(temp_dir.path(), temp_dir.path());
 
         let project = discover_project(&env).expect("discover");
         assert_eq!(project.unknown_fields.len(), 2);
@@ -326,6 +424,7 @@ mod tests {
                 user: String::new(),
                 cwd,
                 gateway_mac: None,
+                home: None,
             };
             let _ = discover_project(&env);
         }
@@ -335,12 +434,7 @@ mod tests {
         fn malformed_yaml_never_panics(body in r"\PC*") {
             let temp_dir = tempfile::TempDir::new().expect("tempdir");
             write_project_file(temp_dir.path(), &body);
-            let env = Env {
-                hostname: String::new(),
-                user: String::new(),
-                cwd: temp_dir.path().to_string_lossy().to_string(),
-                gateway_mac: None,
-            };
+            let env = env_in(temp_dir.path(), temp_dir.path());
             let _ = discover_project(&env);
         }
     }
