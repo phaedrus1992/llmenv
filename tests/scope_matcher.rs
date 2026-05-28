@@ -26,6 +26,7 @@ fn cfg() -> Config {
                 r#match: ProjectMatch {
                     path_prefix: Some("/home/breed/git/x".into()),
                     marker: None,
+                    glob: None,
                 },
                 tags: vec!["x".into()],
             }],
@@ -146,6 +147,7 @@ fn project_path_prefix_respects_component_boundary() {
                 r#match: ProjectMatch {
                     path_prefix: Some("/home/breed/git/x".into()),
                     marker: None,
+                    glob: None,
                 },
                 tags: vec!["x".into()],
             }],
@@ -220,6 +222,7 @@ fn project_matcher_uses_marker() {
                 r#match: ProjectMatch {
                     path_prefix: None,
                     marker: Some(".llmenv-marker".into()),
+                    glob: None,
                 },
                 tags: vec!["marked".into()],
             }],

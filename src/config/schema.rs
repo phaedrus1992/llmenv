@@ -275,6 +275,10 @@ pub struct ProjectMatch {
     pub path_prefix: Option<String>,
     #[serde(alias = "marker_file")]
     pub marker: Option<String>,
+    /// Glob pattern matched against files in the project root.
+    /// If any file matches, the scope activates. Patterns are relative to cwd.
+    #[serde(default)]
+    pub glob: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

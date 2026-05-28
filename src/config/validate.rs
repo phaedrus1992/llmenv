@@ -559,6 +559,7 @@ mod tests {
                         r#match: ProjectMatch {
                             path_prefix: path_prefix.clone(),
                             marker: marker.clone(),
+                            glob: None,
                         },
                         tags: vec![],
                     })
@@ -1153,6 +1154,7 @@ mod tests {
                     r#match: ProjectMatch {
                         path_prefix: Some("/foo/../bar".to_string()),
                         marker: None,
+                        glob: None,
                     },
                     tags: vec!["tag1".to_string()],
                 }],
@@ -1184,6 +1186,7 @@ mod tests {
                     r#match: ProjectMatch {
                         path_prefix: Some("/foo/bar/..".to_string()),
                         marker: None,
+                        glob: None,
                     },
                     tags: vec!["tag1".to_string()],
                 }],
@@ -1213,6 +1216,7 @@ mod tests {
                     r#match: ProjectMatch {
                         path_prefix: Some("/foo\0bar".to_string()),
                         marker: None,
+                        glob: None,
                     },
                     tags: vec!["tag1".to_string()],
                 }],

@@ -115,6 +115,7 @@ pub fn recall_tag_memory_hook() -> anyhow::Result<String> {
 ///
 /// # Errors
 /// Returns an error if memory retrieval fails.
+#[cfg(test)]
 fn recall_stored_tag_memory() -> anyhow::Result<String> {
     let state_dir = crate::paths::state_dir()?;
     let path = icm_state_path(&state_dir);
