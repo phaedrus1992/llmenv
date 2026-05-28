@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for the `llmenv check-stale` subcommand (#121 / #85 gap).
 //!
 //! The SessionStart hook emitted by the Claude Code adapter invokes

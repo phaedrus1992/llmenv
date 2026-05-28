@@ -521,7 +521,7 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         anyhow::bail!("Variable name cannot be empty");
     }
-    let first = name.chars().next().unwrap();
+    let first = name.as_bytes()[0] as char;
     if !first.is_ascii_alphabetic() && first != '_' {
         anyhow::bail!(
             "Variable name '{}' must start with letter or underscore",
@@ -1638,6 +1638,7 @@ fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Re
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

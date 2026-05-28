@@ -232,7 +232,7 @@ fn write_mcp_json(
     }
     overlay_native(&mut doc, native)?;
     let path = out.join("mcp.json");
-    crate::paths::write_owner_only(&path, serde_json::to_string_pretty(&doc)?.as_bytes())?;
+    crate::paths::write_owner_only_atomic(&path, serde_json::to_string_pretty(&doc)?.as_bytes())?;
     Ok(())
 }
 
@@ -506,12 +506,14 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     let settings_path = out.join("settings.json");
     let json_str = serde_json::to_string_pretty(&settings_value)?;
 
-    crate::paths::write_owner_only(&settings_path, json_str.as_bytes()).with_context(|| {
-        format!(
-            "Failed to write settings.json at {}",
-            settings_path.display()
-        )
-    })?;
+    crate::paths::write_owner_only_atomic(&settings_path, json_str.as_bytes()).with_context(
+        || {
+            format!(
+                "Failed to write settings.json at {}",
+                settings_path.display()
+            )
+        },
+    )?;
 
     Ok(())
 }
@@ -610,6 +612,7 @@ enum PermissionAction {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
         MODELED_SETTINGS_KEYS, is_hook_json, overlay_native, reject_modeled_keys_in_catch_all,

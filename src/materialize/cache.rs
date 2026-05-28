@@ -289,6 +289,7 @@ fn walk_mtime(dir: &Path, newest: &mut SystemTime) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::fs;

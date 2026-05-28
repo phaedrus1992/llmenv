@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 /// Test coverage audit for engine-capabilities design doc.
 /// Identifies and tests all precedence, conflict resolution, and value-shape merge rules.
 /// References: docs/design/engine-capabilities.md (D1, D2, D3, O3)

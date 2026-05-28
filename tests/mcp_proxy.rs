@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for #15: mcp-proxy lifecycle for ICM server host.
 //!
 //! `ensure_running(bind, pid_path, spawn)` is the public surface. The `spawn`
