@@ -7,11 +7,11 @@
 //! hash so a marketplace update re-renders the scope.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
 use crate::config::{Marketplace, MarketplaceSource};
+use crate::git;
 use crate::paths::expand_tilde;
 
 /// Where all marketplace clones live, under the llmenv cache dir.
@@ -187,25 +187,14 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
     Ok(())
 }
 
-/// Git config flags to protect cloned repos from executing hooks or fsmonitors.
-/// Used by all git invocations in sync_marketplace to prevent a malicious
-/// marketplace repo from running arbitrary code via git hooks or fsmonitors.
-const GIT_CONFIG_FLAGS: &[&str] = &[
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.hooksPath=/dev/null",
-];
-
 fn git_clone(source: &str, dest: &Path) -> Result<()> {
-    let mut cmd = Command::new("git");
-    cmd.args(["clone", "--depth", "1"])
-        .args(GIT_CONFIG_FLAGS)
-        .args(["--", source])
+    let status = git::secure_git()
+        .args(["clone", "--depth", "1", "--", source])
         .arg(dest)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let status = cmd.status().context("spawning git clone")?;
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("spawning git clone")?;
     if !status.success() {
         return Err(anyhow::anyhow!("git clone failed for {source}"));
     }
@@ -218,28 +207,26 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
 /// `reset` (no upstream change / diverged) keeps the current checkout and is
 /// non-fatal: the clone is still usable, it just didn't advance.
 fn git_pull(repo: &Path) -> Result<()> {
-    let mut fetch_cmd = Command::new("git");
-    fetch_cmd
+    let fetch_status = git::secure_git()
         .args(["fetch", "--depth", "1"])
-        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let fetch_status = fetch_cmd.status().context("spawning git fetch")?;
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("spawning git fetch")?;
     if !fetch_status.success() {
         return Err(anyhow::anyhow!(
             "git fetch failed at {} (network or remote error)",
             repo.display()
         ));
     }
-    let mut reset_cmd = Command::new("git");
-    reset_cmd
+    let reset_status = git::secure_git()
         .args(["reset", "--hard", "@{u}"])
-        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let reset_status = reset_cmd.status().context("spawning git reset")?;
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("spawning git reset")?;
     if !reset_status.success() {
         tracing::debug!(
             "marketplace refresh did not fast-forward at {}; keeping current checkout",
@@ -251,12 +238,12 @@ fn git_pull(repo: &Path) -> Result<()> {
 
 /// Resolve the current HEAD sha of a git checkout, or `None` if it can't be read.
 fn git_head(repo: &Path) -> Option<String> {
-    let mut cmd = Command::new("git");
-    cmd.args(["rev-parse", "HEAD"])
-        .args(GIT_CONFIG_FLAGS)
+    let output = git::secure_git()
+        .args(["rev-parse", "HEAD"])
         .current_dir(repo)
-        .stderr(Stdio::null());
-    let output = cmd.output().ok()?;
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -307,6 +294,7 @@ mod tests {
 
     #[test]
     fn git_config_flags_protect_against_hooks() {
+        use crate::git::GIT_CONFIG_FLAGS;
         let flags = GIT_CONFIG_FLAGS;
         assert_eq!(
             flags,
