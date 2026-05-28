@@ -1,0 +1,5 @@
+name: "LLMenv"
+description: "A universal environment for LLMs"
+id: "llmenv"
+
+tags: ["lang-rust", "agent-coding"]
