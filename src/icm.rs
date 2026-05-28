@@ -55,14 +55,30 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
             .join(", ")
     };
 
-    format!(
+    let mut chunk = format!(
         "## llmenv context\n\
          Active tags: {}\n\
          Bundles: {}\n\n\
          Store scope-specific memory under keyword `llmenv-tag:<tag>` \
          so it is retrievable across projects.",
         tags_str, bundles_str
-    )
+    );
+
+    // Add project description if present.
+    for scope in &active.scopes {
+        if scope.kind == "project"
+            && let Some(name) = &scope.name
+        {
+            chunk.push_str("\n\n**Project:** ");
+            chunk.push_str(name);
+            if let Some(desc) = &scope.description {
+                chunk.push_str(" — ");
+                chunk.push_str(desc);
+            }
+        }
+    }
+
+    chunk
 }
 
 /// Store tag/bundle memory mappings for retrieval by SessionStart hook.
@@ -160,6 +176,52 @@ mod tests {
         let chunk = generate_context_chunk(&active, &bundles);
         assert!(chunk.contains("bundle1"));
         assert!(chunk.contains("bundle2"));
+    }
+
+    #[test]
+    fn test_context_chunk_includes_project_description() {
+        use crate::scope::ActiveScope;
+        let active = ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "myproj".into(),
+                kind: "project",
+                tags: vec![],
+                project_root: Some(std::path::PathBuf::from("/tmp/myproj")),
+                enable_bundles: vec![],
+                name: Some("MyProject".into()),
+                description: Some("A test project".into()),
+                unknown_fields: vec![],
+            }],
+            tags: BTreeSet::new(),
+        };
+        let chunk = generate_context_chunk(&active, &[]);
+        assert!(chunk.contains("MyProject"), "name must appear");
+        assert!(chunk.contains("A test project"), "description must appear");
+    }
+
+    #[test]
+    fn test_context_chunk_omits_description_when_absent() {
+        use crate::scope::ActiveScope;
+        let active = ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "myproj".into(),
+                kind: "project",
+                tags: vec![],
+                project_root: Some(std::path::PathBuf::from("/tmp/myproj")),
+                enable_bundles: vec![],
+                name: Some("MyProject".into()),
+                description: None,
+                unknown_fields: vec![],
+            }],
+            tags: BTreeSet::new(),
+        };
+        let chunk = generate_context_chunk(&active, &[]);
+        assert!(chunk.contains("MyProject"));
+        // No em-dash from the "name — description" separator.
+        assert!(
+            !chunk.contains("MyProject —"),
+            "no separator when description absent"
+        );
     }
 
     #[test]

@@ -217,8 +217,6 @@ pub struct Scopes {
     pub host: Vec<HostScope>,
     #[serde(default)]
     pub user: Vec<UserScope>,
-    #[serde(default)]
-    pub project: Vec<ProjectScope>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -260,25 +258,6 @@ pub struct UserScope {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UserMatch {
     pub user: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ProjectScope {
-    pub id: String,
-    pub r#match: ProjectMatch,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ProjectMatch {
-    pub path_prefix: Option<String>,
-    #[serde(alias = "marker_file")]
-    pub marker: Option<String>,
-    /// Glob pattern matched against files in the project root.
-    /// If any file matches, the scope activates. Patterns are relative to cwd.
-    #[serde(default)]
-    pub glob: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
