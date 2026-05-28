@@ -16,6 +16,16 @@ pub use style::{
     orphan_annotation, should_use_color,
 };
 
+/// Git config flags to protect cloned repos from executing hooks or fsmonitors.
+/// Used by all git invocations to prevent a malicious config repo from running
+/// arbitrary code via git hooks or fsmonitors.
+const GIT_CONFIG_FLAGS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
 /// Outcome of comparing the booted materialized config folder against the
 /// folder llmenv would materialize now (see [`stale_status`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,6 +465,7 @@ fn expand_tilde(path: &str) -> anyhow::Result<PathBuf> {
 
 fn is_git_repo(dir: &Path) -> bool {
     match std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir)
         .output()
@@ -466,6 +477,7 @@ fn is_git_repo(dir: &Path) -> bool {
 
 fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
     let output = std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(dir)
         .output()
@@ -674,6 +686,11 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     let bundles_for_icm = firing.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
     let icm_chunk = crate::icm::generate_context_chunk(&active, &bundles_for_icm);
     vars.insert("LLMENV_ICM_CONTEXT".into(), icm_chunk);
+
+    // Store tag/bundle mappings for SessionStart hook retrieval
+    if let Err(e) = crate::icm::store_tag_memory(&active, &bundles_for_icm) {
+        tracing::debug!("failed to store ICM tag memory (non-fatal): {e}");
+    }
 
     for (key, value) in vars {
         validate_var_name(&key)?;
@@ -1101,6 +1118,18 @@ fn active_host_ids(active: &ActiveScopes) -> BTreeSet<String> {
         .collect()
 }
 
+/// True if the ICM memory backend is active: configured, selected by tags, and
+/// this host is the designated server.
+fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
+    if let Some(mem) = &config.memory {
+        let selected = mem.tags.iter().any(|t| active.tags.contains(t));
+        let is_server = active_host_ids(active).contains(&mem.server_host);
+        selected && is_server
+    } else {
+        false
+    }
+}
+
 /// If the memory backend is selected and designates *this* host as its server,
 /// return the bind address (`0.0.0.0:<port>`) the `mcp-proxy` should listen on.
 /// `None` when this host is a memory client (or memory is unconfigured).
@@ -1112,9 +1141,7 @@ fn active_host_ids(active: &ActiveScopes) -> BTreeSet<String> {
 /// server by tagging it explicitly.
 fn local_memory_server_bind(config: &Config, active: &ActiveScopes) -> Option<String> {
     let mem = config.memory.as_ref()?;
-    let selected = mem.tags.iter().any(|t| active.tags.contains(t));
-    let is_server = active_host_ids(active).contains(&mem.server_host);
-    if selected && is_server {
+    if is_memory_backend_active(config, active) {
         Some(format!("0.0.0.0:{}", mem.port))
     } else {
         None
@@ -1482,6 +1509,7 @@ fn run_sync() -> anyhow::Result<()> {
 
     // Stage all changes in config_dir
     std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["add", "-A"])
         .current_dir(&config_dir)
         .status()
@@ -1489,6 +1517,7 @@ fn run_sync() -> anyhow::Result<()> {
 
     // Commit (allow empty if nothing changed)
     let commit_result = std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["commit", "-m", "Update llmenv config"])
         .current_dir(&config_dir)
         .status()
@@ -1501,6 +1530,7 @@ fn run_sync() -> anyhow::Result<()> {
 
     // Push to origin
     std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["push"])
         .current_dir(&config_dir)
         .status()
