@@ -13,6 +13,24 @@ const GIT_CONFIG_FLAGS: &[&str] = &[
     "core.hooksPath=/dev/null",
 ];
 
+/// Sanitize a git remote URL for display, removing credentials.
+/// Converts `https://user:pass@host/repo.git` to `https://[redacted]@host/repo.git`
+fn sanitize_git_url(url: &str) -> String {
+    if let Some(at_pos) = url.find('@') {
+        if let Some(scheme_end) = url.find("://") {
+            if at_pos > scheme_end {
+                return format!(
+                    "{}{}@{}",
+                    &url[..scheme_end + 3],
+                    "[redacted]",
+                    &url[at_pos + 1..]
+                );
+            }
+        }
+    }
+    url.to_string()
+}
+
 /// True if the repo's working tree has staged or unstaged changes.
 fn working_tree_dirty(repo: &Path) -> bool {
     Command::new("git")
@@ -124,7 +142,7 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .context("git pull --ff-only failed")?;
+        .context(format!("git pull --ff-only failed in {}", repo.display()))?;
 
     if pull_status.success() {
         write_state(state_dir, now)?;
@@ -158,5 +176,27 @@ mod tests {
                 "core.hooksPath=/dev/null"
             ]
         );
+    }
+
+    #[test]
+    fn sanitize_git_url_removes_credentials() {
+        let url = "https://user:password@github.com/repo.git";
+        let sanitized = sanitize_git_url(url);
+        assert_eq!(sanitized, "https://[redacted]@github.com/repo.git");
+        assert!(!sanitized.contains("password"));
+    }
+
+    #[test]
+    fn sanitize_git_url_handles_no_credentials() {
+        let url = "https://github.com/repo.git";
+        assert_eq!(sanitize_git_url(url), url);
+    }
+
+    #[test]
+    fn sanitize_git_url_handles_ssh() {
+        let url = "git@github.com:alice/repo.git";
+        let sanitized = sanitize_git_url(url);
+        // SSH URLs have @ but are not credentials, they're just the git user
+        assert_eq!(sanitized, url);
     }
 }
