@@ -6,8 +6,14 @@ concept. Servers are declared once under `mcp:`, attached to scopes via tags
 agent-native config (for Claude Code: `mcp.json`).
 
 llmenv's own memory backend is configured separately under `memory:`. It is a
-single networked service, not a generic MCP entry — its implementation (ICM) is
-deliberately hidden behind the `memory:` vocabulary.
+single networked service, not a generic MCP entry — its implementation (ICM,
+Infinite Context Memory) is deliberately hidden behind the `memory:` vocabulary.
+
+For the config-field reference, see
+[Configuration → `mcp:`](configuration.md#mcp) and
+[`memory:`](configuration.md#memory). This page covers the runtime model: the
+selection mechanism, the memory topology, the security model, and the
+tag-scoped-memory env var contract.
 
 ## Selection model
 
@@ -185,3 +191,51 @@ nc -vz fixed.local 7878
 
 The server only renders when one of its tags is active. Check that a scope in
 the current environment emits a matching tag (`llmenv tag-ls`).
+
+## Tag-scoped memory and the env var contract
+
+llmenv bridges the active scope into memory so that context can be stored once
+and recalled in *any* environment sharing the same tags — even across different
+projects. Two mechanisms carry this:
+
+### `LLMENV_ICM_CONTEXT`
+
+On every `llmenv export`, llmenv emits `LLMENV_ICM_CONTEXT`: a markdown chunk
+encoding the active tags, the firing bundles, and (when a project marker is
+active) the project name and description. Its shape:
+
+```text
+## llmenv context
+Active tags: `office`, `rust`
+Bundles: `base`, `office-tools`
+
+Store scope-specific memory under keyword `llmenv-tag:<tag>` so it is
+retrievable across projects.
+
+**Project:** MyApp — Customer-facing API
+```
+
+Agents read this to learn which tags are live and how to key memory so it
+follows the tag rather than the project.
+
+### Keyword convention
+
+- `llmenv-tag:<tag>` — memory keyed to a tag. Stored once, retrieved in any
+  environment where that tag is active.
+- `llmenv-bundle:<bundle>` — memory keyed to a bundle, retrieved whenever that
+  bundle fires.
+
+### SessionStart injection
+
+The Claude Code adapter registers a `SessionStart` hook. Alongside
+`check-stale` (drift detection), llmenv records the active tag/bundle set to a
+`0600` state file (`icm.json` in the state dir) so the hook can surface the
+keyword convention to the agent at startup.
+
+### Related introspection vars
+
+`LLMENV_ICM_CONTEXT` is one of several vars `export` emits. The full set —
+`LLMENV_ACTIVE_SCOPES`, `LLMENV_ACTIVE_TAGS`, `LLMENV_ACTIVE_BUNDLES`,
+`LLMENV_ACTIVE_PROJECT`, `LLMENV_PROJECT_ROOT`, `LLMENV_ICM_CONTEXT` — is
+documented in the [README](../README.md#introspection-environment-variables)
+and [Concepts](concepts.md#introspection).
