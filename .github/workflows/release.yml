@@ -41,6 +41,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       # zizmor: ignore[cache-poisoning] — cache is skipped on tag pushes via `if:`
       # below; the conditional guard makes the cache-poisoning audit a false
@@ -163,6 +164,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
+        with:
+          toolchain: stable
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
