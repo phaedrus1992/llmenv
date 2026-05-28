@@ -23,12 +23,27 @@ pub fn expand_tilde(p: &str) -> String {
 /// matching misses: `foo/..`, mixed separators on the host OS, and a bare
 /// `..` with no trailing slash. A leading `/` (root) is fine; only `..`
 /// components are rejected.
+///
+/// Note: this does NOT check whether `path` is absolute. `Path::join` with
+/// an absolute argument returns the argument unchanged, escaping the base
+/// directory. When validating relative paths supplied by user-controlled
+/// data, use [`is_unsafe_join_target`] instead.
 #[must_use]
 pub fn has_parent_component(path: &str) -> bool {
     use std::path::Component;
     Path::new(path)
         .components()
         .any(|c| matches!(c, Component::ParentDir))
+}
+
+/// True if joining `path` onto a base directory would escape it. Returns
+/// true when `path` contains `..` components OR is absolute (since
+/// `Path::join` with an absolute argument discards the base). Use this at
+/// every site that does `base.join(user_controlled_rel)`.
+#[must_use]
+pub fn is_unsafe_join_target(path: &str) -> bool {
+    let p = Path::new(path);
+    p.is_absolute() || has_parent_component(path)
 }
 
 /// Return true if `cwd` is at or below `prefix`, treating both as filesystem
@@ -124,6 +139,31 @@ mod tests {
         assert!(!has_parent_component("/foo/..bar/baz"));
         assert!(!has_parent_component("file..txt"));
         assert!(!has_parent_component(""));
+    }
+
+    #[test]
+    fn has_parent_component_does_not_check_absolute_paths() {
+        // Documents that has_parent_component alone is INSUFFICIENT for
+        // safe-join validation. Callers must use is_unsafe_join_target.
+        assert!(!has_parent_component("/etc/passwd"));
+        assert!(!has_parent_component("/abs/secret"));
+    }
+
+    #[test]
+    fn is_unsafe_join_target_rejects_traversal_and_absolute() {
+        // Parent components — same as has_parent_component.
+        assert!(is_unsafe_join_target(".."));
+        assert!(is_unsafe_join_target("foo/.."));
+        assert!(is_unsafe_join_target("a/b/../c"));
+        // Absolute paths — would escape via Path::join semantics.
+        assert!(is_unsafe_join_target("/etc/passwd"));
+        assert!(is_unsafe_join_target("/abs"));
+        // Safe: plain relative paths.
+        assert!(!is_unsafe_join_target("rel/path"));
+        assert!(!is_unsafe_join_target("file.txt"));
+        assert!(!is_unsafe_join_target("a/b/c"));
+        // Embedded `..` in a name is not a parent component.
+        assert!(!is_unsafe_join_target("file..txt"));
     }
 
     #[cfg(unix)]

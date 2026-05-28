@@ -43,28 +43,28 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(out)?;
-        std::fs::write(out.join("CLAUDE.md"), &manifest.agents_md)?;
+        crate::paths::write_owner_only(&out.join("CLAUDE.md"), manifest.agents_md.as_bytes())?;
 
         // Claude Code has a native rules-directory convention, so write each
         // `rules/*.md` file verbatim (frontmatter preserved) into `<out>/rules/`.
         // Adapters that lack this convention should instead use
         // `merge::agents_md::concat_with_rules` to inline the bodies.
         for r in &manifest.rules {
-            if crate::paths::has_parent_component(r.rel.to_string_lossy().as_ref()) {
+            if crate::paths::is_unsafe_join_target(r.rel.to_string_lossy().as_ref()) {
                 anyhow::bail!("path traversal in rules file: {}", r.rel.display());
             }
             let dest = out.join(&r.rel);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&dest, &r.raw)?;
+            crate::paths::write_owner_only(&dest, r.raw.as_bytes())?;
         }
 
         // Copy all files from the manifest. JSON hook templates get
         // `{{ICM_MCP}}` substituted so bundle hooks can reference the MCP
         // server by name without hard-coding it.
         for (rel, abs) in &manifest.files {
-            if crate::paths::has_parent_component(rel.to_string_lossy().as_ref()) {
+            if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
                 anyhow::bail!("path traversal in bundle file: {}", rel.display());
             }
             let dest = out.join(rel);
@@ -74,7 +74,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             if is_hook_json(rel) {
                 let raw = std::fs::read_to_string(abs)?;
                 let rendered = raw.replace("{{ICM_MCP}}", ICM_MCP_NAME);
-                std::fs::write(&dest, rendered)?;
+                crate::paths::write_owner_only(&dest, rendered.as_bytes())?;
             } else {
                 std::fs::copy(abs, &dest)?;
             }
