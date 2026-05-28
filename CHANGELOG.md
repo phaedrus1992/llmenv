@@ -20,6 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **ICM-aware Claude Code adapter** — the adapter now resolves three previously
+  open design questions automatically. (1) It auto-derives
+  `enabledMcpjsonServers` in `mcp.json` from every server llmenv emits, so the
+  agent never prompts to approve a server llmenv itself configured; a
+  `native` override of the key replaces the derived list rather than unioning
+  with it. (2) When the resolved manifest includes the `icm` MCP server, the
+  adapter emits `autoMemoryEnabled: false` so ICM and Claude's native auto
+  memory don't both write (a user `native` override still wins). (3) The adapter
+  always registers a `SessionStart` hook running the new `llmenv check-stale`
+  subcommand, which compares the booted config folder against the one llmenv
+  would materialize now and warns the user to restart on drift. (#121, #122,
+  #123, #124)
+
 - **Per-feature `native` overrides + top-level passthrough** — completes the
   two-layer engine-capabilities model: every modeled feature now has both an
   engine-neutral generic form and an engine-specific `native` override emitted

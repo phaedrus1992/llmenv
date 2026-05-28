@@ -694,14 +694,12 @@ fn top_level_native_with_hooks_key_hard_errors() {
     );
 }
 
-// Issue #85: SessionStart hook prerequisite — wiring complete, hash comparison deferred
+// Issue #121 (#85): the adapter always emits a SessionStart hook that runs the
+// stale-context check command. The command shells back into `llmenv` so the
+// runtime hook can compare the booted content hash (the CLAUDE_CONFIG_DIR folder
+// name) against what llmenv would materialize now, and warn the user to restart.
 #[test]
-fn session_start_hook_emitted_in_settings_json() {
-    // Issue #85 is the prerequisite for SessionStart hook emission (verifying wiring works).
-    // The actual hash computation and SessionStart emission logic is deferred to the
-    // runtime hook script (once the wiring framework is complete and tested).
-    // This test verifies the hooks structure supports SessionStart registration.
-
+fn session_start_stale_check_hook_emitted_in_settings_json() {
     let bundles = vec![fixture_bundle("base")];
     let m = merge(
         &llmenv::config::Capabilities::default(),
@@ -719,17 +717,271 @@ fn session_start_hook_emitted_in_settings_json() {
     let parsed: serde_json::Value =
         serde_json::from_str(&settings_json).expect("parse settings.json");
 
-    // Verify hooks object exists and supports event registration (including SessionStart)
-    let hooks = parsed
-        .get("hooks")
-        .expect("settings.json should have hooks");
+    let session_start = parsed["hooks"]["SessionStart"]
+        .as_array()
+        .expect("SessionStart hook registered in settings.json");
     assert!(
-        hooks.is_object(),
-        "hooks should be an object mapping event names to handler arrays"
+        !session_start.is_empty(),
+        "SessionStart must carry at least one handler"
     );
+    let handler = &session_start[0]["hooks"][0];
+    assert_eq!(
+        handler["type"],
+        serde_json::Value::String("command".into()),
+        "stale-check is a command-type handler"
+    );
+    let cmd = handler["command"]
+        .as_str()
+        .expect("SessionStart handler has a command");
+    assert!(
+        cmd.contains("llmenv") && cmd.contains("check-stale"),
+        "SessionStart command must invoke `llmenv check-stale`: {cmd}"
+    );
+}
 
-    // The structure { EventName: [{ matcher?, hooks: [...] }] } supports SessionStart
-    // being registered once #85 logic is implemented (after this PR merges).
+// Issue #121: a user-supplied native_hooks SessionStart entry must not be
+// clobbered by the auto-emitted stale-check — both survive (events concat).
+#[test]
+fn session_start_native_hook_coexists_with_stale_check() {
+    let mut native_hooks = BTreeMap::new();
+    native_hooks.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>(
+            "SessionStart:\n  - hooks:\n      - type: command\n        command: /bin/user-start.sh\n",
+        )
+        .expect("parse native hooks"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        capabilities: llmenv::config::Capabilities {
+            native_hooks,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+
+    let session_start = parsed["hooks"]["SessionStart"]
+        .as_array()
+        .expect("SessionStart array");
+    let commands: Vec<&str> = session_start
+        .iter()
+        .filter_map(|e| e["hooks"][0]["command"].as_str())
+        .collect();
+    assert!(
+        commands.iter().any(|c| c.contains("check-stale")),
+        "auto stale-check survives: {commands:?}"
+    );
+    assert!(
+        commands.contains(&"/bin/user-start.sh"),
+        "user SessionStart hook survives: {commands:?}"
+    );
+}
+
+// Issue #122 (design O1): llmenv auto-derives the MCP approval policy from the
+// servers it emits. Every resolved server name lands in `enabledMcpjsonServers`
+// so emitted servers are auto-approved without a manual native passthrough.
+#[test]
+fn mcp_approval_policy_auto_derived_from_resolved_servers() {
+    use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp};
+
+    let m = llmenv::merge::MergedManifest {
+        mcps: vec![
+            ResolvedMcp {
+                name: "playwright".into(),
+                kind: ResolvedKind::Stdio {
+                    command: "npx".into(),
+                    args: vec!["playwright".into()],
+                    env: BTreeMap::new(),
+                },
+            },
+            ResolvedMcp {
+                name: "icm".into(),
+                kind: ResolvedKind::Remote {
+                    url: "http://still.local:9100".into(),
+                    transport: llmenv::config::McpTransport::Http,
+                },
+            },
+        ],
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let mcp_json = std::fs::read_to_string(tmp.path().join("mcp.json")).expect("mcp.json emitted");
+    let parsed: serde_json::Value = serde_json::from_str(&mcp_json).expect("parse mcp.json");
+
+    let enabled: Vec<&str> = parsed["enabledMcpjsonServers"]
+        .as_array()
+        .expect("auto-derived enabledMcpjsonServers")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        enabled.contains(&"playwright") && enabled.contains(&"icm"),
+        "every emitted server is auto-approved: {enabled:?}"
+    );
+}
+
+// Issue #122: an explicit native_mcp `enabledMcpjsonServers` wins over the
+// auto-derived list — the native escape hatch is the higher-precedence overlay,
+// so a user who hand-curates the approval set is respected.
+#[test]
+fn native_mcp_approval_overrides_auto_derived() {
+    use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp};
+
+    let mut native_mcp = BTreeMap::new();
+    native_mcp.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>("enabledMcpjsonServers:\n  - only-this\n")
+            .expect("parse native mcp"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        mcps: vec![ResolvedMcp {
+            name: "playwright".into(),
+            kind: ResolvedKind::Stdio {
+                command: "npx".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+            },
+        }],
+        capabilities: llmenv::config::Capabilities {
+            native_mcp,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let mcp_json = std::fs::read_to_string(tmp.path().join("mcp.json")).expect("mcp.json emitted");
+    let parsed: serde_json::Value = serde_json::from_str(&mcp_json).expect("parse mcp.json");
+    let enabled: Vec<&str> = parsed["enabledMcpjsonServers"]
+        .as_array()
+        .expect("enabledMcpjsonServers present")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        enabled.contains(&"only-this"),
+        "native curation present: {enabled:?}"
+    );
+    assert!(
+        !enabled.contains(&"playwright"),
+        "native list replaces auto-derived (native is the override): {enabled:?}"
+    );
+}
+
+// Issue #123 (design O4): when llmenv's ICM memory backend is active (the `icm`
+// MCP server is resolved), the adapter disables Claude's native auto memory so
+// the two memory systems don't compete. `autoMemoryEnabled: false` lands in
+// settings.json by default.
+#[test]
+fn auto_memory_disabled_when_icm_active() {
+    use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp};
+
+    let m = llmenv::merge::MergedManifest {
+        mcps: vec![ResolvedMcp {
+            name: "icm".into(),
+            kind: ResolvedKind::Remote {
+                url: "http://still.local:9100".into(),
+                transport: llmenv::config::McpTransport::Http,
+            },
+        }],
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+    assert_eq!(
+        parsed["autoMemoryEnabled"],
+        serde_json::Value::Bool(false),
+        "ICM active ⇒ native auto memory disabled"
+    );
+}
+
+// Issue #123: when ICM is NOT active, llmenv leaves Claude's native auto memory
+// alone — no `autoMemoryEnabled` key is emitted, so the user's own setting (or
+// Claude's default) stands.
+#[test]
+fn auto_memory_untouched_when_icm_inactive() {
+    let bundles = vec![fixture_bundle("base")];
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+    assert!(
+        parsed.get("autoMemoryEnabled").is_none(),
+        "no ICM ⇒ llmenv must not touch autoMemoryEnabled: {parsed}"
+    );
+}
+
+// Issue #123: a user who explicitly sets `autoMemoryEnabled` via the top-level
+// native catch-all wins over llmenv's default disable — the native overlay is
+// applied last, so the user's intent is respected even with ICM active.
+#[test]
+fn user_native_auto_memory_overrides_icm_default() {
+    use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp};
+
+    let mut native = BTreeMap::new();
+    native.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>("autoMemoryEnabled: true\n")
+            .expect("parse native"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        mcps: vec![ResolvedMcp {
+            name: "icm".into(),
+            kind: ResolvedKind::Remote {
+                url: "http://still.local:9100".into(),
+                transport: llmenv::config::McpTransport::Http,
+            },
+        }],
+        native,
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+    assert_eq!(
+        parsed["autoMemoryEnabled"],
+        serde_json::Value::Bool(true),
+        "explicit user native setting wins over llmenv's ICM default"
+    );
 }
 
 // Issue #34: Two bundles each contributing a PreToolUse hook + permission entries

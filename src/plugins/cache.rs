@@ -38,6 +38,44 @@ pub struct MarketplaceState {
     pub head: Option<String>,
 }
 
+/// The git operations `sync_marketplace` needs. Abstracted behind a trait so
+/// the clone/pull/head sequencing can be tested without shelling out to a real
+/// `git` binary (the implementation seam, not a network mock — see [`SystemGit`]).
+pub trait GitBackend {
+    /// Clone `source` into `dest` (shallow). Source validation happens in the
+    /// caller, before this is invoked.
+    ///
+    /// # Errors
+    /// Returns an error if the clone fails.
+    fn clone(&self, source: &str, dest: &Path) -> Result<()>;
+
+    /// Fast-forward an existing clone at `repo` to its upstream.
+    ///
+    /// # Errors
+    /// Returns an error if the fetch fails. A non-fast-forwardable reset is
+    /// non-fatal (current checkout is kept).
+    fn pull(&self, repo: &Path) -> Result<()>;
+
+    /// Resolve the current HEAD sha of the clone at `repo`, or `None`.
+    fn head(&self, repo: &Path) -> Option<String>;
+}
+
+/// `GitBackend` backed by the real `git` binary on `PATH`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemGit;
+
+impl GitBackend for SystemGit {
+    fn clone(&self, source: &str, dest: &Path) -> Result<()> {
+        git_clone(source, dest)
+    }
+    fn pull(&self, repo: &Path) -> Result<()> {
+        git_pull(repo)
+    }
+    fn head(&self, repo: &Path) -> Option<String> {
+        git_head(repo)
+    }
+}
+
 /// Fetch a marketplace into the shared cache and report its state.
 ///
 /// Git sources are cloned on first use and fast-forward-pulled on subsequent
@@ -53,9 +91,24 @@ pub fn sync_marketplace(
     m: &Marketplace,
     refresh: bool,
 ) -> Result<MarketplaceState> {
+    sync_marketplace_with(cache_dir, m, refresh, &SystemGit)
+}
+
+/// `sync_marketplace` with an injectable git backend, for testing the
+/// clone/pull/head sequencing without a real `git` binary.
+///
+/// # Errors
+/// Returns an error if a git clone fails on first use, or a local path source
+/// does not exist.
+pub fn sync_marketplace_with(
+    cache_dir: &Path,
+    m: &Marketplace,
+    refresh: bool,
+    git: &dyn GitBackend,
+) -> Result<MarketplaceState> {
     match m.classify_source() {
         MarketplaceSource::Path => sync_path(m),
-        MarketplaceSource::Git => sync_git(cache_dir, m, refresh),
+        MarketplaceSource::Git => sync_git(cache_dir, m, refresh, git),
     }
 }
 
@@ -86,33 +139,41 @@ fn sync_path(m: &Marketplace) -> Result<MarketplaceState> {
     })
 }
 
-fn sync_git(cache_dir: &Path, m: &Marketplace, refresh: bool) -> Result<MarketplaceState> {
+fn sync_git(
+    cache_dir: &Path,
+    m: &Marketplace,
+    refresh: bool,
+    git: &dyn GitBackend,
+) -> Result<MarketplaceState> {
+    // Reject dangerous sources before touching the backend (real or fake): a
+    // leading-dash source trips git's arg parsing, and the `ext::`/`fd::`
+    // transports run arbitrary commands on clone. Validating here keeps the
+    // check independent of the backend and runnable in tests.
+    reject_unsafe_source(&m.source)?;
+
     let dest = marketplace_path(cache_dir, &m.name);
 
     if dest.join(".git").exists() {
         if refresh {
-            git_pull(&dest)?;
+            git.pull(&dest)?;
         }
     } else {
         std::fs::create_dir_all(marketplace_cache_root(cache_dir))
             .context("creating marketplace cache root")?;
-        git_clone(&m.source, &dest)
+        git.clone(&m.source, &dest)
             .with_context(|| format!("cloning marketplace '{}' from {}", m.name, m.source))?;
     }
 
-    let head = git_head(&dest);
+    let head = git.head(&dest);
     Ok(MarketplaceState {
         install_location: dest,
         head,
     })
 }
 
-fn git_clone(source: &str, dest: &Path) -> Result<()> {
-    // Reject sources git would parse as an option (`--upload-pack=…`) and the
-    // `ext::`/`fd::` transports that run arbitrary commands. The `--` separator
-    // below stops option parsing, but a leading-dash source still trips clone's
-    // arg parsing, and `--` does not neutralize the ext transport, so both are
-    // rejected up front.
+/// Reject marketplace sources git would mishandle: leading-dash (parsed as an
+/// option) and the `ext::`/`fd::` transports (run arbitrary commands on clone).
+fn reject_unsafe_source(source: &str) -> Result<()> {
     if source.starts_with('-') {
         return Err(anyhow::anyhow!(
             "marketplace source may not start with '-': {source}"
@@ -123,6 +184,10 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
             "marketplace source uses a disallowed git transport: {source}"
         ));
     }
+    Ok(())
+}
+
+fn git_clone(source: &str, dest: &Path) -> Result<()> {
     let status = Command::new("git")
         .args(["clone", "--depth", "1", "--"])
         .arg(source)

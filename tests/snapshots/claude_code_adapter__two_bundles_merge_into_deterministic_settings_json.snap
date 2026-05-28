@@ -1,6 +1,5 @@
 ---
 source: tests/claude_code_adapter.rs
-assertion_line: 479
 expression: parsed
 ---
 hooks:
@@ -15,6 +14,10 @@ hooks:
           tool: ~
           type: command
       matcher: Edit
+  SessionStart:
+    - hooks:
+        - command: llmenv check-stale
+          type: command
 permissions:
   allow:
     - Bash(cargo *)
