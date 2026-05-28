@@ -72,19 +72,28 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
 /// # Errors
 /// Returns an error if memory storage fails.
 pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
     let state_dir = crate::paths::state_dir()?;
     fs::create_dir_all(&state_dir)?;
-
     let memory = IcmMemory {
         tags: active.tags.iter().cloned().collect::<Vec<_>>(),
         bundles: bundles.to_vec(),
     };
+    write_memory(&icm_state_path(&state_dir), &memory)?;
+    tracing::debug!(
+        "stored ICM tag memory: tags={}, bundles={}",
+        memory.tags.join(","),
+        memory.bundles.join(",")
+    );
+    Ok(())
+}
 
-    let path = icm_state_path(&state_dir);
-    let json = serde_json::to_string(&memory)?;
+/// Write `IcmMemory` as JSON to `path` with mode 0o600. Pure I/O helper —
+/// extracted so property tests can exercise the on-disk format without
+/// touching the global state_dir env var.
+fn write_memory(path: &Path, memory: &IcmMemory) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let json = serde_json::to_string(memory)?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -92,13 +101,16 @@ pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Re
         .mode(0o600)
         .open(path)?;
     file.write_all(json.as_bytes())?;
-
-    tracing::debug!(
-        "stored ICM tag memory: tags={}, bundles={}",
-        memory.tags.join(","),
-        memory.bundles.join(",")
-    );
     Ok(())
+}
+
+/// Read `IcmMemory` from `path`. Counterpart to `write_memory` — used by
+/// property tests to verify on-disk roundtrip. Not currently called from
+/// production code (`recall_tag_memory_hook` returns static markdown).
+#[cfg(test)]
+fn read_memory(path: &Path) -> anyhow::Result<IcmMemory> {
+    let body = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&body)?)
 }
 
 /// Generate ICM context chunk for SessionStart hook to inject tag/bundle mappings.
@@ -181,5 +193,80 @@ mod tests {
         let content = result.unwrap();
         assert!(content.contains("llmenv-tag"));
         assert!(content.contains("keyword"));
+    }
+
+    // ===== Property tests for #145, #146 =====
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // #145: IcmMemory serde roundtrip — deserialize(serialize(x)) == x
+        // for arbitrary tag/bundle lists including special characters.
+        #[test]
+        fn icm_memory_serde_roundtrip(
+            tags in proptest::collection::vec(r"\PC{0,30}", 0..10),
+            bundles in proptest::collection::vec(r"\PC{0,30}", 0..10),
+        ) {
+            let memory = IcmMemory { tags, bundles };
+            let json = serde_json::to_string(&memory).expect("serialize");
+            let decoded: IcmMemory = serde_json::from_str(&json).expect("deserialize");
+            prop_assert_eq!(memory, decoded);
+        }
+
+        // #145: Empty vectors roundtrip correctly.
+        #[test]
+        fn icm_memory_empty_roundtrip(_unit in any::<()>()) {
+            let memory = IcmMemory { tags: vec![], bundles: vec![] };
+            let json = serde_json::to_string(&memory).expect("serialize");
+            let decoded: IcmMemory = serde_json::from_str(&json).expect("deserialize");
+            prop_assert_eq!(memory, decoded);
+        }
+
+        // #146: store + recall via filesystem preserves data integrity.
+        #[test]
+        fn store_recall_filesystem_roundtrip(
+            tags in proptest::collection::vec(r"[\w \-:,]{0,30}", 0..8),
+            bundles in proptest::collection::vec(r"[\w \-:,]{0,30}", 0..8),
+        ) {
+            let temp = tempfile::TempDir::new().expect("tempdir");
+            let path = temp.path().join("icm.json");
+            let memory = IcmMemory { tags, bundles };
+            write_memory(&path, &memory).expect("write");
+            let recalled = read_memory(&path).expect("read");
+            prop_assert_eq!(memory, recalled);
+        }
+
+        // #146: Multi-cycle idempotence — repeated store/recall preserves data
+        // exactly. Each overwrite must produce identical bytes given identical
+        // input.
+        #[test]
+        fn store_recall_idempotent(
+            tags in proptest::collection::vec(r"[a-zA-Z0-9_-]{1,20}", 0..5),
+        ) {
+            let temp = tempfile::TempDir::new().expect("tempdir");
+            let path = temp.path().join("icm.json");
+            let memory = IcmMemory { tags, bundles: vec![] };
+            for _ in 0..3 {
+                write_memory(&path, &memory).expect("write");
+                let recalled = read_memory(&path).expect("read");
+                prop_assert_eq!(&memory, &recalled);
+            }
+        }
+
+        // #146: File permissions remain mode 0o600 after store. Critical
+        // security property — prevents information disclosure on shared hosts.
+        #[test]
+        fn store_writes_owner_only_permissions(
+            tags in proptest::collection::vec(r"[a-z]{1,10}", 0..3),
+        ) {
+            use std::os::unix::fs::PermissionsExt;
+            let temp = tempfile::TempDir::new().expect("tempdir");
+            let path = temp.path().join("icm.json");
+            let memory = IcmMemory { tags, bundles: vec![] };
+            write_memory(&path, &memory).expect("write");
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+            // Only owner bits should be set in the low 9 bits.
+            prop_assert_eq!(mode & 0o077, 0, "group/other bits set: {:o}", mode);
+        }
     }
 }
