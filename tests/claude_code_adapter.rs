@@ -1063,3 +1063,56 @@ fn bundle_order_does_not_change_merged_membership() {
     };
     assert_eq!(set(&mf.capabilities), set(&mb.capabilities));
 }
+
+// Issue #162: Bundle-relative hook paths are resolved to absolute paths at
+// adapter time, ensuring hooks work when run from a different cwd.
+#[test]
+fn bundle_relative_hook_paths_are_resolved() {
+    let bundles = vec![fixture_bundle("with-relative-hook")];
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
+
+    // At merge time, the path is still bundle-relative
+    let hook = m
+        .capabilities
+        .hooks
+        .iter()
+        .find(|h| h.event == "PostToolUse")
+        .expect("PostToolUse hook");
+    let cmd = hook.handler.command.as_ref().expect("hook command");
+    assert!(
+        cmd.contains("hooks/test.sh"),
+        "merged hook command should be relative: {}",
+        cmd
+    );
+
+    // After adapting to settings.json, the path is resolved
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+
+    // Find the PostToolUse hook in the rendered settings
+    let post_tool_use = parsed["hooks"]["PostToolUse"]
+        .as_array()
+        .expect("PostToolUse array");
+    let rendered_cmd = post_tool_use[0]["hooks"][0]["command"]
+        .as_str()
+        .expect("command string");
+
+    // The rendered command should have the path resolved to absolute
+    assert!(
+        rendered_cmd.contains("with-relative-hook/hooks/test.sh"),
+        "adapter should resolve path to absolute: {}",
+        rendered_cmd
+    );
+}

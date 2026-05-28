@@ -389,6 +389,7 @@ fn d2_value_shape_merge_sequences_concat_and_dedup() {
                             command: Some("npm run lint".into()),
                             tool: None,
                         },
+                        bundle_origin: None,
                     },
                     Hook {
                         event: "pre-push".into(),
@@ -398,6 +399,7 @@ fn d2_value_shape_merge_sequences_concat_and_dedup() {
                             command: Some("npm test".into()),
                             tool: None,
                         },
+                        bundle_origin: None,
                     },
                 ],
                 ..Default::default()
@@ -416,6 +418,7 @@ fn d2_value_shape_merge_sequences_concat_and_dedup() {
                             command: Some("npm run lint".into()),
                             tool: None,
                         },
+                        bundle_origin: None,
                     },
                     Hook {
                         event: "post-commit".into(),
@@ -425,6 +428,7 @@ fn d2_value_shape_merge_sequences_concat_and_dedup() {
                             command: Some("git log -1".into()),
                             tool: None,
                         },
+                        bundle_origin: None,
                     },
                 ],
                 ..Default::default()
@@ -538,6 +542,7 @@ fn d2_order_independence_reversing_bundle_order_same_membership() {
             command: Some("npm run lint".into()),
             tool: None,
         },
+        bundle_origin: None,
     };
     let hook_b = Hook {
         event: "post-commit".into(),
@@ -547,6 +552,7 @@ fn d2_order_independence_reversing_bundle_order_same_membership() {
             command: Some("npm test".into()),
             tool: None,
         },
+        bundle_origin: None,
     };
 
     // Order: A then B
@@ -982,6 +988,7 @@ fn integration_bundle_relative_hook_command_paths_resolved() {
                     command: Some("hooks/check.sh".into()),
                     tool: None,
                 },
+                bundle_origin: None,
             }],
             ..Default::default()
         },
@@ -1033,6 +1040,7 @@ fn integration_multiple_bundles_same_feature_type_all_merged() {
                         command: Some("npm run lint".into()),
                         tool: None,
                     },
+                    bundle_origin: None,
                 }],
                 ..Default::default()
             },

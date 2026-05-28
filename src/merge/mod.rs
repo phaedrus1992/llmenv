@@ -122,8 +122,16 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
     }
     let s = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("bundle '{name}': reading {}: {e}", path.display()))?;
-    let caps: Capabilities = serde_yaml::from_str(&s)
+    let mut caps: Capabilities = serde_yaml::from_str(&s)
         .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
+
+    // Track which bundle each hook came from, so the adapter can resolve relative paths later.
+    // We don't resolve paths here because duplicate hooks (e.g., "hooks/guard.sh" from two bundles)
+    // must dedup correctly before being adapted into settings.json.
+    for hook in &mut caps.hooks {
+        hook.bundle_origin = Some(bundle_root.to_path_buf());
+    }
+
     Ok(Some(caps))
 }
 
