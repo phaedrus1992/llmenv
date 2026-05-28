@@ -56,26 +56,16 @@ llmenv resolves your environment through a fixed pipeline:
 scopes → tags → bundles → materialize → adapter emit
 ```
 
-- **Scopes** describe *where you are*. Four kinds: `network` (gateway MAC),
-  `host` (hostname), `user` (OS user) — declared in `config.yaml` — and
-  `project`, discovered automatically from a `.llmenv.yaml` marker file by
-  walking the current directory upward to `$HOME`.
-- **Tags** are the join key. Every matching scope contributes its tags to the
-  active set.
-- **Bundles** (and MCP servers, plugin collections, the memory backend) fire
-  when one of their tags is in the active set. A bundle carries environment
-  variables and an optional content directory of files merged into the agent
-  config.
-- **Materialize** merges every firing contributor into one config directory
-  under the cache (`<cache_dir>/<adapter>/<version>-<hash>/`), keyed by a content
-  hash so identical inputs reuse the same folder.
-- **Adapter emit** renders that directory into an agent's native shape (for
-  Claude Code: `CLAUDE.md`, `settings.json`, `mcp.json`) and exports the env vars
-  that point the agent at it.
+**Scopes** describe where you are (`network`, `host`, `user`, `project`); each
+contributes **tags** to the active set; **bundles**, MCP servers, plugins, and
+the memory backend fire on matching tags; llmenv **materializes** the result into
+a content-hashed config directory; and an **adapter** renders it into an agent's
+native shape and exports the env vars that point the agent at it.
 
-When scopes of different kinds contribute conflicting scalar settings,
-precedence is **network → host → user → project** (project, the most specific,
-wins). See [docs/concepts.md](docs/concepts.md) for the full model.
+When scopes of different kinds set conflicting scalar values, precedence runs
+**network → host → user → project** (project wins). See
+[docs/concepts.md](docs/concepts.md) for the full pipeline, precedence rules, and
+the marker-based project scope.
 
 ## Example
 
