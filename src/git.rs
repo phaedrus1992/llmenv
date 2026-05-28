@@ -3,7 +3,6 @@
 //! Prevents malicious cloned repos from executing hooks or fsmonitors by
 //! centralizing GIT_CONFIG_FLAGS application across all git operations.
 
-use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -21,32 +20,6 @@ pub fn secure_git() -> Command {
     let mut cmd = Command::new("git");
     cmd.args(GIT_CONFIG_FLAGS);
     cmd
-}
-
-/// Check if a path is a valid git repository.
-pub fn is_valid_repo(path: &Path) -> bool {
-    secure_git()
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(path)
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Get the remote URL for a git repository.
-pub fn get_remote_url(repo: &Path) -> Result<String> {
-    let output = secure_git()
-        .args(["config", "--get", "remote.origin.url"])
-        .current_dir(repo)
-        .output()
-        .context("fetching remote URL")?;
-
-    if !output.status.success() {
-        anyhow::bail!("failed to get remote URL from {}", repo.display());
-    }
-
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 /// Check if the working tree has staged or unstaged changes.

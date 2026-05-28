@@ -196,7 +196,7 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
         .status()
         .context("spawning git clone")?;
     if !status.success() {
-        return Err(anyhow::anyhow!("git clone failed for {source}"));
+        anyhow::bail!("git clone failed for {source}");
     }
     Ok(())
 }
@@ -215,10 +215,10 @@ fn git_pull(repo: &Path) -> Result<()> {
         .status()
         .context("spawning git fetch")?;
     if !fetch_status.success() {
-        return Err(anyhow::anyhow!(
+        anyhow::bail!(
             "git fetch failed at {} (network or remote error)",
             repo.display()
-        ));
+        );
     }
     let reset_status = git::secure_git()
         .args(["reset", "--hard", "@{u}"])
