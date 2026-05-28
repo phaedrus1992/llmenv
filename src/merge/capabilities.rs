@@ -178,6 +178,7 @@ mod tests {
                 command: Some(cmd.into()),
                 tool: None,
             },
+            bundle_origin: None,
         }
     }
 

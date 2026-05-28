@@ -397,6 +397,7 @@ mod tests {
                 event,
                 matcher,
                 handler,
+                bundle_origin: None,
             })
     }
 

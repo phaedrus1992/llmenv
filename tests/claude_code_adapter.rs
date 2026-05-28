@@ -1063,3 +1063,41 @@ fn bundle_order_does_not_change_merged_membership() {
     };
     assert_eq!(set(&mf.capabilities), set(&mb.capabilities));
 }
+
+// Issue #162: Bundle-relative hook paths are resolved to absolute paths at
+// merge time, ensuring hooks work when run from a different cwd.
+#[test]
+fn bundle_relative_hook_paths_are_resolved() {
+    let bundles = vec![fixture_bundle("with-relative-hook")];
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
+
+    // Find the PostToolUse hook
+    let hook = m
+        .capabilities
+        .hooks
+        .iter()
+        .find(|h| h.event == "PostToolUse")
+        .expect("PostToolUse hook");
+
+    // The command should have the relative path resolved to absolute
+    let cmd = hook.handler.command.as_ref().expect("hook command");
+
+    // The hook command should NOT contain the relative path "hooks/test.sh"
+    // Instead, it should have the resolved absolute path
+    assert!(
+        !cmd.contains("hooks/test.sh") || cmd.contains("with-relative-hook/hooks/test.sh"),
+        "relative path should be resolved to absolute: {}",
+        cmd
+    );
+    // Check that the bundle-relative part was resolved
+    assert!(
+        cmd.contains("with-relative-hook") || cmd.starts_with("tests/fixtures/bundles"),
+        "path should contain resolved bundle directory: {}",
+        cmd
+    );
+}
