@@ -240,6 +240,46 @@ mod tests {
             let f = write_marker(&body);
             let _ = read_marker(f.path());
         }
+
+        // glob_matches never panics on arbitrary patterns.
+        #[test]
+        fn glob_arbitrary_pattern_never_panics(pattern in r"\PC{0,50}") {
+            use super::glob_matches;
+            let temp_dir = tempfile::TempDir::new().expect("tempdir");
+            let _ = glob_matches(temp_dir.path(), &pattern);
+        }
+
+        // Path-traversal invariant: any pattern containing ".." rejects.
+        // Critical security property — prevents glob from escaping cwd.
+        #[test]
+        fn glob_traversal_patterns_always_reject(
+            prefix in r"[a-z]{0,10}",
+            suffix in r"[a-z/*]{0,10}",
+        ) {
+            use super::glob_matches;
+            let pattern = format!("{prefix}../{suffix}");
+            let temp_dir = tempfile::TempDir::new().expect("tempdir");
+            prop_assert!(!glob_matches(temp_dir.path(), &pattern));
+        }
+
+        // Created files matching a literal pattern are found.
+        #[test]
+        fn glob_literal_match_finds_created_file(name in r"[a-z]{1,10}\.[a-z]{1,4}") {
+            use super::glob_matches;
+            let temp_dir = tempfile::TempDir::new().expect("tempdir");
+            std::fs::write(temp_dir.path().join(&name), "").expect("write");
+            prop_assert!(glob_matches(temp_dir.path(), &name));
+        }
+
+        // Patterns with no matching files in an empty dir return false.
+        #[test]
+        fn glob_no_match_in_empty_dir(pattern in r"[a-z*?]{1,15}\.[a-z]{1,4}") {
+            use super::glob_matches;
+            // Skip patterns containing ".." — covered by traversal test above.
+            prop_assume!(!pattern.contains(".."));
+            let temp_dir = tempfile::TempDir::new().expect("tempdir");
+            prop_assert!(!glob_matches(temp_dir.path(), &pattern));
+        }
     }
 
     #[test]
