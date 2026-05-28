@@ -252,8 +252,13 @@ bundle fragments compose identically.
 
 ## Open questions
 
-- **O1** — MCP enable/deny (`enabledMcpjsonServers`, etc.): derive from which
-  servers llmenv emits, or model explicitly? Lean derive.
+- **O1** — *Resolved (#122).* MCP enable/deny: llmenv auto-derives
+  `enabledMcpjsonServers` from the servers it emits — every resolved server is
+  auto-approved so the agent never prompts for a server llmenv itself put in
+  `mcp.json`. A `native.claude_code.enabledMcpjsonServers` (or `native_mcp`)
+  entry that sets the key **replaces** the derived list rather than unioning
+  with it: an approval list is a deliberate allowlist, so unioning could
+  silently re-approve a server the user meant to omit.
 - **O2** — Neutral `default_mode` vocabulary: adopt Claude's
   (`acceptEdits`/`plan`/`default`/`bypassPermissions`) as the neutral set, or
   invent engine-neutral names? Claude's are reasonable defaults.
@@ -267,8 +272,11 @@ bundle fragments compose identically.
   merge silently overwrites. Per-type identity rules and hard-error detection for
   that case are specced + deferred to **#103** (distinct from the same-precedence
   scalar collision in D2, already a hard-error).
-- **O4** — Does ICM/memory replace Claude's auto memory? If so emit
-  `autoMemoryEnabled: false` via the `native` escape hatch by default.
+- **O4** — *Resolved (#123).* ICM replaces Claude's auto memory. When the
+  resolved manifest contains the `icm` MCP server, the adapter emits
+  `autoMemoryEnabled: false` so the two memory systems don't both write. A user
+  `native.claude_code.autoMemoryEnabled` override still wins (native is overlaid
+  last), so the escape hatch remains for anyone who wants both.
 
 ## Sequencing
 
