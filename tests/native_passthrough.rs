@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use llmenv::config::{Capabilities, Config};
 use llmenv::merge::merge;
 

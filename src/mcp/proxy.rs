@@ -258,6 +258,7 @@ pub fn is_alive(pid: u32) -> bool {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::is_executable;
     use std::os::unix::fs::PermissionsExt;

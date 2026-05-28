@@ -36,7 +36,7 @@ pub fn read_state(state_dir: &Path) -> Result<Option<SystemTime>> {
 pub fn write_state(state_dir: &Path, t: SystemTime) -> Result<()> {
     std::fs::create_dir_all(state_dir)?;
     let secs = t.duration_since(UNIX_EPOCH)?.as_secs();
-    crate::paths::write_owner_only(&state_path(state_dir), secs.to_string().as_bytes())?;
+    crate::paths::write_owner_only_atomic(&state_path(state_dir), secs.to_string().as_bytes())?;
     Ok(())
 }
 
@@ -111,6 +111,7 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     #[test]
     fn git_config_flags_protect_against_hooks() {

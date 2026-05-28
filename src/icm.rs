@@ -92,7 +92,7 @@ pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Re
 /// touching the global state_dir env var.
 fn write_memory(path: &Path, memory: &IcmMemory) -> anyhow::Result<()> {
     let json = serde_json::to_string(memory)?;
-    crate::paths::write_owner_only(path, json.as_bytes())?;
+    crate::paths::write_owner_only_atomic(path, json.as_bytes())?;
     Ok(())
 }
 
@@ -124,6 +124,7 @@ pub fn recall_tag_memory_hook() -> anyhow::Result<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;

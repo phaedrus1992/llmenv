@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 /// Tests for ICM tag mapping (issue #81)
 /// Verify that active tags/bundles are made available to ICM so tag-scoped memory
 /// crosses scope boundaries.

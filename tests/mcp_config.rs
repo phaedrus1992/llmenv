@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for #58: the Claude Code adapter renders all resolved MCP servers
 //! into `mcp.json`. (Generalizes #14's ICM-only server/client emission.)
 

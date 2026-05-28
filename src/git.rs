@@ -67,6 +67,7 @@ mod tests {
         assert_eq!(cmd.get_program(), "git");
     }
 
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     #[cfg(test)]
     mod prop_tests {
         use proptest::prelude::*;
