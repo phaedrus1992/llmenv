@@ -123,6 +123,8 @@ enum Command {
     },
     /// Show current environment status
     Status,
+    /// Show the current resolved environment and active scopes
+    Context,
     /// List available scopes
     #[command(alias = "scopes")]
     ScopeLs,
@@ -188,6 +190,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Status) => {
             run_status(use_color)?;
+        }
+        Some(Command::Context) => {
+            run_context(use_color)?;
         }
         Some(Command::ScopeLs) => {
             run_scope_ls(use_color)?;
@@ -1047,6 +1052,70 @@ fn run_status(use_color: bool) -> anyhow::Result<()> {
         Err(e) => {
             eprintln!("{} Configuration error: {}", doctor_fail(use_color), e);
             return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_context(use_color: bool) -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    let consumed = all_consumed_tags(&config);
+
+    let active_ids: HashSet<(&str, &str)> = active
+        .scopes
+        .iter()
+        .map(|s| (s.kind, s.id.as_str()))
+        .collect();
+
+    let mut active_scopes: Vec<String> = Vec::new();
+    let mut inactive_scopes: Vec<String> = Vec::new();
+
+    let mut classify = |kind: &str, id: &str, tags: &[String]| {
+        let is_active = active_ids.contains(&(kind, id));
+        let is_orphan = !tags.iter().any(|t| consumed.contains(t));
+        let name = format!("{}:{}", kind, id);
+        let annotation = annotate(is_active, is_orphan, use_color);
+
+        if is_active {
+            active_scopes.push(format!(
+                "{} {}{}",
+                active_marker(use_color),
+                name,
+                annotation
+            ));
+        } else {
+            inactive_scopes.push(format!("  {}{}", name, annotation));
+        }
+    };
+
+    for s in &config.scope.network {
+        classify("network", &s.id, &s.tags);
+    }
+    for s in &config.scope.host {
+        classify("host", &s.id, &s.tags);
+    }
+    for s in &config.scope.user {
+        classify("user", &s.id, &s.tags);
+    }
+    for s in &config.scope.project {
+        classify("project", &s.id, &s.tags);
+    }
+
+    if !active_scopes.is_empty() {
+        println!("Active");
+        for line in active_scopes {
+            println!("{}", line);
+        }
+    }
+
+    if !inactive_scopes.is_empty() {
+        println!("Inactive");
+        for line in inactive_scopes {
+            println!("{}", line);
         }
     }
 
