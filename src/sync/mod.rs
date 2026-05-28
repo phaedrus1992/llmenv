@@ -3,25 +3,6 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Sanitize a git remote URL for display, removing credentials.
-/// Converts `https://user:pass@host/repo.git` to `https://[redacted]@host/repo.git`
-#[allow(dead_code)]
-fn sanitize_git_url(url: &str) -> String {
-    if let Some(at_pos) = url.find('@')
-        && let Some(scheme_end) = url.find("://")
-        && at_pos > scheme_end
-    {
-        format!(
-            "{}{}@{}",
-            &url[..scheme_end + 3],
-            "[redacted]",
-            &url[at_pos + 1..]
-        )
-    } else {
-        url.to_string()
-    }
-}
-
 /// True if the repo's working tree has staged or unstaged changes.
 fn working_tree_dirty(repo: &Path) -> bool {
     git::working_tree_dirty(repo)
@@ -131,8 +112,6 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn git_config_flags_protect_against_hooks() {
         use crate::git::GIT_CONFIG_FLAGS;
@@ -145,27 +124,5 @@ mod tests {
                 "core.hooksPath=/dev/null"
             ]
         );
-    }
-
-    #[test]
-    fn sanitize_git_url_removes_credentials() {
-        let url = "https://user:password@github.com/repo.git";
-        let sanitized = sanitize_git_url(url);
-        assert_eq!(sanitized, "https://[redacted]@github.com/repo.git");
-        assert!(!sanitized.contains("password"));
-    }
-
-    #[test]
-    fn sanitize_git_url_handles_no_credentials() {
-        let url = "https://github.com/repo.git";
-        assert_eq!(sanitize_git_url(url), url);
-    }
-
-    #[test]
-    fn sanitize_git_url_handles_ssh() {
-        let url = "git@github.com:alice/repo.git";
-        let sanitized = sanitize_git_url(url);
-        // SSH URLs have @ but are not credentials, they're just the git user
-        assert_eq!(sanitized, url);
     }
 }

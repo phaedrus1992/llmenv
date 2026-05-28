@@ -1,0 +1,27 @@
+{
+  // Renovate automated dependency updates configuration
+  // See: https://docs.renovatebot.com/
+  extends: ['config:base'],
+
+  // Group all updates together for simplicity
+  groupName: 'all',
+  groupSlug: 'all',
+
+  // Weekly schedule to keep updates manageable
+  schedule: ['before 3am on Monday'],
+
+  // Rust crate updates
+  postUpdateOptions: [
+    'cargoLockPackages',
+  ],
+
+  // Auto-merge patch and minor updates from trusted sources
+  automerge: false,
+  autoApprove: false,
+
+  // Require PR for all changes so we can review
+  minimumReleaseAge: '7 days',
+
+  // Don't update dev-dependencies so frequently
+  ignoreDeps: [],
+}
