@@ -63,6 +63,31 @@ pub fn state_dir() -> anyhow::Result<PathBuf> {
     }
 }
 
+/// Write `content` to `path` with owner-only permissions (mode 0o600) on Unix.
+/// On Windows falls back to default permissions. Creates the file if absent,
+/// truncates if present. Use for any file containing user state or
+/// credentials (settings, sync state, MCP configs, ICM memory) where
+/// world-readable defaults would leak data on shared systems.
+pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(content)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +124,34 @@ mod tests {
         assert!(!has_parent_component("/foo/..bar/baz"));
         assert!(!has_parent_component("file..txt"));
         assert!(!has_parent_component(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_sets_mode_0o600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("secret");
+        write_owner_only(&path, b"sensitive").expect("write");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        // Group/other bits must be clear — file is owner-only.
+        assert_eq!(mode & 0o077, 0, "group/other bits set: {mode:o}");
+        let body = std::fs::read(&path).expect("read");
+        assert_eq!(body, b"sensitive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_truncates_existing_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("file");
+        write_owner_only(&path, b"longer content").expect("write1");
+        write_owner_only(&path, b"short").expect("write2");
+        let body = std::fs::read(&path).expect("read");
+        assert_eq!(body, b"short");
     }
 
     #[test]

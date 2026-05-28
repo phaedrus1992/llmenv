@@ -36,7 +36,7 @@ pub fn read_state(state_dir: &Path) -> Result<Option<SystemTime>> {
 pub fn write_state(state_dir: &Path, t: SystemTime) -> Result<()> {
     std::fs::create_dir_all(state_dir)?;
     let secs = t.duration_since(UNIX_EPOCH)?.as_secs();
-    std::fs::write(state_path(state_dir), secs.to_string())?;
+    crate::paths::write_owner_only(&state_path(state_dir), secs.to_string().as_bytes())?;
     Ok(())
 }
 
