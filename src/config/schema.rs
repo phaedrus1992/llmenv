@@ -447,6 +447,7 @@ pub fn split_plugin_ref(s: &str) -> Option<(&str, &str)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

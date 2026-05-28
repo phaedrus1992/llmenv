@@ -199,6 +199,7 @@ fn read_marker(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::read_marker;
     use proptest::prelude::*;

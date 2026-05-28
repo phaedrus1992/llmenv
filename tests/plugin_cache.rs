@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for #59: `sync_marketplace` clones a git source into the shared cache
 //! and reports a HEAD token, and fast-forwards on a second sync. Local *path*
 //! sources are used in place (no clone, no HEAD); the `ext::`/`fd::` transports

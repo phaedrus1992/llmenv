@@ -145,6 +145,7 @@ fn normalize_json(value: &mut serde_json::Value) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{dedup, merge_json, merge_yaml};
 

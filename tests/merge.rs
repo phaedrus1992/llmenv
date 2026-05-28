@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use llmenv::config::Capabilities;
 use llmenv::merge::{BundleRef, merge};
 use std::collections::BTreeMap;

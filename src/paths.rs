@@ -103,7 +103,88 @@ pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Atomically write `content` to `path` with owner-only permissions.
+///
+/// Steps: write to a same-directory temp file `<path>.<pid>.<nanos>.tmp`,
+/// `fsync` it for durability, then `rename` over the destination (POSIX
+/// atomic replace). Readers observing `path` mid-write see either the prior
+/// good contents or the new contents — never a torn document. On error the
+/// temp file is removed.
+///
+/// Use for any structured/JSON state file where a half-written file would
+/// break the next read: `icm.json`, `sync.json`, `settings.json`, `mcp.json`.
+pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no parent: {}", path.display()),
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no file name: {}", path.display()),
+        )
+    })?;
+    if parent.as_os_str().is_empty() {
+        // For paths like "foo.json" (no parent dir), use current dir.
+        return write_owner_only_atomic_in_dir(Path::new("."), file_name, path, content);
+    }
+    std::fs::create_dir_all(parent)?;
+    write_owner_only_atomic_in_dir(parent, file_name, path, content)
+}
+
+fn write_owner_only_atomic_in_dir(
+    parent: &Path,
+    file_name: &std::ffi::OsStr,
+    final_path: &Path,
+    content: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(format!(".{pid}.{nanos}.tmp"));
+    let tmp_path = parent.join(&tmp_name);
+
+    let result = (|| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            file.write_all(content)?;
+            file.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            file.write_all(content)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, final_path)?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -192,6 +273,98 @@ mod tests {
         write_owner_only(&path, b"short").expect("write2");
         let body = std::fs::read(&path).expect("read");
         assert_eq!(body, b"short");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_atomic_creates_file_with_mode_0o600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("atomic");
+        write_owner_only_atomic(&path, b"payload").expect("atomic write");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "group/other bits set: {mode:o}");
+        assert_eq!(std::fs::read(&path).expect("read"), b"payload");
+    }
+
+    #[test]
+    fn write_owner_only_atomic_replaces_existing_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("file");
+        write_owner_only_atomic(&path, b"v1").expect("v1");
+        write_owner_only_atomic(&path, b"v2-longer").expect("v2");
+        assert_eq!(std::fs::read(&path).expect("read"), b"v2-longer");
+    }
+
+    #[test]
+    fn write_owner_only_atomic_leaves_no_temp_files() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("file");
+        write_owner_only_atomic(&path, b"x").expect("write");
+        write_owner_only_atomic(&path, b"y").expect("write");
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "found stray files: {entries:?}");
+    }
+
+    #[test]
+    fn write_owner_only_atomic_creates_parent_dir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("a/b/c/file.json");
+        write_owner_only_atomic(&path, b"nested").expect("write");
+        assert_eq!(std::fs::read(&path).expect("read"), b"nested");
+    }
+
+    #[test]
+    fn write_owner_only_atomic_concurrent_writers_no_torn_reads() {
+        // Spawn N threads writing distinct fixed-size payloads to the same
+        // path. Every reader sees one of the written payloads — never a
+        // partial document, never an empty file.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("contended.json");
+        write_owner_only_atomic(&path, b"initial").expect("seed");
+
+        let payloads: Vec<Vec<u8>> = (0..8)
+            .map(|i| format!("{{\"writer\":{i},\"data\":\"{}\"}}", "x".repeat(256)).into_bytes())
+            .collect();
+        let valid: std::collections::HashSet<Vec<u8>> = std::iter::once(b"initial".to_vec())
+            .chain(payloads.iter().cloned())
+            .collect();
+
+        let writers: Vec<_> = payloads
+            .into_iter()
+            .map(|payload| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        write_owner_only_atomic(&p, &payload).expect("concurrent write");
+                    }
+                })
+            })
+            .collect();
+
+        let reader_path = path.clone();
+        let reader_valid = valid.clone();
+        let reader = std::thread::spawn(move || {
+            for _ in 0..200 {
+                let body = std::fs::read(&reader_path).expect("concurrent read");
+                assert!(
+                    reader_valid.contains(&body),
+                    "reader observed torn write: {body:?}"
+                );
+            }
+        });
+
+        for w in writers {
+            w.join().expect("writer join");
+        }
+        reader.join().expect("reader join");
     }
 
     #[test]
