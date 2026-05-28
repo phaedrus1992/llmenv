@@ -320,7 +320,7 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
 /// Resolve bundle-relative paths in a hook command string.
 /// Scans whitespace-separated tokens and resolves those containing '/' (but not
 /// starting with '/', '~', '$', or '-') to absolute paths relative to bundle_dir.
-fn resolve_bundle_relative_paths(command: &str, bundle_dir: &PathBuf) -> Option<String> {
+fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) -> Option<String> {
     let mut resolved = false;
     let mut result = String::new();
     for (i, token) in command.split_whitespace().enumerate() {
