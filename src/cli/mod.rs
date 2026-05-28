@@ -886,6 +886,10 @@ fn build_bundle_refs(
             if seen.contains(name) {
                 return;
             }
+            if crate::paths::is_unsafe_join_target(name) {
+                tracing::warn!("rejecting bundle name with traversal/absolute path: {name}");
+                return;
+            }
             let path = bundles_dir.join(name);
             if !path.exists() {
                 return;

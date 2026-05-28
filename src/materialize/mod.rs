@@ -33,7 +33,7 @@ pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<Path
     // Rules text (m.agents_md) is rendered by the per-agent adapter under its
     // native filename (CLAUDE.md, AGENTS.md, etc.) — not written here.
     for (rel, abs) in &m.files {
-        if crate::paths::has_parent_component(rel.to_string_lossy().as_ref()) {
+        if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
             anyhow::bail!("path traversal in bundle file: {}", rel.display());
         }
         let out = staging.join(rel);
@@ -81,6 +81,28 @@ mod tests {
             ..Default::default()
         };
         let err = materialize(&m, &cache).expect_err("must reject traversal");
+        assert!(
+            err.to_string().contains("traversal"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// #149: an absolute `rel` would escape staging via Path::join's
+    /// "absolute argument discards base" rule. Must be rejected.
+    #[test]
+    fn materialize_rejects_absolute_path_in_files() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src.txt");
+        std::fs::write(&src, b"x").expect("write src");
+        let cache = tmp.path().join("cache");
+
+        let mut files = BTreeMap::new();
+        files.insert(PathBuf::from("/etc/llmenv-escape.txt"), src);
+        let m = MergedManifest {
+            files,
+            ..Default::default()
+        };
+        let err = materialize(&m, &cache).expect_err("must reject absolute path");
         assert!(
             err.to_string().contains("traversal"),
             "unexpected error: {err}"
