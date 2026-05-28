@@ -3,6 +3,7 @@
 //! crosses scope boundaries.
 
 use crate::scope::ActiveScopes;
+use tracing;
 
 /// Generate an ICM context chunk encoding the active tags/bundles.
 /// The chunk is formatted as a markdown block that agents can paste into ICM.
@@ -59,12 +60,11 @@ pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Re
     let tags_csv = active.tags.iter().cloned().collect::<Vec<_>>().join(",");
     let bundles_csv = bundles.join(",");
 
-    let memory = serde_json::json!({
-        "tags": tags_csv,
-        "bundles": bundles_csv,
-    });
-
-    eprintln!("debug: stored ICM tag memory: {}", memory);
+    tracing::debug!(
+        "stored ICM tag memory: tags={}, bundles={}",
+        tags_csv,
+        bundles_csv
+    );
     Ok(())
 }
 

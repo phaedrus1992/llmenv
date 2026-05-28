@@ -17,19 +17,19 @@ const GIT_CONFIG_FLAGS: &[&str] = &[
 /// Converts `https://user:pass@host/repo.git` to `https://[redacted]@host/repo.git`
 #[allow(dead_code)]
 fn sanitize_git_url(url: &str) -> String {
-    if let Some(at_pos) = url.find('@') {
-        if let Some(scheme_end) = url.find("://") {
-            if at_pos > scheme_end {
-                return format!(
-                    "{}{}@{}",
-                    &url[..scheme_end + 3],
-                    "[redacted]",
-                    &url[at_pos + 1..]
-                );
-            }
-        }
+    if let Some(at_pos) = url.find('@')
+        && let Some(scheme_end) = url.find("://")
+        && at_pos > scheme_end
+    {
+        format!(
+            "{}{}@{}",
+            &url[..scheme_end + 3],
+            "[redacted]",
+            &url[at_pos + 1..]
+        )
+    } else {
+        url.to_string()
     }
-    url.to_string()
 }
 
 /// True if the repo's working tree has staged or unstaged changes.
