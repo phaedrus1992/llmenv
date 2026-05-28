@@ -1,16 +1,22 @@
 # Getting Started with llmenv
 
-llmenv is a universal scope-aware environment manager for AI coding agents. It provides context-aware configuration, caching, and synchronization for Claude Code and other AI tools.
+llmenv is a universal, scope-aware environment for AI coding agents. It detects
+your current context (network, host, user, project), selects the matching
+configuration, materializes it into an agent-native config directory, and points
+the agent at it — automatically, from a shell hook.
 
-## Installation
+This page takes you from zero to a working setup. For the conceptual model, read
+[Concepts](concepts.md) afterward.
 
-Install the latest release:
+## 1. Install
+
+Latest release:
 
 ```bash
 cargo install llmenv
 ```
 
-Or build from source:
+From source:
 
 ```bash
 git clone https://github.com/phaedrus1992/llmenv.git
@@ -19,60 +25,83 @@ cargo build --release
 ./target/release/llmenv --help
 ```
 
-## Quick Start
-
-### 1. Initialize Configuration
-
-Create your first llmenv configuration:
+## 2. Initialize configuration
 
 ```bash
 llmenv init
 ```
 
-This creates `~/.config/llmenv/config.yaml` with a template structure. You can customize it to match your environment.
+This writes a template `config.yaml` into your config directory
+(`~/.config/llmenv/config.yaml`, or `$LLMENV_CONFIG_DIR` if set). It won't
+overwrite an existing config. To start from an existing config repository
+instead:
 
-### 2. Set Up Shell Integration
+```bash
+llmenv init --repo https://github.com/you/llmenv-config.git
+```
 
-Generate shell hook code for your shell (zsh or bash):
+## 3. Install the shell hook
+
+The hook runs `llmenv export` on every prompt, keeping the environment in sync as
+you move between directories and networks.
+
+**zsh** — add to `~/.zshrc`:
 
 ```bash
 eval "$(llmenv hook zsh)"
 ```
 
-Add this line to your shell profile (`.zshrc` or `.bashrc`) to enable automatic scope detection.
-
-### 3. Export Environment Variables
-
-Export variables for the current scope:
+**bash** — add to `~/.bashrc`:
 
 ```bash
-llmenv export
+eval "$(llmenv hook bash)"
 ```
 
-Or with a tag filter:
+Reload your shell (`exec zsh` / `exec bash`) or open a new terminal. To preview
+what the hook installs without committing to it, just run `llmenv hook zsh` and
+read the output.
 
-```bash
-llmenv export --tag dev
-```
-
-### 4. Check Your Setup
-
-Run diagnostics to validate your configuration:
+## 4. Verify the setup
 
 ```bash
 llmenv doctor
 ```
 
-This checks:
-- Configuration file parsing
-- Cache directory writability
-- Git remote connectivity
+`doctor` checks:
 
-## Example Configuration
+- configuration parsing,
+- cache directory writability,
+- git remote connectivity,
+- orphans — scopes/tags/bundles/MCP/plugins that can never activate, a memory
+  `server_host` missing from `host:`, and unknown fields in project markers.
 
-See `docs/configuration.md` for complete schema documentation.
+Then inspect what resolves for your current directory:
 
-A minimal example with network and project scopes:
+```bash
+llmenv status        # active scopes + tags, parse status
+llmenv context       # the fuller resolved view
+llmenv export        # the actual export lines the hook runs
+```
+
+## 5. Add a project
+
+Per-project configuration lives in a `.llmenv.yaml` marker at the project root —
+not in `config.yaml`. Drop one in and llmenv discovers it by walking the current
+directory upward to `$HOME`:
+
+```yaml
+# ~/code/myapp/.llmenv.yaml
+id: myapp
+name: MyApp
+description: "Customer-facing API"
+tags: [myapp, rust]
+enable_bundles: [base]      # optional: force-enable bundles regardless of tags
+```
+
+`cd` into the project and run `llmenv context` — you should see the project scope
+active and its tags joined to the set.
+
+## Minimal config example
 
 ```yaml
 cache:
@@ -82,36 +111,57 @@ cache:
 scope:
   network:
     - id: office
-      match: { ssid: "OfficeWiFi" }
-      tags: [office, ci-enabled]
-  project:
-    - id: myproject
-      match: { marker: ".llmenvrc" }
-      tags: [project-local]
+      match: { gateway_mac: "aa:bb:cc:dd:ee:ff" }
+      tags: [office]
+  user:
+    - id: me
+      match: { user: "alice" }
+      tags: [me]
 
 bundle:
   - name: base
-    tags: []
+    tags: [me]
     vars:
-      AGENT: "claude"
+      EDITOR: "code"
 ```
 
-## Commands Reference
+See [Configuration](configuration.md) for the complete schema.
+
+## Commands reference
 
 | Command | Purpose |
 |---------|---------|
-| `llmenv init [--repo URL]` | Initialize configuration |
+| `llmenv init [PATH] [--repo URL]` | Initialize configuration |
 | `llmenv export [--scope ID] [--tag TAG]` | Export environment variables |
-| `llmenv hook {zsh\|bash}` | Generate shell hook code |
-| `llmenv status` | Show configuration status |
-| `llmenv scope-ls` | List available scopes |
-| `llmenv tag-ls` | List available tags |
-| `llmenv bundle-ls` | List available bundles |
-| `llmenv doctor [--gc]` | Run diagnostics (optionally with GC) |
+| `llmenv hook <zsh\|bash>` | Generate shell hook code |
+| `llmenv status` | Show active scopes/tags + parse status |
+| `llmenv context` | Show the resolved environment in detail |
+| `llmenv scope-ls` / `tag-ls` / `bundle-ls` | List scopes / tags / bundles |
+| `llmenv mcp-ls` | List selected MCP servers |
+| `llmenv marketplace-ls` / `plugin-ls` | List marketplaces / plugins |
+| `llmenv plugin-sync` | Sync plugin marketplaces into the cache |
 | `llmenv sync` | Commit and push config to GitHub |
+| `llmenv check-stale` | Warn if the running agent's config drifted |
+| `llmenv prune [--all] [--older-than DUR] [--dry-run]` | Clean stale cache folders |
+| `llmenv doctor [--gc]` | Run diagnostics (optionally GC) |
 
-## Next Steps
+Full per-command reference: [commands.md](commands.md).
 
-- Read `docs/configuration.md` for detailed scope and bundle configuration
-- Review `docs/icm-topology.md` to understand MCP server integration
-- Check GitHub issues for advanced use cases and examples
+## Common first errors
+
+- **"Config already exists"** from `init` — expected; `init` never overwrites.
+  Edit `~/.config/llmenv/config.yaml` directly.
+- **Nothing activates** — your scopes' tags don't match any contributor's tags,
+  or no scope matches your environment. Run `llmenv scope-ls` and `llmenv tag-ls`
+  (active items are marked) and check [Troubleshooting](troubleshooting.md).
+- **YAML parse error** — usually an unquoted value containing a colon. Quote
+  addresses, MACs, SSIDs, and URLs. See
+  [Configuration → YAML gotchas](configuration.md#yaml-gotchas).
+- **Network scope never matches** — only `gateway_mac` is evaluated today;
+  `ssid`/`cidr` are ignored. Use a host scope as a reliable fallback.
+
+## Next steps
+
+- [Concepts](concepts.md) — how resolution actually works.
+- [Configuration](configuration.md) — the full schema.
+- [MCP & Memory](mcp.md) — wiring MCP servers and the shared memory backend.

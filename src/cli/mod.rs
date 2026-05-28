@@ -1011,10 +1011,14 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
 #     - id: me
 #       match: { user: "alice" }
 #       tags: [me]
-#   project:
-#     - id: myapp
-#       match: { marker: ".llmenvrc" }
-#       tags: [myapp]
+#
+# Project scopes are NOT declared here. Drop a `.llmenv.yaml` marker file in a
+# project directory instead; llmenv discovers it by walking the current
+# directory upward to $HOME. Example `.llmenv.yaml`:
+#   id: myapp
+#   name: MyApp
+#   tags: [myapp]
+#   enable_bundles: [base]   # optional: force-enable bundles regardless of tags
 
 # Bundles fire when one of their tags is emitted by a matching scope.
 bundle:
