@@ -190,21 +190,18 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
 /// Git config flags to protect cloned repos from executing hooks or fsmonitors.
 /// Used by all git invocations in sync_marketplace to prevent a malicious
 /// marketplace repo from running arbitrary code via git hooks or fsmonitors.
-fn git_config_flags() -> Vec<&'static str> {
-    vec![
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-    ]
-}
+const GIT_CONFIG_FLAGS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
 
 fn git_clone(source: &str, dest: &Path) -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.args(["clone", "--depth", "1"])
-        .args(git_config_flags())
-        .arg("--")
-        .arg(source)
+        .args(GIT_CONFIG_FLAGS)
+        .args(["--", source])
         .arg(dest)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -224,12 +221,12 @@ fn git_pull(repo: &Path) -> Result<()> {
     let mut fetch_cmd = Command::new("git");
     fetch_cmd
         .args(["fetch", "--depth", "1"])
-        .args(git_config_flags())
+        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let fetch = fetch_cmd.status().context("spawning git fetch")?;
-    if !fetch.success() {
+    let fetch_status = fetch_cmd.status().context("spawning git fetch")?;
+    if !fetch_status.success() {
         return Err(anyhow::anyhow!(
             "git fetch failed at {} (network or remote error)",
             repo.display()
@@ -238,12 +235,12 @@ fn git_pull(repo: &Path) -> Result<()> {
     let mut reset_cmd = Command::new("git");
     reset_cmd
         .args(["reset", "--hard", "@{u}"])
-        .args(git_config_flags())
+        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let status = reset_cmd.status().context("spawning git reset")?;
-    if !status.success() {
+    let reset_status = reset_cmd.status().context("spawning git reset")?;
+    if !reset_status.success() {
         tracing::debug!(
             "marketplace refresh did not fast-forward at {}; keeping current checkout",
             repo.display()
@@ -256,7 +253,7 @@ fn git_pull(repo: &Path) -> Result<()> {
 fn git_head(repo: &Path) -> Option<String> {
     let mut cmd = Command::new("git");
     cmd.args(["rev-parse", "HEAD"])
-        .args(git_config_flags())
+        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
         .stderr(Stdio::null());
     let output = cmd.output().ok()?;
@@ -310,18 +307,15 @@ mod tests {
 
     #[test]
     fn git_config_flags_protect_against_hooks() {
-        let flags = git_config_flags();
-        // Must pass -c to git to set config options.
-        assert!(flags.contains(&"-c"), "must pass -c flag to git");
-        // Verify fsmonitor and hooksPath are disabled.
-        let flags_str = flags.join(" ");
-        assert!(
-            flags_str.contains("core.fsmonitor=false"),
-            "must disable fsmonitor"
-        );
-        assert!(
-            flags_str.contains("core.hooksPath=/dev/null"),
-            "must disable hooksPath"
+        let flags = GIT_CONFIG_FLAGS;
+        assert_eq!(
+            flags,
+            &[
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null"
+            ]
         );
     }
 }
