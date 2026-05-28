@@ -1,16 +1,17 @@
 ---
 source: tests/claude_code_adapter.rs
+assertion_line: 1026
 expression: parsed
 ---
 hooks:
   PreToolUse:
     - hooks:
-        - command: hooks/guard.sh
+        - command: tests/fixtures/bundles/merge-a/hooks/guard.sh
           tool: ~
           type: command
       matcher: Bash
     - hooks:
-        - command: hooks/fmt.sh
+        - command: tests/fixtures/bundles/merge-b/hooks/fmt.sh
           tool: ~
           type: command
       matcher: Edit

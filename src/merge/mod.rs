@@ -125,39 +125,11 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
     let mut caps: Capabilities = serde_yaml::from_str(&s)
         .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
 
-    // Resolve bundle-relative hook paths to absolute paths.
-    // This ensures settings.json contains absolute paths that work
-    // when the hook is run from a different cwd.
+    // Track which bundle each hook came from, so the adapter can resolve relative paths later.
+    // We don't resolve paths here because duplicate hooks (e.g., "hooks/guard.sh" from two bundles)
+    // must dedup correctly before being adapted into settings.json.
     for hook in &mut caps.hooks {
-        if let Some(command) = &hook.handler.command {
-            // Look for path arguments (tokens containing '/' that don't start with special prefixes)
-            let mut resolved = false;
-            let mut result = String::new();
-            for (i, token) in command.split_whitespace().enumerate() {
-                if i > 0 {
-                    result.push(' ');
-                }
-                // Check if this token is a relative path (contains / but doesn't start with /, ~, $ or vars)
-                if token.contains('/')
-                    && !token.starts_with('/')
-                    && !token.starts_with('~')
-                    && !token.starts_with('$')
-                    && !token.starts_with('-')
-                {
-                    // This is a bundle-relative path
-                    let abs_path = bundle_root.join(token);
-                    result.push_str(&abs_path.to_string_lossy());
-                    resolved = true;
-                } else {
-                    result.push_str(token);
-                }
-            }
-
-            if resolved {
-                hook.bundle_origin = Some(bundle_root.to_path_buf());
-                hook.handler.command = Some(result);
-            }
-        }
+        hook.bundle_origin = Some(bundle_root.to_path_buf());
     }
 
     Ok(Some(caps))

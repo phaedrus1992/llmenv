@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde_json::json;
@@ -317,6 +317,32 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
 /// Cross-bundle merge (concat + dedup, scope-ordered) already happened in
 /// [`crate::merge`]; this function only renders.
 ///
+/// Resolve bundle-relative paths in a hook command string.
+/// Scans whitespace-separated tokens and resolves those containing '/' (but not
+/// starting with '/', '~', '$', or '-') to absolute paths relative to bundle_dir.
+fn resolve_bundle_relative_paths(command: &str, bundle_dir: &PathBuf) -> Option<String> {
+    let mut resolved = false;
+    let mut result = String::new();
+    for (i, token) in command.split_whitespace().enumerate() {
+        if i > 0 {
+            result.push(' ');
+        }
+        if token.contains('/')
+            && !token.starts_with('/')
+            && !token.starts_with('~')
+            && !token.starts_with('$')
+            && !token.starts_with('-')
+        {
+            let abs_path = bundle_dir.join(token);
+            result.push_str(&abs_path.to_string_lossy());
+            resolved = true;
+        } else {
+            result.push_str(token);
+        }
+    }
+    if resolved { Some(result) } else { None }
+}
+
 /// SessionStart (#85): the hook object shape supports it; hash-comparison logic
 /// lives in the runtime hook script.
 fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Result<()> {
@@ -328,8 +354,19 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         std::collections::BTreeMap::new();
 
     for hook in &manifest.capabilities.hooks {
+        // Resolve bundle-relative paths if this hook came from a bundle
+        let resolved_command = if let Some(cmd) = &hook.handler.command {
+            if let Some(bundle_dir) = &hook.bundle_origin {
+                resolve_bundle_relative_paths(cmd, bundle_dir).or_else(|| Some(cmd.clone()))
+            } else {
+                Some(cmd.clone())
+            }
+        } else {
+            None
+        };
+
         let handler = json!({
-            "command": hook.handler.command,
+            "command": resolved_command,
             "tool": hook.handler.tool,
             "type": match hook.handler.kind {
                 crate::config::HookHandlerKind::Command => "command",
