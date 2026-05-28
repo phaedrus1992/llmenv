@@ -143,7 +143,7 @@ fn reject_modeled_keys_in_catch_all(fragment: &serde_yaml::Value) -> anyhow::Res
 fn native_sets_enabled_mcp(native: Option<&serde_yaml::Value>) -> bool {
     native
         .and_then(serde_yaml::Value::as_mapping)
-        .is_some_and(|m| m.contains_key(serde_yaml::Value::String("enabledMcpjsonServers".into())))
+        .is_some_and(|m| m.contains_key("enabledMcpjsonServers"))
 }
 
 /// True if `rel` is a JSON file under the bundle's `hooks/` subtree —

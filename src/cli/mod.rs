@@ -808,7 +808,17 @@ fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
                  (booted {booted}, current {current}). Restart your agent to pick up the new config."
             );
         }
-        StaleStatus::Fresh | StaleStatus::Unknown => {}
+        StaleStatus::Fresh => {}
+        // No booted folder to compare against: llmenv didn't boot this agent
+        // (CLAUDE_CONFIG_DIR unset or not a materialized folder). Not drift, so
+        // don't nag the user — but trace it so "the hook ran but said nothing"
+        // is distinguishable from "the hook silently no-op'd on a real drift".
+        StaleStatus::Unknown => {
+            tracing::debug!(
+                "check-stale: CLAUDE_CONFIG_DIR not set to a materialized folder; \
+                 drift detection skipped (current would be {current})"
+            );
+        }
     }
 
     Ok(())
