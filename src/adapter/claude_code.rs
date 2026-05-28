@@ -13,6 +13,13 @@ use crate::util::{dedup, merge_json};
 /// it ahead of time. Tracks the memory backend's registration name.
 const ICM_MCP_NAME: &str = MEMORY_MCP_NAME;
 
+/// Command the auto-emitted SessionStart hook runs (#121/#85). It shells back
+/// into `llmenv` so the runtime check can compare the booted content hash (the
+/// `CLAUDE_CONFIG_DIR` folder name the session launched with) against what
+/// llmenv would materialize now, and warn the user to restart on drift. Kept as
+/// a bare command (resolved off `PATH`) so it works regardless of install dir.
+const STALE_CHECK_COMMAND: &str = "llmenv check-stale";
+
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
 /// `out` as its config root.
@@ -129,6 +136,16 @@ fn reject_modeled_keys_in_catch_all(fragment: &serde_yaml::Value) -> anyhow::Res
     Ok(())
 }
 
+/// True when a `native_mcp` fragment already declares `enabledMcpjsonServers`.
+/// When it does, llmenv skips its auto-derived approval list and defers entirely
+/// to the user's curated set (#122) — for an approval list, native curation
+/// replaces rather than unions.
+fn native_sets_enabled_mcp(native: Option<&serde_yaml::Value>) -> bool {
+    native
+        .and_then(serde_yaml::Value::as_mapping)
+        .is_some_and(|m| m.contains_key(serde_yaml::Value::String("enabledMcpjsonServers".into())))
+}
+
 /// True if `rel` is a JSON file under the bundle's `hooks/` subtree —
 /// these files are template-rendered rather than byte-copied so bundle hooks
 /// can reference the ICM MCP via `{{ICM_MCP}}`.
@@ -190,7 +207,23 @@ fn write_mcp_json(
         server_sources.insert(m.name.clone(), idx);
         servers.insert(m.name.clone(), entry);
     }
+    // #122 (design O1, 'lean derive'): auto-approve every server llmenv emits by
+    // deriving `enabledMcpjsonServers` from the resolved set. This spares users a
+    // manual native passthrough just to trust servers llmenv itself wrote.
+    //
+    // A user who hand-curates the approval set via `native_mcp` wins outright:
+    // we skip the derive when the native fragment already carries the key, rather
+    // than letting `overlay_native`'s array union+dedup merge the two lists. For
+    // an *approval* list, union is the wrong default — it would silently
+    // re-approve a server the user deliberately left out. Native curation is a
+    // replace, not an add.
     let mut doc = json!({ "mcpServers": servers });
+    if !native_sets_enabled_mcp(native) {
+        let enabled: Vec<String> = mcps.iter().map(|m| m.name.clone()).collect();
+        if !enabled.is_empty() {
+            doc["enabledMcpjsonServers"] = json!(enabled);
+        }
+    }
     overlay_native(&mut doc, native)?;
     let path = out.join("mcp.json");
     std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
@@ -310,6 +343,17 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .push(serde_json::Value::Object(hook_entry));
     }
 
+    // #121/#85: always register a SessionStart stale-context check. It concats
+    // with any bundle- or native-declared SessionStart entries (events union),
+    // so a user's own SessionStart hook is never clobbered. The runtime command
+    // reads the booted hash off CLAUDE_CONFIG_DIR and recomputes the current one.
+    hooks_by_event
+        .entry("SessionStart".to_string())
+        .or_default()
+        .push(json!({
+            "hooks": [{ "type": "command", "command": STALE_CHECK_COMMAND }],
+        }));
+
     let mut hooks_obj = serde_json::Map::new();
     for (event, entries) in hooks_by_event {
         hooks_obj.insert(event, json!(entries));
@@ -411,6 +455,16 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         perm_obj.insert("ask".into(), json!(ask));
         perm_obj.insert("deny".into(), json!(deny));
         settings.insert("permissions".into(), serde_json::Value::Object(perm_obj));
+    }
+
+    // #123 (design O4): when llmenv's ICM memory backend is active (the `icm`
+    // MCP server is resolved), disable Claude's native auto memory so the two
+    // memory systems don't compete. Emitted before the native overlays so a user
+    // who explicitly sets `autoMemoryEnabled` via the top-level `native` catch-all
+    // still wins (native is the higher-precedence layer, applied last).
+    let icm_active = manifest.mcps.iter().any(|m| m.name == ICM_MCP_NAME);
+    if icm_active {
+        settings.insert("autoMemoryEnabled".into(), json!(false));
     }
 
     // Plugins (#59): declare marketplaces + enabled plugins into settings.json.

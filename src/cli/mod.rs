@@ -16,6 +16,42 @@ pub use style::{
     orphan_annotation, should_use_color,
 };
 
+/// Outcome of comparing the booted materialized config folder against the
+/// folder llmenv would materialize now (see [`stale_status`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleStatus {
+    /// Booted folder matches the current one — the session is up to date.
+    Fresh,
+    /// Config drifted since the agent booted; the user should restart.
+    Stale { booted: String, current: String },
+    /// No booted folder to compare against (llmenv didn't boot this agent).
+    Unknown,
+}
+
+impl StaleStatus {
+    /// True only when the booted config no longer matches the current one.
+    #[must_use]
+    pub fn is_drift(&self) -> bool {
+        matches!(self, StaleStatus::Stale { .. })
+    }
+}
+
+/// Compare the booted config folder basename against the freshly-computed
+/// current folder name. `booted` is the basename of `CLAUDE_CONFIG_DIR`, which
+/// is itself the content hash the agent started with; `None` when the agent
+/// wasn't booted by llmenv.
+#[must_use]
+pub fn stale_status(booted: Option<&str>, current: &str) -> StaleStatus {
+    match booted {
+        None => StaleStatus::Unknown,
+        Some(b) if b == current => StaleStatus::Fresh,
+        Some(b) => StaleStatus::Stale {
+            booted: b.to_string(),
+            current: current.to_string(),
+        },
+    }
+}
+
 /// Version string shown by `--version`. Built by `build.rs` as
 /// `"<pkg-version> (<short-hash>[-dirty])"`, falling back to bare pkg version
 /// when the build had no `.git` directory (e.g. crates.io tarball builds).
@@ -108,6 +144,12 @@ enum Command {
     PluginSync,
     /// Sync config with GitHub (git add, commit, push)
     Sync,
+    /// Warn if the booted agent config has drifted from the current config.
+    ///
+    /// Invoked by the Claude Code SessionStart hook: compares the basename of
+    /// `CLAUDE_CONFIG_DIR` (the content hash the agent booted with) against the
+    /// folder llmenv would materialize now. On drift it prints a restart hint.
+    CheckStale,
     /// Clean stale cache folders
     Prune {
         /// Remove ALL cache folders unconditionally (next export re-materializes all environments)
@@ -169,6 +211,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Sync) => {
             run_sync()?;
+        }
+        Some(Command::CheckStale) => {
+            run_check_stale(use_color)?;
         }
         Some(Command::Prune {
             all,
@@ -650,22 +695,10 @@ fn build_and_materialize(
     active: &ActiveScopes,
     firing: &[&Bundle],
 ) -> anyhow::Result<Option<Materialized>> {
-    let refs = build_bundle_refs(config_dir, active, firing);
-    if refs.is_empty() {
+    let Some((manifest, cache_root)) = build_manifest(config, config_dir, active, firing, false)?
+    else {
         return Ok(None);
-    }
-
-    let mut manifest: MergedManifest =
-        crate::merge::merge(&config.capabilities, &config.native, &refs)?;
-    manifest.mcps =
-        crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
-
-    let cache_root = expand_tilde(&config.cache.cache_dir)?;
-
-    let resolved = crate::plugins::resolve::resolve_plugins(config, &active.tags)
-        .context("resolving plugins")?;
-    manifest.plugins = resolved.plugins;
-    manifest.marketplaces = sync_marketplaces(config, &cache_root, resolved.marketplaces, false)?;
+    };
 
     let adapter = ClaudeCodeAdapter;
     let adapter_root = cache_root.join(adapter.name());
@@ -683,6 +716,102 @@ fn build_and_materialize(
     // that would break the `export NAME=...` shell contract.
     reject_invalid_var_names(&env_vars)?;
     Ok(Some((cache_path, env_vars)))
+}
+
+/// Build the merged manifest for the firing bundles, resolving MCP servers and
+/// plugins exactly as `build_and_materialize` does — but without writing
+/// anything. Returns `Ok(None)` when no firing bundle has a content directory.
+/// The returned `cache_root` is the expanded cache dir (shared across adapters).
+fn build_manifest(
+    config: &Config,
+    config_dir: &Path,
+    active: &ActiveScopes,
+    firing: &[&Bundle],
+    refresh_marketplaces: bool,
+) -> anyhow::Result<Option<(MergedManifest, PathBuf)>> {
+    let refs = build_bundle_refs(config_dir, active, firing);
+    if refs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut manifest: MergedManifest =
+        crate::merge::merge(&config.capabilities, &config.native, &refs)?;
+    manifest.mcps =
+        crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
+
+    let cache_root = expand_tilde(&config.cache.cache_dir)?;
+
+    let resolved = crate::plugins::resolve::resolve_plugins(config, &active.tags)
+        .context("resolving plugins")?;
+    manifest.plugins = resolved.plugins;
+    manifest.marketplaces = sync_marketplaces(
+        config,
+        &cache_root,
+        resolved.marketplaces,
+        refresh_marketplaces,
+    )?;
+
+    Ok(Some((manifest, cache_root)))
+}
+
+/// `llmenv check-stale`: warn when the booted agent config has drifted.
+///
+/// Reads the basename of `CLAUDE_CONFIG_DIR` (the content hash the agent booted
+/// with) and compares it against the folder llmenv would materialize now. On
+/// drift, prints a restart hint to stderr. Resolution mirrors `export` but
+/// writes nothing and skips network marketplace refresh (fastest path).
+fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
+    let booted = std::env::var("CLAUDE_CONFIG_DIR").ok().and_then(|p| {
+        Path::new(&p)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+    });
+
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let config_dir = paths::config_dir()?;
+
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+
+    let manually_enabled: BTreeSet<&str> = active
+        .scopes
+        .iter()
+        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+        .collect();
+    let firing: Vec<&Bundle> = config
+        .bundle
+        .iter()
+        .filter(|b| {
+            b.tags.iter().any(|bt| active.tags.contains(bt))
+                || manually_enabled.contains(b.name.as_str())
+        })
+        .collect();
+
+    let current = match build_manifest(&config, &config_dir, &active, &firing, false)? {
+        Some((manifest, _)) => {
+            let hash = crate::materialize::cache::hash_manifest(&manifest)?;
+            crate::materialize::cache::folder_name(&hash)
+        }
+        // No content to materialize: there is no config folder, so a booted
+        // CLAUDE_CONFIG_DIR can't have come from llmenv. Treat as not-drifted.
+        None => {
+            return Ok(());
+        }
+    };
+
+    match stale_status(booted.as_deref(), &current) {
+        StaleStatus::Stale { booted, current } => {
+            let warn = doctor_warning(use_color);
+            eprintln!(
+                "{warn} llmenv config changed since this session started \
+                 (booted {booted}, current {current}). Restart your agent to pick up the new config."
+            );
+        }
+        StaleStatus::Fresh | StaleStatus::Unknown => {}
+    }
+
+    Ok(())
 }
 
 /// Sync each resolved marketplace into the shared cache and fill in its

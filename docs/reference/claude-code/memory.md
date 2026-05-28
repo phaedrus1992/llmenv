@@ -56,11 +56,12 @@ This is the **best-supported** surface:
 
 Narrow gaps / open questions:
 
-1. **Auto memory** is unmodeled. Given llmenv already has a first-class `memory`
-   backend (ICM/MCP), Claude Code's *native* auto memory is a separate system.
-   Worth a design note: do they coexist, or does llmenv intend ICM to replace
-   native auto memory? `autoMemoryEnabled: false` could be generated to avoid two
-   memory systems fighting.
+1. **Auto memory** — *resolved (#123).* When the resolved manifest contains the
+   `icm` MCP server, the adapter emits `autoMemoryEnabled: false` so ICM and
+   Claude Code's native auto memory don't both write. A user
+   `native.claude_code.autoMemoryEnabled` override still wins (native is overlaid
+   last). When ICM is not active the key is left untouched, so Claude's default
+   behavior is preserved.
 2. **`claudeMdExcludes` / `@`-imports** are not generated or validated. If a
    bundle's CLAUDE.md uses `@imports`, the referenced files must also be
    materialized — verify the merge layer handles transitive imports.
