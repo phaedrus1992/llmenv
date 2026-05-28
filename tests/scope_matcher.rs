@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use llmenv::config::{
     Config, HostMatch, HostScope, NetworkMatch, NetworkScope, ProjectMatch, ProjectScope, Scopes,
     UserMatch, UserScope,

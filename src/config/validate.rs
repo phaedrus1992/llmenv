@@ -139,7 +139,7 @@ fn is_valid_var_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    let first = name.chars().next().unwrap();
+    let first = name.as_bytes()[0] as char;
     if !first.is_ascii_alphabetic() && first != '_' {
         return false;
     }
@@ -324,6 +324,7 @@ impl Config {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

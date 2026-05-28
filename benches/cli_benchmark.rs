@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use llmenv::config::Config;
 use llmenv::scope;

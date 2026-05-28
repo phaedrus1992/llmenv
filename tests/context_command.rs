@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;

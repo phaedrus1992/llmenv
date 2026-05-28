@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use llmenv::config::{Bundle, Config};
 use proptest::prelude::*;
 
