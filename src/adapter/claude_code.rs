@@ -332,6 +332,7 @@ fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) -> Option<Str
             && !token.starts_with('~')
             && !token.starts_with('$')
             && !token.starts_with('-')
+            && !crate::paths::is_unsafe_join_target(token)
         {
             let abs_path = bundle_dir.join(token);
             result.push_str(&abs_path.to_string_lossy());
