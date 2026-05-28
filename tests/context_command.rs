@@ -3,6 +3,13 @@ use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
 
+/// Get current user for test config
+fn get_current_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "runner".to_string())
+}
+
 /// Create a test config with given content and return (dir, config_path)
 fn setup_config(content: &str) -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
@@ -13,14 +20,16 @@ fn setup_config(content: &str) -> (TempDir, std::path::PathBuf) {
 
 #[test]
 fn context_shows_active_scopes() {
-    let config = r#"
+    let current_user = get_current_user();
+    let config = format!(
+        r#"
 scope:
   network: []
   host: []
   user:
     - id: test-user
       match:
-        user: ranger
+        user: {user}
       tags: [test]
   project: []
 
@@ -36,9 +45,11 @@ cache:
 
 adapter:
   engine: claude-code
-"#;
+"#,
+        user = current_user
+    );
 
-    let (_dir, config_path) = setup_config(config);
+    let (_dir, config_path) = setup_config(&config);
     let config_dir = _dir.path();
 
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
@@ -53,14 +64,16 @@ adapter:
 
 #[test]
 fn context_shows_inactive_scopes() {
-    let config = r#"
+    let current_user = get_current_user();
+    let config = format!(
+        r#"
 scope:
   network: []
   host: []
   user:
     - id: active-user
       match:
-        user: ranger
+        user: {user}
       tags: [active]
     - id: inactive-user
       match:
@@ -83,9 +96,11 @@ cache:
 
 adapter:
   engine: claude-code
-"#;
+"#,
+        user = current_user
+    );
 
-    let (_dir, config_path) = setup_config(config);
+    let (_dir, config_path) = setup_config(&config);
     let config_dir = _dir.path();
 
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
