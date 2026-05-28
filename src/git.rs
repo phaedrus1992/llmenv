@@ -33,6 +33,8 @@ pub fn working_tree_dirty(repo: &Path) -> bool {
 }
 
 /// Check if current branch has commits not yet pushed to its upstream.
+/// Returns false if there's no upstream, git fails, or output can't be parsed —
+/// we only want to nudge the user when we're certain there are unpushed commits.
 pub fn has_unpushed_commits(repo: &Path) -> bool {
     let output = secure_git()
         .args(["rev-list", "--count", "@{u}..HEAD"])
@@ -63,5 +65,44 @@ mod tests {
         let cmd = secure_git();
         // Just verify command is created; actual flag testing is in integration tests
         assert_eq!(cmd.get_program(), "git");
+    }
+
+    #[cfg(test)]
+    mod prop_tests {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn parse_rev_list_count_handles_valid_numeric_output(count_val in 0u32..1000) {
+                let output_bytes = format!("{}", count_val).into_bytes();
+                let parsed = std::str::from_utf8(&output_bytes)
+                    .unwrap_or("0")
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(0);
+                prop_assert_eq!(parsed, count_val);
+            }
+
+            #[test]
+            fn parse_rev_list_count_handles_malformed_output(junk in ".*") {
+                let _parsed = std::str::from_utf8(junk.as_bytes())
+                    .unwrap_or("0")
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(0);
+                // Test verifies the parsing chain doesn't panic on arbitrary input
+            }
+
+            #[test]
+            fn parse_rev_list_count_with_whitespace(count_val in 0u32..1000) {
+                let output_bytes = format!("  {}  \n", count_val).into_bytes();
+                let parsed = std::str::from_utf8(&output_bytes)
+                    .unwrap_or("0")
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(0);
+                prop_assert_eq!(parsed, count_val);
+            }
+        }
     }
 }
