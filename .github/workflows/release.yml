@@ -9,10 +9,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   build-binaries:
     name: Build binaries
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -37,24 +42,42 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
         with:
           targets: ${{ matrix.target }}
+      # zizmor: ignore[cache-poisoning] — cache is skipped on tag pushes via `if:`
+      # below; the conditional guard makes the cache-poisoning audit a false
+      # positive (zizmor static analysis doesn't trace step-level conditionals).
       - uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014  # v2.7.5
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         with:
           cache-on-failure: false
       - name: Build
-        run: cargo build --release --target "${{ matrix.target }}"
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --target "${TARGET}"
       - name: Strip binary
-        run: strip "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" || true
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+        run: strip "target/${TARGET}/release/${ARTIFACT_NAME}" || true
       - name: Create asset directory
         run: mkdir -p assets
       - name: Copy binary
-        run: cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" \
-          "assets/${{ matrix.asset_name }}"
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+          ASSET_NAME: ${{ matrix.asset_name }}
+        run: cp "target/${TARGET}/release/${ARTIFACT_NAME}" "assets/${ASSET_NAME}"
       - name: Compute SHA256
         id: checksum
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
         run: |
           cd assets
-          sha256sum "${{ matrix.asset_name }}" > "${{ matrix.asset_name }}.sha256"
-          echo "hashes=$(cat "${{ matrix.asset_name }}.sha256")" >> $GITHUB_OUTPUT
+          sha256sum "${ASSET_NAME}" > "${ASSET_NAME}.sha256"
+          {
+            echo "hashes<<EOF"
+            cat "${ASSET_NAME}.sha256"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - name: Upload binary artifact
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
         with:
@@ -121,8 +144,8 @@ jobs:
             json.dump(provenance, f)
           PYTHON_EOF
 
-          echo "provenance_file=${PROVENANCE_FILE}" >> $GITHUB_OUTPUT
-          echo "ARTIFACT_HASH=${ARTIFACT_HASH}" >> $GITHUB_ENV
+          echo "provenance_file=${PROVENANCE_FILE}" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT_HASH=${ARTIFACT_HASH}" >> "$GITHUB_ENV"
       - name: Upload provenance artifact
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
         with:
@@ -133,6 +156,8 @@ jobs:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     needs: build-binaries
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -166,17 +191,18 @@ jobs:
             -exec mv {} release-assets/ \;
           find assets -type f -name '*.sha256' -exec mv {} checksums/ \;
           find assets -type f -name '*.intoto.jsonl' -exec mv {} provenance/ \;
-          cd checksums && cat *.sha256 > checksums.txt && cd ..
+          cd checksums && cat -- *.sha256 > checksums.txt && cd ..
       - name: Extract version from tag
         id: extract_version
+        env:
+          GH_REF: ${{ github.ref }}
         run: |
-          if [[ ! "${{ github.ref }}" =~ ^refs/tags/v ]]; then
+          if [[ ! "${GH_REF}" =~ ^refs/tags/v ]]; then
             echo "Error: Not a release tag" >&2
             exit 1
           fi
-          VERSION="${{ github.ref }}"
-          VERSION="${VERSION#refs/tags/v}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          VERSION="${GH_REF#refs/tags/v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - name: Create Release
         uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191  # v2.0.8
         with:
@@ -208,6 +234,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: create-release
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -239,18 +267,19 @@ jobs:
             fi
           done
 
-          echo "linux_x64=${LINUX_X64}" >> $GITHUB_OUTPUT
-          echo "macos_x64=${MACOS_X64}" >> $GITHUB_OUTPUT
-          echo "macos_arm=${MACOS_ARM}" >> $GITHUB_OUTPUT
+          {
+            echo "linux_x64=${LINUX_X64}"
+            echo "macos_x64=${MACOS_X64}"
+            echo "macos_arm=${MACOS_ARM}"
+          } >> "$GITHUB_OUTPUT"
       - name: Trigger Homebrew formula update
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.create-release.outputs.release_version }}
+          LINUX_X64: ${{ steps.checksums.outputs.linux_x64 }}
+          MACOS_X64: ${{ steps.checksums.outputs.macos_x64 }}
+          MACOS_ARM: ${{ steps.checksums.outputs.macos_arm }}
         run: |
-          VERSION="${{ needs.create-release.outputs.release_version }}"
-          LINUX_X64="${{ steps.checksums.outputs.linux_x64 }}"
-          MACOS_X64="${{ steps.checksums.outputs.macos_x64 }}"
-          MACOS_ARM="${{ steps.checksums.outputs.macos_arm }}"
-
           gh workflow run update-formula.yml \
             --repo phaedrus1992/homebrew-tap \
             -f "version=${VERSION}" \
