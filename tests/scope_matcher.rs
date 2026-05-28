@@ -194,6 +194,7 @@ fn project_marker_walks_upward() {
 
     let env = Env {
         cwd: nested.to_string_lossy().into_owned(),
+        home: Some(tmp.path().to_path_buf()),
         ..Env::empty()
     };
     let active = evaluate(&cfg(), &env);
@@ -213,6 +214,7 @@ fn project_marker_includes_tags() {
 
     let env = Env {
         cwd: tmp.path().to_string_lossy().into_owned(),
+        home: Some(tmp.path().to_path_buf()),
         ..Env::empty()
     };
     let active = evaluate(&cfg(), &env);
@@ -231,6 +233,7 @@ fn project_marker_includes_bundles() {
 
     let env = Env {
         cwd: tmp.path().to_string_lossy().into_owned(),
+        home: Some(tmp.path().to_path_buf()),
         ..Env::empty()
     };
     let active = evaluate(&cfg(), &env);
@@ -245,6 +248,7 @@ fn project_marker_malformed_yaml_uses_defaults() {
 
     let env = Env {
         cwd: tmp.path().to_string_lossy().into_owned(),
+        home: Some(tmp.path().to_path_buf()),
         ..Env::empty()
     };
     let active = evaluate(&cfg(), &env);

@@ -312,6 +312,28 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     }
     // Project scopes are now discovered dynamically from .llmenv.yaml
     // and do not appear in static config; orphan checking is N/A.
+    // Surface anything the active marker file did wrong:
+    //   - unknown fields (typos, stale schema) so the user can clean them up
+    //   - enable_bundles names that don't exist (silent no-op footgun)
+    let configured_bundle_names: std::collections::HashSet<&str> =
+        config.bundle.iter().map(|b| b.name.as_str()).collect();
+    for scope in &active.scopes {
+        if scope.kind != "project" {
+            continue;
+        }
+        for field in &scope.unknown_fields {
+            eprintln!("{warn} unknown field in .llmenv.yaml: {field}");
+            orphan_count += 1;
+        }
+        for bundle_name in &scope.enable_bundles {
+            if !configured_bundle_names.contains(bundle_name.as_str()) {
+                eprintln!(
+                    "{warn} .llmenv.yaml enable_bundles references unknown bundle: {bundle_name}"
+                );
+                orphan_count += 1;
+            }
+        }
+    }
     for b in &config.bundle {
         let has_emitted_tag = b.tags.iter().any(|t| emitted.contains(t));
         if !has_emitted_tag && !marker_enabled.contains(&b.name) {
