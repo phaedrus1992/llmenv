@@ -23,6 +23,7 @@ fn prop_path_prefix_matching_works() {
                     r#match: ProjectMatch {
                         path_prefix: Some(base_path.clone()),
                         marker: None,
+                        glob: None,
                     },
                     tags: vec!["tag".into()],
                 }],
@@ -66,6 +67,7 @@ fn prop_path_prefix_no_false_positive_matches() {
                     r#match: ProjectMatch {
                         path_prefix: Some(base_path.clone()),
                         marker: None,
+                        glob: None,
                     },
                     tags: vec!["tag".into()],
                 }],

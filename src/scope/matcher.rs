@@ -139,7 +139,31 @@ pub fn match_project(s: &ProjectScope, env: &Env) -> Option<MatchedProject> {
             }
         }
     }
+    if let Some(glob_pattern) = s.r#match.glob.as_deref() {
+        let cwd_path = std::path::PathBuf::from(&env.cwd);
+        if glob_matches(&cwd_path, glob_pattern) {
+            return Some(empty_match(cwd_path));
+        }
+    }
     None
+}
+
+/// Check if any file matching the glob pattern exists in the directory.
+fn glob_matches(dir: &std::path::Path, pattern: &str) -> bool {
+    if pattern.contains("..") {
+        return false;
+    }
+
+    let pattern_path = if pattern.starts_with('/') || pattern.starts_with("./") {
+        std::path::PathBuf::from(pattern)
+    } else {
+        dir.join(pattern)
+    };
+
+    match glob::glob(pattern_path.to_string_lossy().as_ref()) {
+        Ok(mut paths) => paths.next().is_some(),
+        Err(_) => false,
+    }
 }
 
 /// Returns either an empty `MatchedProject` for `path_prefix` matches or a
@@ -216,5 +240,24 @@ mod tests {
             let f = write_marker(&body);
             let _ = read_marker(f.path());
         }
+    }
+
+    #[test]
+    fn glob_pattern_matches_existing_file() {
+        use super::glob_matches;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path();
+
+        // Create test files
+        std::fs::write(temp_path.join("Cargo.toml"), "").unwrap();
+        std::fs::write(temp_path.join(".gitignore"), "").unwrap();
+
+        // Pattern matching file that exists
+        assert!(glob_matches(temp_path, "Cargo.toml"));
+        assert!(glob_matches(temp_path, "*.toml"));
+
+        // Pattern not matching
+        assert!(!glob_matches(temp_path, "nonexistent.txt"));
+        assert!(!glob_matches(temp_path, "*.rs"));
     }
 }

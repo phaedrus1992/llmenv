@@ -3,7 +3,22 @@
 //! crosses scope boundaries.
 
 use crate::scope::ActiveScopes;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 use tracing;
+
+/// Path to the ICM state file within state_dir.
+fn icm_state_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("icm.json")
+}
+
+/// Stored ICM tag/bundle memory.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct IcmMemory {
+    tags: Vec<String>,
+    bundles: Vec<String>,
+}
 
 /// Generate an ICM context chunk encoding the active tags/bundles.
 /// The chunk is formatted as a markdown block that agents can paste into ICM.
@@ -57,13 +72,31 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
 /// # Errors
 /// Returns an error if memory storage fails.
 pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Result<()> {
-    let tags_csv = active.tags.iter().cloned().collect::<Vec<_>>().join(",");
-    let bundles_csv = bundles.join(",");
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let state_dir = crate::paths::state_dir()?;
+    fs::create_dir_all(&state_dir)?;
+
+    let memory = IcmMemory {
+        tags: active.tags.iter().cloned().collect::<Vec<_>>(),
+        bundles: bundles.to_vec(),
+    };
+
+    let path = icm_state_path(&state_dir);
+    let json = serde_json::to_string(&memory)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(json.as_bytes())?;
 
     tracing::debug!(
         "stored ICM tag memory: tags={}, bundles={}",
-        tags_csv,
-        bundles_csv
+        memory.tags.join(","),
+        memory.bundles.join(",")
     );
     Ok(())
 }
