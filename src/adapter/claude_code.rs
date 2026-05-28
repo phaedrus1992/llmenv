@@ -50,6 +50,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Adapters that lack this convention should instead use
         // `merge::agents_md::concat_with_rules` to inline the bodies.
         for r in &manifest.rules {
+            if crate::paths::has_parent_component(r.rel.to_string_lossy().as_ref()) {
+                anyhow::bail!("path traversal in rules file: {}", r.rel.display());
+            }
             let dest = out.join(&r.rel);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -61,6 +64,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // `{{ICM_MCP}}` substituted so bundle hooks can reference the MCP
         // server by name without hard-coding it.
         for (rel, abs) in &manifest.files {
+            if crate::paths::has_parent_component(rel.to_string_lossy().as_ref()) {
+                anyhow::bail!("path traversal in bundle file: {}", rel.display());
+            }
             let dest = out.join(rel);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -226,7 +232,7 @@ fn write_mcp_json(
     }
     overlay_native(&mut doc, native)?;
     let path = out.join("mcp.json");
-    std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+    crate::paths::write_owner_only(&path, serde_json::to_string_pretty(&doc)?.as_bytes())?;
     Ok(())
 }
 
@@ -500,25 +506,12 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     let settings_path = out.join("settings.json");
     let json_str = serde_json::to_string_pretty(&settings_value)?;
 
-    std::fs::write(&settings_path, &json_str).with_context(|| {
+    crate::paths::write_owner_only(&settings_path, json_str.as_bytes()).with_context(|| {
         format!(
             "Failed to write settings.json at {}",
             settings_path.display()
         )
     })?;
-
-    #[cfg(unix)]
-    {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&settings_path, perms).with_context(|| {
-            format!(
-                "Failed to set permissions on settings.json at {}",
-                settings_path.display()
-            )
-        })?;
-    }
 
     Ok(())
 }
@@ -844,6 +837,38 @@ mod tests {
             let b = std::fs::read_to_string(dir_b.path().join("mcp.json")).unwrap();
 
             prop_assert_eq!(a, b);
+        }
+
+        // #150: write_mcp_json must produce a file with mode 0o600 — same
+        // owner-only invariant as ICM state and settings.json. Critical
+        // because mcp.json may contain server credentials / API URLs.
+        #[cfg(unix)]
+        #[test]
+        fn write_mcp_json_writes_owner_only_permissions(mcps in arb_distinct_mcps()) {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            write_mcp_json(dir.path(), &mcps, None).unwrap();
+            let mode = std::fs::metadata(dir.path().join("mcp.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            prop_assert_eq!(mode & 0o077, 0, "group/other bits set: {:o}", mode);
+        }
+
+        // #151: write_mcp_json output round-trips through serde_json — every
+        // byte written deserializes back to a parsable Value with the same
+        // mcpServers content. Catches drift between serialize and deserialize
+        // paths.
+        #[test]
+        fn write_mcp_json_serde_roundtrip(mcps in arb_distinct_mcps()) {
+            let dir = tempfile::tempdir().unwrap();
+            write_mcp_json(dir.path(), &mcps, None).unwrap();
+            let raw = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+            // Reserialize and reparse — must produce identical structure.
+            let reserialized = serde_json::to_string_pretty(&doc).expect("reserialize");
+            let doc2: serde_json::Value = serde_json::from_str(&reserialized).expect("reparse");
+            prop_assert_eq!(doc, doc2);
         }
     }
 
