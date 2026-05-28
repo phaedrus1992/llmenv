@@ -16,6 +16,16 @@ pub use style::{
     orphan_annotation, should_use_color,
 };
 
+/// Git config flags to protect cloned repos from executing hooks or fsmonitors.
+/// Used by all git invocations to prevent a malicious config repo from running
+/// arbitrary code via git hooks or fsmonitors.
+const GIT_CONFIG_FLAGS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
 /// Outcome of comparing the booted materialized config folder against the
 /// folder llmenv would materialize now (see [`stale_status`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,6 +465,7 @@ fn expand_tilde(path: &str) -> anyhow::Result<PathBuf> {
 
 fn is_git_repo(dir: &Path) -> bool {
     match std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir)
         .output()
@@ -466,6 +477,7 @@ fn is_git_repo(dir: &Path) -> bool {
 
 fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
     let output = std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(dir)
         .output()
@@ -1497,6 +1509,7 @@ fn run_sync() -> anyhow::Result<()> {
 
     // Stage all changes in config_dir
     std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["add", "-A"])
         .current_dir(&config_dir)
         .status()
@@ -1504,6 +1517,7 @@ fn run_sync() -> anyhow::Result<()> {
 
     // Commit (allow empty if nothing changed)
     let commit_result = std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["commit", "-m", "Update llmenv config"])
         .current_dir(&config_dir)
         .status()
@@ -1516,6 +1530,7 @@ fn run_sync() -> anyhow::Result<()> {
 
     // Push to origin
     std::process::Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["push"])
         .current_dir(&config_dir)
         .status()
