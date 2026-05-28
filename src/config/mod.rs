@@ -4,6 +4,7 @@ mod validate;
 pub use schema::*;
 pub use validate::ValidateError;
 
+use anyhow::Context;
 use std::path::Path;
 
 impl Config {
@@ -24,9 +25,12 @@ impl Config {
             "Config::load expects an expanded path; got tilde-prefixed {}",
             path.display()
         );
-        let s = std::fs::read_to_string(path)?;
-        let cfg: Self = serde_yaml::from_str(&s)?;
-        cfg.validate()?;
+        let s = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file: {}", path.display()))?;
+        let cfg: Self = serde_yaml::from_str(&s)
+            .with_context(|| format!("failed to parse config file: {}", path.display()))?;
+        cfg.validate()
+            .with_context(|| format!("config validation failed: {}", path.display()))?;
         Ok(cfg)
     }
 }
