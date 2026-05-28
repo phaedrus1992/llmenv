@@ -310,15 +310,8 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
             orphan_count += 1;
         }
     }
-    for s in &config.scope.project {
-        if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!(
-                "{warn} orphan scope project:{}: no bundle consumes its tags",
-                s.id
-            );
-            orphan_count += 1;
-        }
-    }
+    // Project scopes are now discovered dynamically from .llmenv.yaml
+    // and do not appear in static config; orphan checking is N/A.
     for b in &config.bundle {
         let has_emitted_tag = b.tags.iter().any(|t| emitted.contains(t));
         if !has_emitted_tag && !marker_enabled.contains(&b.name) {
@@ -1050,7 +1043,18 @@ fn run_status(use_color: bool) -> anyhow::Result<()> {
             eprintln!("    Network: {}", config.scope.network.len());
             eprintln!("    Host: {}", config.scope.host.len());
             eprintln!("    User: {}", config.scope.user.len());
-            eprintln!("    Project: {}", config.scope.project.len());
+            let env = crate::scope::matcher::Env::detect();
+            let active = crate::scope::evaluate(&config, &env);
+            if let Some(proj) = active.scopes.iter().find(|s| s.kind == "project") {
+                let label = proj.name.as_deref().unwrap_or(&proj.id);
+                if let Some(desc) = &proj.description {
+                    eprintln!("    Project: {label} — {desc}");
+                } else {
+                    eprintln!("    Project: {label}");
+                }
+            } else {
+                eprintln!("    Project: (none)");
+            }
             eprintln!("  Bundles: {}", config.bundle.len());
         }
         Err(e) => {
@@ -1105,8 +1109,11 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
     for s in &config.scope.user {
         classify("user", &s.id, &s.tags);
     }
-    for s in &config.scope.project {
-        classify("project", &s.id, &s.tags);
+    // Project scopes are discovered dynamically; display them from active scopes if present.
+    for scope in &active.scopes {
+        if scope.kind == "project" {
+            classify("project", &scope.id, &scope.tags);
+        }
     }
 
     if !active_scopes.is_empty() {
@@ -1129,7 +1136,8 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
 /// Tags emitted by all configured scopes (regardless of whether they match
 /// the current env). A tag is "emitted" if it appears in any scope's static
 /// `tags` list. Marker-declared tags are not included here — those are only
-/// known when the marker actually matches.
+/// known when the marker actually matches. Project scope tags are discovered
+/// dynamically and not included in this static analysis.
 fn all_emitted_tags(config: &Config) -> HashSet<String> {
     let mut out = HashSet::new();
     for s in &config.scope.network {
@@ -1139,9 +1147,6 @@ fn all_emitted_tags(config: &Config) -> HashSet<String> {
         out.extend(s.tags.iter().cloned());
     }
     for s in &config.scope.user {
-        out.extend(s.tags.iter().cloned());
-    }
-    for s in &config.scope.project {
         out.extend(s.tags.iter().cloned());
     }
     out
@@ -1254,8 +1259,18 @@ fn run_scope_ls(use_color: bool) -> anyhow::Result<()> {
     for s in &config.scope.user {
         push(&mut rows, "user", &s.id, &s.tags, &active_ids, &consumed);
     }
-    for s in &config.scope.project {
-        push(&mut rows, "project", &s.id, &s.tags, &active_ids, &consumed);
+    // Project scopes are discovered dynamically; include active project if present.
+    for scope in &active.scopes {
+        if scope.kind == "project" {
+            push(
+                &mut rows,
+                "project",
+                &scope.id,
+                &scope.tags,
+                &active_ids,
+                &consumed,
+            );
+        }
     }
 
     rows.sort_by(|a, b| a.0.cmp(&b.0));

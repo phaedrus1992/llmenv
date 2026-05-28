@@ -55,19 +55,6 @@ scope:
       match:
         user: bob
       tags: [contractor]
-  project:
-    - id: llmenv
-      match:
-        path_prefix: /Users/alice/git/llmenv
-      tags: [rust, cli]
-    - id: web-app
-      match:
-        path_prefix: /Users/alice/git/webapp
-      tags: [typescript, react]
-    - id: mobile-app
-      match:
-        path_prefix: /Users/alice/git/mobile
-      tags: [swift, ios]
 
 tag:
   internal: ""

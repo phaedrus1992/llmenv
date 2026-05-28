@@ -55,14 +55,30 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
             .join(", ")
     };
 
-    format!(
+    let mut chunk = format!(
         "## llmenv context\n\
          Active tags: {}\n\
          Bundles: {}\n\n\
          Store scope-specific memory under keyword `llmenv-tag:<tag>` \
          so it is retrievable across projects.",
         tags_str, bundles_str
-    )
+    );
+
+    // Add project description if present.
+    for scope in &active.scopes {
+        if scope.kind == "project"
+            && let Some(name) = &scope.name
+        {
+            chunk.push_str("\n\n**Project:** ");
+            chunk.push_str(name);
+            if let Some(desc) = &scope.description {
+                chunk.push_str(" — ");
+                chunk.push_str(desc);
+            }
+        }
+    }
+
+    chunk
 }
 
 /// Store tag/bundle memory mappings for retrieval by SessionStart hook.

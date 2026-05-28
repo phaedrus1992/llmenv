@@ -13,14 +13,21 @@ pub struct ActiveScope {
     pub kind: &'static str,
     pub tags: Vec<String>,
     /// On-disk root the scope matched against. Populated only for
-    /// `kind == "project"` (path_prefix → expanded prefix; marker → deepest
-    /// ancestor of cwd containing the marker file). `None` for all other
-    /// scope kinds.
+    /// `kind == "project"` (the directory containing `.llmenv.yaml`).
+    /// `None` for all other scope kinds.
     pub project_root: Option<PathBuf>,
-    /// Bundles this scope manually enables (from the marker file's
-    /// `enable_bundles` list). Only populated for project scopes matched
-    /// via marker.
+    /// Bundles this scope manually enables (from `.llmenv.yaml`'s
+    /// `enable_bundles` list). Only populated for project scopes.
     pub enable_bundles: Vec<String>,
+    /// Project display name (from `.llmenv.yaml` `name` field or folder
+    /// basename). Only present for `kind == "project"`.
+    pub name: Option<String>,
+    /// Project description (from `.llmenv.yaml` `description` field).
+    /// Only present for `kind == "project"`.
+    pub description: Option<String>,
+    /// Unknown fields from `.llmenv.yaml` (for warnings in `llmenv doctor`).
+    /// Only populated for project scopes.
+    pub unknown_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -39,6 +46,9 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 tags: s.tags.clone(),
                 project_root: None,
                 enable_bundles: Vec::new(),
+                name: None,
+                description: None,
+                unknown_fields: Vec::new(),
             });
         }
     }
@@ -50,6 +60,9 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 tags: s.tags.clone(),
                 project_root: None,
                 enable_bundles: Vec::new(),
+                name: None,
+                description: None,
+                unknown_fields: Vec::new(),
             });
         }
     }
@@ -61,28 +74,23 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 tags: s.tags.clone(),
                 project_root: None,
                 enable_bundles: Vec::new(),
+                name: None,
+                description: None,
+                unknown_fields: Vec::new(),
             });
         }
     }
-    for s in &cfg.scope.project {
-        if let Some(matched) = matcher::match_project(s, env) {
-            // Static scope tags + tags declared in the marker file. Dedupe
-            // while preserving "static first, then marker" order so output
-            // is stable.
-            let mut tags = s.tags.clone();
-            for t in matched.extra_tags {
-                if !tags.contains(&t) {
-                    tags.push(t);
-                }
-            }
-            scopes.push(ActiveScope {
-                id: s.id.clone(),
-                kind: "project",
-                tags,
-                project_root: Some(matched.root),
-                enable_bundles: matched.enable_bundles,
-            });
-        }
+    if let Some(p) = matcher::discover_project(env) {
+        scopes.push(ActiveScope {
+            id: p.id,
+            kind: "project",
+            tags: p.tags,
+            project_root: Some(p.root),
+            enable_bundles: p.enable_bundles,
+            name: Some(p.name),
+            description: p.description,
+            unknown_fields: p.unknown_fields,
+        });
     }
     let tags: BTreeSet<String> = scopes.iter().flat_map(|s| s.tags.iter().cloned()).collect();
     ActiveScopes { scopes, tags }
