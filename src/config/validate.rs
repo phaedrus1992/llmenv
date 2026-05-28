@@ -5,8 +5,8 @@ use thiserror::Error;
 use super::{
     Bundle, Cache, Capabilities, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch,
     HostScope, Marketplace, McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch,
-    NetworkScope, PermissionMode, PermissionRule, Permissions, PluginCollection, ProjectMatch,
-    ProjectScope, Scopes, UserMatch, UserScope,
+    NetworkScope, PermissionMode, PermissionRule, Permissions, PluginCollection, Scopes, UserMatch,
+    UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -23,8 +23,6 @@ pub enum ValidateError {
     InvalidMACAddress(String),
     #[error("invalid hostname: {0}")]
     InvalidHostname(String),
-    #[error("invalid path prefix: {0}")]
-    InvalidPathPrefix(String),
     #[error("bundle {0}: invalid variable name '{1}' (must match [A-Za-z_][A-Za-z0-9_]*)")]
     InvalidVarName(String, String),
     #[error("cache_dir contains path traversal components: {0}")]
@@ -126,15 +124,6 @@ fn is_valid_hostname(hostname: &str) -> bool {
     })
 }
 
-fn is_valid_path_prefix(path: &str) -> bool {
-    if path.is_empty() || path.len() > 4096 {
-        return false;
-    }
-    // Parse components rather than substring-match so `foo/..` (no trailing
-    // slash) and host-OS separators are caught, matching is_safe_cache_dir.
-    !path.contains('\0') && !crate::paths::has_parent_component(path)
-}
-
 fn is_valid_var_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -175,8 +164,7 @@ impl Config {
             .iter()
             .map(|s| &s.id)
             .chain(self.scope.host.iter().map(|s| &s.id))
-            .chain(self.scope.user.iter().map(|s| &s.id))
-            .chain(self.scope.project.iter().map(|s| &s.id));
+            .chain(self.scope.user.iter().map(|s| &s.id));
         for id in ids {
             if !seen_scope_ids.insert(id) {
                 return Err(ValidateError::DuplicateScopeId(id.clone()));
@@ -199,13 +187,6 @@ impl Config {
                 && !is_valid_hostname(hostname)
             {
                 return Err(ValidateError::InvalidHostname(hostname.clone()));
-            }
-        }
-        for scope in &self.scope.project {
-            if let Some(path) = &scope.r#match.path_prefix
-                && !is_valid_path_prefix(path)
-            {
-                return Err(ValidateError::InvalidPathPrefix(path.clone()));
             }
         }
         let mut seen_bundle_names = std::collections::HashSet::new();
@@ -551,21 +532,7 @@ mod tests {
                         tags: vec![],
                     })
                     .collect();
-                let project = ids
-                    .iter()
-                    .skip(6)
-                    .take(2)
-                    .map(|(id, path_prefix, marker, _)| ProjectScope {
-                        id: id.clone(),
-                        r#match: ProjectMatch {
-                            path_prefix: path_prefix.clone(),
-                            marker: marker.clone(),
-                            glob: None,
-                        },
-                        tags: vec![],
-                    })
-                    .collect();
-                (network, host, user, project)
+                (network, host, user)
             }),
             prop::collection::vec(
                 (arb_string(), prop::collection::vec(arb_string(), 1..3)),
@@ -628,7 +595,7 @@ mod tests {
             .prop_map(
                 |(
                     cache,
-                    (network, host_scopes, user, project),
+                    (network, host_scopes, user),
                     bundle,
                     mcp,
                     memory,
@@ -643,7 +610,6 @@ mod tests {
                             network,
                             host: host_scopes,
                             user,
-                            project,
                         },
                         capabilities,
                         native: Default::default(),
@@ -687,7 +653,7 @@ mod tests {
                 cache: Cache::default(),
                 capabilities: Default::default(),
                 native: Default::default(),
-                scope: Scopes { network, host: vec![], user: vec![], project: vec![] },
+                scope: Scopes { network, host: vec![], user: vec![] },
                 bundle: vec![],
                 mcp: vec![],
                 memory: None,
@@ -773,7 +739,6 @@ mod tests {
                 }],
                 host: vec![],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![Bundle {
                 name: "test-bundle".to_string(),
@@ -807,7 +772,6 @@ mod tests {
                 }],
                 host: vec![],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -837,7 +801,6 @@ mod tests {
                 }],
                 host: vec![],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -897,7 +860,6 @@ mod tests {
                 }],
                 host: vec![],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -927,7 +889,6 @@ mod tests {
                 }],
                 host: vec![],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -955,7 +916,6 @@ mod tests {
                     tags: vec!["tag1".to_string()],
                 }],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -983,7 +943,6 @@ mod tests {
                     tags: vec!["tag1".to_string()],
                 }],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -1011,7 +970,6 @@ mod tests {
                     tags: vec!["tag1".to_string()],
                 }],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -1041,7 +999,6 @@ mod tests {
                     tags: vec!["tag1".to_string()],
                 }],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -1072,7 +1029,6 @@ mod tests {
                 }],
                 host: vec![],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -1100,7 +1056,6 @@ mod tests {
                     tags: vec!["tag1".to_string()],
                 }],
                 user: vec![],
-                project: vec![],
             },
             bundle: vec![],
             mcp: vec![],
@@ -1128,99 +1083,6 @@ mod tests {
                     tags: vec!["tag1".to_string()],
                 }],
                 user: vec![],
-                project: vec![],
-            },
-            bundle: vec![],
-            mcp: vec![],
-            memory: None,
-            marketplace: vec![],
-            plugin_collection: vec![],
-            host: Default::default(),
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_invalid_path_with_traversal() {
-        let config = Config {
-            cache: Cache::default(),
-            capabilities: Default::default(),
-            native: Default::default(),
-            scope: Scopes {
-                network: vec![],
-                host: vec![],
-                user: vec![],
-                project: vec![ProjectScope {
-                    id: "proj1".to_string(),
-                    r#match: ProjectMatch {
-                        path_prefix: Some("/foo/../bar".to_string()),
-                        marker: None,
-                        glob: None,
-                    },
-                    tags: vec!["tag1".to_string()],
-                }],
-            },
-            bundle: vec![],
-            mcp: vec![],
-            memory: None,
-            marketplace: vec![],
-            plugin_collection: vec![],
-            host: Default::default(),
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_invalid_path_prefix_trailing_parent_no_slash() {
-        // `foo/..` has no "../" substring but is a real traversal — semantic
-        // parsing must reject it (variant of #65, found in pre-pr-review).
-        let config = Config {
-            cache: Cache::default(),
-            capabilities: Default::default(),
-            native: Default::default(),
-            scope: Scopes {
-                network: vec![],
-                host: vec![],
-                user: vec![],
-                project: vec![ProjectScope {
-                    id: "proj1".to_string(),
-                    r#match: ProjectMatch {
-                        path_prefix: Some("/foo/bar/..".to_string()),
-                        marker: None,
-                        glob: None,
-                    },
-                    tags: vec!["tag1".to_string()],
-                }],
-            },
-            bundle: vec![],
-            mcp: vec![],
-            memory: None,
-            marketplace: vec![],
-            plugin_collection: vec![],
-            host: Default::default(),
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_invalid_path_with_null_byte() {
-        let config = Config {
-            cache: Cache::default(),
-            capabilities: Default::default(),
-            native: Default::default(),
-            scope: Scopes {
-                network: vec![],
-                host: vec![],
-                user: vec![],
-                project: vec![ProjectScope {
-                    id: "proj1".to_string(),
-                    r#match: ProjectMatch {
-                        path_prefix: Some("/foo\0bar".to_string()),
-                        marker: None,
-                        glob: None,
-                    },
-                    tags: vec!["tag1".to_string()],
-                }],
             },
             bundle: vec![],
             mcp: vec![],
@@ -1611,24 +1473,6 @@ mod tests {
         ) {
             let name = format!("{d}{rest}");
             prop_assert!(!is_valid_var_name(&name), "leading-digit var name accepted: {name}");
-        }
-
-        #[test]
-        fn prop_path_prefix_with_null_byte_rejected(
-            before in "[a-z0-9/_-]{0,20}",
-            after in "[a-z0-9/_-]{0,20}",
-        ) {
-            let path = format!("{before}\0{after}");
-            prop_assert!(!is_valid_path_prefix(&path), "null byte accepted in path");
-        }
-
-        #[test]
-        fn prop_path_prefix_with_parent_component_rejected(
-            before in "[a-z0-9_-]{1,10}",
-            after in "[a-z0-9_-]{1,10}",
-        ) {
-            let path = format!("{before}/../{after}");
-            prop_assert!(!is_valid_path_prefix(&path), "parent component accepted: {path}");
         }
 
         #[test]
