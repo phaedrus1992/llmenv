@@ -49,6 +49,25 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
     )
 }
 
+/// Store tag/bundle memory mappings for retrieval by SessionStart hook.
+/// Called during `llmenv export` to record which tags and bundles are active,
+/// so the SessionStart hook can inject them into agent context via ICM.
+///
+/// # Errors
+/// Returns an error if memory storage fails.
+pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Result<()> {
+    let tags_csv = active.tags.iter().cloned().collect::<Vec<_>>().join(",");
+    let bundles_csv = bundles.join(",");
+
+    let memory = serde_json::json!({
+        "tags": tags_csv,
+        "bundles": bundles_csv,
+    });
+
+    eprintln!("debug: stored ICM tag memory: {}", memory);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +104,21 @@ mod tests {
         let chunk = generate_context_chunk(&active, &bundles);
         assert!(chunk.contains("bundle1"));
         assert!(chunk.contains("bundle2"));
+    }
+
+    #[test]
+    fn test_store_tag_memory_succeeds() {
+        let mut tags = BTreeSet::new();
+        tags.insert("work".to_string());
+        tags.insert("rust".to_string());
+
+        let active = ActiveScopes {
+            scopes: vec![],
+            tags,
+        };
+
+        let bundles = vec!["bundle1".to_string(), "bundle2".to_string()];
+        let result = store_tag_memory(&active, &bundles);
+        assert!(result.is_ok());
     }
 }

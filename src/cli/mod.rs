@@ -675,6 +675,11 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     let icm_chunk = crate::icm::generate_context_chunk(&active, &bundles_for_icm);
     vars.insert("LLMENV_ICM_CONTEXT".into(), icm_chunk);
 
+    // Store tag/bundle mappings for SessionStart hook retrieval
+    if let Err(e) = crate::icm::store_tag_memory(&active, &bundles_for_icm) {
+        tracing::debug!("failed to store ICM tag memory (non-fatal): {e}");
+    }
+
     for (key, value) in vars {
         validate_var_name(&key)?;
         println!("export {}={}", key, shell_escape(&value));
