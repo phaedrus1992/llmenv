@@ -1,17 +1,7 @@
+use crate::git;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-/// Git config flags to protect cloned repos from executing hooks or fsmonitors.
-/// Used by all git invocations to prevent a malicious config repo from running
-/// arbitrary code via git hooks or fsmonitors.
-const GIT_CONFIG_FLAGS: &[&str] = &[
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.hooksPath=/dev/null",
-];
 
 /// Sanitize a git remote URL for display, removing credentials.
 /// Converts `https://user:pass@host/repo.git` to `https://[redacted]@host/repo.git`
@@ -34,35 +24,14 @@ fn sanitize_git_url(url: &str) -> String {
 
 /// True if the repo's working tree has staged or unstaged changes.
 fn working_tree_dirty(repo: &Path) -> bool {
-    Command::new("git")
-        .args(["status", "--porcelain"])
-        .args(GIT_CONFIG_FLAGS)
-        .current_dir(repo)
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+    git::working_tree_dirty(repo)
 }
 
 /// True if the current branch has commits not yet pushed to its upstream.
 /// Returns false if there's no upstream or git fails — we only want to nudge
 /// the user when we're certain.
 fn has_unpushed_commits(repo: &Path) -> bool {
-    let output = Command::new("git")
-        .args(["rev-list", "--count", "@{u}..HEAD"])
-        .args(GIT_CONFIG_FLAGS)
-        .current_dir(repo)
-        .stderr(Stdio::null())
-        .output();
-    let Ok(output) = output else { return false };
-    if !output.status.success() {
-        return false;
-    }
-    let count = std::str::from_utf8(&output.stdout)
-        .unwrap_or("0")
-        .trim()
-        .parse::<u32>()
-        .unwrap_or(0);
-    count > 0
+    git::has_unpushed_commits(repo)
 }
 
 /// Path to the sync state file within state_dir.
@@ -126,22 +95,20 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
 
     // Attempt fetch — silent on failure (network issues are transient and
     // we don't want to spam every shell prompt while offline).
-    let _ = Command::new("git")
+    let _ = git::secure_git()
         .args(["fetch"])
-        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
 
     // Attempt fast-forward pull. Suppress git's stderr — we'll print our
     // own one-line warning on failure rather than git's two-line message.
-    let pull_status = Command::new("git")
+    let pull_status = git::secure_git()
         .args(["pull", "--ff-only"])
-        .args(GIT_CONFIG_FLAGS)
         .current_dir(repo)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .context(format!("git pull --ff-only failed in {}", repo.display()))?;
 
@@ -168,6 +135,7 @@ mod tests {
 
     #[test]
     fn git_config_flags_protect_against_hooks() {
+        use crate::git::GIT_CONFIG_FLAGS;
         assert_eq!(
             GIT_CONFIG_FLAGS,
             &[
