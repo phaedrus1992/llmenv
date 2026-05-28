@@ -91,16 +91,8 @@ pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Re
 /// extracted so property tests can exercise the on-disk format without
 /// touching the global state_dir env var.
 fn write_memory(path: &Path, memory: &IcmMemory) -> anyhow::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let json = serde_json::to_string(memory)?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(json.as_bytes())?;
+    crate::paths::write_owner_only(path, json.as_bytes())?;
     Ok(())
 }
 
