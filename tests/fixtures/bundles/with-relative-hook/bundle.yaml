@@ -1,0 +1,3 @@
+hooks:
+  - event: PostToolUse
+    handler: { type: command, command: "bash hooks/test.sh" }
