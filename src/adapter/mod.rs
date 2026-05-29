@@ -31,4 +31,9 @@ pub trait AgentAdapter {
     /// Returns any I/O error encountered while creating directories or
     /// copying files.
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<()>;
+
+    /// Format injected hook context in the engine's native hook-output shape so
+    /// the agent runtime adds it to the model's context. Empty input returns an
+    /// empty string, which suppresses any output.
+    fn emit_hook_context(&self, text: &str) -> String;
 }
