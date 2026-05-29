@@ -166,5 +166,8 @@ adapter:
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("Merged Manifest"))
-        .stdout(predicate::str::contains("Hooks"));
+        .stdout(predicate::str::contains("Hooks"))
+        .stdout(predicate::str::contains(
+            "PostToolUse bash (from config.yaml)",
+        ));
 }
