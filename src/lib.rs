@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod errors;
 pub mod git;
+pub mod hook_run;
 pub mod icm;
 pub mod materialize;
 pub mod mcp;

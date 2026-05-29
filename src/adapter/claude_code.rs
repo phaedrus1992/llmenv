@@ -95,6 +95,20 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         Ok(())
     }
+
+    fn emit_hook_context(&self, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        // Wrap in a system barrier to prevent prompt injection: the MCP response
+        // (possibly from an untrusted memory backend) is wrapped so any attempts
+        // to escape the context block are trapped as unparseable markdown.
+        let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{}", text);
+        serde_json::json!({
+            "hookSpecificOutput": { "additionalContext": wrapped }
+        })
+        .to_string()
+    }
 }
 
 /// Deep-merge a per-engine `native_*` fragment (opaque YAML) into an

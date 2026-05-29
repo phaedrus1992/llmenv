@@ -140,6 +140,23 @@ materialize now. Invoked automatically by the Claude Code `SessionStart` hook: i
 compares the content hash in the booted `CLAUDE_CONFIG_DIR` against the
 freshly-computed one and prints a restart hint on drift. Safe to run manually.
 
+## `hook-run`
+
+```
+llmenv hook-run <session_start|turn_start|session_end>
+```
+
+Engine-neutral lifecycle hooks that inject ICM memory context over MCP. Invoked by
+the agent runtime (not by users directly) in response to three neutral events:
+
+- `session_start` — injects the session wake-up pack (`icm_wake_up`)
+- `turn_start` — injects recalled context for the active tags/project (`icm_memory_recall`)
+- `session_end` — best-effort store of the active scope context (`icm_memory_store`)
+
+Each hook talks to the configured ICM memory MCP over HTTP. Failures degrade
+gracefully: a missing or unreachable backend logs a warning and exits cleanly
+(exit code 0) so lifecycle hooks never block the agent.
+
 ## `prune`
 
 ```

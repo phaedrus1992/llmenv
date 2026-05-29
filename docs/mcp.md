@@ -225,12 +225,31 @@ follows the tag rather than the project.
 - `llmenv-bundle:<bundle>` — memory keyed to a bundle, retrieved whenever that
   bundle fires.
 
+### Lifecycle hooks
+
+llmenv provides engine-neutral lifecycle hooks (`hook-run` command) that
+automatically activate when a memory backend is configured and active. These hooks
+run in response to three neutral events:
+
+- **SessionStart** — `hook-run session_start` injects the session wake-up pack
+  (`icm_wake_up`) containing your critical memories (by importance and recency)
+- **TurnStart** — `hook-run turn_start` injects recalled context for the active
+  tags/project (`icm_memory_recall`) at the start of each agent turn
+- **SessionEnd** — `hook-run session_end` stores the active scope context
+  (`icm_memory_store`) when the session closes
+
+Each hook talks to the memory backend over MCP. Failures degrade gracefully: a
+missing or unreachable backend logs a warning and exits cleanly (exit code 0) so
+hooks never block the agent. See [`docs/commands.md`](commands.md#hook-run) for
+details.
+
 ### SessionStart injection
 
 The Claude Code adapter registers a `SessionStart` hook. Alongside
 `check-stale` (drift detection), llmenv records the active tag/bundle set to a
 `0600` state file (`icm.json` in the state dir) so the hook can surface the
-keyword convention to the agent at startup.
+keyword convention to the agent at startup. The `hook-run session_start` command
+is also invoked at session start to inject ICM memory.
 
 ### Related introspection vars
 
