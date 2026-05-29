@@ -95,6 +95,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         Ok(())
     }
+
+    fn emit_hook_context(&self, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        serde_json::json!({
+            "hookSpecificOutput": { "additionalContext": text }
+        })
+        .to_string()
+    }
 }
 
 /// Deep-merge a per-engine `native_*` fragment (opaque YAML) into an
