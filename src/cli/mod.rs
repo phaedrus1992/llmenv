@@ -58,11 +58,16 @@ pub fn stale_status(booted: Option<&str>, current: &str) -> StaleStatus {
 /// when the build had no `.git` directory (e.g. crates.io tarball builds).
 const VERSION: &str = env!("LLMENV_VERSION");
 
+/// Filesystem-safe version tag used in cache paths. Built by `build.rs` as
+/// `"<pkg-version>-<short-hash>"` or bare `<pkg-version>` when no .git is present.
+const VERSION_TAG: &str = env!("LLMENV_VERSION_TAG");
+
 #[derive(Parser)]
 #[command(
     name = "llmenv",
     version = VERSION,
-    about = "Universal scope-aware environment for AI coding agents"
+    about = "Universal scope-aware environment for AI coding agents",
+    arg_required_else_help = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -259,6 +264,33 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
         cache_dir.display()
     );
 
+    // Check for version skew: warn if running binary is older than cached materializations (#173)
+    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+        let mut cached_versions: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && let Some(dir_name) = path.file_name().and_then(|n| n.to_str())
+            {
+                // Extract version tag from dir names like "adapter/<VERSION_TAG>-<hash>/"
+                if let Some(version_part) = dir_name.split('-').next() {
+                    cached_versions.push(version_part.to_string());
+                }
+            }
+        }
+        // Check if running version differs from any cached version (simple heuristic)
+        if !cached_versions.is_empty() {
+            let cached_versions_str = cached_versions.join(", ");
+            if !cached_versions.iter().any(|v| v == VERSION_TAG) {
+                eprintln!(
+                    "{warn} Version skew detected: running llmenv {} but cache has versions [{}]",
+                    VERSION_TAG, cached_versions_str
+                );
+                eprintln!("{warn}   → Fix: cargo install --path . --force");
+            }
+        }
+    }
+
     // Check git remote is reachable (if config_dir is a git repo)
     let config_dir = paths::config_dir()?;
     if is_git_repo(&config_dir) {
@@ -432,6 +464,23 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
         eprintln!("{pass} No orphan scopes/tags/bundles/plugins");
     } else {
         eprintln!("{warn} Found {} orphan item(s)", orphan_count);
+    }
+
+    // Lint for ${CLAUDE_PLUGIN_ROOT} in non-plugin hooks (#174)
+    // Check hooks defined in config/bundles that will be materialized to top-level settings.json
+    for hook in &config.capabilities.hooks {
+        if let Some(cmd) = &hook.handler.command
+            && cmd.contains("${CLAUDE_PLUGIN_ROOT}")
+        {
+            eprintln!(
+                "{warn} Hook command references ${{CLAUDE_PLUGIN_ROOT}} but runs in top-level settings.json: {}",
+                cmd
+            );
+            eprintln!(
+                "{warn}   → ${{CLAUDE_PLUGIN_ROOT}} only works in plugin-scoped hooks/hooks.json files"
+            );
+            eprintln!("{warn}   → Move or rewrite this hook in your config or bundle YAML");
+        }
     }
 
     eprintln!("{pass} Doctor check complete.");
