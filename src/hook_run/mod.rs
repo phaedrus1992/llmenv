@@ -108,7 +108,13 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
 
     let client = McpHttpClient::new(url, HOOK_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
-    let rt = tokio::runtime::Runtime::new()?;
+    // Current-thread runtime: lifecycle hooks run on the agent's hot path (session
+    // start + every prompt turn) and only need to `block_on` a short sequence of
+    // HTTP round-trips. A multi-threaded runtime would spin up a worker thread pool
+    // that's pure overhead for this single sequential await. (#186)
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async {
         let mut out = String::new();
         for action in dispatch(event) {
