@@ -1116,3 +1116,87 @@ fn bundle_relative_hook_paths_are_resolved() {
         rendered_cmd
     );
 }
+
+#[test]
+fn emit_hook_context_returns_empty_string_for_empty_input() {
+    assert_eq!(ClaudeCodeAdapter.emit_hook_context(""), "");
+}
+
+#[test]
+fn emit_hook_context_wraps_text_in_json() {
+    let text = "test content";
+    let output = ClaudeCodeAdapter.emit_hook_context(text);
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+    assert!(parsed.is_object());
+    assert!(parsed.get("hookSpecificOutput").is_some());
+    assert!(
+        parsed["hookSpecificOutput"]
+            .get("additionalContext")
+            .is_some()
+    );
+}
+
+#[test]
+fn emit_hook_context_preserves_markdown_content() {
+    let text = "## Memory\nContent";
+    let output = ClaudeCodeAdapter.emit_hook_context(text);
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+    let context = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("context is string");
+    assert!(context.contains("## Memory"));
+    assert!(context.contains("Content"));
+}
+
+#[test]
+fn emit_hook_context_escapes_special_characters() {
+    let text = r#"{"injection": "attempt", "quote": "\"", "backslash": "\\"}"#;
+    let output = ClaudeCodeAdapter.emit_hook_context(text);
+    // Should be valid JSON with properly escaped special chars
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+    let context = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("context is string");
+    // The text should be preserved correctly after round-tripping through JSON
+    assert!(context.contains("injection"));
+    assert!(context.contains("attempt"));
+}
+
+#[test]
+fn emit_hook_context_wraps_with_barrier_comment() {
+    let text = "context data";
+    let output = ClaudeCodeAdapter.emit_hook_context(text);
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+    let context = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("context is string");
+    // Verify the barrier comment prefix is present
+    assert!(context.starts_with("[ICM MEMORY CONTEXT"));
+    assert!(context.contains("context data"));
+}
+
+#[test]
+fn emit_hook_context_handles_newlines() {
+    let text = "line1\nline2\nline3";
+    let output = ClaudeCodeAdapter.emit_hook_context(text);
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+    let context = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("context is string");
+    assert!(context.contains("line1"));
+    assert!(context.contains("line2"));
+    assert!(context.contains("line3"));
+}
+
+#[test]
+fn emit_hook_context_handles_unicode() {
+    let text = "émojis: 🚀 🔒 日本語 中文";
+    let output = ClaudeCodeAdapter.emit_hook_context(text);
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+    let context = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("context is string");
+    assert!(context.contains("émojis"));
+    assert!(context.contains("🚀"));
+    assert!(context.contains("日本語"));
+}
