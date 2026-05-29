@@ -114,3 +114,57 @@ adapter:
         .stdout(predicate::str::contains("Active"))
         .stdout(predicate::str::contains("Inactive"));
 }
+
+#[test]
+fn context_shows_merged_manifest_with_hooks() {
+    let current_user = get_current_user();
+    let config = format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+  project: []
+
+tag:
+  test: ""
+
+bundle:
+  - name: test-bundle
+    tags: [test]
+
+# Top-level hooks that will appear in merged manifest
+capabilities:
+  hooks:
+    - event: PostToolUse
+      matcher: bash
+      handler:
+        type: command
+        command: "echo test"
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user
+    );
+
+    let (_dir, config_path) = setup_config(&config);
+    let config_dir = _dir.path();
+
+    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.env("LLMENV_CONFIG", config_path)
+        .env("LLMENV_CONFIG_DIR", config_dir)
+        .arg("context");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Merged Manifest"))
+        .stdout(predicate::str::contains("Hooks"));
+}

@@ -1156,6 +1156,44 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
         }
     }
 
+    // Render merged manifest for the active context
+    // Build BundleRef for bundles selected by the active tags
+    let bundle_refs: Vec<crate::merge::BundleRef> = config
+        .bundle
+        .iter()
+        .filter(|b| b.tags.iter().any(|tag| active.tags.contains(tag)))
+        .enumerate()
+        .map(|(idx, b)| {
+            let precedence = (config.bundle.len() as u8).saturating_sub(idx as u8);
+            crate::merge::BundleRef {
+                name: b.name.clone(),
+                path: std::path::PathBuf::from(&b.name),
+                precedence,
+            }
+        })
+        .collect();
+
+    let manifest = crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)?;
+
+    if !manifest.capabilities.hooks.is_empty() {
+        println!("\nMerged Manifest");
+        println!("Hooks");
+        for hook in &manifest.capabilities.hooks {
+            let source = hook
+                .bundle_origin
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("config.yaml");
+            println!(
+                "  {} {} (from {})",
+                hook.event,
+                hook.matcher.as_deref().unwrap_or("*"),
+                source
+            );
+        }
+    }
+
     Ok(())
 }
 
