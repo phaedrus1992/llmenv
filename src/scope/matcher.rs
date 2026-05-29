@@ -437,5 +437,113 @@ mod tests {
             let env = env_in(temp_dir.path(), temp_dir.path());
             let _ = discover_project(&env);
         }
+
+        // Property test #165: Unicode-safe basename derivation.
+        // Derived project id/name must be valid UTF-8 and handle special chars.
+        #[test]
+        fn unicode_safe_basename_derivation(
+            name_part in r"[^\x00/\.]|[^\x00/][^\x00/]*[^\x00/.]"
+        ) {
+            let temp_dir = tempfile::TempDir::new().expect("tempdir");
+            let root = temp_dir.path();
+            let sub = root.join(&name_part);
+            // Reject test cases where directory creation fails.
+            prop_assume!(std::fs::create_dir_all(&sub).is_ok());
+
+            write_project_file(&sub, "");
+            let env = env_in(&sub, root);
+            let project = discover_project(&env).expect("discover");
+
+            // id and name must be valid UTF-8 (already guaranteed by String).
+            // Both must be non-empty (basename fallback is "llmenv").
+            prop_assert!(!project.id.is_empty());
+            prop_assert!(!project.name.is_empty());
+            // name_part is guaranteed non-empty, no leading/trailing dots
+            prop_assert_eq!(project.id, name_part.clone());
+            prop_assert_eq!(project.name, name_part);
+        }
+
+        // Property test #166: discover_project walk termination with deep nesting.
+        // Walk must not descend infinitely; should terminate at home boundary or root.
+        #[test]
+        fn walk_terminates_at_home_boundary(
+            depth in 1..32usize,
+        ) {
+            let temp_dir = tempfile::TempDir::new().expect("tempdir");
+            let root = temp_dir.path();
+            let mut deep_path = root.to_path_buf();
+            for i in 0..depth {
+                deep_path.push(format!("d{i}"));
+            }
+            let _ = std::fs::create_dir_all(&deep_path);
+
+            // Place marker at root; walk from deep_path should find it.
+            write_project_file(root, "id: root-marker\n");
+
+            let env = env_in(&deep_path, root);
+            let project = discover_project(&env).expect("discover at depth");
+            prop_assert_eq!(project.id, "root-marker");
+            prop_assert_eq!(project.root, root);
+
+            // Now test walk stops at home: place hostile marker above home.
+            let temp_dir2 = tempfile::TempDir::new().expect("tempdir2");
+            let above_home = temp_dir2.path();
+            let home = above_home.join("home");
+            let mut deep_work = home.to_path_buf();
+            for i in 0..depth {
+                deep_work.push(format!("w{i}"));
+            }
+            let _ = std::fs::create_dir_all(&deep_work);
+            write_project_file(above_home, "id: hostile\n");
+
+            let env2 = env_in(&deep_work, &home);
+            let result = discover_project(&env2);
+            // Hostile marker above home must not be found, even at depth.
+            prop_assert!(result.is_none(), "hostile marker above home must not activate");
+        }
+
+        // Property test #167: ProjectFile unknown-fields filtering correctness.
+        // Unknown fields must be captured; known fields must not appear in unknown_fields.
+        #[test]
+        fn project_file_unknown_fields_filtering(
+            unknown_count in 0..10usize,
+            known_id in "[a-z0-9]+",
+        ) {
+            let temp_dir = tempfile::TempDir::new().expect("tempdir");
+
+            // Build YAML with known fields + unknown fields.
+            let mut yaml = format!("id: {}\n", known_id);
+            yaml.push_str("name: TestName\n");
+            yaml.push_str("tags: [a, b, c]\n");
+
+            // Append arbitrary unknown fields.
+            for i in 0..unknown_count {
+                yaml.push_str(&format!("field_{}: value_{}\n", i, i));
+            }
+
+            write_project_file(temp_dir.path(), &yaml);
+            let env = env_in(temp_dir.path(), temp_dir.path());
+            let project = discover_project(&env).expect("discover");
+
+            // Verify known fields were parsed.
+            prop_assert_eq!(project.id, known_id);
+            prop_assert_eq!(project.name, "TestName");
+            prop_assert_eq!(project.tags, vec!["a", "b", "c"]);
+
+            // Verify unknown fields were captured.
+            prop_assert_eq!(
+                project.unknown_fields.len(),
+                unknown_count,
+                "all unknown fields must be captured"
+            );
+
+            // Verify no known field names appear in unknown_fields.
+            for uf in &project.unknown_fields {
+                prop_assert!(!matches!(
+                    uf.as_str(),
+                    "id" | "name" | "description" | "tags" | "enable_bundles"
+                ));
+            }
+        }
     }
 }
