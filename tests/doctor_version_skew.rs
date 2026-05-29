@@ -12,11 +12,14 @@ fn test_doctor_runs_without_error() {
         .output()
         .expect("failed to run llmenv doctor");
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
     // Exit 0 is expected (warnings don't make it fail)
     assert_eq!(
         output.status.code(),
         Some(0),
-        "doctor should exit 0 even with warnings"
+        "doctor should exit 0 even with warnings\nstderr:\n{}",
+        stderr
     );
 }
 
