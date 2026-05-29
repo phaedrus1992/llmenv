@@ -120,6 +120,15 @@ fn hook_cmd(config_dir: &std::path::Path, config_path: &std::path::Path, event: 
     cmd
 }
 
+/// Assert the fail-soft contract: exit 0, empty stdout, and a stderr warning
+/// containing `stderr_needle`.
+fn assert_fail_soft(mut cmd: Command, stderr_needle: &str) {
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(stderr_needle));
+}
+
 #[test]
 fn unknown_event_exits_zero_with_warning() {
     // The event name is rejected before any config load, so a near-empty config
@@ -128,11 +137,10 @@ fn unknown_event_exits_zero_with_warning() {
     let config_path = dir.path().join("config.yaml");
     fs::write(&config_path, "adapter:\n  engine: claude-code\n").unwrap();
 
-    hook_cmd(dir.path(), &config_path, "not_a_real_event")
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("unknown hook event"));
+    assert_fail_soft(
+        hook_cmd(dir.path(), &config_path, "not_a_real_event"),
+        "unknown hook event",
+    );
 }
 
 #[test]
@@ -140,11 +148,10 @@ fn no_memory_backend_active_exits_zero_with_warning() {
     // Valid config, active scope, but no `memory:` topology — nothing to recall.
     let (dir, config_path) = setup_config(&config_no_backend());
 
-    hook_cmd(dir.path(), &config_path, "session_start")
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("no memory backend active"));
+    assert_fail_soft(
+        hook_cmd(dir.path(), &config_path, "session_start"),
+        "no memory backend active",
+    );
 }
 
 #[test]
@@ -153,11 +160,10 @@ fn malformed_backend_url_exits_zero_with_warning() {
     // fail-soft at client construction, not panic.
     let (dir, config_path) = setup_config(&config_with_memory_addr("bad addr", 9));
 
-    hook_cmd(dir.path(), &config_path, "session_start")
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("invalid memory backend URL"));
+    assert_fail_soft(
+        hook_cmd(dir.path(), &config_path, "session_start"),
+        "invalid memory backend URL",
+    );
 }
 
 #[test]
@@ -166,11 +172,10 @@ fn ssrf_rejected_loopback_url_exits_zero_with_warning() {
     // dispatcher must treat that rejection as fail-soft, not as a hard error.
     let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
 
-    hook_cmd(dir.path(), &config_path, "session_start")
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("invalid memory backend URL"));
+    assert_fail_soft(
+        hook_cmd(dir.path(), &config_path, "session_start"),
+        "invalid memory backend URL",
+    );
 }
 
 #[test]
@@ -178,11 +183,10 @@ fn ssrf_rejected_private_url_exits_zero_with_warning() {
     // Private-range IPs are likewise SSRF-rejected and must fail-soft.
     let (dir, config_path) = setup_config(&config_with_memory_addr("10.0.0.1", 8080));
 
-    hook_cmd(dir.path(), &config_path, "session_start")
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("invalid memory backend URL"));
+    assert_fail_soft(
+        hook_cmd(dir.path(), &config_path, "session_start"),
+        "invalid memory backend URL",
+    );
 }
 
 #[test]
@@ -194,11 +198,10 @@ fn unreachable_public_backend_exits_zero_with_warning() {
     // host.
     let (dir, config_path) = setup_config(&config_with_memory_addr("192.0.2.1", 9));
 
-    hook_cmd(dir.path(), &config_path, "session_start")
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("session_start skipped"));
+    assert_fail_soft(
+        hook_cmd(dir.path(), &config_path, "session_start"),
+        "session_start skipped",
+    );
 }
 
 #[test]
