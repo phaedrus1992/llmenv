@@ -97,10 +97,17 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
 
     // Recall query: the sorted active tags. Store content: the llmenv context
     // chunk (tags/bundles/project). Bundles aren't needed for the query.
-    let query = active.tags.iter().cloned().collect::<Vec<_>>().join(", ");
+    let mut tags = active.tags.iter().cloned().collect::<Vec<_>>();
+    tags.sort();
+    // Validate tags to prevent query injection before building the recall query.
+    for tag in &tags {
+        validate_tag(tag)?;
+    }
+    let query = tags.join(", ");
     let chunk = crate::icm::generate_context_chunk(&active, &[]);
 
-    let client = McpHttpClient::new(url, HOOK_TIMEOUT);
+    let client = McpHttpClient::new(url, HOOK_TIMEOUT)
+        .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let mut out = String::new();
@@ -127,6 +134,24 @@ fn memory_url(
         ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some(url),
         _ => None,
     })
+}
+
+/// Validate a tag to prevent query injection. Tags must be alphanumeric with
+/// hyphens and underscores only (same as bundle/scope naming).
+fn validate_tag(tag: &str) -> anyhow::Result<()> {
+    if tag.is_empty() {
+        return Err(anyhow::anyhow!("empty tag in recall query"));
+    }
+    if !tag
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow::anyhow!(
+            "tag '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
+            tag
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -160,5 +185,39 @@ mod tests {
         assert_eq!(dispatch(HookEvent::SessionStart), vec![Action::WakeUp]);
         assert_eq!(dispatch(HookEvent::TurnStart), vec![Action::Recall]);
         assert_eq!(dispatch(HookEvent::SessionEnd), vec![Action::Store]);
+    }
+
+    #[test]
+    fn validate_tag_accepts_valid_tags() {
+        assert!(validate_tag("base").is_ok());
+        assert!(validate_tag("rust-lang").is_ok());
+        assert!(validate_tag("work_project").is_ok());
+        assert!(validate_tag("tag123").is_ok());
+        assert!(validate_tag("my-tag_123").is_ok());
+    }
+
+    #[test]
+    fn validate_tag_rejects_empty() {
+        assert!(validate_tag("").is_err());
+    }
+
+    #[test]
+    fn validate_tag_rejects_special_characters() {
+        assert!(validate_tag("tag:space").is_err());
+        assert!(validate_tag("tag space").is_err());
+        assert!(validate_tag("tag/path").is_err());
+        assert!(validate_tag("tag.dot").is_err());
+        assert!(validate_tag("tag@at").is_err());
+        assert!(validate_tag("tag#hash").is_err());
+        assert!(validate_tag("tag$dollar").is_err());
+        assert!(validate_tag("tag\"quote").is_err());
+    }
+
+    #[test]
+    fn validate_tag_rejects_query_injection_attempts() {
+        // Attempts to inject ICM query syntax
+        assert!(validate_tag("tag,malicious").is_err());
+        assert!(validate_tag("tag OR other").is_err());
+        assert!(validate_tag("tag AND other").is_err());
     }
 }

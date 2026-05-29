@@ -33,6 +33,7 @@ anstream = "0.6"
 anstyle = "1.0"
 glob = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+url = "2.5"
 
 [dev-dependencies]
 assert_cmd = "2.2"

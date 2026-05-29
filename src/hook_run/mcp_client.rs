@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
+use url::{Host, Url};
 
 /// A minimal MCP-over-HTTP client bound to one server URL with a fixed timeout.
 #[derive(Debug, Clone)]
@@ -15,14 +16,27 @@ pub struct McpHttpClient {
 
 impl McpHttpClient {
     /// Build a client for `url` whose every request is bounded by `timeout`.
-    pub fn new(url: String, timeout: Duration) -> Self {
-        // `build()` only fails on TLS backend init; default rustls is infallible
-        // here, so fall back to a default client rather than panicking.
+    ///
+    /// # Errors
+    /// Returns an error if the URL is invalid, uses an unsupported scheme, or
+    /// points to a private/loopback IP address (SSRF protection).
+    pub fn new(url: String, timeout: Duration) -> anyhow::Result<Self> {
+        validate_url_production(&url)?;
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .unwrap_or_default();
-        Self { url, client }
+            .context("failed to build HTTP client (TLS backend unavailable)")?;
+        Ok(Self { url, client })
+    }
+
+    #[cfg(test)]
+    /// Build a client for testing, skipping SSRF validation.
+    fn test_new(url: String, timeout: Duration) -> anyhow::Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("failed to build HTTP client")?;
+        Ok(Self { url, client })
     }
 
     /// Call one MCP tool and return the concatenated text content.
@@ -43,9 +57,18 @@ impl McpHttpClient {
             .json(&req)
             .send()
             .await
-            .with_context(|| format!("POST {} for tool {name}", self.url))?
-            .error_for_status()
-            .with_context(|| format!("tool {name} returned an error status"))?;
+            .with_context(|| format!("POST {} for tool {name}", self.url))?;
+
+        // Capture status and body for detailed error reporting.
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "(failed to read error body)".to_string());
+            return Err(anyhow!("tool {name} returned HTTP {}: {}", status, body));
+        }
+
         let body: Value = resp
             .json()
             .await
@@ -74,6 +97,49 @@ fn extract_text(body: &Value) -> Option<String> {
     Some(out)
 }
 
+/// Validate ICM backend URL to prevent SSRF attacks.
+///
+/// Rejects URLs with unsupported schemes and private/loopback IP addresses.
+fn validate_url_production(url: &str) -> anyhow::Result<()> {
+    let parsed = Url::parse(url).with_context(|| format!("invalid URL: {url}"))?;
+
+    // Only allow http/https schemes
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(anyhow!(
+            "unsupported URL scheme '{}' (only http/https allowed)",
+            parsed.scheme()
+        ));
+    }
+
+    // Reject private/loopback IP ranges to prevent SSRF
+    if let Some(host) = parsed.host() {
+        match host {
+            Host::Ipv4(v4) => {
+                if v4.is_loopback() {
+                    return Err(anyhow!("loopback IPv4 {} not allowed", v4));
+                }
+                if v4.is_private() {
+                    return Err(anyhow!("private IPv4 {} not allowed", v4));
+                }
+                if v4.is_link_local() {
+                    return Err(anyhow!("link-local IPv4 {} not allowed", v4));
+                }
+            }
+            Host::Ipv6(v6) => {
+                if v6.is_loopback() {
+                    return Err(anyhow!("loopback IPv6 {} not allowed", v6));
+                }
+                if v6.is_unicast_link_local() {
+                    return Err(anyhow!("link-local IPv6 {} not allowed", v6));
+                }
+            }
+            Host::Domain(_) => {} // Domain names are allowed
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -98,7 +164,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = McpHttpClient::new(server.uri(), Duration::from_secs(2));
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
         let text = client
             .call_tool("icm_wake_up", serde_json::json!({}))
             .await
@@ -108,11 +175,36 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_errors_on_unreachable() {
-        // Port 0 is never listening; connection fails fast.
-        let client =
-            McpHttpClient::new("http://127.0.0.1:0".to_string(), Duration::from_millis(200));
+        // Valid public IP that should reject (no listening service)
+        let client = McpHttpClient::new("http://8.8.8.8:0".to_string(), Duration::from_millis(200))
+            .expect("valid URL");
         let result = client.call_tool("icm_wake_up", serde_json::json!({})).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_loopback() {
+        assert!(validate_url_production("http://127.0.0.1:8080").is_err());
+        assert!(validate_url_production("http://[::1]:8080").is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_private_ips() {
+        assert!(validate_url_production("http://10.0.0.1:8080").is_err());
+        assert!(validate_url_production("http://192.168.1.1:8080").is_err());
+        assert!(validate_url_production("http://172.16.0.1:8080").is_err());
+    }
+
+    #[test]
+    fn validate_url_accepts_public_ips() {
+        assert!(validate_url_production("http://8.8.8.8:8080").is_ok());
+        assert!(validate_url_production("https://example.com:8080").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_unsupported_schemes() {
+        assert!(validate_url_production("file:///tmp/socket").is_err());
+        assert!(validate_url_production("ftp://example.com").is_err());
     }
 
     #[tokio::test]
@@ -127,8 +219,98 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(&server)
             .await;
-        let client = McpHttpClient::new(server.uri(), Duration::from_secs(2));
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
         let result = client.call_tool("icm_wake_up", serde_json::json!({})).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_text_handles_missing_result() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1
+        });
+        assert_eq!(extract_text(&body), None);
+    }
+
+    #[test]
+    fn extract_text_handles_missing_content() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "other_field": "data" }
+        });
+        assert_eq!(extract_text(&body), None);
+    }
+
+    #[test]
+    fn extract_text_handles_non_array_content() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "content": "not an array" }
+        });
+        assert_eq!(extract_text(&body), None);
+    }
+
+    #[test]
+    fn extract_text_concatenates_multiple_text_items() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    { "type": "text", "text": "first" },
+                    { "type": "text", "text": "second" },
+                    { "type": "text", "text": "third" }
+                ]
+            }
+        });
+        assert_eq!(
+            extract_text(&body),
+            Some("first\nsecond\nthird".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_text_skips_non_text_items() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    { "type": "text", "text": "a" },
+                    { "type": "image", "url": "https://example.com/img.png" },
+                    { "type": "text", "text": "b" }
+                ]
+            }
+        });
+        assert_eq!(extract_text(&body), Some("a\nb".to_string()));
+    }
+
+    #[test]
+    fn extract_text_handles_missing_text_field() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    { "type": "text" },
+                    { "type": "text", "text": "valid" }
+                ]
+            }
+        });
+        assert_eq!(extract_text(&body), Some("valid".to_string()));
+    }
+
+    #[test]
+    fn extract_text_handles_empty_content_array() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "content": [] }
+        });
+        assert_eq!(extract_text(&body), Some(String::new()));
     }
 }

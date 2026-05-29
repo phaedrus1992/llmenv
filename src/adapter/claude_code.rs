@@ -100,8 +100,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if text.is_empty() {
             return String::new();
         }
+        // Wrap in a system barrier to prevent prompt injection: the MCP response
+        // (possibly from an untrusted memory backend) is wrapped so any attempts
+        // to escape the context block are trapped as unparseable markdown.
+        let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{}", text);
         serde_json::json!({
-            "hookSpecificOutput": { "additionalContext": text }
+            "hookSpecificOutput": { "additionalContext": wrapped }
         })
         .to_string()
     }
