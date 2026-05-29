@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Lifecycle memory hooks** — new `hook-run` command provides engine-neutral
+  lifecycle event dispatching for ICM memory integration. Three events (`session_start`,
+  `turn_start`, `session_end`) trigger corresponding ICM actions (`icm_wake_up`,
+  `icm_memory_recall`, `icm_memory_store`). Hooks auto-activate when a memory
+  backend is configured; failures degrade gracefully with warnings (exit 0) so
+  hooks never block the agent. (#171)
+
 - **ICM-aware Claude Code adapter** — the adapter now resolves three previously
   open design questions automatically. (1) It auto-derives
   `enabledMcpjsonServers` in `mcp.json` from every server llmenv emits, so the
