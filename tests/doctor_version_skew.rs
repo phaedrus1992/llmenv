@@ -6,11 +6,8 @@ use std::process::Command;
 #[test]
 fn test_doctor_runs_without_error() {
     // Baseline: doctor should run and exit 0 (warnings don't block)
-    // Use the compiled binary directly instead of cargo run to avoid cargo's
-    // stderr mixing with the program's output.
-    let binary_path = env!("CARGO_BIN_EXE_llmenv");
-    let output = Command::new(binary_path)
-        .args(["doctor"])
+    let output = Command::new("cargo")
+        .args(["run", "--quiet", "--", "doctor"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("failed to run llmenv doctor");
@@ -26,11 +23,8 @@ fn test_doctor_runs_without_error() {
 #[test]
 fn test_doctor_version_check_label_exists() {
     // Version skew check should be in doctor output (or at least not break doctor)
-    // Use the compiled binary directly instead of cargo run to avoid cargo's
-    // stderr mixing with the program's output.
-    let binary_path = env!("CARGO_BIN_EXE_llmenv");
-    let output = Command::new(binary_path)
-        .args(["doctor"])
+    let output = Command::new("cargo")
+        .args(["run", "--quiet", "--", "doctor"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("failed to run llmenv doctor");

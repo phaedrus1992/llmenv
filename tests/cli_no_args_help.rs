@@ -6,9 +6,8 @@ use std::process::Command;
 #[test]
 fn test_llmenv_no_args_shows_help() {
     // Run `llmenv` with no subcommand
-    // Use the compiled binary directly instead of cargo run to get cleaner output
-    let binary_path = env!("CARGO_BIN_EXE_llmenv");
-    let output = Command::new(binary_path)
+    let output = Command::new("cargo")
+        .args(["run", "--quiet", "--"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("failed to run llmenv");
@@ -51,10 +50,8 @@ fn test_llmenv_no_args_shows_help() {
 #[test]
 fn test_llmenv_help_flag_shows_help() {
     // Baseline: --help should work and show full help
-    // Use the compiled binary directly instead of cargo run to get cleaner output
-    let binary_path = env!("CARGO_BIN_EXE_llmenv");
-    let output = Command::new(binary_path)
-        .args(["--help"])
+    let output = Command::new("cargo")
+        .args(["run", "--quiet", "--", "--help"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("failed to run llmenv --help");
