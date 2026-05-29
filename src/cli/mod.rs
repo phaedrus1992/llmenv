@@ -1094,6 +1094,9 @@ fn run_status(use_color: bool) -> anyhow::Result<()> {
 
 fn run_context(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent directory"))?;
     let config = Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
@@ -1154,6 +1157,36 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
         for line in inactive_scopes {
             println!("{}", line);
         }
+    }
+
+    // Render merged manifest for the active context using existing bundle resolution
+    let firing: Vec<&Bundle> = config
+        .bundle
+        .iter()
+        .filter(|b| b.tags.iter().any(|tag| active.tags.contains(tag)))
+        .collect();
+    let bundle_refs = build_bundle_refs(config_dir, &active, &firing);
+    let manifest = crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)?;
+
+    println!("\nMerged Manifest");
+    println!("Hooks");
+    if !manifest.capabilities.hooks.is_empty() {
+        for hook in &manifest.capabilities.hooks {
+            let source = hook
+                .bundle_origin
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("config.yaml");
+            println!(
+                "  {} {} (from {})",
+                hook.event,
+                hook.matcher.as_deref().unwrap_or("*"),
+                source
+            );
+        }
+    } else {
+        println!("  (no hooks selected for active context)");
     }
 
     Ok(())
