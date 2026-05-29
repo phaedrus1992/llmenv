@@ -442,7 +442,7 @@ mod tests {
         // Derived project id/name must be valid UTF-8 and handle special chars.
         #[test]
         fn unicode_safe_basename_derivation(
-            name_part in r"[^\x00/]*"
+            name_part in r"[^\x00/\.]|[^\x00/][^\x00/]*[^\x00/.]"
         ) {
             let temp_dir = tempfile::TempDir::new().expect("tempdir");
             let root = temp_dir.path();
@@ -458,11 +458,9 @@ mod tests {
             // Both must be non-empty (basename fallback is "llmenv").
             prop_assert!(!project.id.is_empty());
             prop_assert!(!project.name.is_empty());
-            // If name_part was non-empty, it should derive from the folder.
-            if !name_part.is_empty() {
-                prop_assert_eq!(project.id, name_part.clone());
-                prop_assert_eq!(project.name, name_part);
-            }
+            // name_part is guaranteed non-empty, no leading/trailing dots
+            prop_assert_eq!(project.id, name_part.clone());
+            prop_assert_eq!(project.name, name_part);
         }
 
         // Property test #166: discover_project walk termination with deep nesting.
