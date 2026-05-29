@@ -41,8 +41,8 @@ fn test_llmenv_no_args_shows_help() {
 
     // Should NOT be the minimal stub we're replacing
     assert!(
-        !combined.contains("Run 'llmenv --help' for more information.")
-            || combined.contains("Commands:"),
+        combined.contains("Commands:")
+            && !combined.contains("Run 'llmenv --help' for more information."),
         "help output should be full help, not the minimal stub"
     );
 }

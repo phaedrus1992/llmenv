@@ -273,7 +273,8 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
                 && let Some(dir_name) = path.file_name().and_then(|n| n.to_str())
             {
                 // Extract version tag from dir names like "adapter/<VERSION_TAG>-<hash>/"
-                if let Some(version_part) = dir_name.split('-').next() {
+                // Use rsplit_once to split from right to preserve any dashes in semver prerelease versions
+                if let Some(version_part) = dir_name.rsplit_once('-').map(|(v, _)| v) {
                     cached_versions.push(version_part.to_string());
                 }
             }
