@@ -145,6 +145,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reads far more compactly in YAML. Dropped the `toml` dependency and migrated off
   the deprecated `serde_yaml` crate to the maintained `serde_yaml_ng` fork. (#76)
 
+- **Lifecycle hooks run on a current-thread tokio runtime** — `hook-run` fires on
+  the agent's hot path (session start and every prompt turn) and only does one
+  `block_on` over a short sequential chain of HTTP round-trips, so the
+  multi-threaded runtime's worker pool was pure startup overhead. Swapped to
+  `Builder::new_current_thread().enable_all().build()`; the 2s timeout and
+  fail-soft behavior are unchanged. Added integration tests driving the real
+  `hook-run` binary to lock in the fail-soft contract (exit 0 + stderr warning on
+  unknown event, no backend, malformed/SSRF-rejected URL, unreachable backend).
+  (#186, #187, #189)
+
 ### Fixed
 
 - **Path traversal detection now parses path components** instead of substring
