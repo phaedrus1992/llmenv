@@ -158,6 +158,14 @@ enum Command {
     /// `CLAUDE_CONFIG_DIR` (the content hash the agent booted with) against the
     /// folder llmenv would materialize now. On drift it prints a restart hint.
     CheckStale,
+    /// Run an agent lifecycle hook (injects ICM memory context over MCP).
+    ///
+    /// Invoked by the agent runtime, not by users directly. `event` is an
+    /// engine-neutral name: session_start | turn_start | session_end.
+    HookRun {
+        /// Lifecycle event: session_start, turn_start, or session_end
+        event: String,
+    },
     /// Clean stale cache folders
     Prune {
         /// Remove ALL cache folders unconditionally (next export re-materializes all environments)
@@ -225,6 +233,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::CheckStale) => {
             run_check_stale(use_color)?;
+        }
+        Some(Command::HookRun { event }) => {
+            crate::hook_run::run(&event)?;
         }
         Some(Command::Prune {
             all,
