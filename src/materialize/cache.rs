@@ -3,6 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
+use crate::config::{HashingMode, VersionFidelity};
 use crate::merge::MergedManifest;
 
 /// Stable SHA-256 of the merged manifest. Each field is length-prefixed
@@ -20,13 +21,55 @@ use crate::merge::MergedManifest;
 /// starting with the current tag.
 pub const VERSION_TAG: &str = env!("LLMENV_VERSION_TAG");
 
-/// Compose the on-disk folder name: `{VERSION_TAG}-{content_hash}`. Splitting
-/// the version off the content hash keeps the hash a function of inputs only,
-/// so two folders that differ in version prefix but share the same content
-/// hash are byte-identical — useful for diffing across upgrades.
+/// Bare package version (`X.Y.Z`, or a semver prerelease like `1.2.3-rc.1`),
+/// baked in by `build.rs`. Source for the `version`-mode folder name at every
+/// fidelity below `commit`.
+pub const PKG_VERSION: &str = env!("LLMENV_PKG_VERSION");
+
+/// Short git commit hash, or empty when built outside a git checkout (crates.io
+/// tarball). Appended at [`VersionFidelity::Commit`] fidelity.
+pub const GIT_HASH: &str = env!("LLMENV_GIT_HASH");
+
+/// Compose the on-disk folder name for the active [`HashingMode`].
+///
+/// - [`HashingMode::Strict`] → `{VERSION_TAG}-{content_hash}`. Splitting the
+///   version off the content hash keeps the hash a function of inputs only, so
+///   two folders that differ in version prefix but share the same content hash
+///   are byte-identical — useful for diffing across upgrades.
+/// - [`HashingMode::Version`] → the binary version at `fidelity` (the content
+///   hash is *not* in the name; it lives in the manifest dotfile). Content
+///   edits re-render into the same folder.
 #[must_use]
-pub fn folder_name(content_hash: &str) -> String {
-    format!("{VERSION_TAG}-{content_hash}")
+pub fn folder_name(content_hash: &str, mode: HashingMode, fidelity: VersionFidelity) -> String {
+    match mode {
+        HashingMode::Strict => format!("{VERSION_TAG}-{content_hash}"),
+        HashingMode::Version => version_folder_name(fidelity),
+    }
+}
+
+/// The `version`-mode folder name at `fidelity`, composed from [`PKG_VERSION`]
+/// and [`GIT_HASH`] (both baked in by `build.rs`). Filesystem-safe: package
+/// versions and git short-hashes contain only `[0-9A-Za-z.+-]`.
+///
+/// A version of `1.2.3` yields `1` / `1.2` / `1.2.3` / `1.2.3-hhhhhhhh`. A
+/// shorter-than-expected version (e.g. a bare `1`) degrades gracefully: each
+/// fidelity takes as many leading `.`-separated components as exist.
+#[must_use]
+pub fn version_folder_name(fidelity: VersionFidelity) -> String {
+    let take =
+        |n: usize| -> String { PKG_VERSION.split('.').take(n).collect::<Vec<_>>().join(".") };
+    match fidelity {
+        VersionFidelity::Major => take(1),
+        VersionFidelity::MajorMinor => take(2),
+        VersionFidelity::Full => PKG_VERSION.to_string(),
+        VersionFidelity::Commit => {
+            if GIT_HASH.is_empty() {
+                PKG_VERSION.to_string()
+            } else {
+                format!("{PKG_VERSION}-{GIT_HASH}")
+            }
+        }
+    }
 }
 
 pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
@@ -134,10 +177,17 @@ pub struct PruneReport {
 
 /// Prune cache folders under `cache_root` according to `mode`.
 ///
+/// `version_folder` is the current [`HashingMode::Version`] folder name (e.g.
+/// `1.2`) when version mode is active, or `None` in strict mode. It exists so a
+/// version-mode folder — which has no `{VERSION_TAG}-` prefix to recognize it
+/// by — is still counted as "current" and not swept by `StaleOnly`. In strict
+/// mode pass `None`; the prefix test alone identifies current folders.
+///
 /// Behavior:
 /// - `*.tmp` staging dirs are always removed (orphaned partial writes).
-/// - `StaleOnly`: removes folders whose name prefix != current `VERSION_TAG`.
-/// - `OlderThan(d)`: removes current-version folders older than `d`.
+/// - `StaleOnly`: removes folders that are neither a `{VERSION_TAG}-…` folder
+///   (strict, current binary) nor `version_folder` (version mode, current).
+/// - `OlderThan(d)`: removes current folders older than `d`.
 /// - `All`: removes every folder unconditionally.
 ///
 /// Security invariants:
@@ -149,7 +199,12 @@ pub struct PruneReport {
 ///
 /// # Errors
 /// Returns an error if reading `cache_root` or removing an entry fails.
-pub fn prune(cache_root: &Path, mode: PruneMode, dry_run: bool) -> anyhow::Result<PruneReport> {
+pub fn prune(
+    cache_root: &Path,
+    mode: PruneMode,
+    version_folder: Option<&str>,
+    dry_run: bool,
+) -> anyhow::Result<PruneReport> {
     let mut report = PruneReport::default();
     if !cache_root.exists() {
         return Ok(report);
@@ -175,10 +230,9 @@ pub fn prune(cache_root: &Path, mode: PruneMode, dry_run: bool) -> anyhow::Resul
             continue;
         }
 
-        let is_current = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(&format!("{VERSION_TAG}-")));
+        let is_current = entry.file_name().to_str().is_some_and(|name| {
+            name.starts_with(&format!("{VERSION_TAG}-")) || version_folder == Some(name)
+        });
 
         let should_remove = match mode {
             PruneMode::All => true,
@@ -301,6 +355,59 @@ mod tests {
         p
     }
 
+    #[test]
+    fn strict_folder_name_is_version_tag_plus_hash() {
+        let name = folder_name("deadbeef", HashingMode::Strict, VersionFidelity::default());
+        assert_eq!(name, format!("{VERSION_TAG}-deadbeef"));
+    }
+
+    #[test]
+    fn version_folder_name_nests_by_fidelity() {
+        // PKG_VERSION is baked at build time, so assert structural relationships
+        // rather than literal strings: each coarser fidelity is a prefix of the
+        // finer one, and commit is full (+ optional `-hash`).
+        let major = version_folder_name(VersionFidelity::Major);
+        let major_minor = version_folder_name(VersionFidelity::MajorMinor);
+        let full = version_folder_name(VersionFidelity::Full);
+        let commit = version_folder_name(VersionFidelity::Commit);
+
+        assert_eq!(
+            full, PKG_VERSION,
+            "full fidelity is the bare package version"
+        );
+        assert!(
+            major_minor.starts_with(&major),
+            "major ({major}) is a prefix of major_minor ({major_minor})"
+        );
+        assert!(
+            full.starts_with(&major_minor),
+            "major_minor ({major_minor}) is a prefix of full ({full})"
+        );
+        if GIT_HASH.is_empty() {
+            assert_eq!(commit, full, "no git hash → commit degrades to full");
+        } else {
+            assert_eq!(commit, format!("{full}-{GIT_HASH}"));
+        }
+        // Folder mode ignores the content hash argument entirely.
+        assert_eq!(
+            folder_name("ignored", HashingMode::Version, VersionFidelity::Full),
+            full
+        );
+    }
+
+    #[test]
+    fn version_folder_name_takes_leading_components() {
+        // The major/major_minor split counts `.`-separated leading components.
+        let dots = PKG_VERSION.split('.').count();
+        if dots >= 2 {
+            assert_ne!(
+                version_folder_name(VersionFidelity::Major),
+                version_folder_name(VersionFidelity::MajorMinor),
+                "a >=2-component version distinguishes major from major_minor"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn hash_manifest_is_stable_across_symlinked_source_paths() {
@@ -340,7 +447,7 @@ mod tests {
     fn prune_missing_root_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist");
-        let report = prune(&missing, PruneMode::All, false).unwrap();
+        let report = prune(&missing, PruneMode::All, None, false).unwrap();
         assert!(report.removed.is_empty());
         assert_eq!(report.kept, 0);
     }
@@ -350,7 +457,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         touch_dir(tmp.path(), &format!("{VERSION_TAG}-aaaa"));
         touch_dir(tmp.path(), "0.0.1-old-bbbb");
-        let report = prune(tmp.path(), PruneMode::All, false).unwrap();
+        let report = prune(tmp.path(), PruneMode::All, None, false).unwrap();
         assert_eq!(report.removed.len(), 2);
         assert_eq!(report.kept, 0);
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
@@ -361,7 +468,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let current = touch_dir(tmp.path(), &format!("{VERSION_TAG}-aaaa"));
         let stale = touch_dir(tmp.path(), "0.0.1-old-bbbb");
-        let report = prune(tmp.path(), PruneMode::StaleOnly, false).unwrap();
+        let report = prune(tmp.path(), PruneMode::StaleOnly, None, false).unwrap();
         assert_eq!(report.kept, 1);
         assert!(report.removed.contains(&stale));
         assert!(!report.removed.contains(&current));
@@ -370,10 +477,25 @@ mod tests {
     }
 
     #[test]
+    fn prune_stale_only_keeps_version_mode_folder() {
+        // #196: a version-mode folder (e.g. "1.2") has no `{VERSION_TAG}-`
+        // prefix, so `StaleOnly` must be told the current version folder name
+        // explicitly or it would wrongly sweep the live config dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let current = touch_dir(tmp.path(), "1.2");
+        let stale = touch_dir(tmp.path(), "1.1");
+        let report = prune(tmp.path(), PruneMode::StaleOnly, Some("1.2"), false).unwrap();
+        assert_eq!(report.kept, 1);
+        assert!(current.exists(), "current version folder must survive");
+        assert!(!stale.exists(), "older version folder is swept");
+        assert!(report.removed.contains(&stale));
+    }
+
+    #[test]
     fn prune_always_removes_tmp_staging_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let staging = touch_dir(tmp.path(), &format!("{VERSION_TAG}-cccc.tmp"));
-        let report = prune(tmp.path(), PruneMode::StaleOnly, false).unwrap();
+        let report = prune(tmp.path(), PruneMode::StaleOnly, None, false).unwrap();
         assert!(report.removed.contains(&staging));
         assert!(!staging.exists());
     }
@@ -383,7 +505,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let a = touch_dir(tmp.path(), &format!("{VERSION_TAG}-aaaa"));
         let b = touch_dir(tmp.path(), "0.0.1-old-bbbb");
-        let report = prune(tmp.path(), PruneMode::All, true).unwrap();
+        let report = prune(tmp.path(), PruneMode::All, None, true).unwrap();
         // Reports what *would* be removed, but leaves the filesystem intact.
         assert_eq!(report.removed.len(), 2);
         assert!(a.exists());
@@ -396,7 +518,13 @@ mod tests {
         // A stale folder is NOT aged out by OlderThan — only current-version
         // folders are subject to the age check, keeping the two axes orthogonal.
         let stale = touch_dir(tmp.path(), "0.0.1-old-bbbb");
-        let report = prune(tmp.path(), PruneMode::OlderThan(Duration::ZERO), false).unwrap();
+        let report = prune(
+            tmp.path(),
+            PruneMode::OlderThan(Duration::ZERO),
+            None,
+            false,
+        )
+        .unwrap();
         // Current-version dir absent; stale kept because OlderThan ignores it.
         assert!(stale.exists());
         assert_eq!(report.kept, 1);
@@ -418,7 +546,7 @@ mod tests {
         let link = cache_root.join("link");
         symlink(&outside, &link).unwrap();
 
-        let report = prune(&cache_root, PruneMode::All, false).unwrap();
+        let report = prune(&cache_root, PruneMode::All, None, false).unwrap();
         assert!(report.removed.contains(&link));
         // The link is gone; the target and its contents survive.
         assert!(!link.exists());

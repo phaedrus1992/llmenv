@@ -1,21 +1,71 @@
 pub mod cache;
+pub mod manifest;
 
 use std::path::{Path, PathBuf};
 
+use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
-/// Materialize `m` into a content-hashed subdirectory of `cache_root`.
+/// Outcome of [`materialize`]: the folder llmenv rendered into, plus the
+/// content hash it rendered (so callers can record it in the dotfile without
+/// re-hashing).
+#[derive(Debug, Clone)]
+pub struct Rendered {
+    /// The materialized folder (`<cache_root>/<adapter>/<folder_name>`).
+    pub path: PathBuf,
+    /// The content hash of `m` (the [`cache::hash_manifest`] result).
+    pub hash: String,
+}
+
+/// Materialize the bundle files of `m` into a subdirectory of `cache_root`,
+/// named per the active [`HashingMode`] (#196).
 ///
-/// Writes are staged to `<cache_root>/<hash>.tmp/` and atomically renamed to
-/// `<cache_root>/<hash>/` on success. If the destination already exists the
-/// call is a no-op and the existing path is returned.
-pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<PathBuf> {
+/// - [`HashingMode::Strict`]: folder = `{VERSION_TAG}-{hash}`. Writes are staged
+///   to a per-call `.tmp/` dir and atomically renamed into place; an existing
+///   destination is a no-op (byte-identical by construction).
+/// - [`HashingMode::Version`]: folder = the binary version at `fidelity`. The
+///   content hash is *not* in the name, so the folder is reused across content
+///   edits. Files are written in place (no staging swap) because the folder is
+///   the agent's live config dir for the whole session — a swap would destroy
+///   foreign in-session state (#175). Stale-file reconciliation against the
+///   owned-set manifest happens in the orchestrator after the adapter runs.
+///
+/// This function only handles `m.files` (raw bundle content). The agent adapter
+/// writes the native files (CLAUDE.md, settings.json, …) on top, and the
+/// orchestrator records the combined owned set + content hash in the dotfile.
+pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<Rendered> {
+    materialize_with_mode(m, cache_root, HashingMode::default(), Default::default())
+}
+
+/// [`materialize`] with an explicit mode + fidelity. `materialize` is the
+/// default-mode convenience wrapper used by tests and callers that don't thread
+/// config through.
+pub fn materialize_with_mode(
+    m: &MergedManifest,
+    cache_root: &Path,
+    mode: HashingMode,
+    fidelity: crate::config::VersionFidelity,
+) -> anyhow::Result<Rendered> {
     let hash = cache::hash_manifest(m)?;
-    let folder = cache::folder_name(&hash);
+    let folder = cache::folder_name(&hash, mode, fidelity);
     let dest = cache_root.join(&folder);
-    if dest.exists() {
-        return Ok(dest);
+
+    match mode {
+        // Version mode reuses one folder across content edits: write in place,
+        // never swap (the folder is Claude's live home). Stale-file cleanup is
+        // the orchestrator's job via the owned-set manifest.
+        HashingMode::Version => {
+            write_in_place(m, &dest)?;
+            return Ok(Rendered { path: dest, hash });
+        }
+        // Strict mode: a content-hashed folder that already exists is
+        // byte-identical, so reuse it untouched.
+        HashingMode::Strict if dest.exists() => {
+            return Ok(Rendered { path: dest, hash });
+        }
+        HashingMode::Strict => {}
     }
+
     std::fs::create_dir_all(cache_root)?;
 
     // Per-call staging directory: `<folder>.<pid>.<nanos>.tmp`. Each concurrent
@@ -43,20 +93,40 @@ pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<Path
         std::fs::copy(abs, &out)?;
     }
     match std::fs::rename(&staging, &dest) {
-        Ok(()) => Ok(dest),
+        Ok(()) => Ok(Rendered { path: dest, hash }),
         Err(e) => {
             // Another concurrent writer raced us to the same hash. Their dir
             // is byte-identical (same hash ⇒ same contents), so accept it
             // and drop our staging.
             if dest.exists() {
                 let _ = std::fs::remove_dir_all(&staging);
-                Ok(dest)
+                Ok(Rendered { path: dest, hash })
             } else {
                 let _ = std::fs::remove_dir_all(&staging);
                 Err(e.into())
             }
         }
     }
+}
+
+/// Copy `m.files` into `dest` in place (version mode). No staging swap: `dest`
+/// is the agent's live config dir, so foreign in-session files must survive.
+/// Stale llmenv-owned files from a prior render are reconciled separately by
+/// the orchestrator against the owned-set manifest — this function only writes
+/// the current content. Idempotent: re-copying the same bytes is harmless.
+fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for (rel, abs) in &m.files {
+        if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
+            anyhow::bail!("path traversal in bundle file: {}", rel.display());
+        }
+        let out = dest.join(rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(abs, &out)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

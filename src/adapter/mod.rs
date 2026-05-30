@@ -1,6 +1,6 @@
 pub mod claude_code;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::merge::MergedManifest;
 
@@ -23,14 +23,23 @@ pub trait AgentAdapter {
     /// path the agent will silently mis-parse.
     fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>>;
 
-    /// Write the manifest into `out` in the agent-native layout.
+    /// Write the manifest into `out` in the agent-native layout, returning the
+    /// set of paths the adapter wrote, each relative to `out`. The returned set
+    /// is llmenv's *owned* set for `out`: callers union it with the generic
+    /// copied files to build the [`crate::materialize::manifest::CacheManifest`]
+    /// and to reconcile ghost files on a version-mode re-render (#196).
     ///
-    /// Implementations must be idempotent — callers re-run after cache GC.
+    /// Implementations must be idempotent — callers re-run after cache GC and
+    /// re-render in place in version mode. Files an implementation merges over
+    /// (rather than overwrites) to preserve foreign in-session state — e.g.
+    /// `settings.json`, which a plugin may self-register hooks into (#175) — are
+    /// still reported as owned, because llmenv authored their llmenv-controlled
+    /// keys.
     ///
     /// # Errors
     /// Returns any I/O error encountered while creating directories or
     /// copying files.
-    fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<()>;
+    fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>>;
 
     /// Format injected hook context in the engine's native hook-output shape so
     /// the agent runtime adds it to the model's context. Empty input returns an
