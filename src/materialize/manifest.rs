@@ -39,12 +39,20 @@ impl CacheManifest {
     /// Build a manifest from a content hash and the set of owned relative
     /// paths. Paths are normalized to forward slashes and the dotfile itself is
     /// never recorded as owned (it is metadata, not content).
+    ///
+    /// A path that would escape the materialized folder when joined (`..`
+    /// components or an absolute path) is dropped rather than recorded: the
+    /// owned set drives `remove_file` during reconciliation, so a traversal
+    /// path that survived into the manifest would let a re-render delete files
+    /// outside the cache. llmenv only ever writes safe relative paths, so a
+    /// rejected entry means a corrupt or tampered manifest, not lost ownership.
     #[must_use]
     pub fn new(content_hash: impl Into<String>, owned: impl IntoIterator<Item = PathBuf>) -> Self {
         let owned = owned
             .into_iter()
             .map(|p| normalize_rel(&p))
             .filter(|p| p != MANIFEST_FILE && !p.is_empty())
+            .filter(|p| !crate::paths::is_unsafe_join_target(p))
             .collect();
         Self {
             content_hash: content_hash.into(),
@@ -124,6 +132,26 @@ mod tests {
             m.owned,
             BTreeSet::from(["CLAUDE.md".to_string()]),
             "the manifest never records itself or empty paths"
+        );
+    }
+
+    #[test]
+    fn new_drops_traversal_and_absolute_paths() {
+        // The owned set drives remove_file during reconciliation; a path that
+        // escapes the folder must never be recorded (#196 path-traversal).
+        let m = CacheManifest::new(
+            "abc",
+            vec![
+                PathBuf::from("CLAUDE.md"),
+                PathBuf::from("../../../etc/passwd"),
+                PathBuf::from("/etc/shadow"),
+                PathBuf::from("rules/../../escape.md"),
+            ],
+        );
+        assert_eq!(
+            m.owned,
+            BTreeSet::from(["CLAUDE.md".to_string()]),
+            "only the safe relative path is recorded"
         );
     }
 
