@@ -210,4 +210,47 @@ mod tests {
         );
         assert!(prev.stale_against(&cur).is_empty());
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Safe relative path segments — no traversal, no separators that
+        // `new()` would reject, so what goes in is what comes back out.
+        fn arb_rel() -> impl Strategy<Value = String> {
+            "[a-z0-9_]{1,8}(/[a-z0-9_]{1,8}){0,2}"
+        }
+
+        fn arb_manifest() -> impl Strategy<Value = CacheManifest> {
+            (
+                "[a-f0-9]{0,64}",
+                prop::collection::vec(arb_rel().prop_map(PathBuf::from), 0..8),
+            )
+                .prop_map(|(hash, owned)| CacheManifest::new(hash, owned))
+        }
+
+        proptest! {
+            #[test]
+            fn serde_roundtrips(m in arb_manifest()) {
+                let json = serde_json::to_string(&m).unwrap();
+                let back: CacheManifest = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back, m, "manifest must survive a JSON round-trip");
+            }
+
+            #[test]
+            fn stale_is_previous_minus_current(prev in arb_manifest(), cur in arb_manifest()) {
+                let stale: BTreeSet<String> = prev.stale_against(&cur).into_iter().collect();
+                // Every stale path was owned before and is not owned now.
+                prop_assert!(stale.is_subset(&prev.owned), "stale ⊆ previous.owned");
+                prop_assert!(
+                    stale.is_disjoint(&cur.owned),
+                    "stale never names a still-owned (current) path"
+                );
+                // Completeness: nothing in previous-but-not-current is missed.
+                let expected: BTreeSet<String> =
+                    prev.owned.difference(&cur.owned).cloned().collect();
+                prop_assert_eq!(stale, expected);
+            }
+        }
+    }
 }
