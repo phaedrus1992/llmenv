@@ -904,6 +904,14 @@ fn write_cache_manifest(
         && let Some(previous) = CacheManifest::read(cache_path)?
     {
         for ghost in previous.stale_against(&current) {
+            // The previous manifest is deserialized raw, bypassing
+            // `CacheManifest::new`'s filter — a tampered dotfile could carry a
+            // `..`/absolute path that `join` would resolve outside the cache.
+            // Re-check here so reconciliation can never delete a foreign file.
+            if crate::paths::is_unsafe_join_target(&ghost) {
+                tracing::warn!("refusing to delete unsafe owned path from manifest: {ghost}");
+                continue;
+            }
             let victim = cache_path.join(&ghost);
             if let Err(e) = std::fs::remove_file(&victim) {
                 if e.kind() != std::io::ErrorKind::NotFound {
@@ -2009,6 +2017,36 @@ mod tests {
         let read = CacheManifest::read(&cache).unwrap().unwrap();
         assert_eq!(read.content_hash, "h2");
         assert!(!read.owned.contains("ghost.md"));
+    }
+
+    #[test]
+    fn write_cache_manifest_refuses_to_delete_outside_cache() {
+        // A tampered dotfile (written as raw JSON, bypassing CacheManifest::new's
+        // filter) claims to own a path that escapes the folder. Reconciliation
+        // must refuse to delete it rather than join + remove_file outside the
+        // cache (#196 path-traversal).
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("1.2");
+        std::fs::create_dir_all(&cache).unwrap();
+
+        // A victim file a level above the cache folder — must survive.
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, b"do not delete").unwrap();
+
+        // Hand-write a previous manifest with a traversal owned path. Raw JSON
+        // so it slips past the constructor's safety filter the way a tampered
+        // or corrupt on-disk dotfile would.
+        let tampered = r#"{"content_hash":"old","owned":["../victim.txt"]}"#;
+        std::fs::write(cache.join(MANIFEST_FILE), tampered).unwrap();
+
+        // Re-render dropping the traversal path from the owned set.
+        let m = manifest_with_files(tmp.path(), &[]);
+        write_cache_manifest(&cache, "new", &m, vec![], HashingMode::Version).unwrap();
+
+        assert!(
+            victim.exists(),
+            "reconciliation must never delete a file outside the cache folder"
+        );
     }
 
     #[test]
