@@ -552,4 +552,102 @@ mod tests {
         assert!(!link.exists());
         assert!(outside.join("keep.txt").exists());
     }
+
+    mod hash_properties {
+        use super::*;
+        use crate::merge::MergedManifest;
+        use crate::merge::rules::RuleFile;
+        use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
+        use proptest::prelude::*;
+
+        fn rule(bundle: &str, rel: &str, raw: &str) -> RuleFile {
+            RuleFile {
+                bundle: bundle.into(),
+                rel: PathBuf::from(rel),
+                frontmatter: None,
+                body: raw.into(),
+                raw: raw.into(),
+            }
+        }
+
+        // Build a manifest from in-memory fields only (no `files`, which would
+        // require on-disk sources). These fields alone exercise the hash's
+        // determinism and per-field sensitivity.
+        fn manifest(
+            agents_md: &str,
+            rules: Vec<RuleFile>,
+            plugins: Vec<ResolvedPlugin>,
+            marketplaces: Vec<ResolvedMarketplace>,
+        ) -> MergedManifest {
+            MergedManifest {
+                agents_md: agents_md.into(),
+                rules,
+                plugins,
+                marketplaces,
+                ..Default::default()
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn hash_is_deterministic(s in ".{0,64}", body in ".{0,64}") {
+                let m = manifest(&s, vec![rule("b", "rules/a.md", &body)], vec![], vec![]);
+                // Hashing the same manifest twice must yield the same digest:
+                // the cache key would otherwise be unstable across runs.
+                prop_assert_eq!(hash_manifest(&m).unwrap(), hash_manifest(&m).unwrap());
+            }
+
+            #[test]
+            fn agents_md_edit_changes_hash(a in ".{0,48}", b in ".{0,48}") {
+                prop_assume!(a != b);
+                let ha = hash_manifest(&manifest(&a, vec![], vec![], vec![])).unwrap();
+                let hb = hash_manifest(&manifest(&b, vec![], vec![], vec![])).unwrap();
+                prop_assert_ne!(ha, hb, "an AGENTS.md edit must invalidate the cache");
+            }
+
+            #[test]
+            fn rule_edit_changes_hash(a in ".{0,48}", b in ".{0,48}") {
+                prop_assume!(a != b);
+                let ha = hash_manifest(&manifest("x", vec![rule("b", "r.md", &a)], vec![], vec![]))
+                    .unwrap();
+                let hb = hash_manifest(&manifest("x", vec![rule("b", "r.md", &b)], vec![], vec![]))
+                    .unwrap();
+                prop_assert_ne!(ha, hb, "a rules/*.md edit must invalidate the cache");
+            }
+
+            #[test]
+            fn plugin_set_change_changes_hash(name in "[a-z]{1,12}") {
+                let base = manifest("x", vec![], vec![], vec![]);
+                let with_plugin = manifest(
+                    "x",
+                    vec![],
+                    vec![ResolvedPlugin {
+                        marketplace: "mk".into(),
+                        plugin: name,
+                        collection: "c".into(),
+                    }],
+                    vec![],
+                );
+                prop_assert_ne!(
+                    hash_manifest(&base).unwrap(),
+                    hash_manifest(&with_plugin).unwrap(),
+                    "adding a plugin must invalidate the cache"
+                );
+            }
+
+            #[test]
+            fn marketplace_head_change_changes_hash(h1 in "[a-f0-9]{1,12}", h2 in "[a-f0-9]{1,12}") {
+                prop_assume!(h1 != h2);
+                let mk = |head: &str| ResolvedMarketplace {
+                    name: "mk".into(),
+                    source: "https://example.com/x.git".into(),
+                    install_location: None,
+                    head: Some(head.into()),
+                };
+                let ha = hash_manifest(&manifest("x", vec![], vec![], vec![mk(&h1)])).unwrap();
+                let hb = hash_manifest(&manifest("x", vec![], vec![], vec![mk(&h2)])).unwrap();
+                prop_assert_ne!(ha, hb, "a marketplace HEAD bump must invalidate the cache");
+            }
+        }
+    }
 }

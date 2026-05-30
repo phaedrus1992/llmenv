@@ -82,7 +82,7 @@ fn version_skew_detected_when_versions_differ() {
         extract_version_from_dir_name(&dir_b),
     ];
     assert!(
-        !cached.iter().any(|v| *v == running),
+        !cached.contains(&running),
         "version skew should be detected"
     );
 }
