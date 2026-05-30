@@ -41,11 +41,17 @@ fn main() {
     // while editing). Format: `{pkg_version}-{hash}` or `{pkg_version}` when
     // no .git is present (e.g. crates.io tarball builds).
     let version_tag = if hash.is_empty() {
-        pkg_version
+        pkg_version.clone()
     } else {
         format!("{pkg_version}-{hash}")
     };
 
     println!("cargo:rustc-env=LLMENV_VERSION={version}");
     println!("cargo:rustc-env=LLMENV_VERSION_TAG={version_tag}");
+    // Components surfaced separately so the cache layer can compose
+    // version-fidelity folder names (#196) without re-parsing the combined
+    // tag — parsing `{pkg}-{hash}` is ambiguous when `pkg` is a semver
+    // prerelease that itself contains dashes (e.g. `1.2.3-rc.1`).
+    println!("cargo:rustc-env=LLMENV_PKG_VERSION={pkg_version}");
+    println!("cargo:rustc-env=LLMENV_GIT_HASH={hash}");
 }

@@ -35,11 +35,41 @@ cache:
   cache_dir: "~/.cache/llmenv"      # where materialized configs are stored
   sync_interval_minutes: 15         # how often `export` pulls config from git
   cache_retention_hours: 168        # GC retention window (default: 7 days)
+  hashing: version                  # version | strict (default: version)
+  version_fidelity: major_minor     # major | major_minor | full | commit
 ```
 
 Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
 `cache_retention_hours` = `168`. Set `cache_retention_hours` to `null` to
 disable age-based GC.
+
+### `hashing` — how materialized folders are named
+
+- **`version`** (default): the folder is named after the running binary's
+  version. Config edits **re-render into the same folder**, so a running agent
+  only loads them when you relaunch it (`llmenv check-stale` nudges you on the
+  next `SessionStart`). The folder is the agent's live config dir for the whole
+  session, so in-session state llmenv doesn't own — Claude's runtime files,
+  third-party plugin state — is preserved across re-renders. `settings.json` is
+  merged rather than clobbered, so a plugin's self-registered hooks survive.
+- **`strict`**: the folder is named `<version>-<content_hash>`. Any input change
+  produces a new folder, so two configs never share a directory. Stronger
+  isolation, but the cache fragments across edits.
+
+`version_fidelity` (version mode only) chooses how much of the version goes into
+the folder name, i.e. how often the folder churns:
+
+| Fidelity      | Folder name        | Churns on        |
+|---------------|--------------------|------------------|
+| `major`       | `1`                | major bump       |
+| `major_minor` | `1.2` (default)    | minor bump       |
+| `full`        | `1.2.3`            | any release      |
+| `commit`      | `1.2.3-abc1234`    | every commit     |
+
+Each materialized folder also carries a `.llmenv-manifest.json` dotfile (the
+content hash + the files llmenv owns). It is what `check-stale`/`doctor` use to
+detect drift and what version-mode re-renders use to clean up files llmenv no
+longer renders without touching foreign state.
 
 ## `scope:`
 
