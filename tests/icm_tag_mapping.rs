@@ -103,7 +103,7 @@ fn test_icm_context_chunk_exported_by_cli() {
 }
 
 #[test]
-#[ignore = "deferred: recall-side hook integration (issue #81 open question #2)"]
+#[ignore = "deferred: recall-side hook integration (issue #197)"]
 fn test_icm_tag_memory_crosses_projects() {
     // When a tag (e.g., "work-vpn") is active in project A, and memory
     // is stored with keyword "llmenv-tag:work-vpn", that memory should
@@ -113,11 +113,11 @@ fn test_icm_tag_memory_crosses_projects() {
     // 1. Write side: export active tags so agents can store memory keyed by tag ✅ DONE
     // 2. Recall side: when tags activate, call icm_memory_recall with
     //    project filter disabled and keyword filter set to "llmenv-tag:<tag>"
-    //    → Deferred: requires hook integration (issue #81 open questions)
+    //    → Deferred: requires hook integration (issue #197)
 
     // The chunk injection is implemented (LLMENV_ICM_CONTEXT export).
-    // Next steps (separate issues):
+    // Next steps (tracked by #197):
     // - Store memory mappings on export via icm_memory_store() with llmenv-tag keywords
     // - Implement recall hook to auto-surface tag-scoped memory on activation
-    // See issue #81 acceptance criteria for full scope.
+    // See issue #197 acceptance criteria for full scope.
 }
