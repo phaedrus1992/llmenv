@@ -23,6 +23,14 @@ pub const STATE_DIR_NAME: &str = "state";
 /// tool or config can reference a hash-independent location.
 pub const STATE_DIR_ENV: &str = "LLMENV_STATE_DIR";
 
+/// Env vars llmenv (and its adapters) emit into the same `env_vars` set a tool's
+/// relocation var lands in. A [`crate::config::StateTool`] must not claim any of
+/// these: doing so would emit two conflicting bindings for the same name (e.g.
+/// redirecting `CLAUDE_CONFIG_DIR` into a state subdir), so validation rejects it
+/// up front (#175). `LLMENV_STATE_DIR` is always emitted here; `CLAUDE_CONFIG_DIR`
+/// is emitted by the Claude Code adapter.
+pub const RESERVED_STATE_ENV_VARS: &[&str] = &[STATE_DIR_ENV, "CLAUDE_CONFIG_DIR"];
+
 /// The durable state directory for an adapter, given its cache root
 /// (`<cache_dir>/<adapter>`). Sibling to the hashed config folders.
 #[must_use]

@@ -69,10 +69,13 @@ pub enum ValidateError {
     StateInvalidEnvName(String),
     #[error(
         "state tool subdir '{0}' is not a safe single path component \
-         (no '/', '\\', '..', '.', or empty)"
+         (no '/', '\\', ':', NUL, '..', '.', or empty)"
     )]
     StateInvalidSubdir(String),
-    #[error("state tool env '{0}' is declared more than once (or collides with LLMENV_STATE_DIR)")]
+    #[error(
+        "state tool env '{0}' is declared more than once \
+         (or collides with an llmenv-emitted var: LLMENV_STATE_DIR, CLAUDE_CONFIG_DIR)"
+    )]
     StateDuplicateEnv(String),
     #[error("duplicate plugin-collection name: {0}")]
     DuplicatePluginCollectionName(String),
@@ -319,11 +322,15 @@ impl Config {
 
     /// Validate the durable-state block (#175): each tool's env var must be a
     /// valid shell variable name, its subdir a single safe path component, and
-    /// no env var may repeat or collide with llmenv's own `LLMENV_STATE_DIR`.
+    /// no env var may repeat or collide with a var llmenv itself emits into the
+    /// same set (`LLMENV_STATE_DIR`, `CLAUDE_CONFIG_DIR`).
     fn validate_state(&self) -> Result<(), ValidateError> {
         let mut seen_env = std::collections::HashSet::new();
-        // Reserve llmenv's own emitted var so a tool can't shadow it.
-        seen_env.insert(crate::materialize::state::STATE_DIR_ENV.to_string());
+        // Reserve llmenv/adapter-emitted vars so a tool can't shadow them and
+        // produce a conflicting binding in the emitted env_vars set.
+        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+            seen_env.insert((*reserved).to_string());
+        }
         for tool in &self.state.tools {
             if !is_valid_var_name(&tool.env) {
                 return Err(ValidateError::StateInvalidEnvName(tool.env.clone()));
@@ -1543,13 +1550,18 @@ mod tests {
     }
 
     #[test]
-    fn state_reserved_llmenv_state_dir_rejected() {
-        // LLMENV_STATE_DIR is emitted by llmenv itself; a tool must not claim it.
-        let cfg = config_with_state(vec![state_tool("LLMENV_STATE_DIR", "x")]);
-        assert!(matches!(
-            cfg.validate(),
-            Err(ValidateError::StateDuplicateEnv(_))
-        ));
+    fn state_reserved_env_vars_rejected() {
+        // llmenv (and the Claude Code adapter) emit these into the same env_vars
+        // set a tool's relocation var lands in; claiming one would emit a
+        // conflicting binding (e.g. redirecting CLAUDE_CONFIG_DIR), so each is
+        // rejected up front (#175).
+        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+            let cfg = config_with_state(vec![state_tool(reserved, "x")]);
+            assert!(
+                matches!(cfg.validate(), Err(ValidateError::StateDuplicateEnv(_))),
+                "reserved env '{reserved}' should be rejected"
+            );
+        }
     }
 
     #[test]
