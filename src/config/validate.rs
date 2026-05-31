@@ -1832,5 +1832,32 @@ mod tests {
             let name = format!("-{rest}");
             prop_assert!(!is_valid_marketplace_name(&name), "leading-dash name accepted: {name}");
         }
+
+        #[test]
+        fn prop_safe_subdir_accepts_single_clean_component(
+            subdir in "[A-Za-z0-9._-]{1,20}",
+        ) {
+            // A single component free of separators/colon/NUL is accepted, except
+            // the traversal sentinels "." and "..".
+            prop_assume!(subdir != "." && subdir != "..");
+            prop_assert!(is_safe_state_subdir(&subdir), "clean subdir rejected: {subdir}");
+        }
+
+        #[test]
+        fn prop_safe_subdir_rejects_separators_and_special(
+            before in "[A-Za-z0-9._-]{0,10}",
+            bad in prop_oneof![Just('/'), Just('\\'), Just(':'), Just('\0')],
+            after in "[A-Za-z0-9._-]{0,10}",
+        ) {
+            // Any path separator, drive-letter colon, or NUL anywhere in the
+            // component is rejected so state can't escape the durable dir (#175).
+            let subdir = format!("{before}{bad}{after}");
+            prop_assert!(!is_safe_state_subdir(&subdir), "unsafe subdir accepted: {subdir:?}");
+        }
+
+        #[test]
+        fn prop_safe_subdir_never_panics(subdir in ".{0,40}") {
+            let _ = is_safe_state_subdir(&subdir);
+        }
     }
 }

@@ -721,5 +721,48 @@ mod tests {
         fn prop_split_plugin_ref_never_panics(s in ".{0,60}") {
             let _ = split_plugin_ref(&s);
         }
+
+        #[test]
+        fn prop_github_owner_repo_roundtrip(
+            owner in "[a-z0-9][a-z0-9-]{0,20}",
+            repo in "[a-z0-9][a-z0-9._-]{0,20}",
+        ) {
+            // A canonical https github URL always parses back to its components.
+            // repo strips a trailing ".git", so exclude inputs ending in it.
+            prop_assume!(!repo.ends_with(".git"));
+            let source = format!("https://github.com/{owner}/{repo}");
+            prop_assert_eq!(github_owner_repo(&source), Some((owner.as_str(), repo.as_str())));
+        }
+
+        #[test]
+        fn prop_github_owner_repo_never_panics(source in ".{0,80}") {
+            // Must total over arbitrary input — it gates reserved-name enforcement.
+            let _ = github_owner_repo(&source);
+        }
+
+        #[test]
+        fn prop_state_config_yaml_roundtrip(
+            tools in proptest::collection::vec(
+                ("[A-Z][A-Z0-9_]{0,10}", "[a-z0-9][a-z0-9._-]{0,12}"),
+                0..5,
+            ),
+        ) {
+            // StateConfig survives a YAML serialize→deserialize round-trip for any
+            // well-formed tool list (#175). Dedup of env names is enforced by
+            // validate(), not serde, so keep generated env names distinct here.
+            prop_assume!({
+                let names: std::collections::HashSet<_> = tools.iter().map(|(e, _)| e).collect();
+                names.len() == tools.len()
+            });
+            let cfg = StateConfig {
+                tools: tools
+                    .into_iter()
+                    .map(|(env, subdir)| StateTool { env, subdir })
+                    .collect(),
+            };
+            let yaml = serde_yaml::to_string(&cfg).expect("serialize StateConfig");
+            let back: StateConfig = serde_yaml::from_str(&yaml).expect("deserialize StateConfig");
+            prop_assert_eq!(cfg, back);
+        }
     }
 }
