@@ -680,12 +680,16 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
 /// Render one marketplace's `extraKnownMarketplaces` entry body, or `None` if it
 /// should be skipped.
 ///
+/// Every entry value wraps the source object under a `source` key, matching the
+/// `extraKnownMarketplaces` shape Claude Code reads/writes:
+/// `{ "source": { "source": "github" | "directory", ... } }`.
+///
 /// - **Reserved official marketplaces** (#190): Claude Code rejects the reserved
 ///   name unless it is sourced from a `github.com/anthropics` repo, so a
-///   `directory` clone is never accepted for these. Emit a `github` source
-///   (`{source: "github", repo: "<owner>/<repo>"}`) parsed from the configured
-///   source. This needs no local clone, so it renders even when unsynced.
-/// - **Ordinary marketplaces**: emit a `directory` source pointing at llmenv's
+///   `directory` clone is never accepted for these. Emit a github source
+///   (`{source: {source: "github", repo: "<owner>/<repo>"}}`) parsed from the
+///   configured source. This needs no local clone, so it renders even unsynced.
+/// - **Ordinary marketplaces**: emit a directory source pointing at llmenv's
 ///   local clone (`install_location`). A marketplace never synced (no install
 ///   location) is skipped.
 fn render_marketplace_source(mk: &ResolvedMarketplace) -> Option<serde_json::Value> {
@@ -695,7 +699,9 @@ fn render_marketplace_source(mk: &ResolvedMarketplace) -> Option<serde_json::Val
         // somehow fails (e.g. resolution bypassed validation), skip rather than
         // emit a malformed entry.
         let (owner, repo) = crate::config::github_owner_repo(&mk.source)?;
-        return Some(json!({ "source": "github", "repo": format!("{owner}/{repo}") }));
+        return Some(json!({
+            "source": { "source": "github", "repo": format!("{owner}/{repo}") }
+        }));
     }
     let location = mk.install_location.as_ref()?;
     Some(json!({ "source": { "source": "directory", "path": location } }))
@@ -822,11 +828,38 @@ mod tests {
             Some("/cache/marketplaces/claude-plugins-official"),
         );
         let src = render_marketplace_source(&mk).expect("reserved renders a source");
-        assert_eq!(src["source"], serde_json::json!("github"));
-        assert_eq!(src["repo"], serde_json::json!("anthropics/claude-code"));
+        // Claude Code's extraKnownMarketplaces nests the source object under a
+        // `source` key, verified against a real settings.json: the github entry is
+        // `{source: {source: "github", repo: "owner/repo"}}` (#190).
+        assert_eq!(src["source"]["source"], serde_json::json!("github"));
+        assert_eq!(
+            src["source"]["repo"],
+            serde_json::json!("anthropics/claude-code")
+        );
         assert!(
-            src.get("path").is_none(),
+            src["source"].get("path").is_none(),
             "no directory path for github source"
+        );
+    }
+
+    #[test]
+    fn reserved_marketplace_entry_matches_claude_code_shape_exactly() {
+        // Pin the full entry value against the exact shape Claude Code itself
+        // writes into extraKnownMarketplaces (verified against a real
+        // settings.json). A flat `{source:"github",repo:...}` would be rejected
+        // by Claude Code, silently defeating #190 — assert the whole object so a
+        // regression to the flat form fails here, not at the user's load time.
+        let mk = marketplace(
+            "claude-plugins-official",
+            "https://github.com/anthropics/claude-code",
+            None,
+        );
+        let src = render_marketplace_source(&mk).expect("reserved renders");
+        assert_eq!(
+            src,
+            serde_json::json!({
+                "source": { "source": "github", "repo": "anthropics/claude-code" }
+            })
         );
     }
 
@@ -866,7 +899,10 @@ mod tests {
             None,
         );
         let src = render_marketplace_source(&mk).expect("reserved renders without sync");
-        assert_eq!(src["repo"], serde_json::json!("anthropics/claude-code"));
+        assert_eq!(
+            src["source"]["repo"],
+            serde_json::json!("anthropics/claude-code")
+        );
     }
 
     proptest! {
