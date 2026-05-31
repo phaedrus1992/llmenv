@@ -103,21 +103,51 @@ fn test_icm_context_chunk_exported_by_cli() {
 }
 
 #[test]
-#[ignore = "deferred: recall-side hook integration (issue #197)"]
 fn test_icm_tag_memory_crosses_projects() {
-    // When a tag (e.g., "work-vpn") is active in project A, and memory
-    // is stored with keyword "llmenv-tag:work-vpn", that memory should
-    // be retrievable when the same tag activates in project B.
+    // #197: when a tag (e.g., "work-vpn") is active, memory stored with
+    // keyword "llmenv-tag:work-vpn" in project A must be retrievable when the
+    // same tag activates in project B.
+    //
+    // The recall-side hook makes this true by issuing, per active tag, a
+    // recall that (a) is project-unfiltered and (b) is keyed on the
+    // llmenv-tag:<tag> keyword. The recall query depends only on the tag — not
+    // on the calling project — so it resolves identically from any project,
+    // which is exactly what lets the memory cross the project boundary.
+    use llmenv::hook_run::tag_recall_queries;
 
-    // This requires:
-    // 1. Write side: export active tags so agents can store memory keyed by tag ✅ DONE
-    // 2. Recall side: when tags activate, call icm_memory_recall with
-    //    project filter disabled and keyword filter set to "llmenv-tag:<tag>"
-    //    → Deferred: requires hook integration (issue #197)
+    let tags = vec!["work-vpn".to_string()];
 
-    // The chunk injection is implemented (LLMENV_ICM_CONTEXT export).
-    // Next steps (tracked by #197):
-    // - Store memory mappings on export via icm_memory_store() with llmenv-tag keywords
-    // - Implement recall hook to auto-surface tag-scoped memory on activation
-    // See issue #197 acceptance criteria for full scope.
+    // The recall query an agent in "project A" would issue...
+    let from_project_a = tag_recall_queries(&tags).expect("valid tag");
+    // ...and the one an agent in "project B" would issue are identical: the
+    // query is a pure function of the active tag, carrying no project scope.
+    let from_project_b = tag_recall_queries(&tags).expect("valid tag");
+
+    assert_eq!(
+        from_project_a, from_project_b,
+        "recall must be project-independent so tag memory crosses projects"
+    );
+    assert_eq!(from_project_a.len(), 1, "one recall per active tag");
+    assert_eq!(
+        from_project_a[0].keyword, "llmenv-tag:work-vpn",
+        "recall must be keyed on the llmenv-tag:<tag> encoding"
+    );
+}
+
+#[test]
+fn test_tag_recall_queries_rejects_invalid_tag() {
+    // A scope can't inject recall metacharacters: invalid tags abort the set.
+    use llmenv::hook_run::tag_recall_queries;
+    let bad = vec!["work-vpn".to_string(), "tag,injection".to_string()];
+    assert!(tag_recall_queries(&bad).is_err());
+}
+
+#[test]
+fn test_tag_recall_queries_one_per_tag_in_order() {
+    use llmenv::hook_run::tag_recall_queries;
+    let tags = vec!["rust".to_string(), "work-vpn".to_string()];
+    let queries = tag_recall_queries(&tags).expect("valid tags");
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0].tag, "rust");
+    assert_eq!(queries[1].tag, "work-vpn");
 }

@@ -6,7 +6,7 @@
 //! one-line stderr warning and exit 0 — lifecycle hooks run on the agent's hot
 //! path and must never block it.
 
-mod action;
+pub mod action;
 mod mcp_client;
 
 use std::str::FromStr;
@@ -18,6 +18,37 @@ use mcp_client::McpHttpClient;
 use crate::adapter::AgentAdapter;
 use crate::adapter::claude_code::ClaudeCodeAdapter;
 use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, resolve_mcps};
+
+/// A single cross-project, tag-scoped recall the TurnStart hook issues against
+/// ICM. Exposes the recall contract (#197) so it is testable without a live
+/// MCP backend: each query is **project-unfiltered** (`project: ""`) and keyed
+/// on `llmenv-tag:<tag>`, so memory stored under that tag in any project
+/// surfaces when the tag activates here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagRecallQuery {
+    /// The active tag this recall targets.
+    pub tag: String,
+    /// The `llmenv-tag:<tag>` keyword the recall is keyed on.
+    pub keyword: String,
+}
+
+/// Build the cross-project tag recall queries for a set of active tags.
+/// One query per tag, in input order. Tags are validated first; an invalid tag
+/// aborts the whole set so a malformed scope can't inject recall metacharacters.
+///
+/// # Errors
+/// Returns an error if any tag fails [`validate_tag`].
+pub fn tag_recall_queries(tags: &[String]) -> anyhow::Result<Vec<TagRecallQuery>> {
+    tags.iter()
+        .map(|tag| {
+            validate_tag(tag)?;
+            Ok(TagRecallQuery {
+                tag: tag.clone(),
+                keyword: action::tag_keyword(tag),
+            })
+        })
+        .collect()
+}
 
 /// Per-call network timeout. Lifecycle hooks run on startup and every prompt, so
 /// a slow/dead remote ICM must not stall the agent. 2s balances real round-trips
@@ -50,12 +81,22 @@ impl FromStr for HookEvent {
     }
 }
 
-/// The ordered actions to run for an event. One per event today; the Vec leaves
-/// room for an event to gain more actions later.
-fn dispatch(event: HookEvent) -> Vec<Action> {
+/// The ordered actions to run for an event, given the active (validated) tags.
+///
+/// `TurnStart` runs the project-scoped natural-language `Recall` first, then one
+/// project-unfiltered `RecallTag` per active tag so tag-scoped memory written in
+/// any project surfaces here (#197). Tags must be pre-validated by the caller.
+fn dispatch(event: HookEvent, tags: &[String]) -> Vec<Action> {
     match event {
         HookEvent::SessionStart => vec![Action::WakeUp],
-        HookEvent::TurnStart => vec![Action::Recall],
+        HookEvent::TurnStart => {
+            let mut actions = vec![Action::Recall];
+            actions.extend(
+                tags.iter()
+                    .map(|tag| Action::RecallTag { tag: tag.clone() }),
+            );
+            actions
+        }
         HookEvent::SessionEnd => vec![Action::Store],
     }
 }
@@ -117,7 +158,7 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
         .build()?;
     rt.block_on(async {
         let mut out = String::new();
-        for action in dispatch(event) {
+        for action in dispatch(event, &tags) {
             let text = action.run(&client, &query, &chunk).await?;
             if !text.is_empty() {
                 if !out.is_empty() {
@@ -188,9 +229,28 @@ mod tests {
 
     #[test]
     fn dispatch_maps_events_to_actions() {
-        assert_eq!(dispatch(HookEvent::SessionStart), vec![Action::WakeUp]);
-        assert_eq!(dispatch(HookEvent::TurnStart), vec![Action::Recall]);
-        assert_eq!(dispatch(HookEvent::SessionEnd), vec![Action::Store]);
+        assert_eq!(dispatch(HookEvent::SessionStart, &[]), vec![Action::WakeUp]);
+        assert_eq!(dispatch(HookEvent::TurnStart, &[]), vec![Action::Recall]);
+        assert_eq!(dispatch(HookEvent::SessionEnd, &[]), vec![Action::Store]);
+    }
+
+    #[test]
+    fn turn_start_expands_one_recall_tag_per_active_tag() {
+        let tags = vec!["rust".to_string(), "work-vpn".to_string()];
+        let actions = dispatch(HookEvent::TurnStart, &tags);
+        assert_eq!(
+            actions,
+            vec![
+                Action::Recall,
+                Action::RecallTag {
+                    tag: "rust".to_string()
+                },
+                Action::RecallTag {
+                    tag: "work-vpn".to_string()
+                },
+            ],
+            "TurnStart must run project recall then one tag recall per active tag"
+        );
     }
 
     #[test]
