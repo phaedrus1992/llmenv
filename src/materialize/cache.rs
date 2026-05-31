@@ -314,6 +314,13 @@ pub fn gc(cache_root: &Path, older_than: Duration) -> anyhow::Result<GcReport> {
             report.removed.push(p);
             continue;
         }
+        // The durable state dir (#175) is a stable sibling of the hashed config
+        // folders and must outlive every materialization. It is never an age-based
+        // collection candidate — cache invalidation must not wipe tool state.
+        if entry.file_name().to_str() == Some(crate::materialize::state::STATE_DIR_NAME) {
+            report.kept += 1;
+            continue;
+        }
         let m = newest_mtime(&p)?;
         if now.duration_since(m).unwrap_or_default() > older_than {
             std::fs::remove_dir_all(&p)?;
@@ -521,6 +528,29 @@ mod tests {
             // Sanity: a genuine stale folder is still swept under both modes.
             assert!(!stale.exists(), "stale folder still swept under {mode:?}");
         }
+    }
+
+    #[test]
+    fn gc_never_removes_durable_state_dir() {
+        // The age-based gc() path must honor the same durability guarantee as
+        // prune() (#175): the durable state dir is a stable sibling of the hashed
+        // config folders and must never be removed by cache invalidation, even
+        // once it ages past the retention window. `Duration::ZERO` makes every
+        // entry "older than", so a normal folder is swept and the state dir must
+        // be the only survivor.
+        use crate::materialize::state::STATE_DIR_NAME;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = touch_dir(tmp.path(), STATE_DIR_NAME);
+        let stale = touch_dir(tmp.path(), &format!("{VERSION_TAG}-deadbeef"));
+        let report = gc(tmp.path(), Duration::ZERO).unwrap();
+        assert!(state.exists(), "state dir must survive gc");
+        assert!(
+            !report.removed.contains(&state),
+            "state dir never reported removed by gc"
+        );
+        // Sanity: an aged non-state folder is still collected.
+        assert!(!stale.exists(), "aged folder still collected by gc");
+        assert!(report.removed.contains(&stale));
     }
 
     #[test]
