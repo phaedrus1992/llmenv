@@ -104,13 +104,20 @@ fn is_valid_marketplace_name(name: &str) -> bool {
 }
 
 /// A state-tool subdir must be a single safe path component: non-empty, not
-/// `.`/`..`, and free of path separators, so a relocated tool's state can never
-/// escape the durable state directory (#175).
+/// `.`/`..`, and free of path separators, drive-letter colons, and NUL, so a
+/// relocated tool's state can never escape the durable state directory (#175).
+///
+/// `\0` is rejected (matching [`is_safe_cache_dir`]) because path APIs handle it
+/// inconsistently across platforms; `:` is rejected so a Windows drive-relative
+/// component like `C:` cannot be joined into a path outside the state dir.
 fn is_safe_state_subdir(subdir: &str) -> bool {
     if subdir.is_empty() || subdir == "." || subdir == ".." {
         return false;
     }
-    !subdir.contains('/') && !subdir.contains('\\')
+    !subdir.contains('/')
+        && !subdir.contains('\\')
+        && !subdir.contains(':')
+        && !subdir.contains('\0')
 }
 
 fn is_valid_cidr(cidr: &str) -> bool {
@@ -1500,9 +1507,21 @@ mod tests {
 
     #[test]
     fn state_tool_with_unsafe_subdir_rejected() {
-        // Subdir must be a single safe path component — block traversal/separators
-        // so a tool's state can't be relocated outside the durable dir (#175).
-        for bad in ["..", ".", "", "a/b", "../escape", "/abs", "a\\b"] {
+        // Subdir must be a single safe path component — block traversal,
+        // separators, drive-letter colons, and NUL so a tool's state can't be
+        // relocated outside the durable dir (#175).
+        for bad in [
+            "..",
+            ".",
+            "",
+            "a/b",
+            "../escape",
+            "/abs",
+            "a\\b",
+            "C:",
+            "a:b",
+            "a\0b",
+        ] {
             let cfg = config_with_state(vec![state_tool("OK_DIR", bad)]);
             assert!(
                 matches!(cfg.validate(), Err(ValidateError::StateInvalidSubdir(_))),
