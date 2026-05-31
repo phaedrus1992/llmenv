@@ -6,7 +6,7 @@
 //! one-line stderr warning and exit 0 — lifecycle hooks run on the agent's hot
 //! path and must never block it.
 
-pub mod action;
+mod action;
 mod mcp_client;
 
 use std::str::FromStr;
@@ -81,20 +81,19 @@ impl FromStr for HookEvent {
     }
 }
 
-/// The ordered actions to run for an event, given the active (validated) tags.
+/// The ordered actions to run for an event, given the active tags' recall
+/// queries (built by [`tag_recall_queries`], the single source of tag→recall
+/// expansion).
 ///
 /// `TurnStart` runs the project-scoped natural-language `Recall` first, then one
 /// project-unfiltered `RecallTag` per active tag so tag-scoped memory written in
-/// any project surfaces here (#197). Tags must be pre-validated by the caller.
-fn dispatch(event: HookEvent, tags: &[String]) -> Vec<Action> {
+/// any project surfaces here (#197).
+fn dispatch(event: HookEvent, tag_queries: &[TagRecallQuery]) -> Vec<Action> {
     match event {
         HookEvent::SessionStart => vec![Action::WakeUp],
         HookEvent::TurnStart => {
             let mut actions = vec![Action::Recall];
-            actions.extend(
-                tags.iter()
-                    .map(|tag| Action::RecallTag { tag: tag.clone() }),
-            );
+            actions.extend(tag_queries.iter().cloned().map(Action::RecallTag));
             actions
         }
         HookEvent::SessionEnd => vec![Action::Store],
@@ -140,10 +139,9 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
     // chunk (tags/bundles/project). Bundles aren't needed for the query.
     let mut tags = active.tags.iter().cloned().collect::<Vec<_>>();
     tags.sort();
-    // Validate tags to prevent query injection before building the recall query.
-    for tag in &tags {
-        validate_tag(tag)?;
-    }
+    // Build per-tag recall queries. This validates every tag (rejecting query
+    // injection) and is the single source of the tag→keyword encoding.
+    let tag_queries = tag_recall_queries(&tags)?;
     let query = tags.join(", ");
     let chunk = crate::icm::generate_context_chunk(&active, &[]);
 
@@ -158,7 +156,7 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
         .build()?;
     rt.block_on(async {
         let mut out = String::new();
-        for action in dispatch(event, &tags) {
+        for action in dispatch(event, &tag_queries) {
             let text = action.run(&client, &query, &chunk).await?;
             if !text.is_empty() {
                 if !out.is_empty() {
@@ -237,17 +235,20 @@ mod tests {
     #[test]
     fn turn_start_expands_one_recall_tag_per_active_tag() {
         let tags = vec!["rust".to_string(), "work-vpn".to_string()];
-        let actions = dispatch(HookEvent::TurnStart, &tags);
+        let queries = tag_recall_queries(&tags).expect("valid tags");
+        let actions = dispatch(HookEvent::TurnStart, &queries);
         assert_eq!(
             actions,
             vec![
                 Action::Recall,
-                Action::RecallTag {
-                    tag: "rust".to_string()
-                },
-                Action::RecallTag {
-                    tag: "work-vpn".to_string()
-                },
+                Action::RecallTag(TagRecallQuery {
+                    tag: "rust".to_string(),
+                    keyword: "llmenv-tag:rust".to_string(),
+                }),
+                Action::RecallTag(TagRecallQuery {
+                    tag: "work-vpn".to_string(),
+                    keyword: "llmenv-tag:work-vpn".to_string(),
+                }),
             ],
             "TurnStart must run project recall then one tag recall per active tag"
         );

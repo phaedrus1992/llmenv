@@ -3,6 +3,7 @@
 
 use serde_json::{Value, json};
 
+use crate::hook_run::TagRecallQuery;
 use crate::hook_run::mcp_client::McpHttpClient;
 
 /// The keyword prefix under which tag-scoped memory is stored and recalled.
@@ -28,8 +29,10 @@ pub enum Action {
     /// Recall tag-scoped memory for one active tag (`icm_memory_recall`),
     /// **project-unfiltered** and keyed on `llmenv-tag:<tag>`. This is what
     /// makes memory stored under a tag in one project surface when the same tag
-    /// activates in another (#197). One action is dispatched per active tag.
-    RecallTag { tag: String },
+    /// activates in another (#197). One action is dispatched per active tag. The
+    /// carried [`TagRecallQuery`] is the single source of the tag + keyword, so
+    /// the keyword encoding never drifts between dispatch and the tool call.
+    RecallTag(TagRecallQuery),
     /// Best-effort store of the active scope context (`icm_memory_store`).
     Store,
 }
@@ -39,7 +42,7 @@ impl Action {
     pub fn tool_name(&self) -> &'static str {
         match self {
             Action::WakeUp => "icm_wake_up",
-            Action::Recall | Action::RecallTag { .. } => "icm_memory_recall",
+            Action::Recall | Action::RecallTag(_) => "icm_memory_recall",
             Action::Store => "icm_memory_store",
         }
     }
@@ -55,10 +58,10 @@ impl Action {
         match self {
             Action::WakeUp => json!({}),
             Action::Recall => json!({ "query": query }),
-            Action::RecallTag { tag } => json!({
-                "query": tag,
+            Action::RecallTag(q) => json!({
+                "query": q.tag,
                 "project": "",
-                "keyword": tag_keyword(tag),
+                "keyword": q.keyword,
             }),
             Action::Store => json!({ "content": chunk }),
         }
@@ -116,12 +119,16 @@ mod tests {
         assert_eq!(tag_keyword("rust"), "llmenv-tag:rust");
     }
 
+    fn recall_tag(tag: &str) -> Action {
+        Action::RecallTag(TagRecallQuery {
+            tag: tag.to_string(),
+            keyword: tag_keyword(tag),
+        })
+    }
+
     #[test]
     fn recall_tag_tool_is_memory_recall() {
-        let action = Action::RecallTag {
-            tag: "work-vpn".to_string(),
-        };
-        assert_eq!(action.tool_name(), "icm_memory_recall");
+        assert_eq!(recall_tag("work-vpn").tool_name(), "icm_memory_recall");
     }
 
     #[test]
@@ -130,10 +137,7 @@ mod tests {
         // project-unfiltered so memory stored under the tag in one project
         // surfaces in another. An empty project string disables ICM's default
         // cwd filter.
-        let action = Action::RecallTag {
-            tag: "work-vpn".to_string(),
-        };
-        let args = action.arguments("ignored", "ignored");
+        let args = recall_tag("work-vpn").arguments("ignored", "ignored");
         assert_eq!(
             args["project"],
             serde_json::json!(""),
@@ -143,10 +147,7 @@ mod tests {
 
     #[test]
     fn recall_tag_keys_on_llmenv_tag_keyword() {
-        let action = Action::RecallTag {
-            tag: "work-vpn".to_string(),
-        };
-        let args = action.arguments("ignored", "ignored");
+        let args = recall_tag("work-vpn").arguments("ignored", "ignored");
         assert_eq!(
             args["keyword"],
             serde_json::json!("llmenv-tag:work-vpn"),
