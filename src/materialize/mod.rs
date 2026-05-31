@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod manifest;
+pub mod state;
 
 use std::path::{Path, PathBuf};
 
