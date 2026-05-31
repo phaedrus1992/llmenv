@@ -155,4 +155,38 @@ mod tests {
         );
         assert_eq!(args["query"], serde_json::json!("work-vpn"));
     }
+
+    // ===== Property tests for the tag keyword + RecallTag argument shape =====
+
+    use proptest::prelude::*;
+
+    /// A tag accepted by `hook_run::validate_tag`.
+    fn valid_tag() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{1,24}"
+    }
+
+    proptest! {
+        // tag_keyword always prepends the prefix and preserves the tag exactly —
+        // the keyword is `llmenv-tag:` + the unmodified tag for any valid input.
+        #[test]
+        fn prop_tag_keyword_is_prefix_plus_tag(tag in valid_tag()) {
+            let kw = tag_keyword(&tag);
+            prop_assert_eq!(&kw, &format!("{TAG_KEYWORD_PREFIX}{tag}"));
+            prop_assert!(kw.starts_with(TAG_KEYWORD_PREFIX));
+            prop_assert_eq!(&kw[TAG_KEYWORD_PREFIX.len()..], tag.as_str());
+        }
+
+        // RecallTag arguments are always exactly {query, project, keyword} with
+        // query == tag, project == "" (cross-project), keyword == tag_keyword(tag).
+        // The shape can't silently gain/lose a field or mis-bind a value.
+        #[test]
+        fn prop_recall_tag_arguments_shape(tag in valid_tag()) {
+            let args = recall_tag(&tag).arguments("ignored", "ignored");
+            let obj = args.as_object().expect("arguments must be a JSON object");
+            prop_assert_eq!(obj.len(), 3, "exactly query/project/keyword");
+            prop_assert_eq!(&obj["query"], &serde_json::json!(tag));
+            prop_assert_eq!(&obj["project"], &serde_json::json!(""));
+            prop_assert_eq!(&obj["keyword"], &serde_json::json!(tag_keyword(&tag)));
+        }
+    }
 }

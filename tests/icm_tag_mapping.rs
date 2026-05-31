@@ -151,3 +151,74 @@ fn test_tag_recall_queries_one_per_tag_in_order() {
     assert_eq!(queries[0].tag, "rust");
     assert_eq!(queries[1].tag, "work-vpn");
 }
+
+// ===== Property tests for tag_recall_queries (#197) =====
+//
+// The recall-scoping correctness of #197 rests on three invariants that
+// example tests only spot-check: the keyword encoding must never drift from
+// `llmenv-tag:<tag>`, input order must be preserved (the per-tag recalls map
+// 1:1 to active tags), and any tag that could carry recall metacharacters must
+// reject the whole batch. Properties exercise these across the full input space.
+
+use proptest::prelude::*;
+
+/// A tag accepted by `validate_tag`: non-empty, ASCII alphanumeric plus `-`/`_`.
+fn valid_tag() -> impl Strategy<Value = String> {
+    "[a-zA-Z0-9_-]{1,24}"
+}
+
+proptest! {
+    // Every valid tag yields exactly one query whose keyword is the
+    // llmenv-tag:<tag> encoding and whose tag is preserved verbatim. This is the
+    // anti-drift property: the keyword is always the prefix + the original tag.
+    #[test]
+    fn tag_recall_query_keyword_encodes_tag(tag in valid_tag()) {
+        use llmenv::hook_run::tag_recall_queries;
+        let queries = tag_recall_queries(std::slice::from_ref(&tag)).expect("valid tag");
+        prop_assert_eq!(queries.len(), 1);
+        prop_assert_eq!(&queries[0].tag, &tag);
+        prop_assert_eq!(&queries[0].keyword, &format!("llmenv-tag:{tag}"));
+    }
+
+    // N valid tags produce N queries in the same order — the per-tag recalls
+    // line up 1:1 with the active tags, not reordered or deduplicated.
+    #[test]
+    fn tag_recall_queries_preserve_count_and_order(
+        tags in proptest::collection::vec(valid_tag(), 0..12),
+    ) {
+        use llmenv::hook_run::tag_recall_queries;
+        let queries = tag_recall_queries(&tags).expect("all tags valid");
+        prop_assert_eq!(queries.len(), tags.len());
+        for (q, tag) in queries.iter().zip(tags.iter()) {
+            prop_assert_eq!(&q.tag, tag);
+        }
+    }
+
+    // Deterministic: the same input always yields the same queries (no hidden
+    // dependence on environment/project). This is what lets a tag's recall
+    // resolve identically from any project.
+    #[test]
+    fn tag_recall_queries_are_deterministic(
+        tags in proptest::collection::vec(valid_tag(), 0..8),
+    ) {
+        use llmenv::hook_run::tag_recall_queries;
+        let a = tag_recall_queries(&tags).expect("valid");
+        let b = tag_recall_queries(&tags).expect("valid");
+        prop_assert_eq!(a, b);
+    }
+
+    // Any tag containing a character outside the validator's set aborts the
+    // whole batch — a single malformed scope can't inject recall metacharacters
+    // and can't partially-succeed into a surprising subset of recalls.
+    #[test]
+    fn tag_recall_queries_reject_batch_with_invalid_tag(
+        good in proptest::collection::vec(valid_tag(), 0..6),
+        bad in r#"[^a-zA-Z0-9_-]"#,
+    ) {
+        use llmenv::hook_run::tag_recall_queries;
+        let mut tags = good;
+        // Insert a tag guaranteed to contain a rejected character.
+        tags.push(format!("inj{bad}ect"));
+        prop_assert!(tag_recall_queries(&tags).is_err());
+    }
+}
