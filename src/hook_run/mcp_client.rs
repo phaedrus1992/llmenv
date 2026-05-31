@@ -27,15 +27,13 @@ impl McpHttpClient {
         // performs its own (re-)resolution at send() time, so a hostname cannot
         // resolve to a public IP during validation and a private one at connect
         // time — the connection can only target an address we already approved.
-        let addrs = validate_url_production(&url)?;
-        let mut builder = reqwest::Client::builder().timeout(timeout);
-        if let Some(host) = Url::parse(&url)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_owned))
-        {
-            builder = builder.resolve_to_addrs(&host, &addrs);
-        }
-        let client = builder
+        let (host, addrs) = validate_url_production(&url)?;
+        // Pin unconditionally to the host/addrs the SSRF check just vetted.
+        // validation already guaranteed a non-empty host, so there is no
+        // fall-through path where reqwest could re-resolve at send() time.
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .resolve_to_addrs(&host, &addrs)
             .build()
             .context("failed to build HTTP client (TLS backend unavailable)")?;
         Ok(Self { url, client })
@@ -160,19 +158,22 @@ fn is_unique_local_v6(v6: &std::net::Ipv6Addr) -> bool {
     (v6.octets()[0] & 0xfe) == 0xfc
 }
 
-/// Validate ICM backend URL to prevent SSRF attacks and return the vetted set of
-/// socket addresses the connection may target.
+/// Validate ICM backend URL to prevent SSRF attacks and return the host string
+/// together with the vetted set of socket addresses the connection may target.
 ///
 /// Rejects unsupported schemes, blocked literal IPs, and — for hostnames —
 /// resolves DNS and rejects the URL if *any* resolved address is blocked. The
-/// returned addresses are pinned by the caller so reqwest cannot re-resolve to
-/// an unvetted address at send() time (DNS-rebinding TOCTOU mitigation, #191).
+/// caller pins reqwest to the returned host→addrs mapping so reqwest cannot
+/// re-resolve to an unvetted address at send() time (DNS-rebinding TOCTOU
+/// mitigation, #191). The host is returned from the same parse that produced the
+/// addresses, so the caller never re-parses the URL — a second parse could
+/// disagree about the host and pin the wrong (or no) mapping.
 ///
 /// # Errors
 /// Returns an error for an unparseable URL, an unsupported scheme, a missing
 /// host, a DNS resolution failure, or any resolved/literal address that falls in
 /// a private, loopback, link-local, unspecified, or unique-local range.
-fn validate_url_production(url: &str) -> anyhow::Result<Vec<SocketAddr>> {
+fn validate_url_production(url: &str) -> anyhow::Result<(String, Vec<SocketAddr>)> {
     let parsed = Url::parse(url).with_context(|| format!("invalid URL: {url}"))?;
 
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -185,6 +186,13 @@ fn validate_url_production(url: &str) -> anyhow::Result<Vec<SocketAddr>> {
     let host = parsed
         .host()
         .ok_or_else(|| anyhow!("URL {url} has no host"))?;
+    // reqwest's resolve_to_addrs keys on the unbracketed host string; Host's
+    // Display matches host_str without the IPv6 brackets, which is what we pin.
+    let host_key = match host {
+        Host::Ipv4(v4) => v4.to_string(),
+        Host::Ipv6(v6) => v6.to_string(),
+        Host::Domain(name) => name.to_string(),
+    };
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| anyhow!("URL {url} has no port and an unknown default"))?;
@@ -211,7 +219,7 @@ fn validate_url_production(url: &str) -> anyhow::Result<Vec<SocketAddr>> {
         }
     }
 
-    Ok(addrs)
+    Ok((host_key, addrs))
 }
 
 #[cfg(test)]
@@ -346,13 +354,26 @@ mod tests {
     #[test]
     fn validate_url_returns_pinned_addrs_for_literal_ip() {
         // The TOCTOU fix pins reqwest to the addresses validation already vetted.
-        // For a literal IP, the returned set is exactly that address (#191).
-        let addrs = validate_url_production("http://8.8.8.8:8080").expect("public IP ok");
+        // For a literal IP, the returned set is exactly that address, and the host
+        // key matches the literal so the caller can pin without re-parsing (#191).
+        let (host, addrs) = validate_url_production("http://8.8.8.8:8080").expect("public IP ok");
+        assert_eq!(host, "8.8.8.8");
         assert!(
             addrs
                 .iter()
                 .any(|a| a.ip().to_string() == "8.8.8.8" && a.port() == 8080)
         );
+    }
+
+    #[test]
+    fn validate_url_returns_unbracketed_host_for_literal_ipv6() {
+        // resolve_to_addrs keys on the unbracketed host; a re-parse via host_str
+        // would yield the bracketed form and pin the wrong key. Returning the host
+        // from the validating parse keeps the two in lockstep (#191).
+        let (host, addrs) =
+            validate_url_production("http://[2606:4700:4700::1111]:8080").expect("public IPv6 ok");
+        assert_eq!(host, "2606:4700:4700::1111");
+        assert!(addrs.iter().any(|a| a.port() == 8080));
     }
 
     #[test]
