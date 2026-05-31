@@ -1,27 +1,79 @@
 {
-  // Renovate automated dependency updates configuration
-  // See: https://docs.renovatebot.com/
-  extends: ['config:base'],
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":configMigration",
+    ":semanticCommits",
+  ],
 
-  // Group all updates together for simplicity
-  groupName: 'all',
-  groupSlug: 'all',
+  // General settings
+  "assigneesFromCodeOwners": true,
+  "baseBranchPatterns": ["main"],
+  "branchConcurrentLimit": 5,
+  "internalChecksFilter": "strict",
+  "labels": ["dependencies"],
+  "minimumReleaseAge": "3 days",
 
-  // Weekly schedule to keep updates manageable
-  schedule: ['before 3am on Monday'],
+  "prCreation": "not-pending",
+  "prHourlyLimit": 0,
+  "rangeStrategy": "bump",
+  "rebaseWhen": "behind-base-branch",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
 
   // Rust crate updates
   postUpdateOptions: [
     'cargoLockPackages',
   ],
 
-  // Auto-merge patch and minor updates from trusted sources
-  automerge: false,
-  autoApprove: false,
+  // Package- or manager-specific rules
+  "packageRules": [
+    {
+      "groupName": "auto-merge non-major dependencies",
+      "groupSlug": "all-non-major",
+      "matchUpdateTypes": ["!major"],
+      "automerge": true,
+    },
+    {
+      "groupName": "auto-merge developer dependencies",
+      "groupSlug": "dev-dependencies",
+      "matchDepTypes": ["devDependencies"],
+      "automerge": true,
+    },
+    {
+      "description": "Separate major updates into individual PRs for review",
+      "matchUpdateTypes": ["major"],
+      "groupName": null,
+    },
+    {
+      "description": "Group non-major GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "non-major GitHub Actions",
+      "groupSlug": "github-actions-non-major",
+    },
+    {
+      "groupName": "group Rust Serde package updates together",
+      "groupSlug": "rust-serde",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["/^serde/"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+    },
+    {
+      "groupName": "group Rust Tokio package updates together",
+      "groupSlug": "rust-tokio",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["/^tokio/"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+    },
+  ],
 
-  // Require PR for all changes so we can review
-  minimumReleaseAge: '7 days',
-
-  // Don't update dev-dependencies so frequently
-  ignoreDeps: [],
+  // CVE fixes: vulnerabilityAlerts defaults already give us separate PRs
+  // (groupName: null), no release-age delay (minimumReleaseAge: null), and
+  // immediate creation (prCreation: "immediate"). Security PRs also bypass
+  // branchConcurrentLimit/prConcurrentLimit, so prPriority would be moot.
+  // All we need is the shared "security" label.
+  "vulnerabilityAlerts": {
+    "labels": ["dependencies", "security"],
+  },
 }

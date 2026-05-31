@@ -6,6 +6,7 @@ use serde_json::json;
 use super::AgentAdapter;
 use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
+use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
 
 /// Substitution value for `{{ICM_MCP}}` placeholders in bundle hook templates,
@@ -676,12 +677,41 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
     Ok(merged)
 }
 
+/// Render one marketplace's `extraKnownMarketplaces` entry body, or `None` if it
+/// should be skipped.
+///
+/// Every entry value wraps the source object under a `source` key, matching the
+/// `extraKnownMarketplaces` shape Claude Code reads/writes:
+/// `{ "source": { "source": "github" | "directory", ... } }`.
+///
+/// - **Reserved official marketplaces** (#190): Claude Code rejects the reserved
+///   name unless it is sourced from a `github.com/anthropics` repo, so a
+///   `directory` clone is never accepted for these. Emit a github source
+///   (`{source: {source: "github", repo: "<owner>/<repo>"}}`) parsed from the
+///   configured source. This needs no local clone, so it renders even unsynced.
+/// - **Ordinary marketplaces**: emit a directory source pointing at llmenv's
+///   local clone (`install_location`). A marketplace never synced (no install
+///   location) is skipped.
+fn render_marketplace_source(mk: &ResolvedMarketplace) -> Option<serde_json::Value> {
+    if crate::config::is_reserved_official_marketplace(&mk.name) {
+        // Validation guarantees a reserved marketplace's source is an
+        // anthropics GitHub repo; render it as a github source. If parsing
+        // somehow fails (e.g. resolution bypassed validation), skip rather than
+        // emit a malformed entry.
+        let (owner, repo) = crate::config::github_owner_repo(&mk.source)?;
+        return Some(json!({
+            "source": { "source": "github", "repo": format!("{owner}/{repo}") }
+        }));
+    }
+    let location = mk.install_location.as_ref()?;
+    Some(json!({ "source": { "source": "directory", "path": location } }))
+}
+
 /// Render the manifest's resolved marketplaces + plugins into `settings`.
 ///
-/// - `extraKnownMarketplaces`: keyed by marketplace name. Source is `directory`
-///   pointing at llmenv's local clone (`install_location`) so Claude loads the
-///   already-synced checkout instead of re-fetching. A marketplace with no
-///   install location (never synced) is skipped.
+/// - `extraKnownMarketplaces`: keyed by marketplace name; the per-marketplace
+///   body comes from [`render_marketplace_source`] (directory clone for ordinary
+///   marketplaces, github source for reserved official ones, #190).
 /// - `enabledPlugins`: keyed `<plugin>@<marketplace>`, all `true`. llmenv only
 ///   emits plugins it wants on; it never authors a `false` (disabled) entry.
 ///
@@ -697,15 +727,10 @@ fn render_plugins(
 
     let mut markets = serde_json::Map::new();
     for mk in &manifest.marketplaces {
-        let Some(location) = &mk.install_location else {
+        let Some(body) = render_marketplace_source(mk) else {
             continue;
         };
-        markets.insert(
-            mk.name.clone(),
-            json!({
-                "source": { "source": "directory", "path": location },
-            }),
-        );
+        markets.insert(mk.name.clone(), body);
     }
     if !markets.is_empty() {
         settings.insert(
@@ -774,12 +799,111 @@ enum PermissionAction {
 mod tests {
     use super::{
         MODELED_SETTINGS_KEYS, is_hook_json, overlay_native, reconcile_settings,
-        reject_modeled_keys_in_catch_all, render_permission_rule, write_mcp_json,
+        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
+        write_mcp_json,
     };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
+    use crate::plugins::resolve::ResolvedMarketplace;
     use proptest::prelude::*;
     use std::path::PathBuf;
+
+    fn marketplace(name: &str, source: &str, install: Option<&str>) -> ResolvedMarketplace {
+        ResolvedMarketplace {
+            name: name.into(),
+            source: source.into(),
+            install_location: install.map(Into::into),
+            head: None,
+        }
+    }
+
+    #[test]
+    fn reserved_marketplace_renders_github_source_not_directory() {
+        // A reserved official marketplace must be wired as a github source under
+        // anthropics; a `directory` source (llmenv's normal clone) is rejected by
+        // Claude Code for reserved names (#190).
+        let mk = marketplace(
+            "claude-plugins-official",
+            "https://github.com/anthropics/claude-code",
+            Some("/cache/marketplaces/claude-plugins-official"),
+        );
+        let src = render_marketplace_source(&mk).expect("reserved renders a source");
+        // Claude Code's extraKnownMarketplaces nests the source object under a
+        // `source` key, verified against a real settings.json: the github entry is
+        // `{source: {source: "github", repo: "owner/repo"}}` (#190).
+        assert_eq!(src["source"]["source"], serde_json::json!("github"));
+        assert_eq!(
+            src["source"]["repo"],
+            serde_json::json!("anthropics/claude-code")
+        );
+        assert!(
+            src["source"].get("path").is_none(),
+            "no directory path for github source"
+        );
+    }
+
+    #[test]
+    fn reserved_marketplace_entry_matches_claude_code_shape_exactly() {
+        // Pin the full entry value against the exact shape Claude Code itself
+        // writes into extraKnownMarketplaces (verified against a real
+        // settings.json). A flat `{source:"github",repo:...}` would be rejected
+        // by Claude Code, silently defeating #190 — assert the whole object so a
+        // regression to the flat form fails here, not at the user's load time.
+        let mk = marketplace(
+            "claude-plugins-official",
+            "https://github.com/anthropics/claude-code",
+            None,
+        );
+        let src = render_marketplace_source(&mk).expect("reserved renders");
+        assert_eq!(
+            src,
+            serde_json::json!({
+                "source": { "source": "github", "repo": "anthropics/claude-code" }
+            })
+        );
+    }
+
+    #[test]
+    fn non_reserved_marketplace_renders_directory_source() {
+        // Ordinary marketplaces keep the directory-clone behavior.
+        let mk = marketplace(
+            "superpowers",
+            "https://github.com/example/superpowers",
+            Some("/cache/marketplaces/superpowers"),
+        );
+        let src = render_marketplace_source(&mk).expect("synced marketplace renders");
+        assert_eq!(src["source"]["source"], serde_json::json!("directory"));
+        assert_eq!(
+            src["source"]["path"],
+            serde_json::json!("/cache/marketplaces/superpowers")
+        );
+    }
+
+    #[test]
+    fn non_reserved_marketplace_without_install_location_is_skipped() {
+        let mk = marketplace(
+            "superpowers",
+            "https://github.com/example/superpowers",
+            None,
+        );
+        assert!(render_marketplace_source(&mk).is_none());
+    }
+
+    #[test]
+    fn reserved_marketplace_renders_github_even_without_install_location() {
+        // The github source needs no local clone, so a reserved marketplace
+        // renders regardless of whether it was synced into the cache (#190).
+        let mk = marketplace(
+            "claude-plugins-official",
+            "git@github.com:anthropics/claude-code.git",
+            None,
+        );
+        let src = render_marketplace_source(&mk).expect("reserved renders without sync");
+        assert_eq!(
+            src["source"]["repo"],
+            serde_json::json!("anthropics/claude-code")
+        );
+    }
 
     proptest! {
         // A rule with a `pattern` always renders to exactly one `Tool(pattern)`

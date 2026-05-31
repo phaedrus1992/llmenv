@@ -51,6 +51,32 @@ pub enum ValidateError {
     InvalidMarketplaceName(String),
     #[error("marketplace {0} has an empty source")]
     MarketplaceEmptySource(String),
+    #[error(
+        "marketplace '{name}' uses a name reserved for official Anthropic marketplaces, \
+         which require a GitHub source under the '{owner}' org; got source '{got}'. \
+         Fix: set source to 'https://github.com/{owner}/<repo>' (e.g. \
+         'https://github.com/{owner}/claude-code'), or rename the marketplace."
+    )]
+    ReservedMarketplaceSource {
+        name: String,
+        got: String,
+        owner: &'static str,
+    },
+    #[error(
+        "state tool env '{0}' is not a valid environment variable name \
+         (must match [A-Za-z_][A-Za-z0-9_]*)"
+    )]
+    StateInvalidEnvName(String),
+    #[error(
+        "state tool subdir '{0}' is not a safe single path component \
+         (no '/', '\\', ':', NUL, '..', '.', or empty)"
+    )]
+    StateInvalidSubdir(String),
+    #[error(
+        "state tool env '{0}' is declared more than once \
+         (or collides with an llmenv-emitted var: LLMENV_STATE_DIR, CLAUDE_CONFIG_DIR)"
+    )]
+    StateDuplicateEnv(String),
     #[error("duplicate plugin-collection name: {0}")]
     DuplicatePluginCollectionName(String),
     #[error("plugin-collection {0} has no tags")]
@@ -78,6 +104,23 @@ fn is_valid_marketplace_name(name: &str) -> bool {
     }
     name.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// A state-tool subdir must be a single safe path component: non-empty, not
+/// `.`/`..`, and free of path separators, drive-letter colons, and NUL, so a
+/// relocated tool's state can never escape the durable state directory (#175).
+///
+/// `\0` is rejected (matching [`is_safe_cache_dir`]) because path APIs handle it
+/// inconsistently across platforms; `:` is rejected so a Windows drive-relative
+/// component like `C:` cannot be joined into a path outside the state dir.
+fn is_safe_state_subdir(subdir: &str) -> bool {
+    if subdir.is_empty() || subdir == "." || subdir == ".." {
+        return false;
+    }
+    !subdir.contains('/')
+        && !subdir.contains('\\')
+        && !subdir.contains(':')
+        && !subdir.contains('\0')
 }
 
 fn is_valid_cidr(cidr: &str) -> bool {
@@ -208,6 +251,7 @@ impl Config {
         }
         self.validate_mcps()?;
         self.validate_plugins()?;
+        self.validate_state()?;
         Ok(())
     }
 
@@ -226,6 +270,22 @@ impl Config {
             }
             if m.source.is_empty() {
                 return Err(ValidateError::MarketplaceEmptySource(m.name.clone()));
+            }
+            // A reserved official marketplace name is only accepted by Claude
+            // Code when sourced from a github.com/anthropics repo (#190). Reject
+            // any other source here with a fix hint rather than letting it fail
+            // opaquely inside Claude Code at load time.
+            if super::is_reserved_official_marketplace(&m.name) {
+                let owner = super::OFFICIAL_MARKETPLACE_OWNER;
+                let ok = super::github_owner_repo(&m.source)
+                    .is_some_and(|(o, _)| o.eq_ignore_ascii_case(owner));
+                if !ok {
+                    return Err(ValidateError::ReservedMarketplaceSource {
+                        name: m.name.clone(),
+                        got: m.source.clone(),
+                        owner,
+                    });
+                }
             }
             if !seen_marketplace_names.insert(&m.name) {
                 return Err(ValidateError::DuplicateMarketplaceName(m.name.clone()));
@@ -255,6 +315,31 @@ impl Config {
                         marketplace: marketplace.to_string(),
                     });
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the durable-state block (#175): each tool's env var must be a
+    /// valid shell variable name, its subdir a single safe path component, and
+    /// no env var may repeat or collide with a var llmenv itself emits into the
+    /// same set (`LLMENV_STATE_DIR`, `CLAUDE_CONFIG_DIR`).
+    fn validate_state(&self) -> Result<(), ValidateError> {
+        let mut seen_env = std::collections::HashSet::new();
+        // Reserve llmenv/adapter-emitted vars so a tool can't shadow them and
+        // produce a conflicting binding in the emitted env_vars set.
+        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+            seen_env.insert((*reserved).to_string());
+        }
+        for tool in &self.state.tools {
+            if !is_valid_var_name(&tool.env) {
+                return Err(ValidateError::StateInvalidEnvName(tool.env.clone()));
+            }
+            if !is_safe_state_subdir(&tool.subdir) {
+                return Err(ValidateError::StateInvalidSubdir(tool.subdir.clone()));
+            }
+            if !seen_env.insert(tool.env.clone()) {
+                return Err(ValidateError::StateDuplicateEnv(tool.env.clone()));
             }
         }
         Ok(())
@@ -650,6 +735,7 @@ mod tests {
                         memory,
                         marketplace,
                         plugin_collection,
+                        state: Default::default(),
                         host,
                     }
                 },
@@ -691,6 +777,7 @@ mod tests {
                 memory: None,
                 marketplace: vec![],
                 plugin_collection: vec![],
+                state: Default::default(),
                 host: Default::default(),
             };
             prop_assert!(
@@ -719,6 +806,7 @@ mod tests {
                 memory: None,
                 marketplace: vec![],
                 plugin_collection: vec![],
+                state: Default::default(),
                 host: Default::default(),
             };
             prop_assert!(
@@ -744,6 +832,7 @@ mod tests {
                 memory: None,
                 marketplace: vec![],
                 plugin_collection: vec![],
+                state: Default::default(),
                 host: Default::default(),
             };
             prop_assert!(
@@ -781,6 +870,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -810,6 +900,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -839,6 +930,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -866,6 +958,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(matches!(
@@ -898,6 +991,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -927,6 +1021,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -954,6 +1049,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -981,6 +1077,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1008,6 +1105,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1037,6 +1135,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1067,6 +1166,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1094,6 +1194,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1121,6 +1222,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1144,6 +1246,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1167,6 +1270,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1192,6 +1296,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -1214,6 +1319,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1238,6 +1344,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1260,6 +1367,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1277,6 +1385,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -1299,6 +1408,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_err());
@@ -1321,6 +1431,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -1343,6 +1454,7 @@ mod tests {
             memory: None,
             marketplace: vec![],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
         };
         assert!(config.validate().is_ok());
@@ -1362,7 +1474,93 @@ mod tests {
                 source: source.to_string(),
             }],
             plugin_collection: vec![],
+            state: Default::default(),
             host: Default::default(),
+        }
+    }
+
+    fn config_with_state(tools: Vec<crate::config::StateTool>) -> Config {
+        Config {
+            state: crate::config::StateConfig { tools },
+            ..Config::default()
+        }
+    }
+
+    fn state_tool(env: &str, subdir: &str) -> crate::config::StateTool {
+        crate::config::StateTool {
+            env: env.into(),
+            subdir: subdir.into(),
+        }
+    }
+
+    #[test]
+    fn state_tool_with_valid_env_and_subdir_accepted() {
+        let cfg = config_with_state(vec![state_tool("CONTEXT_MODE_DATA_DIR", "context-mode")]);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn state_tool_with_invalid_env_name_rejected() {
+        // Leading-digit / space / dash / empty break the shell export contract.
+        // (Lowercase is a valid POSIX env name, so it is intentionally accepted.)
+        for bad in ["1LEADING", "HAS SPACE", "HAS-DASH", ""] {
+            let cfg = config_with_state(vec![state_tool(bad, "ok")]);
+            assert!(
+                matches!(cfg.validate(), Err(ValidateError::StateInvalidEnvName(_))),
+                "env '{bad}' should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn state_tool_with_unsafe_subdir_rejected() {
+        // Subdir must be a single safe path component — block traversal,
+        // separators, drive-letter colons, and NUL so a tool's state can't be
+        // relocated outside the durable dir (#175).
+        for bad in [
+            "..",
+            ".",
+            "",
+            "a/b",
+            "../escape",
+            "/abs",
+            "a\\b",
+            "C:",
+            "a:b",
+            "a\0b",
+        ] {
+            let cfg = config_with_state(vec![state_tool("OK_DIR", bad)]);
+            assert!(
+                matches!(cfg.validate(), Err(ValidateError::StateInvalidSubdir(_))),
+                "subdir '{bad}' should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn state_duplicate_env_var_rejected() {
+        let cfg = config_with_state(vec![
+            state_tool("DATA_DIR", "a"),
+            state_tool("DATA_DIR", "b"),
+        ]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::StateDuplicateEnv(_))
+        ));
+    }
+
+    #[test]
+    fn state_reserved_env_vars_rejected() {
+        // llmenv (and the Claude Code adapter) emit these into the same env_vars
+        // set a tool's relocation var lands in; claiming one would emit a
+        // conflicting binding (e.g. redirecting CLAUDE_CONFIG_DIR), so each is
+        // rejected up front (#175).
+        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+            let cfg = config_with_state(vec![state_tool(reserved, "x")]);
+            assert!(
+                matches!(cfg.validate(), Err(ValidateError::StateDuplicateEnv(_))),
+                "reserved env '{reserved}' should be rejected"
+            );
         }
     }
 
@@ -1373,6 +1571,47 @@ mod tests {
             config.validate(),
             Err(ValidateError::InvalidMarketplaceName(_))
         ));
+    }
+
+    #[test]
+    fn reserved_marketplace_name_with_non_anthropics_source_rejected() {
+        // claude-plugins-official sourced from a non-anthropics repo is exactly
+        // what Claude Code rejects at load time; catch it at config validation
+        // with an actionable error instead (#190).
+        let config = config_with_marketplace(
+            "claude-plugins-official",
+            "https://github.com/someone-else/plugins",
+        );
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::ReservedMarketplaceSource { .. })
+        ));
+    }
+
+    #[test]
+    fn reserved_marketplace_name_with_non_github_source_rejected() {
+        let config = config_with_marketplace("anthropic-plugins", "/local/clone");
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::ReservedMarketplaceSource { .. })
+        ));
+    }
+
+    #[test]
+    fn reserved_marketplace_name_with_anthropics_source_accepted() {
+        let config = config_with_marketplace(
+            "claude-plugins-official",
+            "https://github.com/anthropics/claude-code",
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn non_reserved_marketplace_keeps_arbitrary_source() {
+        // A normal marketplace name carries no source constraint.
+        let config =
+            config_with_marketplace("my-plugins", "https://github.com/someone-else/plugins");
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -1592,6 +1831,33 @@ mod tests {
         fn prop_marketplace_name_leading_dash_rejected(rest in "[A-Za-z0-9._-]{0,20}") {
             let name = format!("-{rest}");
             prop_assert!(!is_valid_marketplace_name(&name), "leading-dash name accepted: {name}");
+        }
+
+        #[test]
+        fn prop_safe_subdir_accepts_single_clean_component(
+            subdir in "[A-Za-z0-9._-]{1,20}",
+        ) {
+            // A single component free of separators/colon/NUL is accepted, except
+            // the traversal sentinels "." and "..".
+            prop_assume!(subdir != "." && subdir != "..");
+            prop_assert!(is_safe_state_subdir(&subdir), "clean subdir rejected: {subdir}");
+        }
+
+        #[test]
+        fn prop_safe_subdir_rejects_separators_and_special(
+            before in "[A-Za-z0-9._-]{0,10}",
+            bad in prop_oneof![Just('/'), Just('\\'), Just(':'), Just('\0')],
+            after in "[A-Za-z0-9._-]{0,10}",
+        ) {
+            // Any path separator, drive-letter colon, or NUL anywhere in the
+            // component is rejected so state can't escape the durable dir (#175).
+            let subdir = format!("{before}{bad}{after}");
+            prop_assert!(!is_safe_state_subdir(&subdir), "unsafe subdir accepted: {subdir:?}");
+        }
+
+        #[test]
+        fn prop_safe_subdir_never_panics(subdir in ".{0,40}") {
+            let _ = is_safe_state_subdir(&subdir);
         }
     }
 }

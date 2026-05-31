@@ -230,6 +230,14 @@ pub fn prune(
             continue;
         }
 
+        // The durable state dir (#175) is a stable sibling of the hashed config
+        // folders that must outlive every materialization. It is never a prune
+        // candidate under any mode — cache invalidation must not wipe tool state.
+        if entry.file_name().to_str() == Some(crate::materialize::state::STATE_DIR_NAME) {
+            report.kept += 1;
+            continue;
+        }
+
         let is_current = entry.file_name().to_str().is_some_and(|name| {
             name.starts_with(&format!("{VERSION_TAG}-")) || version_folder == Some(name)
         });
@@ -304,6 +312,13 @@ pub fn gc(cache_root: &Path, older_than: Duration) -> anyhow::Result<GcReport> {
         if p.extension().is_some_and(|e| e == "tmp") {
             std::fs::remove_dir_all(&p)?;
             report.removed.push(p);
+            continue;
+        }
+        // The durable state dir (#175) is a stable sibling of the hashed config
+        // folders and must outlive every materialization. It is never an age-based
+        // collection candidate — cache invalidation must not wipe tool state.
+        if entry.file_name().to_str() == Some(crate::materialize::state::STATE_DIR_NAME) {
+            report.kept += 1;
             continue;
         }
         let m = newest_mtime(&p)?;
@@ -488,6 +503,53 @@ mod tests {
         assert_eq!(report.kept, 1);
         assert!(current.exists(), "current version folder must survive");
         assert!(!stale.exists(), "older version folder is swept");
+        assert!(report.removed.contains(&stale));
+    }
+
+    #[test]
+    fn prune_never_removes_durable_state_dir() {
+        // The durable state dir (#175) is a stable sibling of the hashed config
+        // folders; it holds tool state that must outlive every config folder, so
+        // no prune mode may delete it — not even `All` (cache invalidation must
+        // not wipe user/tool state).
+        use crate::materialize::state::STATE_DIR_NAME;
+        for mode in [PruneMode::StaleOnly, PruneMode::All] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = touch_dir(tmp.path(), STATE_DIR_NAME);
+            // A genuinely stale folder: a different version tag, so it lacks the
+            // current `{VERSION_TAG}-` prefix and is a real prune candidate.
+            let stale = touch_dir(tmp.path(), "0.0.1-old-deadbeef");
+            let report = prune(tmp.path(), mode, None, false).unwrap();
+            assert!(state.exists(), "state dir must survive {mode:?}");
+            assert!(
+                !report.removed.contains(&state),
+                "state dir never reported removed under {mode:?}"
+            );
+            // Sanity: a genuine stale folder is still swept under both modes.
+            assert!(!stale.exists(), "stale folder still swept under {mode:?}");
+        }
+    }
+
+    #[test]
+    fn gc_never_removes_durable_state_dir() {
+        // The age-based gc() path must honor the same durability guarantee as
+        // prune() (#175): the durable state dir is a stable sibling of the hashed
+        // config folders and must never be removed by cache invalidation, even
+        // once it ages past the retention window. `Duration::ZERO` makes every
+        // entry "older than", so a normal folder is swept and the state dir must
+        // be the only survivor.
+        use crate::materialize::state::STATE_DIR_NAME;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = touch_dir(tmp.path(), STATE_DIR_NAME);
+        let stale = touch_dir(tmp.path(), &format!("{VERSION_TAG}-deadbeef"));
+        let report = gc(tmp.path(), Duration::ZERO).unwrap();
+        assert!(state.exists(), "state dir must survive gc");
+        assert!(
+            !report.removed.contains(&state),
+            "state dir never reported removed by gc"
+        );
+        // Sanity: an aged non-state folder is still collected.
+        assert!(!stale.exists(), "aged folder still collected by gc");
         assert!(report.removed.contains(&stale));
     }
 

@@ -43,6 +43,11 @@ pub struct Config {
     /// collections' plugins is what gets wired up for the active host.
     #[serde(default, rename = "plugin-collection")]
     pub plugin_collection: Vec<PluginCollection>,
+    /// Durable state relocation (#175). Tools that persist runtime state into
+    /// `CLAUDE_CONFIG_DIR` lose it on every content-hash change; this declares
+    /// per-tool env vars llmenv points at a stable, hash-independent state dir.
+    #[serde(default)]
+    pub state: StateConfig,
     /// Static host directory mapping a host name to a reachable address. Used
     /// by the `memory` topology to build a client URL pointing at the host
     /// that runs the server. Keyed by host name (matched against host-scope
@@ -451,6 +456,82 @@ pub fn classify_source(source: &str) -> MarketplaceSource {
     MarketplaceSource::Path
 }
 
+/// Marketplace names Claude Code reserves for official Anthropic marketplaces.
+/// Each may only be sourced from a `github.com/anthropics/...` repository; any
+/// other source is rejected by Claude Code at load time (#190).
+pub const RESERVED_OFFICIAL_MARKETPLACES: &[&str] = &[
+    "claude-plugins-official",
+    "claude-code-plugins",
+    "claude-code-marketplace",
+    "anthropic-marketplace",
+    "anthropic-plugins",
+];
+
+/// The GitHub organization that must own a reserved official marketplace's
+/// source repository (#190).
+pub const OFFICIAL_MARKETPLACE_OWNER: &str = "anthropics";
+
+/// Whether `name` is a marketplace name reserved for an official Anthropic
+/// marketplace. Reserved names carry the `anthropics`-GitHub source constraint.
+#[must_use]
+pub fn is_reserved_official_marketplace(name: &str) -> bool {
+    RESERVED_OFFICIAL_MARKETPLACES.contains(&name)
+}
+
+/// Parse a GitHub source string into its `(owner, repo)` pair, or `None` if the
+/// source is not a `github.com` repository in `owner/repo` form.
+///
+/// Accepts the common git URL shapes: `https://github.com/o/r[.git][/]`,
+/// scp-style `git@github.com:o/r[.git]`, and `ssh://git@github.com/o/r`. Used to
+/// enforce the reserved-name → `anthropics` org constraint (#190).
+#[must_use]
+pub fn github_owner_repo(source: &str) -> Option<(&str, &str)> {
+    // Reduce every accepted shape to the "github.com<sep>owner/repo..." tail,
+    // then split the first two path segments.
+    let rest = source
+        .strip_prefix("https://github.com/")
+        .or_else(|| source.strip_prefix("http://github.com/"))
+        .or_else(|| source.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| source.strip_prefix("git://github.com/"))
+        .or_else(|| source.strip_prefix("git@github.com:"))?;
+
+    let mut segments = rest.trim_end_matches('/').splitn(3, '/');
+    let owner = segments.next().filter(|s| !s.is_empty())?;
+    let repo = segments.next().filter(|s| !s.is_empty())?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    if repo.is_empty() {
+        return None;
+    }
+    Some((owner, repo))
+}
+
+/// Durable per-tool state relocation (#175).
+///
+/// llmenv materializes each agent config into a content-hashed cache folder and
+/// points `CLAUDE_CONFIG_DIR` at it; every hash change yields a fresh folder, so
+/// tool state written under the config dir is lost. llmenv guarantees a stable
+/// sibling state directory (name has no content hash) and emits `LLMENV_STATE_DIR`
+/// pointing at it. Each [`StateTool`] additionally relocates one tool's state by
+/// emitting its env var pointed at a per-tool subdirectory of that stable dir.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct StateConfig {
+    /// Per-tool env-var relocations. Each emits `<env>=<state_dir>/<subdir>`.
+    #[serde(default)]
+    pub tools: Vec<StateTool>,
+}
+
+/// One tool's durable-state relocation: the env var the tool reads to find its
+/// state, and the subdirectory of the stable state dir to point it at (#175).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StateTool {
+    /// Environment variable the tool honors to relocate its state (e.g.
+    /// `CONTEXT_MODE_DATA_DIR`). Emitted alongside `CLAUDE_CONFIG_DIR`.
+    pub env: String,
+    /// Subdirectory under the stable state dir this tool's state lives in (e.g.
+    /// `context-mode`). A single safe path component — no separators or `..`.
+    pub subdir: String,
+}
+
 /// A named collection of plugins selected onto a scope by tag intersection
 /// (identical model to bundles and MCP servers). Each plugin is identified as
 /// `<marketplace>:<plugin>`, where `<marketplace>` references a top-level
@@ -522,6 +603,60 @@ mod tests {
     }
 
     #[test]
+    fn reserved_official_marketplace_names_detected() {
+        // Claude Code reserves these names for official Anthropic marketplaces
+        // (#190); each can only be sourced from a github.com/anthropics repo.
+        for name in [
+            "claude-plugins-official",
+            "claude-code-plugins",
+            "claude-code-marketplace",
+            "anthropic-marketplace",
+            "anthropic-plugins",
+        ] {
+            assert!(is_reserved_official_marketplace(name), "{name} reserved");
+        }
+        for name in ["superpowers", "dev-commons", "claude", "my-claude-plugins"] {
+            assert!(!is_reserved_official_marketplace(name), "{name} free");
+        }
+    }
+
+    #[test]
+    fn github_owner_repo_parses_common_forms() {
+        let want = Some(("anthropics", "claude-code"));
+        assert_eq!(
+            github_owner_repo("https://github.com/anthropics/claude-code"),
+            want
+        );
+        assert_eq!(
+            github_owner_repo("https://github.com/anthropics/claude-code.git"),
+            want
+        );
+        assert_eq!(
+            github_owner_repo("https://github.com/anthropics/claude-code/"),
+            want
+        );
+        assert_eq!(
+            github_owner_repo("git@github.com:anthropics/claude-code.git"),
+            want
+        );
+        assert_eq!(
+            github_owner_repo("ssh://git@github.com/anthropics/claude-code"),
+            want
+        );
+    }
+
+    #[test]
+    fn github_owner_repo_rejects_non_github_and_malformed() {
+        assert_eq!(
+            github_owner_repo("https://gitlab.com/anthropics/claude-code"),
+            None
+        );
+        assert_eq!(github_owner_repo("https://github.com/anthropics"), None);
+        assert_eq!(github_owner_repo("/local/path"), None);
+        assert_eq!(github_owner_repo("not a url"), None);
+    }
+
+    #[test]
     fn split_plugin_ref_roundtrips() {
         assert_eq!(
             split_plugin_ref("superpowers:caveman"),
@@ -585,6 +720,49 @@ mod tests {
         #[test]
         fn prop_split_plugin_ref_never_panics(s in ".{0,60}") {
             let _ = split_plugin_ref(&s);
+        }
+
+        #[test]
+        fn prop_github_owner_repo_roundtrip(
+            owner in "[a-z0-9][a-z0-9-]{0,20}",
+            repo in "[a-z0-9][a-z0-9._-]{0,20}",
+        ) {
+            // A canonical https github URL always parses back to its components.
+            // repo strips a trailing ".git", so exclude inputs ending in it.
+            prop_assume!(!repo.ends_with(".git"));
+            let source = format!("https://github.com/{owner}/{repo}");
+            prop_assert_eq!(github_owner_repo(&source), Some((owner.as_str(), repo.as_str())));
+        }
+
+        #[test]
+        fn prop_github_owner_repo_never_panics(source in ".{0,80}") {
+            // Must total over arbitrary input — it gates reserved-name enforcement.
+            let _ = github_owner_repo(&source);
+        }
+
+        #[test]
+        fn prop_state_config_yaml_roundtrip(
+            tools in proptest::collection::vec(
+                ("[A-Z][A-Z0-9_]{0,10}", "[a-z0-9][a-z0-9._-]{0,12}"),
+                0..5,
+            ),
+        ) {
+            // StateConfig survives a YAML serialize→deserialize round-trip for any
+            // well-formed tool list (#175). Dedup of env names is enforced by
+            // validate(), not serde, so keep generated env names distinct here.
+            prop_assume!({
+                let names: std::collections::HashSet<_> = tools.iter().map(|(e, _)| e).collect();
+                names.len() == tools.len()
+            });
+            let cfg = StateConfig {
+                tools: tools
+                    .into_iter()
+                    .map(|(env, subdir)| StateTool { env, subdir })
+                    .collect(),
+            };
+            let yaml = serde_yaml::to_string(&cfg).expect("serialize StateConfig");
+            let back: StateConfig = serde_yaml::from_str(&yaml).expect("deserialize StateConfig");
+            prop_assert_eq!(cfg, back);
         }
     }
 }

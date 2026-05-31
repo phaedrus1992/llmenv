@@ -865,11 +865,24 @@ fn build_and_materialize(
         config.cache.hashing,
     )?;
 
-    let env_vars = adapter.env_vars(&cache_path)?;
-    // Defense-in-depth (#67): validate adapter-returned var names at the
-    // source, not only at the final emission loop. A future emission path that
-    // doesn't route through run_export's validate step can't smuggle a name
-    // that would break the `export NAME=...` shell contract.
+    let mut env_vars = adapter.env_vars(&cache_path)?;
+
+    // Durable state (#175): the state dir is a stable sibling of the hashed
+    // config folders (`<adapter_root>/state`), so it survives every hash change.
+    // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and
+    // create the dirs so tools find them on first run.
+    let state_dir = crate::materialize::state::state_dir(&adapter_root);
+    crate::materialize::state::ensure_state_dirs(&config.state, &state_dir)
+        .context("creating durable state directories")?;
+    env_vars.extend(crate::materialize::state::state_env_vars(
+        &config.state,
+        &state_dir,
+    ));
+
+    // Defense-in-depth (#67): validate var names at the source, not only at the
+    // final emission loop. A future emission path that doesn't route through
+    // run_export's validate step can't smuggle a name that would break the
+    // `export NAME=...` shell contract.
     reject_invalid_var_names(&env_vars)?;
     Ok(Some((cache_path, env_vars)))
 }
@@ -1247,6 +1260,16 @@ bundle:
 #   server_host: my-laptop
 #   port: 7878
 #   tags: [me]
+
+# Durable per-tool state (#175). The materialized config folder is renamed on
+# every version/config change, so tool state written under CLAUDE_CONFIG_DIR is
+# lost. llmenv guarantees a stable state dir (sibling of the hashed folders,
+# never garbage-collected) and always exports LLMENV_STATE_DIR pointing at it.
+# Declare a tool's relocation env var here to point it at a per-tool subdir:
+# state:
+#   tools:
+#     - env: CONTEXT_MODE_DATA_DIR   # tool reads this to find its state
+#       subdir: context-mode         # → $LLMENV_STATE_DIR/context-mode
 "#;
     std::fs::write(&config_path, template)
         .with_context(|| format!("writing template to {}", config_path.display()))?;
