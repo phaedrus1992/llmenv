@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde_json::json;
@@ -41,9 +41,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
         Ok(vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())])
     }
 
-    fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<()> {
+    fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        // Every path llmenv writes into `out`, relative to `out`. Returned as
+        // the owned set so the orchestrator can reconcile ghost files on a
+        // version-mode re-render (#196) without touching foreign state.
+        let mut owned: Vec<PathBuf> = Vec::new();
+
         std::fs::create_dir_all(out)?;
         crate::paths::write_owner_only(&out.join("CLAUDE.md"), manifest.agents_md.as_bytes())?;
+        owned.push(PathBuf::from("CLAUDE.md"));
 
         // Claude Code has a native rules-directory convention, so write each
         // `rules/*.md` file verbatim (frontmatter preserved) into `<out>/rules/`.
@@ -58,6 +64,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 std::fs::create_dir_all(parent)?;
             }
             crate::paths::write_owner_only(&dest, r.raw.as_bytes())?;
+            owned.push(r.rel.clone());
         }
 
         // Copy all files from the manifest. JSON hook templates get
@@ -78,6 +85,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             } else {
                 std::fs::copy(abs, &dest)?;
             }
+            owned.push(rel.clone());
         }
 
         // Validate that skills are properly structured with SKILL.md frontmatter
@@ -85,15 +93,17 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         // Generate settings.json from hook/permission bundles
         generate_settings_json(out, manifest)?;
+        owned.push(PathBuf::from("settings.json"));
 
         // Emit mcp.json when the manifest carries resolved MCP servers or a
         // per-engine `native_mcp` fragment (#97) to overlay onto the doc.
         let native_mcp = manifest.capabilities.native_mcp.get("claude_code");
         if !manifest.mcps.is_empty() || native_mcp.is_some() {
             write_mcp_json(out, &manifest.mcps, native_mcp)?;
+            owned.push(PathBuf::from("mcp.json"));
         }
 
-        Ok(())
+        Ok(owned)
     }
 
     fn emit_hook_context(&self, text: &str) -> String {
@@ -555,8 +565,18 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         reject_modeled_keys_in_catch_all(native)?;
     }
     overlay_native(&mut settings_value, manifest.native.get("claude_code"))?;
+
     let settings_path = out.join("settings.json");
-    let json_str = serde_json::to_string_pretty(&settings_value)?;
+
+    // #196/#175: in version mode `out` is the agent's live config dir for the
+    // whole session, so a plugin may have self-registered hooks (or other keys)
+    // into settings.json after llmenv last wrote it. A wholesale overwrite would
+    // strand that registration. Reconcile instead: preserve any foreign keys
+    // already on disk, while making llmenv authoritative over the keys it owns.
+    // In strict mode the file never pre-exists (fresh content-hashed folder), so
+    // this is a no-op there.
+    let reconciled = reconcile_settings(&settings_path, settings_value)?;
+    let json_str = serde_json::to_string_pretty(&reconciled)?;
 
     crate::paths::write_owner_only_atomic(&settings_path, json_str.as_bytes()).with_context(
         || {
@@ -568,6 +588,92 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     )?;
 
     Ok(())
+}
+
+/// Top-level settings.json keys llmenv renders authoritatively. On a re-render
+/// these are **replaced** with llmenv's freshly-computed value — a rule llmenv
+/// dropped from config must actually disappear, and `permissions` must never be
+/// weakened by a stale union. The one shared key, `hooks`, is handled specially
+/// (see [`reconcile_settings`]) so a plugin's self-registered hook survives.
+const LLMENV_OWNED_SETTINGS_KEYS: [&str; 5] = [
+    "permissions",
+    "enabledPlugins",
+    "extraKnownMarketplaces",
+    "autoMemoryEnabled",
+    "hooks",
+];
+
+/// Merge llmenv's freshly-rendered settings (`fresh`) onto whatever already
+/// exists at `path`, preserving foreign in-session state (#175, #196).
+///
+/// Strategy:
+/// - Start from the on-disk doc (or an empty object when absent / unparseable —
+///   a corrupt file must not abort the render or silently drop llmenv config).
+/// - **Foreign keys** (anything not in [`LLMENV_OWNED_SETTINGS_KEYS`]) are left
+///   exactly as they were on disk — that is what protects a plugin's own
+///   top-level keys.
+/// - **`hooks`** is *merged* (per-event arrays concat + dedup via
+///   [`merge_json`]), so a plugin's self-registered SessionStart entry survives
+///   alongside llmenv's. Dedup keeps llmenv's own re-rendered entries from
+///   accumulating across renders.
+/// - **Every other owned key** is *replaced* with llmenv's value (authoritative;
+///   removals propagate, `permissions` is never weakened by a stale union).
+/// - An owned key llmenv does *not* render this round (e.g. no plugins → no
+///   `enabledPlugins`) is removed from the on-disk doc, so dropping all plugins
+///   actually clears the key rather than leaving a stale one.
+fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let existing = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "reading existing settings.json {}: {e}",
+                path.display()
+            ));
+        }
+    };
+
+    // No prior file (strict mode, or first version-mode render): llmenv's doc is
+    // the whole truth.
+    let Some(mut merged) = existing else {
+        return Ok(fresh);
+    };
+    // A non-object on disk (corrupt/hand-edited) can't carry foreign keys worth
+    // preserving — llmenv's render wins outright.
+    let Some(merged_obj) = merged.as_object_mut() else {
+        return Ok(fresh);
+    };
+    let fresh_obj = match &fresh {
+        serde_json::Value::Object(o) => o,
+        // llmenv always renders an object; defend against a future change.
+        _ => return Ok(fresh),
+    };
+
+    for key in LLMENV_OWNED_SETTINGS_KEYS {
+        match fresh_obj.get(key) {
+            Some(fresh_val) if key == "hooks" => {
+                // Union so a plugin's foreign hook entries survive; dedup keeps
+                // llmenv's own entries from piling up across re-renders.
+                match merged_obj.get_mut(key) {
+                    Some(existing_val) => merge_json(existing_val, fresh_val.clone()),
+                    None => {
+                        merged_obj.insert(key.to_string(), fresh_val.clone());
+                    }
+                }
+            }
+            Some(fresh_val) => {
+                // Authoritative replace.
+                merged_obj.insert(key.to_string(), fresh_val.clone());
+            }
+            None => {
+                // llmenv rendered nothing for this owned key this round → drop
+                // any stale value so removals (e.g. all plugins removed) clear.
+                merged_obj.remove(key);
+            }
+        }
+    }
+
+    Ok(merged)
 }
 
 /// Render the manifest's resolved marketplaces + plugins into `settings`.
@@ -667,8 +773,8 @@ enum PermissionAction {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        MODELED_SETTINGS_KEYS, is_hook_json, overlay_native, reject_modeled_keys_in_catch_all,
-        render_permission_rule, write_mcp_json,
+        MODELED_SETTINGS_KEYS, is_hook_json, overlay_native, reconcile_settings,
+        reject_modeled_keys_in_catch_all, render_permission_rule, write_mcp_json,
     };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -1000,5 +1106,117 @@ mod tests {
                 }
             });
         prop_oneof![stdio, remote]
+    }
+
+    // ---- reconcile_settings (#196 / #175): settings.json is shared, not owned ----
+
+    fn write_json(path: &std::path::Path, v: &serde_json::Value) {
+        std::fs::write(path, serde_json::to_vec_pretty(v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn reconcile_absent_file_returns_fresh_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
+        let out = reconcile_settings(&path, fresh.clone()).unwrap();
+        assert_eq!(
+            out, fresh,
+            "no prior file → llmenv's render is the whole truth"
+        );
+    }
+
+    #[test]
+    fn reconcile_preserves_foreign_top_level_keys() {
+        // #175: a plugin self-registered a top-level key. A re-render must keep it.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        write_json(
+            &path,
+            &serde_json::json!({
+                "permissions": { "deny": ["STALE"] },
+                "contextModeState": { "session": "abc" }
+            }),
+        );
+        let fresh = serde_json::json!({ "permissions": { "deny": ["FRESH"] } });
+        let out = reconcile_settings(&path, fresh).unwrap();
+        // Owned key replaced authoritatively; foreign key untouched.
+        assert_eq!(out["permissions"]["deny"], serde_json::json!(["FRESH"]));
+        assert_eq!(out["contextModeState"]["session"], "abc");
+    }
+
+    #[test]
+    fn reconcile_unions_hooks_so_plugin_registration_survives() {
+        // A plugin self-registered a SessionStart hook into settings.json after
+        // llmenv last wrote it. llmenv's re-render must merge, not clobber.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        write_json(
+            &path,
+            &serde_json::json!({
+                "hooks": { "SessionStart": [{ "command": "plugin-hook" }] }
+            }),
+        );
+        let fresh = serde_json::json!({
+            "hooks": { "SessionStart": [{ "command": "llmenv-hook" }] }
+        });
+        let out = reconcile_settings(&path, fresh).unwrap();
+        let entries = out["hooks"]["SessionStart"].as_array().unwrap();
+        let cmds: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["command"].as_str())
+            .collect();
+        assert!(
+            cmds.contains(&"plugin-hook"),
+            "plugin hook survives: {cmds:?}"
+        );
+        assert!(
+            cmds.contains(&"llmenv-hook"),
+            "llmenv hook present: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_hooks_union_dedups_across_renders() {
+        // Re-rendering the same llmenv hook must not pile up duplicates.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let llmenv_hook = serde_json::json!({
+            "hooks": { "SessionStart": [{ "command": "llmenv-hook" }] }
+        });
+        write_json(&path, &llmenv_hook);
+        let out = reconcile_settings(&path, llmenv_hook.clone()).unwrap();
+        let entries = out["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "identical hook deduped, not doubled");
+    }
+
+    #[test]
+    fn reconcile_drops_owned_key_llmenv_no_longer_renders() {
+        // All plugins removed → llmenv renders no `enabledPlugins`; a stale value
+        // on disk must be cleared, not left to keep enabling a dropped plugin.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        write_json(
+            &path,
+            &serde_json::json!({ "enabledPlugins": { "old@market": true } }),
+        );
+        let fresh = serde_json::json!({ "permissions": { "deny": [] } });
+        let out = reconcile_settings(&path, fresh).unwrap();
+        assert!(
+            out.get("enabledPlugins").is_none(),
+            "stale owned key cleared on re-render"
+        );
+    }
+
+    #[test]
+    fn reconcile_corrupt_file_falls_back_to_fresh() {
+        // A hand-corrupted settings.json must not abort the render or strand
+        // llmenv config — llmenv's render wins outright.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
+        let out = reconcile_settings(&path, fresh.clone()).unwrap();
+        assert_eq!(out, fresh);
     }
 }

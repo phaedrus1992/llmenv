@@ -60,6 +60,17 @@ pub struct Cache {
     pub cache_dir: String,
     pub sync_interval_minutes: u64,
     pub cache_retention_hours: Option<u64>,
+    /// How the materialized cache folder is *named* (#196). `strict` suffixes
+    /// the folder with the content hash, so any input change mints a fresh
+    /// folder. `version` names the folder after the binary version at
+    /// [`Self::version_fidelity`], so content edits re-render into the same
+    /// folder and a running agent only picks them up on relaunch. Drift
+    /// detection and reconciliation are identical in both modes — the manifest
+    /// dotfile carries the content hash and owned-file set regardless.
+    pub hashing: HashingMode,
+    /// Fidelity of the version string used to name the folder in
+    /// [`HashingMode::Version`]. Ignored in [`HashingMode::Strict`].
+    pub version_fidelity: VersionFidelity,
 }
 
 impl Default for Cache {
@@ -68,8 +79,43 @@ impl Default for Cache {
             cache_dir: "~/.cache/llmenv".into(),
             sync_interval_minutes: 15,
             cache_retention_hours: Some(168), // 7 days
+            hashing: HashingMode::default(),
+            version_fidelity: VersionFidelity::default(),
         }
     }
+}
+
+/// Cache-folder naming strategy (#196). Default is [`Self::Version`]: stability
+/// over cache-invalidation precision. Pre-1.0, single user, no back-compat
+/// constraint — the default is the new behavior outright, with `strict` the
+/// opt-in for per-content folders.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HashingMode {
+    /// Folder = `{VERSION_TAG}-{content_hash}`. Any input change → new folder.
+    Strict,
+    /// Folder = version string at [`VersionFidelity`]. Content edits re-render
+    /// in place; the running agent picks them up only on relaunch.
+    #[default]
+    Version,
+}
+
+/// Fidelity of the version string used to name a [`HashingMode::Version`]
+/// folder. Lower fidelity = fewer, longer-lived folders (folder churns only on
+/// a version bump at the chosen granularity).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionFidelity {
+    /// `X` — folder churns only on a major bump.
+    Major,
+    /// `X.Y` — the default. Folder churns on a minor bump.
+    #[default]
+    MajorMinor,
+    /// `X.Y.Z` — folder churns on any release.
+    Full,
+    /// `X.Y.Z-hhhhhhhh` — folder churns on every commit (closest to `strict`
+    /// without mixing in content).
+    Commit,
 }
 
 /// Engine-agnostic capability vocabulary. Identical shape whether declared at the
@@ -438,6 +484,34 @@ pub fn split_plugin_ref(s: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn cache_defaults_to_version_major_minor_when_keys_absent() {
+        // #196: a Cache block with no `hashing`/`version_fidelity` keys parses
+        // to the new defaults (version + major_minor), not strict.
+        let cache: Cache =
+            serde_yaml::from_str("cache_dir: ~/.cache/llmenv\nsync_interval_minutes: 60\n")
+                .expect("parse minimal cache");
+        assert_eq!(cache.hashing, HashingMode::Version);
+        assert_eq!(cache.version_fidelity, VersionFidelity::MajorMinor);
+        // The bare Default impl must agree with the parsed-absent behavior.
+        assert_eq!(Cache::default().hashing, HashingMode::Version);
+        assert_eq!(
+            Cache::default().version_fidelity,
+            VersionFidelity::MajorMinor
+        );
+    }
+
+    #[test]
+    fn cache_parses_explicit_strict_and_fidelity() {
+        let cache: Cache = serde_yaml::from_str(
+            "cache_dir: ~/.cache/llmenv\nsync_interval_minutes: 60\n\
+             hashing: strict\nversion_fidelity: commit\n",
+        )
+        .expect("parse explicit cache");
+        assert_eq!(cache.hashing, HashingMode::Strict);
+        assert_eq!(cache.version_fidelity, VersionFidelity::Commit);
+    }
 
     #[test]
     fn classify_scp_style_is_git() {

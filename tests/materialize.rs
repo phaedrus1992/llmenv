@@ -3,9 +3,22 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use llmenv::materialize::{cache, materialize};
+use llmenv::config::{HashingMode, VersionFidelity};
+use llmenv::materialize::{cache, materialize_with_mode};
 use llmenv::merge::{BundleRef, merge};
 use tempfile::tempdir;
+
+/// Strict-mode materialize: content-addressed folders. The crate's `materialize`
+/// convenience wrapper now defaults to version mode (#196), so the dedup/skew
+/// tests below pin strict explicitly.
+fn materialize_strict(
+    m: &llmenv::merge::MergedManifest,
+    root: &std::path::Path,
+) -> std::path::PathBuf {
+    materialize_with_mode(m, root, HashingMode::Strict, VersionFidelity::default())
+        .expect("materialize strict")
+        .path
+}
 
 fn fixture_bundle(name: &str) -> BundleRef {
     BundleRef {
@@ -28,8 +41,8 @@ fn materializes_deterministically() {
         &[fixture_bundle("base")],
     )
     .expect("merge");
-    let p1 = materialize(&m, tmp.path()).expect("materialize 1");
-    let p2 = materialize(&m, tmp.path()).expect("materialize 2");
+    let p1 = materialize_strict(&m, tmp.path());
+    let p2 = materialize_strict(&m, tmp.path());
     assert_eq!(p1, p2, "same manifest hashes to same path");
     // materialize copies raw bundle files only — rules text is rendered by
     // the per-agent adapter, not written here.
@@ -52,9 +65,45 @@ fn different_manifests_produce_different_dirs() {
         &[fixture_bundle("base"), fixture_bundle("rust-defaults")],
     )
     .expect("merge both");
-    let p1 = materialize(&m_base, tmp.path()).expect("materialize base");
-    let p2 = materialize(&m_both, tmp.path()).expect("materialize both");
+    let p1 = materialize_strict(&m_base, tmp.path());
+    let p2 = materialize_strict(&m_both, tmp.path());
     assert_ne!(p1, p2);
+}
+
+#[test]
+fn version_mode_reuses_one_folder_across_manifests() {
+    // #196: version mode names the folder after the binary version, not the
+    // content hash. Two different manifests therefore render into the SAME
+    // folder (last-writer-wins), unlike strict mode above.
+    let tmp = tempdir().expect("tempdir");
+    let m_base = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge base");
+    let m_both = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &[fixture_bundle("base"), fixture_bundle("rust-defaults")],
+    )
+    .expect("merge both");
+    let r1 = materialize_with_mode(
+        &m_base,
+        tmp.path(),
+        HashingMode::Version,
+        VersionFidelity::Full,
+    )
+    .expect("materialize base");
+    let r2 = materialize_with_mode(
+        &m_both,
+        tmp.path(),
+        HashingMode::Version,
+        VersionFidelity::Full,
+    )
+    .expect("materialize both");
+    assert_eq!(r1.path, r2.path, "version mode reuses the same folder");
+    assert_ne!(r1.hash, r2.hash, "but the content hash still differs");
 }
 
 #[test]
@@ -66,7 +115,7 @@ fn no_tmp_stage_dir_after_success() {
         &[fixture_bundle("base")],
     )
     .expect("merge");
-    let _ = materialize(&m, tmp.path()).expect("materialize");
+    let _ = materialize_strict(&m, tmp.path());
     for entry in std::fs::read_dir(tmp.path()).expect("read_dir") {
         let p = entry.expect("entry").path();
         assert!(
