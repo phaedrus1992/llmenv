@@ -1,6 +1,7 @@
 //! Minimal HTTP JSON-RPC MCP client — only the `tools/call` path this feature
 //! needs. Not a general MCP library.
 
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
@@ -21,9 +22,20 @@ impl McpHttpClient {
     /// Returns an error if the URL is invalid, uses an unsupported scheme, or
     /// points to a private/loopback IP address (SSRF protection).
     pub fn new(url: String, timeout: Duration) -> anyhow::Result<Self> {
-        validate_url_production(&url)?;
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
+        // Resolve and SSRF-validate up front, then pin reqwest to exactly the
+        // vetted addresses. Pinning closes the DNS-rebinding TOCTOU: reqwest never
+        // performs its own (re-)resolution at send() time, so a hostname cannot
+        // resolve to a public IP during validation and a private one at connect
+        // time — the connection can only target an address we already approved.
+        let addrs = validate_url_production(&url)?;
+        let mut builder = reqwest::Client::builder().timeout(timeout);
+        if let Some(host) = Url::parse(&url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+        {
+            builder = builder.resolve_to_addrs(&host, &addrs);
+        }
+        let client = builder
             .build()
             .context("failed to build HTTP client (TLS backend unavailable)")?;
         Ok(Self { url, client })
@@ -97,13 +109,72 @@ fn extract_text(body: &Value) -> Option<String> {
     Some(out)
 }
 
-/// Validate ICM backend URL to prevent SSRF attacks.
+/// Report why an IP address is blocked for SSRF safety, or `None` if it is a
+/// routable public address.
 ///
-/// Rejects URLs with unsupported schemes and private/loopback IP addresses.
-fn validate_url_production(url: &str) -> anyhow::Result<()> {
+/// Single source of truth shared by literal-IP and resolved-domain validation.
+/// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are unwrapped and judged by
+/// their IPv4 form so a blocked v4 range cannot be smuggled through the v6
+/// namespace (#191).
+fn blocked_reason(ip: &IpAddr) -> Option<&'static str> {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                Some("loopback IPv4")
+            } else if v4.is_private() {
+                Some("private IPv4")
+            } else if v4.is_link_local() {
+                Some("link-local IPv4")
+            } else if v4.is_unspecified() {
+                Some("unspecified IPv4")
+            } else if v4.is_broadcast() {
+                Some("broadcast IPv4")
+            } else {
+                None
+            }
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return blocked_reason(&IpAddr::V4(mapped));
+            }
+            if v6.is_loopback() {
+                Some("loopback IPv6")
+            } else if v6.is_unspecified() {
+                Some("unspecified IPv6")
+            } else if v6.is_unicast_link_local() {
+                Some("link-local IPv6")
+            } else if is_unique_local_v6(v6) {
+                Some("unique-local IPv6 (ULA)")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Whether an IPv6 address falls in the Unique Local Address range `fc00::/7`.
+///
+/// `Ipv6Addr::is_unique_local` is unstable, so test the prefix directly: the
+/// top seven bits are `1111110`, i.e. the first byte is `0xfc` or `0xfd` (#191).
+fn is_unique_local_v6(v6: &std::net::Ipv6Addr) -> bool {
+    (v6.octets()[0] & 0xfe) == 0xfc
+}
+
+/// Validate ICM backend URL to prevent SSRF attacks and return the vetted set of
+/// socket addresses the connection may target.
+///
+/// Rejects unsupported schemes, blocked literal IPs, and — for hostnames —
+/// resolves DNS and rejects the URL if *any* resolved address is blocked. The
+/// returned addresses are pinned by the caller so reqwest cannot re-resolve to
+/// an unvetted address at send() time (DNS-rebinding TOCTOU mitigation, #191).
+///
+/// # Errors
+/// Returns an error for an unparseable URL, an unsupported scheme, a missing
+/// host, a DNS resolution failure, or any resolved/literal address that falls in
+/// a private, loopback, link-local, unspecified, or unique-local range.
+fn validate_url_production(url: &str) -> anyhow::Result<Vec<SocketAddr>> {
     let parsed = Url::parse(url).with_context(|| format!("invalid URL: {url}"))?;
 
-    // Only allow http/https schemes
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(anyhow!(
             "unsupported URL scheme '{}' (only http/https allowed)",
@@ -111,33 +182,36 @@ fn validate_url_production(url: &str) -> anyhow::Result<()> {
         ));
     }
 
-    // Reject private/loopback IP ranges to prevent SSRF
-    if let Some(host) = parsed.host() {
-        match host {
-            Host::Ipv4(v4) => {
-                if v4.is_loopback() {
-                    return Err(anyhow!("loopback IPv4 {} not allowed", v4));
-                }
-                if v4.is_private() {
-                    return Err(anyhow!("private IPv4 {} not allowed", v4));
-                }
-                if v4.is_link_local() {
-                    return Err(anyhow!("link-local IPv4 {} not allowed", v4));
-                }
-            }
-            Host::Ipv6(v6) => {
-                if v6.is_loopback() {
-                    return Err(anyhow!("loopback IPv6 {} not allowed", v6));
-                }
-                if v6.is_unicast_link_local() {
-                    return Err(anyhow!("link-local IPv6 {} not allowed", v6));
-                }
-            }
-            Host::Domain(_) => {} // Domain names are allowed
+    let host = parsed
+        .host()
+        .ok_or_else(|| anyhow!("URL {url} has no host"))?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("URL {url} has no port and an unknown default"))?;
+
+    let addrs: Vec<SocketAddr> = match host {
+        Host::Ipv4(v4) => vec![SocketAddr::new(IpAddr::V4(v4), port)],
+        Host::Ipv6(v6) => vec![SocketAddr::new(IpAddr::V6(v6), port)],
+        Host::Domain(name) => (name, port)
+            .to_socket_addrs()
+            .with_context(|| format!("failed to resolve host '{name}'"))?
+            .collect(),
+    };
+
+    if addrs.is_empty() {
+        return Err(anyhow!("host of URL {url} resolved to no addresses"));
+    }
+
+    // Reject if ANY resolved address is blocked. A permissive "some address is
+    // public" rule would let an attacker pair one public A record with a private
+    // one and gamble on connection ordering.
+    for addr in &addrs {
+        if let Some(reason) = blocked_reason(&addr.ip()) {
+            return Err(anyhow!("{reason} address {} not allowed (SSRF)", addr.ip()));
         }
     }
 
-    Ok(())
+    Ok(addrs)
 }
 
 #[cfg(test)]
@@ -199,6 +273,94 @@ mod tests {
     fn validate_url_accepts_public_ips() {
         assert!(validate_url_production("http://8.8.8.8:8080").is_ok());
         assert!(validate_url_production("https://example.com:8080").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_ipv6_ula() {
+        // IPv6 Unique Local Addresses (fc00::/7) are private and must be rejected
+        // (#191). Covers both halves of the prefix: fc00::/8 and fd00::/8.
+        assert!(validate_url_production("http://[fc00::1]:8080").is_err());
+        assert!(validate_url_production("http://[fd00::1]:8080").is_err());
+        assert!(validate_url_production("http://[fd12:3456:789a::1]:8080").is_err());
+    }
+
+    #[test]
+    fn validate_url_accepts_public_ipv6() {
+        // Documentation range 2001:db8::/32 and a real public resolver address are
+        // not in any blocked range, so they must pass.
+        assert!(validate_url_production("http://[2001:db8::1]:8080").is_ok());
+        assert!(validate_url_production("http://[2606:4700:4700::1111]:8080").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_ipv4_mapped_ipv6_loopback() {
+        // An attacker can smuggle a blocked IPv4 through the v6 namespace as a
+        // mapped address (::ffff:127.0.0.1). The blocklist must unwrap and reject
+        // it rather than treat the v6 wrapper as public (#191).
+        assert!(validate_url_production("http://[::ffff:127.0.0.1]:8080").is_err());
+        assert!(validate_url_production("http://[::ffff:169.254.169.254]:8080").is_err());
+        assert!(validate_url_production("http://[::ffff:10.0.0.1]:8080").is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_unspecified_and_metadata() {
+        // 0.0.0.0 / :: route to localhost on many stacks; 169.254.169.254 is the
+        // cloud metadata endpoint — both are classic SSRF targets (#191).
+        assert!(validate_url_production("http://0.0.0.0:8080").is_err());
+        assert!(validate_url_production("http://[::]:8080").is_err());
+        assert!(validate_url_production("http://169.254.169.254:8080").is_err());
+    }
+
+    #[test]
+    fn blocked_reason_flags_private_and_special_ranges() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        // The blocklist is the single source of truth shared by literal-IP and
+        // resolved-domain validation; assert it directly (#191).
+        let blocked: &[IpAddr] = &[
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+        ];
+        for ip in blocked {
+            assert!(blocked_reason(ip).is_some(), "expected {ip} to be blocked");
+        }
+        let allowed: &[IpAddr] = &[
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)),
+        ];
+        for ip in allowed {
+            assert!(blocked_reason(ip).is_none(), "expected {ip} to be allowed");
+        }
+    }
+
+    #[test]
+    fn validate_url_returns_pinned_addrs_for_literal_ip() {
+        // The TOCTOU fix pins reqwest to the addresses validation already vetted.
+        // For a literal IP, the returned set is exactly that address (#191).
+        let addrs = validate_url_production("http://8.8.8.8:8080").expect("public IP ok");
+        assert!(
+            addrs
+                .iter()
+                .any(|a| a.ip().to_string() == "8.8.8.8" && a.port() == 8080)
+        );
+    }
+
+    #[test]
+    fn validate_url_rejects_domain_resolving_to_loopback() {
+        // DNS-rebinding TOCTOU: a hostname that resolves to a blocked address must
+        // be rejected at validation time, before any request is sent. localhost is
+        // the always-available stand-in for an attacker-controlled rebind (#191).
+        assert!(validate_url_production("http://localhost:8080").is_err());
     }
 
     #[test]
