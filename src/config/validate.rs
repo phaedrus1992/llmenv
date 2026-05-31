@@ -308,6 +308,7 @@ impl Config {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::config::{HashingMode, VersionFidelity};
     use proptest::prelude::*;
 
     fn arb_string() -> impl Strategy<Value = String> {
@@ -320,14 +321,44 @@ mod tests {
         prop::option::of(arb_string())
     }
 
+    fn arb_hashing_mode() -> impl Strategy<Value = HashingMode> {
+        prop_oneof![Just(HashingMode::Strict), Just(HashingMode::Version)]
+    }
+
+    fn arb_version_fidelity() -> impl Strategy<Value = VersionFidelity> {
+        prop_oneof![
+            Just(VersionFidelity::Major),
+            Just(VersionFidelity::MajorMinor),
+            Just(VersionFidelity::Full),
+            Just(VersionFidelity::Commit),
+        ]
+    }
+
     fn arb_cache() -> impl Strategy<Value = Cache> {
-        (arb_string(), 0u64..120, prop::option::of(0u64..10_000)).prop_map(
-            |(cache_dir, sync_interval_minutes, cache_retention_hours)| Cache {
-                cache_dir,
-                sync_interval_minutes,
-                cache_retention_hours,
-            },
+        (
+            arb_string(),
+            0u64..120,
+            prop::option::of(0u64..10_000),
+            arb_hashing_mode(),
+            arb_version_fidelity(),
         )
+            .prop_map(
+                |(
+                    cache_dir,
+                    sync_interval_minutes,
+                    cache_retention_hours,
+                    hashing,
+                    version_fidelity,
+                )| {
+                    Cache {
+                        cache_dir,
+                        sync_interval_minutes,
+                        cache_retention_hours,
+                        hashing,
+                        version_fidelity,
+                    }
+                },
+            )
     }
 
     fn arb_permission_mode() -> impl Strategy<Value = PermissionMode> {
@@ -1173,6 +1204,7 @@ mod tests {
                 cache_dir: "~/.cache/../../../etc/passwd".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
+                ..Default::default()
             },
             capabilities: Default::default(),
             native: Default::default(),
@@ -1196,6 +1228,7 @@ mod tests {
                 cache_dir: "~/.cache/llmenv/..".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
+                ..Default::default()
             },
             capabilities: Default::default(),
             native: Default::default(),
@@ -1217,6 +1250,7 @@ mod tests {
                 cache_dir: "~/.cache/llm\0env".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
+                ..Default::default()
             },
             capabilities: Default::default(),
             native: Default::default(),
@@ -1255,6 +1289,7 @@ mod tests {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(0),
+                ..Default::default()
             },
             capabilities: Default::default(),
             native: Default::default(),
@@ -1276,6 +1311,7 @@ mod tests {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: Some(168),
+                ..Default::default()
             },
             capabilities: Default::default(),
             native: Default::default(),
@@ -1297,6 +1333,7 @@ mod tests {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
                 cache_retention_hours: None,
+                ..Default::default()
             },
             capabilities: Default::default(),
             native: Default::default(),

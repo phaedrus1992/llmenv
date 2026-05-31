@@ -1,106 +1,108 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Unit tests for version tag extraction logic
+//! Unit tests for the version-tag extraction used by doctor's version-skew
+//! detection (#196).
+//!
+//! A cache folder is either strict-mode (`<version_tag>-<content_hash>`, where
+//! the hash is exactly 64 lowercase hex digits) or version-mode (a bare version
+//! like `1.2` or `1.2.3-rc.1`, no hash suffix). Recovering the version means
+//! stripping a trailing `-<hash>` *only* when the tail is a real content hash —
+//! otherwise the whole name is the version. This mirrors the guarded logic in
+//! `run_doctor` (src/cli/mod.rs), which gates the `rsplit_once('-')` split on
+//! `is_content_hash(tail)`. Splitting on the rightmost dash unconditionally
+//! would corrupt semver prerelease names like `1.2.3-rc.1`.
 
-// Test the version extraction logic used in doctor's version skew detection
-fn extract_version_from_dir_name(dir_name: &str) -> Option<&str> {
-    // This mirrors the logic in src/cli/mod.rs:276
-    // Use rsplit_once to split from right to preserve any dashes in semver prerelease versions
-    dir_name.rsplit_once('-').map(|(v, _)| v)
+/// True if `s` is exactly 64 lowercase hex digits — the content-hash shape.
+/// Kept in lockstep with `is_content_hash` in src/cli/mod.rs.
+fn is_content_hash(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Strip a trailing `-<content_hash>` to recover the version tag, or return the
+/// whole name when there is no hash suffix (version-mode folder).
+fn extract_version_from_dir_name(dir_name: &str) -> &str {
+    match dir_name.rsplit_once('-') {
+        Some((version, tail)) if is_content_hash(tail) => version,
+        _ => dir_name,
+    }
+}
+
+const HASH: &str = "e8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7";
+
+#[test]
+fn strict_folder_strips_content_hash() {
+    // <version>-<64-hex>: the hash suffix is stripped to recover the version.
+    let dir = format!("1.2.3-{HASH}");
+    assert_eq!(extract_version_from_dir_name(&dir), "1.2.3");
 }
 
 #[test]
-fn test_extract_version_simple_semver() {
-    // Basic semantic version with hash
-    let result = extract_version_from_dir_name("1.2.3-abc123");
-    assert_eq!(result, Some("1.2.3"));
+fn strict_folder_with_prerelease_preserves_dashes_in_version() {
+    // The version itself contains dashes (semver prerelease). Only the trailing
+    // content hash is removed; the prerelease dashes are preserved.
+    let dir = format!("1.2.3-rc.1-{HASH}");
+    assert_eq!(extract_version_from_dir_name(&dir), "1.2.3-rc.1");
 }
 
 #[test]
-fn test_extract_version_with_prerelease() {
-    // Semver prerelease version (includes dash in version itself)
-    let result = extract_version_from_dir_name("1.2.3-rc.1-abc123");
+fn version_mode_folder_has_no_hash_suffix() {
+    // A bare version-mode folder: no content-hash tail, so nothing is stripped.
+    assert_eq!(extract_version_from_dir_name("1.2"), "1.2");
+    assert_eq!(extract_version_from_dir_name("1.2.3"), "1.2.3");
+    assert_eq!(extract_version_from_dir_name("1.2.3-rc.1"), "1.2.3-rc.1");
+}
+
+#[test]
+fn short_dashed_suffix_is_not_a_content_hash() {
+    // A short suffix like `abc123` is NOT a 64-hex hash, so the name is treated
+    // as a (whole) version, not split. The old unguarded helper wrongly split
+    // here — this is the bug the guard prevents.
     assert_eq!(
-        result,
-        Some("1.2.3-rc.1"),
-        "should preserve dashes in version tag"
+        extract_version_from_dir_name("1.2.3-abc123"),
+        "1.2.3-abc123"
     );
 }
 
 #[test]
-fn test_extract_version_with_multiple_dashes() {
-    // Complex prerelease like "1.2.3-beta-2-hash"
-    let result = extract_version_from_dir_name("1.2.3-beta-2-hash");
-    assert_eq!(
-        result,
-        Some("1.2.3-beta-2"),
-        "should split from rightmost dash only"
-    );
+fn uppercase_hex_tail_is_not_a_content_hash() {
+    // Content hashes are lowercase; an uppercase 64-char tail is rejected.
+    let upper = HASH.to_uppercase();
+    let dir = format!("1.2.3-{upper}");
+    assert_eq!(extract_version_from_dir_name(&dir), dir);
 }
 
 #[test]
-fn test_extract_version_no_hash() {
-    // Version without hash (edge case)
-    let result = extract_version_from_dir_name("1.2.3");
-    assert_eq!(result, None, "no dash means no extraction");
-}
-
-#[test]
-fn test_extract_version_hash_only() {
-    // Just a hash (malformed)
-    let result = extract_version_from_dir_name("-abc123");
-    assert_eq!(result, Some(""), "empty version before dash");
-}
-
-#[test]
-fn test_extract_version_long_hash() {
-    // Realistic full git hash
-    let result = extract_version_from_dir_name("1.2.3-e8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c7c8c");
-    assert_eq!(result, Some("1.2.3"));
-}
-
-#[test]
-fn test_version_comparison_matching_versions() {
-    // Simulate version comparison logic from doctor
-    let running_version = "1.2.3";
-    let cached_versions = ["1.2.3"];
-
-    let has_match = cached_versions.iter().any(|v| v == &running_version);
-    assert!(has_match, "matching versions should be detected");
-}
-
-#[test]
-fn test_version_comparison_with_prerelease() {
-    // Prerelease version comparison
-    let running_version = "1.2.3-rc.1";
-    let extracted_from_cache = extract_version_from_dir_name("1.2.3-rc.1-hash").unwrap();
-
-    assert_eq!(
-        extracted_from_cache, running_version,
-        "extracted prerelease should match running version"
-    );
-}
-
-#[test]
-fn test_version_skew_detection_different_versions() {
-    // Ensure version skew is detected when versions differ
-    let running_version = "1.2.3";
-    let cached_versions = [
-        extract_version_from_dir_name("1.2.4-hash").unwrap(),
-        extract_version_from_dir_name("1.2.2-hash").unwrap(),
+fn version_skew_detected_when_versions_differ() {
+    let running = "1.2.3";
+    let dir_a = format!("1.2.4-{HASH}");
+    let dir_b = format!("1.2.2-{HASH}");
+    let cached = [
+        extract_version_from_dir_name(&dir_a),
+        extract_version_from_dir_name(&dir_b),
     ];
-
-    let has_match = cached_versions.iter().any(|v| v == &running_version);
-    assert!(!has_match, "version skew should be detected");
+    assert!(
+        !cached.contains(&running),
+        "version skew should be detected"
+    );
 }
 
 #[test]
-fn test_version_skew_detection_prerelease_vs_release() {
-    // Prerelease should NOT match corresponding release
-    let running_version = "1.2.3-rc.1";
-    let cached_version = extract_version_from_dir_name("1.2.3-hash").unwrap();
-
+fn version_skew_prerelease_vs_release_are_distinct() {
+    let running = "1.2.3-rc.1";
+    let dir = format!("1.2.3-{HASH}");
+    let cached = extract_version_from_dir_name(&dir);
     assert_ne!(
-        cached_version, running_version,
-        "prerelease and release should be treated as different versions"
+        cached, running,
+        "prerelease and release are different versions"
     );
+}
+
+#[test]
+fn is_content_hash_matches_only_64_lowercase_hex() {
+    assert!(is_content_hash(HASH));
+    assert!(!is_content_hash("abc123"));
+    assert!(!is_content_hash(&HASH[..63])); // too short
+    assert!(!is_content_hash(&HASH.to_uppercase())); // uppercase
+    assert!(!is_content_hash(&format!("{}g", &HASH[..63]))); // non-hex char
 }
