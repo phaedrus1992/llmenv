@@ -496,4 +496,46 @@ mod tests {
         });
         assert_eq!(extract_text(&body), Some(String::new()));
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_blocked_reason_never_panics(octets in any::<[u8; 16]>(), v4 in any::<[u8; 4]>()) {
+            // The SSRF gate must total over every possible address (#191).
+            let _ = blocked_reason(&IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+            let _ = blocked_reason(&IpAddr::V4(std::net::Ipv4Addr::from(v4)));
+        }
+
+        #[test]
+        fn prop_is_unique_local_v6_matches_fc00_slash_7(octets in any::<[u8; 16]>()) {
+            // The hand-rolled prefix test must agree with the fc00::/7 definition:
+            // first byte 0xfc or 0xfd (the unstable std is_unique_local).
+            let v6 = std::net::Ipv6Addr::from(octets);
+            let expected = matches!(octets[0], 0xfc | 0xfd);
+            prop_assert_eq!(is_unique_local_v6(&v6), expected);
+        }
+
+        #[test]
+        fn prop_ula_v6_always_blocked(first in prop_oneof![Just(0xfcu8), Just(0xfdu8)], rest in any::<[u8; 15]>()) {
+            // Every fc00::/7 address is rejected, regardless of the lower bits.
+            let mut octets = [0u8; 16];
+            octets[0] = first;
+            octets[1..].copy_from_slice(&rest);
+            let v6 = std::net::Ipv6Addr::from(octets);
+            prop_assert!(blocked_reason(&IpAddr::V6(v6)).is_some());
+        }
+
+        #[test]
+        fn prop_ipv4_mapped_v6_judged_as_v4(v4 in any::<[u8; 4]>()) {
+            // ::ffff:a.b.c.d must yield the same verdict as a.b.c.d — a blocked v4
+            // range cannot be smuggled through the v6 namespace.
+            let v4_addr = std::net::Ipv4Addr::from(v4);
+            let mapped = v4_addr.to_ipv6_mapped();
+            prop_assert_eq!(
+                blocked_reason(&IpAddr::V6(mapped)).is_some(),
+                blocked_reason(&IpAddr::V4(v4_addr)).is_some()
+            );
+        }
+    }
 }
