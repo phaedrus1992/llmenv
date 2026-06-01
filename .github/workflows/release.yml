@@ -35,7 +35,7 @@ jobs:
     outputs:
       checksums: ${{ steps.checksum.outputs.hashes }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
@@ -49,7 +49,7 @@ jobs:
       # zizmor: ignore[cache-poisoning] — cache is skipped on tag pushes via `if:`
       # below; the conditional guard makes the cache-poisoning audit a false
       # positive (zizmor static analysis doesn't trace step-level conditionals).
-      - uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014  # v2.7.5
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         with:
           cache-on-failure: false
@@ -83,12 +83,12 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
       - name: Upload binary artifact
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: ${{ matrix.asset_name }}
           path: assets/${{ matrix.asset_name }}
       - name: Upload checksum artifact
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: ${{ matrix.asset_name }}-sha256
           path: assets/${{ matrix.asset_name }}.sha256
@@ -151,7 +151,7 @@ jobs:
           echo "provenance_file=${PROVENANCE_FILE}" >> "$GITHUB_OUTPUT"
           echo "ARTIFACT_HASH=${ARTIFACT_HASH}" >> "$GITHUB_ENV"
       - name: Upload provenance artifact
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: ${{ matrix.asset_name }}-provenance
           path: ${{ steps.slsa.outputs.provenance_file }}
@@ -163,7 +163,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
@@ -183,11 +183,11 @@ jobs:
     outputs:
       release_version: ${{ steps.extract_version.outputs.version }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           persist-credentials: false
       - name: Download all artifacts
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: assets
       - name: Prepare release assets
@@ -210,7 +210,7 @@ jobs:
           VERSION="${GH_REF#refs/tags/v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - name: Create Release
-        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191  # v2.0.8
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           files: |
             release-assets/llmenv-*
@@ -243,11 +243,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           persist-credentials: false
       - name: Download all artifacts
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: artifacts
       - name: Extract and validate checksums
