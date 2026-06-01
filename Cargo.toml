@@ -16,34 +16,34 @@ expect_used = "deny"
 panic = "deny"
 
 [dependencies]
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "fs", "process", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-thiserror = "2.0"
-anyhow = "1.0"
+thiserror = "2.0.18"
+anyhow = "1.0.102"
 directories = "6"
 sha2 = "0.11"
-hex = "0.4"
-humantime = "2.1"
-anstream = "0.6"
-anstyle = "1.0"
-glob = "0.3"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
-url = "2.5"
+hex = "0.4.3"
+humantime = "2.3.0"
+anstream = "0.6.21"
+anstyle = "1.0.14"
+glob = "0.3.3"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
+url = "2.5.8"
 
 [dev-dependencies]
-assert_cmd = "2.2"
-insta = { version = "1.47", features = ["yaml"] }
+assert_cmd = "2.2.2"
+insta = { version = "1.47.2", features = ["yaml"] }
 tempfile = "3.27"
-predicates = "3.1"
+predicates = "3.1.4"
 walkdir = "2.5"
-proptest = "1.5"
-criterion = { version = "0.5", features = ["html_reports"] }
-wiremock = "0.6"
+proptest = "1.11.0"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+wiremock = "0.6.5"
 
 [profile.release]
 lto = true
