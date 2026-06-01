@@ -59,9 +59,11 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
         "## llmenv context\n\
          Active tags: {}\n\
          Bundles: {}\n\n\
-         Store scope-specific memory under keyword `llmenv-tag:<tag>` so it is \
-         retrievable across projects. On each turn, llmenv auto-recalls memory \
-         under these tags' `llmenv-tag:<tag>` keywords across all projects.",
+         Store scope-specific memory under keyword `llmenv-tag:<tag>` (per tag) \
+         or `llmenv-bundle:<bundle>` (per bundle) so it is retrievable across \
+         projects. On each turn, llmenv auto-recalls memory under these tags' \
+         `llmenv-tag:<tag>` and bundles' `llmenv-bundle:<bundle>` keywords \
+         across all projects.",
         tags_str, bundles_str
     );
 
@@ -158,6 +160,10 @@ mod tests {
         let chunk = generate_context_chunk(&active, &bundles);
         assert!(chunk.contains("bundle1"));
         assert!(chunk.contains("bundle2"));
+        assert!(
+            chunk.contains("llmenv-bundle:"),
+            "chunk must document llmenv-bundle keyword format for agents"
+        );
     }
 
     #[test]
