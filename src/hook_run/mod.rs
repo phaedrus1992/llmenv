@@ -50,6 +50,39 @@ pub fn tag_recall_queries(tags: &[String]) -> anyhow::Result<Vec<TagRecallQuery>
         .collect()
 }
 
+/// A single cross-project, bundle-scoped recall the TurnStart hook issues
+/// against ICM. Mirrors [`TagRecallQuery`] for bundles (#228): each query is
+/// **project-unfiltered** (`project: ""`) and keyed on
+/// `llmenv-bundle:<bundle>`, so memory stored under that bundle in any project
+/// surfaces when the bundle activates here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleRecallQuery {
+    /// The active bundle this recall targets.
+    pub bundle: String,
+    /// The `llmenv-bundle:<bundle>` keyword the recall is keyed on.
+    pub keyword: String,
+}
+
+/// Build the cross-project bundle recall queries for a set of active bundles.
+/// One query per bundle, in input order. Bundle names are validated first; an
+/// invalid name aborts the whole set so a malformed bundle can't inject recall
+/// metacharacters.
+///
+/// # Errors
+/// Returns an error if any bundle name fails [`validate_bundle`].
+pub fn bundle_recall_queries(bundles: &[String]) -> anyhow::Result<Vec<BundleRecallQuery>> {
+    bundles
+        .iter()
+        .map(|bundle| {
+            validate_bundle(bundle)?;
+            Ok(BundleRecallQuery {
+                bundle: bundle.clone(),
+                keyword: action::bundle_keyword(bundle),
+            })
+        })
+        .collect()
+}
+
 /// Per-call network timeout. Lifecycle hooks run on startup and every prompt, so
 /// a slow/dead remote ICM must not stall the agent. 2s balances real round-trips
 /// against not hanging the prompt.
@@ -81,19 +114,24 @@ impl FromStr for HookEvent {
     }
 }
 
-/// The ordered actions to run for an event, given the active tags' recall
-/// queries (built by [`tag_recall_queries`], the single source of tag→recall
-/// expansion).
+/// The ordered actions to run for an event, given the active tags' and bundles'
+/// recall queries (built by [`tag_recall_queries`] and [`bundle_recall_queries`],
+/// the single sources of tag→recall and bundle→recall expansion).
 ///
 /// `TurnStart` runs the project-scoped natural-language `Recall` first, then one
-/// project-unfiltered `RecallTag` per active tag so tag-scoped memory written in
-/// any project surfaces here (#197).
-fn dispatch(event: HookEvent, tag_queries: &[TagRecallQuery]) -> Vec<Action> {
+/// project-unfiltered `RecallTag` per active tag (#197), then one
+/// project-unfiltered `RecallBundle` per active bundle (#228).
+fn dispatch(
+    event: HookEvent,
+    tag_queries: &[TagRecallQuery],
+    bundle_queries: &[BundleRecallQuery],
+) -> Vec<Action> {
     match event {
         HookEvent::SessionStart => vec![Action::WakeUp],
         HookEvent::TurnStart => {
             let mut actions = vec![Action::Recall];
             actions.extend(tag_queries.iter().cloned().map(Action::RecallTag));
+            actions.extend(bundle_queries.iter().cloned().map(Action::RecallBundle));
             actions
         }
         HookEvent::SessionEnd => vec![Action::Store],
@@ -136,14 +174,25 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("no memory backend active for this scope"))?;
 
     // Recall query: the sorted active tags. Store content: the llmenv context
-    // chunk (tags/bundles/project). Bundles aren't needed for the query.
+    // chunk (tags/bundles/project).
     let mut tags = active.tags.iter().cloned().collect::<Vec<_>>();
     tags.sort();
-    // Build per-tag recall queries. This validates every tag (rejecting query
-    // injection) and is the single source of the tag→keyword encoding.
+    // Bundles: collect from all active scopes, deduplicate, sort.
+    let bundles: Vec<String> = {
+        let mut set = std::collections::BTreeSet::new();
+        for scope in &active.scopes {
+            for b in &scope.enable_bundles {
+                set.insert(b.clone());
+            }
+        }
+        set.into_iter().collect()
+    };
+    // Build per-tag and per-bundle recall queries. Validation rejects query
+    // injection; these are the single sources of the tag/bundle→keyword encoding.
     let tag_queries = tag_recall_queries(&tags)?;
+    let bundle_queries = bundle_recall_queries(&bundles)?;
     let query = tags.join(", ");
-    let chunk = crate::icm::generate_context_chunk(&active, &[]);
+    let chunk = crate::icm::generate_context_chunk(&active, &bundles);
 
     let client = McpHttpClient::new(url, HOOK_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
@@ -156,7 +205,7 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
         .build()?;
     rt.block_on(async {
         let mut out = String::new();
-        for action in dispatch(event, &tag_queries) {
+        for action in dispatch(event, &tag_queries, &bundle_queries) {
             let text = action.run(&client, &query, &chunk).await?;
             if !text.is_empty() {
                 if !out.is_empty() {
@@ -199,6 +248,24 @@ fn validate_tag(tag: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validate a bundle name to prevent query injection. Bundle names follow the
+/// same character rules as tags: alphanumeric, hyphens, and underscores only.
+fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
+    if bundle.is_empty() {
+        return Err(anyhow::anyhow!("empty bundle name in recall query"));
+    }
+    if !bundle
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow::anyhow!(
+            "bundle '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
+            bundle
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -227,16 +294,25 @@ mod tests {
 
     #[test]
     fn dispatch_maps_events_to_actions() {
-        assert_eq!(dispatch(HookEvent::SessionStart, &[]), vec![Action::WakeUp]);
-        assert_eq!(dispatch(HookEvent::TurnStart, &[]), vec![Action::Recall]);
-        assert_eq!(dispatch(HookEvent::SessionEnd, &[]), vec![Action::Store]);
+        assert_eq!(
+            dispatch(HookEvent::SessionStart, &[], &[]),
+            vec![Action::WakeUp]
+        );
+        assert_eq!(
+            dispatch(HookEvent::TurnStart, &[], &[]),
+            vec![Action::Recall]
+        );
+        assert_eq!(
+            dispatch(HookEvent::SessionEnd, &[], &[]),
+            vec![Action::Store]
+        );
     }
 
     #[test]
     fn turn_start_expands_one_recall_tag_per_active_tag() {
         let tags = vec!["rust".to_string(), "work-vpn".to_string()];
         let queries = tag_recall_queries(&tags).expect("valid tags");
-        let actions = dispatch(HookEvent::TurnStart, &queries);
+        let actions = dispatch(HookEvent::TurnStart, &queries, &[]);
         assert_eq!(
             actions,
             vec![
@@ -252,6 +328,40 @@ mod tests {
             ],
             "TurnStart must run project recall then one tag recall per active tag"
         );
+    }
+
+    #[test]
+    fn turn_start_expands_one_recall_bundle_per_active_bundle() {
+        let bundles = vec!["base".to_string(), "rust-defaults".to_string()];
+        let queries = bundle_recall_queries(&bundles).expect("valid bundles");
+        let actions = dispatch(HookEvent::TurnStart, &[], &queries);
+        assert_eq!(
+            actions,
+            vec![
+                Action::Recall,
+                Action::RecallBundle(BundleRecallQuery {
+                    bundle: "base".to_string(),
+                    keyword: "llmenv-bundle:base".to_string(),
+                }),
+                Action::RecallBundle(BundleRecallQuery {
+                    bundle: "rust-defaults".to_string(),
+                    keyword: "llmenv-bundle:rust-defaults".to_string(),
+                }),
+            ],
+            "TurnStart must emit one bundle recall per active bundle"
+        );
+    }
+
+    #[test]
+    fn turn_start_interleaves_tag_and_bundle_recalls() {
+        let tag_qs = tag_recall_queries(&["rust".to_string()]).expect("valid");
+        let bundle_qs = bundle_recall_queries(&["base".to_string()]).expect("valid");
+        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs);
+        // Order: project recall, then tag recalls, then bundle recalls.
+        assert_eq!(actions[0], Action::Recall);
+        assert!(matches!(actions[1], Action::RecallTag(_)));
+        assert!(matches!(actions[2], Action::RecallBundle(_)));
+        assert_eq!(actions.len(), 3);
     }
 
     #[test]
@@ -286,5 +396,55 @@ mod tests {
         assert!(validate_tag("tag,malicious").is_err());
         assert!(validate_tag("tag OR other").is_err());
         assert!(validate_tag("tag AND other").is_err());
+    }
+
+    #[test]
+    fn dispatch_tag_and_bundle_with_same_name_produce_distinct_recalls() {
+        // A name valid as both a tag and a bundle must produce two separate
+        // recalls keyed on different prefixes — no cross-contamination.
+        let tag_qs = tag_recall_queries(&["foo".to_string()]).expect("valid");
+        let bundle_qs = bundle_recall_queries(&["foo".to_string()]).expect("valid");
+        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs);
+        assert_eq!(actions.len(), 3);
+        match &actions[1] {
+            Action::RecallTag(q) => assert_eq!(q.keyword, "llmenv-tag:foo"),
+            other => panic!("expected RecallTag, got {other:?}"),
+        }
+        match &actions[2] {
+            Action::RecallBundle(q) => assert_eq!(q.keyword, "llmenv-bundle:foo"),
+            other => panic!("expected RecallBundle, got {other:?}"),
+        }
+    }
+
+    use proptest::prelude::*;
+
+    fn valid_name() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{1,24}"
+    }
+
+    proptest! {
+        // dispatch(TurnStart) always produces [Recall, N×RecallTag, M×RecallBundle]
+        // regardless of N and M. This is the ordering invariant.
+        #[test]
+        fn prop_dispatch_turn_start_ordering(
+            tags in proptest::collection::vec(valid_name(), 0..8),
+            bundles in proptest::collection::vec(valid_name(), 0..8),
+        ) {
+            let tag_qs = tag_recall_queries(&tags).expect("valid tags");
+            let bundle_qs = bundle_recall_queries(&bundles).expect("valid bundles");
+            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs);
+
+            prop_assert_eq!(actions.len(), 1 + tags.len() + bundles.len());
+            prop_assert!(matches!(actions[0], Action::Recall));
+            for a in &actions[1..=tags.len()] {
+                prop_assert!(matches!(a, Action::RecallTag(_)), "expected RecallTag, got {a:?}");
+            }
+            for a in &actions[1 + tags.len()..] {
+                prop_assert!(
+                    matches!(a, Action::RecallBundle(_)),
+                    "expected RecallBundle, got {a:?}"
+                );
+            }
+        }
     }
 }

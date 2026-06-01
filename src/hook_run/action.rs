@@ -3,8 +3,8 @@
 
 use serde_json::{Value, json};
 
-use crate::hook_run::TagRecallQuery;
 use crate::hook_run::mcp_client::McpHttpClient;
+use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
 
 /// The keyword prefix under which tag-scoped memory is stored and recalled.
 /// A memory written for tag `work-vpn` carries keyword `llmenv-tag:work-vpn`;
@@ -16,6 +16,19 @@ pub const TAG_KEYWORD_PREFIX: &str = "llmenv-tag:";
 #[must_use]
 pub fn tag_keyword(tag: &str) -> String {
     format!("{TAG_KEYWORD_PREFIX}{tag}")
+}
+
+/// The keyword prefix under which bundle-scoped memory is stored and recalled.
+/// A memory written for bundle `base` carries keyword `llmenv-bundle:base`;
+/// recalling that keyword (project-unfiltered) surfaces it from any project.
+pub const BUNDLE_KEYWORD_PREFIX: &str = "llmenv-bundle:";
+
+/// The `llmenv-bundle:<bundle>` keyword for a bundle. The bundle name is
+/// assumed pre-validated (see `hook_run::validate_bundle`) so it contains no
+/// recall-query metacharacters.
+#[must_use]
+pub fn bundle_keyword(bundle: &str) -> String {
+    format!("{BUNDLE_KEYWORD_PREFIX}{bundle}")
 }
 
 /// One memory action against the ICM MCP backend.
@@ -33,6 +46,11 @@ pub enum Action {
     /// carried [`TagRecallQuery`] is the single source of the tag + keyword, so
     /// the keyword encoding never drifts between dispatch and the tool call.
     RecallTag(TagRecallQuery),
+    /// Recall bundle-scoped memory for one active bundle (`icm_memory_recall`),
+    /// **project-unfiltered** and keyed on `llmenv-bundle:<bundle>`. Mirrors
+    /// `RecallTag` for bundles (#228): one action per active bundle, ensuring
+    /// memory stored under a bundle in one project surfaces in another.
+    RecallBundle(BundleRecallQuery),
     /// Best-effort store of the active scope context (`icm_memory_store`).
     Store,
 }
@@ -42,7 +60,7 @@ impl Action {
     pub fn tool_name(&self) -> &'static str {
         match self {
             Action::WakeUp => "icm_wake_up",
-            Action::Recall | Action::RecallTag(_) => "icm_memory_recall",
+            Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_) => "icm_memory_recall",
             Action::Store => "icm_memory_store",
         }
     }
@@ -51,15 +69,21 @@ impl Action {
     /// recall query (active tags/project), `chunk` is the llmenv context chunk
     /// used as store content. Unused fields are ignored per action.
     ///
-    /// `RecallTag` passes `project: ""` to disable ICM's default cwd project
-    /// filter (per the tool contract, an empty string searches all projects) and
-    /// `keyword: llmenv-tag:<tag>` to scope the recall to that tag's memory.
+    /// `RecallTag` and `RecallBundle` pass `project: ""` to disable ICM's
+    /// default cwd project filter (per the tool contract, an empty string
+    /// searches all projects) and `keyword: llmenv-tag:<tag>` /
+    /// `keyword: llmenv-bundle:<bundle>` to scope the recall.
     pub fn arguments(&self, query: &str, chunk: &str) -> Value {
         match self {
             Action::WakeUp => json!({}),
             Action::Recall => json!({ "query": query }),
             Action::RecallTag(q) => json!({
                 "query": q.tag,
+                "project": "",
+                "keyword": q.keyword,
+            }),
+            Action::RecallBundle(q) => json!({
+                "query": q.bundle,
                 "project": "",
                 "keyword": q.keyword,
             }),
@@ -93,6 +117,7 @@ mod tests {
         assert_eq!(Action::WakeUp.tool_name(), "icm_wake_up");
         assert_eq!(Action::Recall.tool_name(), "icm_memory_recall");
         assert_eq!(Action::Store.tool_name(), "icm_memory_store");
+        assert_eq!(recall_bundle("base").tool_name(), "icm_memory_recall");
     }
 
     #[test]
@@ -126,9 +151,51 @@ mod tests {
         })
     }
 
+    fn recall_bundle(bundle: &str) -> Action {
+        Action::RecallBundle(BundleRecallQuery {
+            bundle: bundle.to_string(),
+            keyword: bundle_keyword(bundle),
+        })
+    }
+
     #[test]
     fn recall_tag_tool_is_memory_recall() {
         assert_eq!(recall_tag("work-vpn").tool_name(), "icm_memory_recall");
+    }
+
+    #[test]
+    fn bundle_keyword_prefixes_bundle() {
+        assert_eq!(bundle_keyword("base"), "llmenv-bundle:base");
+        assert_eq!(
+            bundle_keyword("rust-defaults"),
+            "llmenv-bundle:rust-defaults"
+        );
+    }
+
+    #[test]
+    fn recall_bundle_tool_is_memory_recall() {
+        assert_eq!(recall_bundle("base").tool_name(), "icm_memory_recall");
+    }
+
+    #[test]
+    fn recall_bundle_disables_project_filter() {
+        let args = recall_bundle("base").arguments("ignored", "ignored");
+        assert_eq!(
+            args["project"],
+            serde_json::json!(""),
+            "project must be empty to search across all projects"
+        );
+    }
+
+    #[test]
+    fn recall_bundle_keys_on_llmenv_bundle_keyword() {
+        let args = recall_bundle("base").arguments("ignored", "ignored");
+        assert_eq!(
+            args["keyword"],
+            serde_json::json!("llmenv-bundle:base"),
+            "recall must be keyed on the llmenv-bundle:<bundle> encoding"
+        );
+        assert_eq!(args["query"], serde_json::json!("base"));
     }
 
     #[test]
@@ -187,6 +254,28 @@ mod tests {
             prop_assert_eq!(&obj["query"], &serde_json::json!(tag));
             prop_assert_eq!(&obj["project"], &serde_json::json!(""));
             prop_assert_eq!(&obj["keyword"], &serde_json::json!(tag_keyword(&tag)));
+        }
+
+        // bundle_keyword always prepends the bundle prefix and preserves the bundle
+        // name exactly — the keyword is `llmenv-bundle:` + the unmodified bundle.
+        #[test]
+        fn prop_bundle_keyword_is_prefix_plus_bundle(bundle in valid_tag()) {
+            let kw = bundle_keyword(&bundle);
+            prop_assert_eq!(&kw, &format!("{BUNDLE_KEYWORD_PREFIX}{bundle}"));
+            prop_assert!(kw.starts_with(BUNDLE_KEYWORD_PREFIX));
+            prop_assert_eq!(&kw[BUNDLE_KEYWORD_PREFIX.len()..], bundle.as_str());
+        }
+
+        // RecallBundle arguments are always exactly {query, project, keyword} with
+        // query == bundle, project == "" (cross-project), keyword == bundle_keyword(bundle).
+        #[test]
+        fn prop_recall_bundle_arguments_shape(bundle in valid_tag()) {
+            let args = recall_bundle(&bundle).arguments("ignored", "ignored");
+            let obj = args.as_object().expect("arguments must be a JSON object");
+            prop_assert_eq!(obj.len(), 3, "exactly query/project/keyword");
+            prop_assert_eq!(&obj["query"], &serde_json::json!(bundle));
+            prop_assert_eq!(&obj["project"], &serde_json::json!(""));
+            prop_assert_eq!(&obj["keyword"], &serde_json::json!(bundle_keyword(&bundle)));
         }
     }
 }
