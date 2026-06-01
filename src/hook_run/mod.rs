@@ -397,4 +397,54 @@ mod tests {
         assert!(validate_tag("tag OR other").is_err());
         assert!(validate_tag("tag AND other").is_err());
     }
+
+    #[test]
+    fn dispatch_tag_and_bundle_with_same_name_produce_distinct_recalls() {
+        // A name valid as both a tag and a bundle must produce two separate
+        // recalls keyed on different prefixes — no cross-contamination.
+        let tag_qs = tag_recall_queries(&["foo".to_string()]).expect("valid");
+        let bundle_qs = bundle_recall_queries(&["foo".to_string()]).expect("valid");
+        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs);
+        assert_eq!(actions.len(), 3);
+        match &actions[1] {
+            Action::RecallTag(q) => assert_eq!(q.keyword, "llmenv-tag:foo"),
+            other => panic!("expected RecallTag, got {other:?}"),
+        }
+        match &actions[2] {
+            Action::RecallBundle(q) => assert_eq!(q.keyword, "llmenv-bundle:foo"),
+            other => panic!("expected RecallBundle, got {other:?}"),
+        }
+    }
+
+    use proptest::prelude::*;
+
+    fn valid_name() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{1,24}"
+    }
+
+    proptest! {
+        // dispatch(TurnStart) always produces [Recall, N×RecallTag, M×RecallBundle]
+        // regardless of N and M. This is the ordering invariant.
+        #[test]
+        fn prop_dispatch_turn_start_ordering(
+            tags in proptest::collection::vec(valid_name(), 0..8),
+            bundles in proptest::collection::vec(valid_name(), 0..8),
+        ) {
+            let tag_qs = tag_recall_queries(&tags).expect("valid tags");
+            let bundle_qs = bundle_recall_queries(&bundles).expect("valid bundles");
+            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs);
+
+            prop_assert_eq!(actions.len(), 1 + tags.len() + bundles.len());
+            prop_assert!(matches!(actions[0], Action::Recall));
+            for a in &actions[1..=tags.len()] {
+                prop_assert!(matches!(a, Action::RecallTag(_)), "expected RecallTag, got {a:?}");
+            }
+            for a in &actions[1 + tags.len()..] {
+                prop_assert!(
+                    matches!(a, Action::RecallBundle(_)),
+                    "expected RecallBundle, got {a:?}"
+                );
+            }
+        }
+    }
 }
