@@ -99,7 +99,20 @@ impl CacheManifest {
     pub fn read(folder: &Path) -> anyhow::Result<Option<Self>> {
         let path = folder.join(MANIFEST_FILE);
         match std::fs::read(&path) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(manifest) => Ok(Some(manifest)),
+                Err(e) => {
+                    // Non-fatal by design (see doc comment): treat a corrupt
+                    // manifest as "no prior knowledge" rather than failing the
+                    // render. Log it so the degradation is not silent.
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "ignoring corrupt cache manifest; treating folder as unowned"
+                    );
+                    Ok(None)
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(anyhow::anyhow!(
                 "reading cache manifest {}: {e}",
