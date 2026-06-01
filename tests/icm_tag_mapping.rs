@@ -143,6 +143,47 @@ fn test_tag_recall_queries_rejects_invalid_tag() {
 }
 
 #[test]
+fn test_icm_bundle_memory_crosses_projects() {
+    // #228: when a bundle (e.g., "base") is active, memory stored with keyword
+    // "llmenv-bundle:base" in project A must be retrievable when the same bundle
+    // activates in project B. The recall query is a pure function of the bundle
+    // name — no project scope — so it resolves identically from any project.
+    use llmenv::hook_run::bundle_recall_queries;
+
+    let bundles = vec!["base".to_string()];
+
+    let from_project_a = bundle_recall_queries(&bundles).expect("valid bundle");
+    let from_project_b = bundle_recall_queries(&bundles).expect("valid bundle");
+
+    assert_eq!(
+        from_project_a, from_project_b,
+        "recall must be project-independent so bundle memory crosses projects"
+    );
+    assert_eq!(from_project_a.len(), 1, "one recall per active bundle");
+    assert_eq!(
+        from_project_a[0].keyword, "llmenv-bundle:base",
+        "recall must be keyed on the llmenv-bundle:<bundle> encoding"
+    );
+}
+
+#[test]
+fn test_bundle_recall_queries_rejects_invalid_bundle() {
+    use llmenv::hook_run::bundle_recall_queries;
+    let bad = vec!["base".to_string(), "bundle,injection".to_string()];
+    assert!(bundle_recall_queries(&bad).is_err());
+}
+
+#[test]
+fn test_bundle_recall_queries_one_per_bundle_in_order() {
+    use llmenv::hook_run::bundle_recall_queries;
+    let bundles = vec!["base".to_string(), "rust-defaults".to_string()];
+    let queries = bundle_recall_queries(&bundles).expect("valid bundles");
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0].bundle, "base");
+    assert_eq!(queries[1].bundle, "rust-defaults");
+}
+
+#[test]
 fn test_tag_recall_queries_one_per_tag_in_order() {
     use llmenv::hook_run::tag_recall_queries;
     let tags = vec!["rust".to_string(), "work-vpn".to_string()];
@@ -220,5 +261,54 @@ proptest! {
         // Insert a tag guaranteed to contain a rejected character.
         tags.push(format!("inj{bad}ect"));
         prop_assert!(tag_recall_queries(&tags).is_err());
+    }
+
+    // ===== Property tests for bundle_recall_queries (#228) =====
+
+    // Every valid bundle name yields exactly one query whose keyword is the
+    // llmenv-bundle:<bundle> encoding and whose bundle is preserved verbatim.
+    #[test]
+    fn bundle_recall_query_keyword_encodes_bundle(bundle in valid_tag()) {
+        use llmenv::hook_run::bundle_recall_queries;
+        let queries = bundle_recall_queries(std::slice::from_ref(&bundle)).expect("valid bundle");
+        prop_assert_eq!(queries.len(), 1);
+        prop_assert_eq!(&queries[0].bundle, &bundle);
+        prop_assert_eq!(&queries[0].keyword, &format!("llmenv-bundle:{bundle}"));
+    }
+
+    // N valid bundle names produce N queries in the same order.
+    #[test]
+    fn bundle_recall_queries_preserve_count_and_order(
+        bundles in proptest::collection::vec(valid_tag(), 0..12),
+    ) {
+        use llmenv::hook_run::bundle_recall_queries;
+        let queries = bundle_recall_queries(&bundles).expect("all bundles valid");
+        prop_assert_eq!(queries.len(), bundles.len());
+        for (q, bundle) in queries.iter().zip(bundles.iter()) {
+            prop_assert_eq!(&q.bundle, bundle);
+        }
+    }
+
+    // Deterministic: same input always yields same queries (project-independent).
+    #[test]
+    fn bundle_recall_queries_are_deterministic(
+        bundles in proptest::collection::vec(valid_tag(), 0..8),
+    ) {
+        use llmenv::hook_run::bundle_recall_queries;
+        let a = bundle_recall_queries(&bundles).expect("valid");
+        let b = bundle_recall_queries(&bundles).expect("valid");
+        prop_assert_eq!(a, b);
+    }
+
+    // Any bundle name with invalid characters aborts the whole batch.
+    #[test]
+    fn bundle_recall_queries_reject_batch_with_invalid_bundle(
+        good in proptest::collection::vec(valid_tag(), 0..6),
+        bad in r#"[^a-zA-Z0-9_-]"#,
+    ) {
+        use llmenv::hook_run::bundle_recall_queries;
+        let mut bundles = good;
+        bundles.push(format!("inj{bad}ect"));
+        prop_assert!(bundle_recall_queries(&bundles).is_err());
     }
 }
