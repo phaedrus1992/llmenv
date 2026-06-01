@@ -150,7 +150,9 @@ Engine-neutral lifecycle hooks that inject ICM memory context over MCP. Invoked 
 the agent runtime (not by users directly) in response to three neutral events:
 
 - `session_start` — injects the session wake-up pack (`icm_wake_up`)
-- `turn_start` — injects recalled context for the active tags/project (`icm_memory_recall`)
+- `turn_start` — injects recalled context (`icm_memory_recall`): a project-scoped
+  recall for the active tags, plus one project-unfiltered recall per active tag
+  keyed on `llmenv-tag:<tag>` so tag memory crosses project boundaries
 - `session_end` — best-effort store of the active scope context (`icm_memory_store`)
 
 Each hook talks to the configured ICM memory MCP over HTTP. Failures degrade

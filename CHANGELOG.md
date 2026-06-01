@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Cross-project tag-scoped memory recall** — the `turn_start` hook now issues,
+  in addition to the existing project-scoped recall, one **project-unfiltered**
+  recall per active tag keyed on that tag's `llmenv-tag:<tag>` keyword. Memory
+  stored under a tag in one project surfaces when the same tag activates in
+  another, completing the cross-project promise of the write side (#81). Tags are
+  validated before expansion so a malformed scope can't inject recall
+  metacharacters. Bundle-scoped recall (`llmenv-bundle:<bundle>`) remains
+  documented-but-unimplemented (#215). (#197)
+
 - **Lifecycle memory hooks** — new `hook-run` command provides engine-neutral
   lifecycle event dispatching for ICM memory integration. Three events (`session_start`,
   `turn_start`, `session_end`) trigger corresponding ICM actions (`icm_wake_up`,
