@@ -655,12 +655,13 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
             Some(fresh_val) if key == "hooks" => {
                 // Union so a plugin's foreign hook entries survive; dedup keeps
                 // llmenv's own entries from piling up across re-renders.
-                match merged_obj.get_mut(key) {
-                    Some(existing_val) => merge_json(existing_val, fresh_val.clone()),
-                    None => {
+                merged_obj
+                    .get_mut(key)
+                    .map(|v| merge_json(v, fresh_val.clone()))
+                    .or_else(|| {
                         merged_obj.insert(key.to_string(), fresh_val.clone());
-                    }
-                }
+                        Some(())
+                    });
             }
             Some(fresh_val) => {
                 // Authoritative replace.

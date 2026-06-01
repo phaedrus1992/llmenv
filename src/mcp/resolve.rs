@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{Config, Features, HostEntry, McpServer, McpTransport, Memory};
+use crate::config::{Config, HostEntry, McpServer, McpTransport, Memory};
 
 /// A fully resolved MCP entry ready for an adapter to render. Transport-shaped:
 /// `Stdio` carries a launch command; `Remote` carries a URL.
@@ -145,7 +145,7 @@ fn remote_kind(m: &McpServer, transport: McpTransport) -> Result<ResolvedKind, R
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::{McpServer, Memory};
+    use crate::config::{Features, McpServer, Memory};
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {
         ts.iter().map(|s| (*s).to_string()).collect()
