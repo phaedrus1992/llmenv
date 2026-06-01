@@ -57,14 +57,19 @@ pub fn folder_name(content_hash: &str, mode: HashingMode, fidelity: VersionFidel
 #[must_use]
 pub fn version_folder_name(fidelity: VersionFidelity) -> String {
     match fidelity {
-        VersionFidelity::Major => PKG_VERSION
-            .split('.')
-            .next()
-            .unwrap_or(PKG_VERSION)
-            .to_string(),
+        VersionFidelity::Major => {
+            let major = match PKG_VERSION.split('.').next() {
+                Some(m) => m,
+                None => PKG_VERSION,
+            };
+            major.to_string()
+        }
         VersionFidelity::MajorMinor => {
             let mut parts = PKG_VERSION.split('.');
-            let first = parts.next().unwrap_or("");
+            let first = match parts.next() {
+                Some(f) => f,
+                None => "",
+            };
             if let Some(second) = parts.next() {
                 format!("{first}.{second}")
             } else {
