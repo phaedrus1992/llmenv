@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { Fragment } from 'react';
 import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
@@ -17,7 +17,7 @@ const PIPELINE_STEPS: PipelineStep[] = [
   { label: 'Emit', description: 'Adapter writes agent-native config files.' },
 ];
 
-function Hero(): ReactNode {
+function Hero() {
   const { siteConfig } = useDocusaurusContext();
   return (
     <header className={styles.hero}>
@@ -44,7 +44,7 @@ function Hero(): ReactNode {
   );
 }
 
-function Pipeline(): ReactNode {
+function Pipeline() {
   return (
     <section className={styles.pipeline}>
       <div className="container">
@@ -54,17 +54,17 @@ function Pipeline(): ReactNode {
         </p>
         <div className={styles.steps}>
           {PIPELINE_STEPS.map((step, i) => (
-            <>
-              <div key={step.label} className={styles.step}>
+            <Fragment key={step.label}>
+              <div className={styles.step}>
                 <div className={styles.stepLabel}>{step.label}</div>
                 <p className={styles.stepDesc}>{step.description}</p>
               </div>
               {i < PIPELINE_STEPS.length - 1 && (
-                <span key={`arrow-${i}`} className={styles.stepArrow} aria-hidden>
+                <span className={styles.stepArrow} aria-hidden>
                   →
                 </span>
               )}
-            </>
+            </Fragment>
           ))}
         </div>
       </div>
@@ -72,7 +72,7 @@ function Pipeline(): ReactNode {
   );
 }
 
-export default function Home(): ReactNode {
+export default function Home() {
   return (
     <Layout description="direnv for Claude Code and other AI tools.">
       <Hero />
