@@ -1,21 +1,26 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use llmenv::config::{HashingMode, VersionFidelity};
+use llmenv::config::HashingMode;
 use llmenv::materialize::{cache, materialize_with_mode};
 use llmenv::merge::{BundleRef, merge};
 use tempfile::tempdir;
 
+/// The empty-selection shape, used by the strict/normal helpers below.
+fn empty_shape() -> String {
+    cache::shape(&BTreeSet::new(), &BTreeSet::new())
+}
+
 /// Strict-mode materialize: content-addressed folders. The crate's `materialize`
-/// convenience wrapper now defaults to version mode (#196), so the dedup/skew
+/// convenience wrapper now defaults to normal mode (#246), so the dedup/skew
 /// tests below pin strict explicitly.
 fn materialize_strict(
     m: &llmenv::merge::MergedManifest,
     root: &std::path::Path,
 ) -> std::path::PathBuf {
-    materialize_with_mode(m, root, HashingMode::Strict, VersionFidelity::default())
+    materialize_with_mode(m, root, HashingMode::Strict, &empty_shape())
         .expect("materialize strict")
         .path
 }
@@ -71,10 +76,11 @@ fn different_manifests_produce_different_dirs() {
 }
 
 #[test]
-fn version_mode_reuses_one_folder_across_manifests() {
-    // #196: version mode names the folder after the binary version, not the
-    // content hash. Two different manifests therefore render into the SAME
-    // folder (last-writer-wins), unlike strict mode above.
+fn normal_mode_reuses_one_folder_across_manifests() {
+    // #246: normal mode names the folder after <version_mm>/<shape>, not the
+    // content hash. Two different manifests sharing the same selection shape
+    // therefore render into the SAME folder (last-writer-wins), unlike strict
+    // mode above.
     let tmp = tempdir().expect("tempdir");
     let m_base = merge(
         &llmenv::config::Capabilities::default(),
@@ -88,21 +94,12 @@ fn version_mode_reuses_one_folder_across_manifests() {
         &[fixture_bundle("base"), fixture_bundle("rust-defaults")],
     )
     .expect("merge both");
-    let r1 = materialize_with_mode(
-        &m_base,
-        tmp.path(),
-        HashingMode::Version,
-        VersionFidelity::Full,
-    )
-    .expect("materialize base");
-    let r2 = materialize_with_mode(
-        &m_both,
-        tmp.path(),
-        HashingMode::Version,
-        VersionFidelity::Full,
-    )
-    .expect("materialize both");
-    assert_eq!(r1.path, r2.path, "version mode reuses the same folder");
+    let shape = empty_shape();
+    let r1 = materialize_with_mode(&m_base, tmp.path(), HashingMode::Normal, &shape)
+        .expect("materialize base");
+    let r2 = materialize_with_mode(&m_both, tmp.path(), HashingMode::Normal, &shape)
+        .expect("materialize both");
+    assert_eq!(r1.path, r2.path, "normal mode reuses the same folder");
     assert_ne!(r1.hash, r2.hash, "but the content hash still differs");
 }
 

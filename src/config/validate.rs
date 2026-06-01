@@ -393,7 +393,7 @@ impl Config {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::{HashingMode, VersionFidelity};
+    use crate::config::HashingMode;
     use proptest::prelude::*;
 
     fn arb_string() -> impl Strategy<Value = String> {
@@ -407,15 +407,10 @@ mod tests {
     }
 
     fn arb_hashing_mode() -> impl Strategy<Value = HashingMode> {
-        prop_oneof![Just(HashingMode::Strict), Just(HashingMode::Version)]
-    }
-
-    fn arb_version_fidelity() -> impl Strategy<Value = VersionFidelity> {
         prop_oneof![
-            Just(VersionFidelity::Major),
-            Just(VersionFidelity::MajorMinor),
-            Just(VersionFidelity::Full),
-            Just(VersionFidelity::Commit),
+            Just(HashingMode::Loose),
+            Just(HashingMode::Normal),
+            Just(HashingMode::Strict),
         ]
     }
 
@@ -425,23 +420,13 @@ mod tests {
             0u64..120,
             prop::option::of(0u64..10_000),
             arb_hashing_mode(),
-            arb_version_fidelity(),
         )
             .prop_map(
-                |(
+                |(cache_dir, sync_interval_minutes, cache_retention_hours, hashing)| Cache {
                     cache_dir,
                     sync_interval_minutes,
                     cache_retention_hours,
                     hashing,
-                    version_fidelity,
-                )| {
-                    Cache {
-                        cache_dir,
-                        sync_interval_minutes,
-                        cache_retention_hours,
-                        hashing,
-                        version_fidelity,
-                    }
                 },
             )
     }

@@ -90,8 +90,8 @@ See [permissions.md](./permissions.md) for the full `permissions.*` and
 | `allowAllClaudeAiMcps` | (M) Load claude.ai connectors alongside `managed-mcp.json`. |
 
 > Note: there is **no `mcp` array key** in `settings.json`. MCP servers are
-> defined in `mcp.json`/`.mcp.json`/`~/.claude.json`; `settings.json` only
-> governs *which* of them are enabled/denied.
+> defined in `.mcp.json` (project) or the `mcpServers` object of `~/.claude.json`
+> (user/local); `settings.json` only governs *which* of them are enabled/denied.
 
 ### Memory & instructions
 

@@ -742,10 +742,12 @@ fn d2_merge_native_mcp_from_two_bundles() {
 // ============================================================================
 
 #[test]
-fn d3_mcp_json_emitted_when_resolved_servers() {
+fn d3_mcp_servers_present_when_resolved() {
     // Test: manifest carries resolved servers when present.
-    // Per D3: "`mcp.json` is emitted when there are resolved servers *or* a `native_mcp` fragment."
-    // This test verifies merge produces a manifest with mcp servers; file emission is adapter responsibility.
+    // Per D3 (#244): MCP servers are merged into `.claude.json` when there are
+    // resolved servers *or* a `native_mcp` fragment.
+    // This test verifies merge produces a manifest with mcp servers; the merge
+    // into `.claude.json` is the adapter's responsibility.
     use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp};
 
     let manifest = llmenv::merge::MergedManifest {
@@ -766,10 +768,12 @@ fn d3_mcp_json_emitted_when_resolved_servers() {
 }
 
 #[test]
-fn d3_mcp_json_emitted_when_native_mcp_fragment() {
+fn d3_native_mcp_fragment_present_when_declared() {
     // Test: manifest carries native_mcp fragment when present.
-    // Per D3: "`mcp.json` is emitted when there are resolved servers *or* a `native_mcp` fragment."
-    // This test verifies merge produces a manifest with mcp data; file emission tested in adapter.
+    // Per D3 (#244): MCP servers are merged into `.claude.json` when there are
+    // resolved servers *or* a `native_mcp` fragment.
+    // This test verifies merge produces a manifest with mcp data; the merge into
+    // `.claude.json` is tested in the adapter.
     let manifest = llmenv::merge::MergedManifest {
         native: {
             let mut m = BTreeMap::new();
@@ -805,10 +809,11 @@ mcp:
 }
 
 #[test]
-fn d3_mcp_json_not_emitted_when_both_empty() {
+fn d3_no_mcp_when_both_empty() {
     // Test: manifest empty when no servers and no native_mcp fragment.
     // Per issue #104: "but not emitted when both empty?"
-    // This test verifies merge produces empty mcp state; non-emission is adapter responsibility.
+    // This test verifies merge produces empty mcp state; non-emission of
+    // `.claude.json` mcpServers is the adapter's responsibility.
     let manifest = llmenv::merge::MergedManifest::default(); // Empty manifest
 
     // Verify both mcp sources are empty

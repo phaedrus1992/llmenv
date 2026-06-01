@@ -2,6 +2,7 @@ pub mod cache;
 pub mod manifest;
 pub mod state;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::config::HashingMode;
@@ -19,43 +20,47 @@ pub struct Rendered {
 }
 
 /// Materialize the bundle files of `m` into a subdirectory of `cache_root`,
-/// named per the active [`HashingMode`] (#196).
+/// named per the active [`HashingMode`] (#246).
 ///
+/// - [`HashingMode::Loose`]: folder = `<shape>`. Selection-addressed, version
+///   agnostic; written in place (folder reused across content edits + upgrades).
+/// - [`HashingMode::Normal`]: folder = `<version_mm>/<shape>`. Reused across
+///   content edits within a `major.minor` generation; written in place.
 /// - [`HashingMode::Strict`]: folder = `{VERSION_TAG}-{hash}`. Writes are staged
 ///   to a per-call `.tmp/` dir and atomically renamed into place; an existing
 ///   destination is a no-op (byte-identical by construction).
-/// - [`HashingMode::Version`]: folder = the binary version at `fidelity`. The
-///   content hash is *not* in the name, so the folder is reused across content
-///   edits. Files are written in place (no staging swap) because the folder is
-///   the agent's live config dir for the whole session — a swap would destroy
-///   foreign in-session state (#175). Stale-file reconciliation against the
-///   owned-set manifest happens in the orchestrator after the adapter runs.
+///
+/// Loose/normal write in place (no staging swap) because the folder is the
+/// agent's live config dir for the whole session — a swap would destroy foreign
+/// in-session state (#175). Stale-file reconciliation against the owned-set
+/// manifest happens in the orchestrator after the adapter runs.
 ///
 /// This function only handles `m.files` (raw bundle content). The agent adapter
 /// writes the native files (CLAUDE.md, settings.json, …) on top, and the
 /// orchestrator records the combined owned set + content hash in the dotfile.
 pub fn materialize(m: &MergedManifest, cache_root: &Path) -> anyhow::Result<Rendered> {
-    materialize_with_mode(m, cache_root, HashingMode::default(), Default::default())
+    let shape = cache::shape(&BTreeSet::new(), &BTreeSet::new());
+    materialize_with_mode(m, cache_root, HashingMode::default(), &shape)
 }
 
-/// [`materialize`] with an explicit mode + fidelity. `materialize` is the
-/// default-mode convenience wrapper used by tests and callers that don't thread
-/// config through.
+/// [`materialize`] with an explicit mode + selection `shape`. `materialize` is
+/// the default-mode, empty-selection convenience wrapper used by tests and
+/// callers that don't thread config through.
 pub fn materialize_with_mode(
     m: &MergedManifest,
     cache_root: &Path,
     mode: HashingMode,
-    fidelity: crate::config::VersionFidelity,
+    shape: &str,
 ) -> anyhow::Result<Rendered> {
     let hash = cache::hash_manifest(m)?;
-    let folder = cache::folder_name(&hash, mode, fidelity);
+    let folder = cache::folder_name(mode, shape, &hash);
     let dest = cache_root.join(&folder);
 
     match mode {
-        // Version mode reuses one folder across content edits: write in place,
-        // never swap (the folder is Claude's live home). Stale-file cleanup is
-        // the orchestrator's job via the owned-set manifest.
-        HashingMode::Version => {
+        // Loose/normal reuse one folder across content edits: write in place,
+        // never swap (the folder is the agent's live home). Stale-file cleanup
+        // is the orchestrator's job via the owned-set manifest.
+        HashingMode::Loose | HashingMode::Normal => {
             write_in_place(m, &dest)?;
             return Ok(Rendered { path: dest, hash });
         }
@@ -110,8 +115,8 @@ pub fn materialize_with_mode(
     }
 }
 
-/// Copy `m.files` into `dest` in place (version mode). No staging swap: `dest`
-/// is the agent's live config dir, so foreign in-session files must survive.
+/// Copy `m.files` into `dest` in place (loose/normal mode). No staging swap:
+/// `dest` is the agent's live config dir, so foreign in-session files survive.
 /// Stale llmenv-owned files from a prior render are reconciled separately by
 /// the orchestrator against the owned-set manifest — this function only writes
 /// the current content. Idempotent: re-copying the same bytes is harmless.

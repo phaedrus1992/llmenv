@@ -96,12 +96,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
         generate_settings_json(out, manifest)?;
         owned.push(PathBuf::from("settings.json"));
 
-        // Emit mcp.json when the manifest carries resolved MCP servers or a
-        // per-engine `native_mcp` fragment (#97) to overlay onto the doc.
+        // #244: merge resolved MCP servers (and any per-engine `native_mcp`
+        // fragment, #97) into the top-level `mcpServers` of `.claude.json` — the
+        // only surface Claude Code actually reads for user-scoped servers. The
+        // legacy `mcp.json` was never ingested. `.claude.json` is overwhelmingly
+        // foreign Claude state, so it is deliberately NOT added to the owned set:
+        // llmenv only upserts `mcpServers`, and must never reconcile-delete the
+        // file.
         let native_mcp = manifest.capabilities.native_mcp.get("claude_code");
         if !manifest.mcps.is_empty() || native_mcp.is_some() {
-            write_mcp_json(out, &manifest.mcps, native_mcp)?;
-            owned.push(PathBuf::from("mcp.json"));
+            merge_mcp_into_claude_json(out, &manifest.mcps, native_mcp)?;
         }
 
         Ok(owned)
@@ -167,16 +171,6 @@ fn reject_modeled_keys_in_catch_all(fragment: &serde_yaml::Value) -> anyhow::Res
     Ok(())
 }
 
-/// True when a `native_mcp` fragment already declares `enabledMcpjsonServers`.
-/// When it does, llmenv skips its auto-derived approval list and defers entirely
-/// to the user's curated set (#122) — for an approval list, native curation
-/// replaces rather than unions.
-fn native_sets_enabled_mcp(native: Option<&serde_yaml::Value>) -> bool {
-    native
-        .and_then(serde_yaml::Value::as_mapping)
-        .is_some_and(|m| m.contains_key("enabledMcpjsonServers"))
-}
-
 /// True if `rel` is a JSON file under the bundle's `hooks/` subtree —
 /// these files are template-rendered rather than byte-copied so bundle hooks
 /// can reference the ICM MCP via `{{ICM_MCP}}`.
@@ -184,23 +178,33 @@ fn is_hook_json(rel: &Path) -> bool {
     rel.starts_with("hooks") && rel.extension().is_some_and(|e| e == "json")
 }
 
-/// Writes `mcp.json` registering every resolved MCP server under the
-/// `mcpServers` key. Stdio entries carry `command`/`args`/`env`; remote entries
-/// carry `url`. Entries are keyed by server name.
+/// File Claude Code reads for user-scoped (cross-project) MCP servers: the
+/// top-level `mcpServers` key of `$CLAUDE_CONFIG_DIR/.claude.json` (#244). The
+/// legacy `mcp.json` was never a config surface Claude ingested.
+const CLAUDE_JSON_FILE: &str = ".claude.json";
+
+/// Map a resolved remote transport onto Claude Code's `type` discriminator
+/// (#244). Claude requires `"type"` on remote `mcpServers` entries; without it
+/// the server is dropped. `Stdio` never reaches a `Remote` entry, so it is
+/// treated as `http` defensively rather than panicking.
+fn remote_type_str(transport: crate::config::McpTransport) -> &'static str {
+    use crate::config::McpTransport;
+    match transport {
+        McpTransport::Sse => "sse",
+        McpTransport::Http | McpTransport::Stdio => "http",
+    }
+}
+
+/// Build the `mcpServers` object for every resolved server, keyed by name.
+/// Stdio entries carry `command`/`args`/`env`; remote entries carry
+/// `{"type", "url"}` — the transport discriminator Claude Code requires (#244).
 ///
-/// #97: a per-engine `native_mcp` fragment (mcp.json-shaped opaque YAML) is
-/// overlaid onto the doc so engine-only keys (e.g. `enabledMcpjsonServers`)
-/// merge in. Native is the higher-precedence overlay.
-///
-/// #103: Detects true same-identity-different-content conflicts: if two MCP
-/// server definitions have the same name but different command/args/url,
-/// hard-errors naming both contributors and the conflicting name. This prevents
-/// silent overwrites that hide real mistakes.
-fn write_mcp_json(
-    out: &Path,
+/// #103: detects true same-identity-different-content conflicts: if two MCP
+/// server definitions share a name but differ in content, hard-errors naming
+/// both contributors and the conflicting name, preventing silent overwrites.
+fn build_mcp_servers(
     mcps: &[ResolvedMcp],
-    native: Option<&serde_yaml::Value>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     let mut servers = serde_json::Map::new();
     // Track which server came from which resolved entry for conflict reporting.
     let mut server_sources: std::collections::BTreeMap<String, usize> =
@@ -215,10 +219,12 @@ fn write_mcp_json(
                 }
                 obj
             }
-            ResolvedKind::Remote { url, .. } => json!({ "url": url }),
+            ResolvedKind::Remote { url, transport } => {
+                json!({ "type": remote_type_str(*transport), "url": url })
+            }
         };
 
-        // O3: Detect true same-identity-different-content conflicts.
+        // #103: detect true same-identity-different-content conflicts.
         // If the server name already exists and the content differs, hard-error.
         if let Some(&prev_idx) = server_sources.get(&m.name)
             && let Some(existing_entry) = servers.get(&m.name)
@@ -238,27 +244,101 @@ fn write_mcp_json(
         server_sources.insert(m.name.clone(), idx);
         servers.insert(m.name.clone(), entry);
     }
-    // #122 (design O1, 'lean derive'): auto-approve every server llmenv emits by
-    // deriving `enabledMcpjsonServers` from the resolved set. This spares users a
-    // manual native passthrough just to trust servers llmenv itself wrote.
-    //
-    // A user who hand-curates the approval set via `native_mcp` wins outright:
-    // we skip the derive when the native fragment already carries the key, rather
-    // than letting `overlay_native`'s array union+dedup merge the two lists. For
-    // an *approval* list, union is the wrong default — it would silently
-    // re-approve a server the user deliberately left out. Native curation is a
-    // replace, not an add.
+    Ok(servers)
+}
+
+/// Merge llmenv's resolved MCP servers into the top-level `mcpServers` of
+/// `$CLAUDE_CONFIG_DIR/.claude.json` (#244) — the only surface Claude Code reads
+/// for user-scoped servers.
+///
+/// `.claude.json` is overwhelmingly foreign state (oauthAccount, projects,
+/// numStartups, …) that Claude mutates constantly, so this is a
+/// read-merge-write, never a clobber:
+/// - read the existing doc (absent → start from `{}`);
+/// - upsert each llmenv server into `mcpServers` by name — foreign server
+///   entries and every other top-level key are preserved verbatim;
+/// - write back owner-only (0o600 — entries may carry credentials / URLs).
+///
+/// A present-but-unparseable `.claude.json` is a hard error: silently replacing
+/// it would destroy the user's Claude state, so llmenv refuses rather than
+/// clobber.
+///
+/// #97: a per-engine `native_mcp` fragment is overlaid onto the server set
+/// before the merge, so engine-specific server entries still flow through. Only
+/// its `mcpServers` are propagated — `enabledMcpjsonServers` is a project
+/// `.mcp.json` approval gate, irrelevant for the auto-trusted user-scoped
+/// servers in `.claude.json`, and is intentionally dropped (#244, relates #122).
+///
+/// Known limitation (follow-up): a server llmenv stops resolving is not removed
+/// from `mcpServers` — llmenv does not yet track which server names it owns
+/// across renders, so stale entries linger until manually removed.
+fn merge_mcp_into_claude_json(
+    out: &Path,
+    mcps: &[ResolvedMcp],
+    native: Option<&serde_yaml::Value>,
+) -> anyhow::Result<()> {
+    // Build llmenv's server set, then overlay the native fragment so engine-only
+    // server entries merge in. Only `mcpServers` is carried into `.claude.json`.
+    let servers = build_mcp_servers(mcps)?;
     let mut doc = json!({ "mcpServers": servers });
-    if !native_sets_enabled_mcp(native) {
-        let enabled: Vec<String> = mcps.iter().map(|m| m.name.clone()).collect();
-        if !enabled.is_empty() {
-            doc["enabledMcpjsonServers"] = json!(enabled);
+    overlay_native(&mut doc, native)?;
+    let llmenv_servers = match doc.get("mcpServers").and_then(|v| v.as_object()) {
+        Some(s) if !s.is_empty() => s.clone(),
+        // No servers to merge (e.g. a native fragment that carried no
+        // `mcpServers`): leave `.claude.json` untouched.
+        _ => return Ok(()),
+    };
+
+    let path = out.join(CLAUDE_JSON_FILE);
+    let mut claude = read_claude_json(&path)?;
+    let Some(obj) = claude.as_object_mut() else {
+        anyhow::bail!(
+            "existing {} is not a JSON object; refusing to overwrite (would \
+             destroy Claude state). Fix or remove the file and re-run.",
+            path.display()
+        );
+    };
+
+    let servers_val = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    match servers_val.as_object_mut() {
+        Some(servers_obj) => {
+            for (name, entry) in llmenv_servers {
+                servers_obj.insert(name, entry);
+            }
+        }
+        // Foreign `mcpServers` was a non-object (malformed). Replace it with
+        // llmenv's set rather than error — the servers key is llmenv's domain.
+        None => {
+            *servers_val = serde_json::Value::Object(llmenv_servers);
         }
     }
-    overlay_native(&mut doc, native)?;
-    let path = out.join("mcp.json");
-    crate::paths::write_owner_only_atomic(&path, serde_json::to_string_pretty(&doc)?.as_bytes())?;
+
+    crate::paths::write_owner_only_atomic(
+        &path,
+        serde_json::to_string_pretty(&claude)?.as_bytes(),
+    )?;
     Ok(())
+}
+
+/// Read `.claude.json`, returning an empty object when the file is absent. A
+/// present-but-unparseable file is a hard error — llmenv must never destroy the
+/// user's Claude state by overwriting corrupt JSON with a fresh doc.
+fn read_claude_json(path: &Path) -> anyhow::Result<serde_json::Value> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "existing {} is not valid JSON; refusing to overwrite (would \
+                 destroy Claude state). Fix or remove the file and re-run.",
+                path.display()
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(serde_json::Value::Object(serde_json::Map::new()))
+        }
+        Err(e) => Err(anyhow::anyhow!("reading {}: {e}", path.display())),
+    }
 }
 
 /// Validates that all skills in the materialized directory have SKILL.md with required frontmatter.
@@ -801,9 +881,9 @@ enum PermissionAction {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        MODELED_SETTINGS_KEYS, is_hook_json, overlay_native, reconcile_settings,
-        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        write_mcp_json,
+        CLAUDE_JSON_FILE, MODELED_SETTINGS_KEYS, is_hook_json, merge_mcp_into_claude_json,
+        overlay_native, reconcile_settings, reject_modeled_keys_in_catch_all,
+        render_marketplace_source, render_permission_rule,
     };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -1065,14 +1145,21 @@ mod tests {
             prop_assert_eq!(is_hook_json(&p), is_hook_json(&p));
         }
 
-        // #108 write_mcp_json producibility + roundtrip: every distinctly-named
-        // resolved MCP appears under `mcpServers` in valid, re-parseable JSON.
+        // #244 producibility + roundtrip: every distinctly-named resolved MCP
+        // appears under `.claude.json` → top-level `mcpServers` in valid,
+        // re-parseable JSON. Remote entries carry the `type` discriminator.
         #[test]
-        fn write_mcp_json_roundtrips_distinct_servers(mcps in arb_distinct_mcps()) {
+        fn merge_mcp_roundtrips_distinct_servers(mcps in arb_distinct_mcps()) {
             let dir = tempfile::tempdir().unwrap();
-            write_mcp_json(dir.path(), &mcps, None).unwrap();
+            merge_mcp_into_claude_json(dir.path(), &mcps, None).unwrap();
 
-            let raw = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
+            // No servers and no native fragment → `.claude.json` is never written.
+            if mcps.is_empty() {
+                prop_assert!(!dir.path().join(CLAUDE_JSON_FILE).exists());
+                return Ok(());
+            }
+
+            let raw = std::fs::read_to_string(dir.path().join(CLAUDE_JSON_FILE)).unwrap();
             let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
             let servers = doc.get("mcpServers").and_then(|v| v.as_object()).unwrap();
 
@@ -1103,55 +1190,62 @@ mod tests {
                             }
                         }
                     }
-                    ResolvedKind::Remote { url, .. } => {
+                    ResolvedKind::Remote { url, transport } => {
                         prop_assert_eq!(entry.get("url").unwrap(), url);
+                        // #244: remote entries MUST carry the transport type, or
+                        // Claude Code drops them.
+                        let want = match transport {
+                            crate::config::McpTransport::Sse => "sse",
+                            _ => "http",
+                        };
+                        prop_assert_eq!(entry.get("type").unwrap().as_str().unwrap(), want);
                     }
                 }
             }
         }
 
-        // #108 write_mcp_json overlay determinism: an empty native overlay onto a
-        // server doc is a deterministic no-op on the `mcpServers` content.
+        // #244 overlay determinism: an empty native overlay onto the server set
+        // is a deterministic no-op on the merged `.claude.json` content.
         #[test]
-        fn write_mcp_json_empty_overlay_is_deterministic(mcps in arb_distinct_mcps()) {
+        fn merge_mcp_empty_overlay_is_deterministic(mcps in arb_distinct_mcps()) {
             let empty = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
 
             let dir_a = tempfile::tempdir().unwrap();
-            write_mcp_json(dir_a.path(), &mcps, Some(&empty)).unwrap();
-            let a = std::fs::read_to_string(dir_a.path().join("mcp.json")).unwrap();
+            merge_mcp_into_claude_json(dir_a.path(), &mcps, Some(&empty)).unwrap();
+            let a = std::fs::read_to_string(dir_a.path().join(CLAUDE_JSON_FILE)).ok();
 
             let dir_b = tempfile::tempdir().unwrap();
-            write_mcp_json(dir_b.path(), &mcps, Some(&empty)).unwrap();
-            let b = std::fs::read_to_string(dir_b.path().join("mcp.json")).unwrap();
+            merge_mcp_into_claude_json(dir_b.path(), &mcps, Some(&empty)).unwrap();
+            let b = std::fs::read_to_string(dir_b.path().join(CLAUDE_JSON_FILE)).ok();
 
             prop_assert_eq!(a, b);
         }
 
-        // #150: write_mcp_json must produce a file with mode 0o600 — same
-        // owner-only invariant as ICM state and settings.json. Critical
-        // because mcp.json may contain server credentials / API URLs.
+        // #150/#244: the merged `.claude.json` must be mode 0o600 — same
+        // owner-only invariant as ICM state and settings.json. Critical because
+        // it carries the user's Claude state plus server credentials / URLs.
         #[cfg(unix)]
         #[test]
-        fn write_mcp_json_writes_owner_only_permissions(mcps in arb_distinct_mcps()) {
+        fn merge_mcp_writes_owner_only_permissions(mcps in arb_distinct_mcps()) {
             use std::os::unix::fs::PermissionsExt;
+            prop_assume!(!mcps.is_empty());
             let dir = tempfile::tempdir().unwrap();
-            write_mcp_json(dir.path(), &mcps, None).unwrap();
-            let mode = std::fs::metadata(dir.path().join("mcp.json"))
+            merge_mcp_into_claude_json(dir.path(), &mcps, None).unwrap();
+            let mode = std::fs::metadata(dir.path().join(CLAUDE_JSON_FILE))
                 .unwrap()
                 .permissions()
                 .mode();
             prop_assert_eq!(mode & 0o077, 0, "group/other bits set: {:o}", mode);
         }
 
-        // #151: write_mcp_json output round-trips through serde_json — every
-        // byte written deserializes back to a parsable Value with the same
-        // mcpServers content. Catches drift between serialize and deserialize
-        // paths.
+        // #151/#244: merged output round-trips through serde_json — every byte
+        // written deserializes back to a parsable Value with identical structure.
         #[test]
-        fn write_mcp_json_serde_roundtrip(mcps in arb_distinct_mcps()) {
+        fn merge_mcp_serde_roundtrip(mcps in arb_distinct_mcps()) {
+            prop_assume!(!mcps.is_empty());
             let dir = tempfile::tempdir().unwrap();
-            write_mcp_json(dir.path(), &mcps, None).unwrap();
-            let raw = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
+            merge_mcp_into_claude_json(dir.path(), &mcps, None).unwrap();
+            let raw = std::fs::read_to_string(dir.path().join(CLAUDE_JSON_FILE)).unwrap();
             let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse");
             // Reserialize and reparse — must produce identical structure.
             let reserialized = serde_json::to_string_pretty(&doc).expect("reserialize");
@@ -1345,5 +1439,150 @@ mod tests {
         let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
         let out = reconcile_settings(&path, fresh.clone()).unwrap();
         assert_eq!(out, fresh);
+    }
+
+    // ---- merge_mcp_into_claude_json (#244): mcpServers into .claude.json ----
+
+    fn stdio_mcp(name: &str, command: &str) -> ResolvedMcp {
+        ResolvedMcp {
+            name: name.into(),
+            kind: ResolvedKind::Stdio {
+                command: command.into(),
+                args: vec![],
+                env: std::collections::BTreeMap::new(),
+            },
+        }
+    }
+
+    fn remote_mcp(name: &str, url: &str, transport: crate::config::McpTransport) -> ResolvedMcp {
+        ResolvedMcp {
+            name: name.into(),
+            kind: ResolvedKind::Remote {
+                url: url.into(),
+                transport,
+            },
+        }
+    }
+
+    #[test]
+    fn merge_mcp_preserves_foreign_keys_and_servers() {
+        // #244 acceptance: a pre-existing .claude.json carries Claude's own
+        // state (oauthAccount, numStartups) plus a user-added MCP server. A
+        // re-export must upsert llmenv's server WITHOUT disturbing any of it.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({
+                "oauthAccount": { "email": "x@y.z" },
+                "numStartups": 42,
+                "mcpServers": { "user-added": { "command": "foo" } }
+            }),
+        );
+        merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("icm", "icm-bin")], None).unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // Foreign top-level keys untouched.
+        assert_eq!(doc["oauthAccount"]["email"], "x@y.z");
+        assert_eq!(doc["numStartups"], 42);
+        // Foreign server preserved alongside llmenv's upsert.
+        assert_eq!(doc["mcpServers"]["user-added"]["command"], "foo");
+        assert_eq!(doc["mcpServers"]["icm"]["command"], "icm-bin");
+    }
+
+    #[test]
+    fn merge_mcp_remote_entry_carries_type() {
+        // #244 gap #2: remote servers MUST emit "type" or Claude drops them.
+        let tmp = tempfile::tempdir().unwrap();
+        merge_mcp_into_claude_json(
+            tmp.path(),
+            &[remote_mcp(
+                "icm",
+                "http://still.local:9092",
+                crate::config::McpTransport::Http,
+            )],
+            None,
+        )
+        .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join(CLAUDE_JSON_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(doc["mcpServers"]["icm"]["type"], "http");
+        assert_eq!(doc["mcpServers"]["icm"]["url"], "http://still.local:9092");
+    }
+
+    #[test]
+    fn merge_mcp_sse_remote_emits_sse_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        merge_mcp_into_claude_json(
+            tmp.path(),
+            &[remote_mcp(
+                "ev",
+                "http://h/sse",
+                crate::config::McpTransport::Sse,
+            )],
+            None,
+        )
+        .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join(CLAUDE_JSON_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(doc["mcpServers"]["ev"]["type"], "sse");
+    }
+
+    #[test]
+    fn merge_mcp_creates_file_when_absent() {
+        // No pre-existing .claude.json: a fresh doc with only mcpServers is born.
+        let tmp = tempfile::tempdir().unwrap();
+        merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("icm", "icm-bin")], None).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join(CLAUDE_JSON_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(doc["mcpServers"]["icm"]["command"], "icm-bin");
+        assert!(doc.as_object().unwrap().len() == 1, "only mcpServers key");
+    }
+
+    #[test]
+    fn merge_mcp_refuses_to_clobber_corrupt_file() {
+        // .claude.json is overwhelmingly foreign state. A parse failure must
+        // abort rather than replace it with a fresh doc (data-loss guard).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        let err = merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("icm", "icm-bin")], None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not valid JSON"),
+            "expected refusal, got: {err}"
+        );
+        // Original bytes left intact.
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not valid json");
+    }
+
+    #[test]
+    fn merge_mcp_no_servers_no_native_leaves_no_file() {
+        // Nothing to write → .claude.json is never created.
+        let tmp = tempfile::tempdir().unwrap();
+        merge_mcp_into_claude_json(tmp.path(), &[], None).unwrap();
+        assert!(!tmp.path().join(CLAUDE_JSON_FILE).exists());
+    }
+
+    #[test]
+    fn merge_mcp_overlays_native_server_fragment() {
+        // #97: a native_mcp fragment injects an engine-specific server entry,
+        // which merges into mcpServers alongside the resolved set.
+        let tmp = tempfile::tempdir().unwrap();
+        let native: serde_yaml::Value =
+            serde_yaml::from_str("mcpServers:\n  extra:\n    command: native-bin\n").unwrap();
+        merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("icm", "icm-bin")], Some(&native))
+            .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join(CLAUDE_JSON_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(doc["mcpServers"]["icm"]["command"], "icm-bin");
+        assert_eq!(doc["mcpServers"]["extra"]["command"], "native-bin");
+        // enabledMcpjsonServers is never emitted into .claude.json (#244).
+        assert!(doc.get("enabledMcpjsonServers").is_none());
     }
 }
