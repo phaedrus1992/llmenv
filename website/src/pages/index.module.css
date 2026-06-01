@@ -1,0 +1,85 @@
+.hero {
+  padding: 5rem 0 4rem;
+  text-align: center;
+}
+
+.title {
+  font-size: 3.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.tagline {
+  font-size: 1.4rem;
+  color: var(--ifm-color-emphasis-700);
+  margin-bottom: 1.5rem;
+  font-style: italic;
+}
+
+.description {
+  max-width: 640px;
+  margin: 0 auto 2.5rem;
+  font-size: 1.1rem;
+  line-height: 1.7;
+  color: var(--ifm-color-emphasis-800);
+}
+
+.buttons {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.pipeline {
+  padding: 4rem 0;
+  background: var(--ifm-background-surface-color);
+}
+
+.pipelineTitle {
+  text-align: center;
+  margin-bottom: 0.5rem;
+}
+
+.pipelineSub {
+  text-align: center;
+  color: var(--ifm-color-emphasis-600);
+  margin-bottom: 2.5rem;
+}
+
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.step {
+  flex: 1 1 160px;
+  max-width: 180px;
+  text-align: center;
+  padding: 1.5rem 1rem;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 8px;
+  background: var(--ifm-background-color);
+}
+
+.stepArrow {
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: 1.5rem;
+  color: var(--ifm-color-emphasis-400);
+}
+
+.stepLabel {
+  font-weight: 700;
+  font-size: 1rem;
+  margin-bottom: 0.4rem;
+  color: var(--ifm-color-primary);
+}
+
+.stepDesc {
+  font-size: 0.85rem;
+  margin: 0;
+  color: var(--ifm-color-emphasis-700);
+  line-height: 1.5;
+}

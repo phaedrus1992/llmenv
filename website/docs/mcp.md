@@ -267,5 +267,5 @@ is also invoked at session start to inject ICM memory.
 `LLMENV_ICM_CONTEXT` is one of several vars `export` emits. The full set —
 `LLMENV_ACTIVE_SCOPES`, `LLMENV_ACTIVE_TAGS`, `LLMENV_ACTIVE_BUNDLES`,
 `LLMENV_ACTIVE_PROJECT`, `LLMENV_PROJECT_ROOT`, `LLMENV_ICM_CONTEXT` — is
-documented in the [README](../README.md#introspection-environment-variables)
+documented in the [README](https://github.com/phaedrus1992/llmenv/blob/main/README.md#introspection-environment-variables)
 and [Concepts](concepts.md#introspection).
