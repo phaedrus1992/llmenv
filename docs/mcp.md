@@ -221,9 +221,11 @@ follows the tag rather than the project.
 ### Keyword convention
 
 - `llmenv-tag:<tag>` — memory keyed to a tag. Stored once, retrieved in any
-  environment where that tag is active.
+  environment where that tag is active. The TurnStart hook recalls this keyword
+  automatically across all projects (see [Lifecycle hooks](#lifecycle-hooks)).
 - `llmenv-bundle:<bundle>` — memory keyed to a bundle, retrieved whenever that
-  bundle fires.
+  bundle fires. *Convention only — automatic bundle recall is not yet
+  implemented ([#215](https://github.com/phaedrus1992/llmenv/issues/215)).*
 
 ### Lifecycle hooks
 
@@ -233,8 +235,11 @@ run in response to three neutral events:
 
 - **SessionStart** — `hook-run session_start` injects the session wake-up pack
   (`icm_wake_up`) containing your critical memories (by importance and recency)
-- **TurnStart** — `hook-run turn_start` injects recalled context for the active
-  tags/project (`icm_memory_recall`) at the start of each agent turn
+- **TurnStart** — `hook-run turn_start` injects recalled context at the start of
+  each agent turn (`icm_memory_recall`). It issues a project-scoped recall for
+  the active tags, then one **project-unfiltered** recall per active tag keyed on
+  that tag's `llmenv-tag:<tag>` keyword — so memory stored under a tag in one
+  project surfaces when the same tag activates in another
 - **SessionEnd** — `hook-run session_end` stores the active scope context
   (`icm_memory_store`) when the session closes
 
