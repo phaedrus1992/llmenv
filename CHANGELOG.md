@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Corrupt cache manifest now logged** — a `.llmenv-manifest.json` that fails
+  to parse is still treated as "no prior knowledge" (non-fatal, the documented
+  behavior), but the discard now emits a `tracing::warn!` instead of being
+  swallowed silently, so the degraded re-render is observable. (#247)
+
 - **Deep-merge non-idempotence** — `util::merge_json` / `merge_yaml` and
   `merge::capabilities::merge_native_feature` could keep duplicate
   sequence/array elements on the insert and scalar-overwrite paths that a later
@@ -44,6 +49,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   #111)
 
 ### Added
+
+- **Third-party license attribution + dual-license texts** — added the
+  `LICENSE-MIT` and `LICENSE-APACHE` texts for the project's `MIT OR Apache-2.0`
+  license, and generate per-dependency attribution with cargo-about into two
+  outputs: `THIRD-PARTY-LICENSES.md` (ships with the binary/source dist) and
+  `website/docs/third-party-licenses.md` (browseable on the docs site).
+  `cargo deny check` now gates the license policy in CI and on pre-push, and the
+  allowlist was audited and extended (`MIT-0`, `BSD-3-Clause`, `ISC`,
+  `CDLA-Permissive-2.0`) — all permissive or weak/file-scoped copyleft, mutually
+  compatible for the dual-licensed binary. (#253)
 
 - **Cross-project tag-scoped memory recall** — the `turn_start` hook now issues,
   in addition to the existing project-scoped recall, one **project-unfiltered**
