@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml)
 [![coverage](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml)
+[![docs](https://img.shields.io/badge/docs-phaedrus1992.github.io%2Fllmenv-blue)](https://phaedrus1992.github.io/llmenv/)
 
 A universal, scope-aware environment for AI coding agents.
 

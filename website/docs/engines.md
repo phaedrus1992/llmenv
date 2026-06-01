@@ -6,8 +6,7 @@ engine's native shape. Anything that can't be expressed neutrally drops through 
 per-engine escape hatch.
 
 The current adapter targets **Claude Code**. The design doc behind this model is
-[`design/engine-capabilities.md`](design/engine-capabilities.md) (related: #34,
-#59).
+[`docs/design/engine-capabilities.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md) (related: #34, #59).
 
 ## The principle
 
