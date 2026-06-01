@@ -4,7 +4,7 @@
 //! Two sources feed the resolver:
 //! - `config.mcp` — plain user-declared servers, selected when any of their
 //!   `tags` intersect the active scope tag set (same model as bundles).
-//! - `config.memory` — llmenv's own memory backend (ICM). One host runs the
+//! - `config.features.memory` — llmenv's own memory backend (ICM). One host runs the
 //!   daemon (`icm serve`, stdio-only) wrapped in `mcp-proxy` to expose it on
 //!   the network; the CLI launches that proxy on the designated `server_host`.
 //!   Every agent — including the one on the server host — connects to the
@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{Config, HostEntry, McpServer, McpTransport, Memory};
+use crate::config::{Config, Features, HostEntry, McpServer, McpTransport, Memory};
 
 /// A fully resolved MCP entry ready for an adapter to render. Transport-shaped:
 /// `Stdio` carries a launch command; `Remote` carries a URL.
@@ -76,7 +76,7 @@ pub fn resolve_mcps(
         }
         out.push(resolve_static(m)?);
     }
-    if let Some(mem) = &config.memory
+    if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref())
         && mem.tags.iter().any(|t| active_tags.contains(t))
     {
         out.push(resolve_memory(mem, &config.host)?);
@@ -217,7 +217,9 @@ mod tests {
     #[test]
     fn memory_always_resolves_to_network_client() {
         let mut cfg = base_config();
-        cfg.memory = Some(memory());
+        cfg.features = Some(Features {
+            memory: Some(memory()),
+        });
         // Same result whether or not this host is the server host: the agent
         // always talks to the network proxy.
         for active_tags in [tags(&["network-home"]), tags(&["network-home"])] {
@@ -236,7 +238,9 @@ mod tests {
     #[test]
     fn memory_not_selected_when_tags_inactive() {
         let mut cfg = base_config();
-        cfg.memory = Some(memory());
+        cfg.features = Some(Features {
+            memory: Some(memory()),
+        });
         let resolved = resolve_mcps(&cfg, &tags(&["unrelated"])).unwrap();
         assert!(resolved.is_empty());
     }
@@ -245,7 +249,9 @@ mod tests {
     fn memory_with_unknown_host_errors() {
         let mut cfg = base_config();
         cfg.host.clear();
-        cfg.memory = Some(memory());
+        cfg.features = Some(Features {
+            memory: Some(memory()),
+        });
         let err = resolve_mcps(&cfg, &tags(&["network-home"])).unwrap_err();
         assert_eq!(err, ResolveError::MemoryUnknownServerHost("still".into()));
     }

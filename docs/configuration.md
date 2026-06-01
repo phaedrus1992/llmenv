@@ -240,11 +240,12 @@ host:
   fixed:
     addr: "fixed.local"        # IP or resolvable hostname
 
-memory:
-  server_host: fixed           # key into the host: table
-  port: 7878
-  tags: [me]                   # activates the backend (same model as bundles)
-  default_topics: ["context-{project}", preferences]
+features:
+  memory:
+    server_host: fixed         # key into the host: table
+    port: 7878
+    tags: [me]                 # activates the backend (same model as bundles)
+    default_topics: ["context-{project}", preferences]
 ```
 
 | Field | Required | Notes |

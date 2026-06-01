@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+/// llmenv feature toggles and experimental configuration. Nested under
+/// `features:` in `config.yaml`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct Features {
+    /// llmenv's memory backend (ICM). A single optional topology: one host runs
+    /// the daemon, every other selected host connects to it as a network
+    /// client. Desugars into a resolved MCP server so it lands in the agent's
+    /// MCP config alongside the `mcp` entries.
+    #[serde(default)]
+    pub memory: Option<Memory>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct Config {
     #[serde(default)]
@@ -25,12 +37,9 @@ pub struct Config {
     /// llmenv's own memory backend is configured separately under `memory`.
     #[serde(default)]
     pub mcp: Vec<McpServer>,
-    /// llmenv's memory backend (ICM). A single optional topology: one host runs
-    /// the daemon, every other selected host connects to it as a network
-    /// client. Desugars into a resolved MCP server so it lands in the agent's
-    /// MCP config alongside the `mcp` entries.
+    /// Feature toggles and experimental configuration.
     #[serde(default)]
-    pub memory: Option<Memory>,
+    pub features: Option<Features>,
     /// Agent plugin marketplaces, each a named source (git URL or local path).
     /// Referenced by `plugin-collection` entries as the left half of a
     /// `marketplace:plugin` identifier. Cloned once into the shared marketplace

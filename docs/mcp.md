@@ -84,11 +84,12 @@ host:
   fixed:
     addr: "fixed.local"      # IP or resolvable hostname
 
-memory:
-  server_host: fixed         # key into the `host:` table
-  port: 7878
-  tags: [base]               # activates the backend (same model as bundles)
-  default_topics: ["context-{project}", preferences]
+features:
+  memory:
+    server_host: fixed       # key into the `host:` table
+    port: 7878
+    tags: [base]             # activates the backend (same model as bundles)
+    default_topics: ["context-{project}", preferences]
 ```
 
 ### How the topology is resolved
@@ -122,10 +123,11 @@ scope:
       match: { hostname: laptop }
       tags: [home]            # always fires on this host — manual fallback
 
-memory:
-  server_host: fixed
-  port: 7878
-  tags: [home]               # active via either route
+features:
+  memory:
+    server_host: fixed
+    port: 7878
+    tags: [home]             # active via either route
 ```
 
 With this, `laptop` always emits `home`, so its agents always get the memory
