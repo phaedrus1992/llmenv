@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Cache hashing strictness dial (BREAKING)** — replaced the two-knob
+  `cache.hashing: strict|version` + `cache.version_fidelity: major_minor|...`
+  config with a single `cache.hashing: loose|normal|strict` (default `normal`).
+  Folder layout follows the mode: `loose` → `<adapter>/<shape>/`, `normal` →
+  `<adapter>/<version_mm>/<shape>/`, `strict` →
+  `<adapter>/<VERSION_TAG>-<content_hash>/`, where `shape` is a 12-hex SHA-256
+  over the active tags ∪ enabled bundles. The plaintext selection set
+  (`active_tags`, `enabled_bundles`) is now recorded in
+  `.llmenv-manifest.json`, and pruning is mode-aware (`state/` is never
+  touched). Existing configs using `hashing: version`/`strict` or
+  `version_fidelity` must migrate to the new single key. (#246)
+
+- **MCP servers written to `.claude.json` (BREAKING)** — the Claude Code adapter
+  now merges resolved MCP servers into the top-level `mcpServers` object of
+  `.claude.json` (the surface Claude Code actually reads) instead of writing a
+  standalone `mcp.json` that Claude never ingested. The merge is read-modify-write:
+  llmenv servers are upserted by name and every foreign key (`oauthAccount`,
+  `projects`, `numStartups`, hooks, …) is preserved; a corrupt or non-object
+  `.claude.json` is a hard error rather than being overwritten. Remote servers
+  now carry an explicit `"type"` (`http`/`sse`). `mcp.json` is no longer written,
+  and `enabledMcpjsonServers` (a project `.mcp.json` approval gate, irrelevant to
+  auto-trusted user-scoped servers) is no longer emitted. (#244)
+
 ### Fixed
 
 - **Deep-merge non-idempotence** — `util::merge_json` / `merge_yaml` and
@@ -37,11 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   hooks never block the agent. (#171)
 
 - **ICM-aware Claude Code adapter** — the adapter now resolves three previously
-  open design questions automatically. (1) It auto-derives
-  `enabledMcpjsonServers` in `mcp.json` from every server llmenv emits, so the
-  agent never prompts to approve a server llmenv itself configured; a
-  `native` override of the key replaces the derived list rather than unioning
-  with it. (2) When the resolved manifest includes the `icm` MCP server, the
+  open design questions automatically. (1) It merges every resolved MCP server
+  into the top-level `mcpServers` of `.claude.json` — the surface Claude actually
+  reads — so user-scoped servers are auto-trusted and never prompt (the earlier
+  `enabledMcpjsonServers` approach targeted the dead `mcp.json` and was removed;
+  see the #244 entry below). (2) When the resolved manifest includes the `icm` MCP server, the
   adapter emits `autoMemoryEnabled: false` so ICM and Claude's native auto
   memory don't both write (a user `native` override still wins). (3) The adapter
   always registers a `SessionStart` hook running the new `llmenv check-stale`

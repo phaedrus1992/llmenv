@@ -572,17 +572,18 @@ fn native_plugins_merge_into_settings() {
     );
 }
 
-// Issue #97: native_mcp["claude_code"] is an mcp.json fragment that deep-merges
-// into the generated mcp.json doc (e.g. enabledMcpjsonServers, which llmenv has
-// no neutral representation for). mcp.json is emitted even with no resolved MCPs
-// when a native_mcp fragment exists.
+// Issue #97 + #244: a native_mcp["claude_code"] fragment carrying its own
+// `mcpServers` injects engine-specific server entries, which merge into the
+// top-level `mcpServers` of `.claude.json` even with no resolved MCPs.
 #[test]
-fn native_mcp_merge_into_mcp_json() {
+fn native_mcp_servers_merge_into_claude_json() {
     let mut native_mcp = BTreeMap::new();
     native_mcp.insert(
         "claude_code".to_string(),
-        serde_yaml::from_str::<serde_yaml::Value>("enabledMcpjsonServers:\n  - stdio_server\n")
-            .expect("parse native mcp"),
+        serde_yaml::from_str::<serde_yaml::Value>(
+            "mcpServers:\n  stdio_server:\n    command: native-bin\n",
+        )
+        .expect("parse native mcp"),
     );
     let m = llmenv::merge::MergedManifest {
         capabilities: llmenv::config::Capabilities {
@@ -596,14 +597,14 @@ fn native_mcp_merge_into_mcp_json() {
         .materialize(&m, tmp.path())
         .expect("materialize");
 
-    let mcp_json =
-        std::fs::read_to_string(tmp.path().join("mcp.json")).expect("mcp.json emitted for native");
-    let parsed: serde_json::Value = serde_json::from_str(&mcp_json).expect("parse mcp.json");
+    let claude_json = std::fs::read_to_string(tmp.path().join(".claude.json"))
+        .expect(".claude.json emitted for native servers");
+    let parsed: serde_json::Value = serde_json::from_str(&claude_json).expect("parse .claude.json");
 
-    let enabled = parsed["enabledMcpjsonServers"]
-        .as_array()
-        .expect("native enabledMcpjsonServers rendered");
-    assert_eq!(enabled[0], serde_json::Value::String("stdio_server".into()));
+    assert_eq!(
+        parsed["mcpServers"]["stdio_server"]["command"],
+        "native-bin"
+    );
 }
 
 // Issue #96: the top-level `native.claude_code` catch-all (keys no modeled
@@ -787,11 +788,12 @@ fn session_start_native_hook_coexists_with_stale_check() {
     );
 }
 
-// Issue #122 (design O1): llmenv auto-derives the MCP approval policy from the
-// servers it emits. Every resolved server name lands in `enabledMcpjsonServers`
-// so emitted servers are auto-approved without a manual native passthrough.
+// Issue #244: resolved servers land in the top-level `mcpServers` of
+// `.claude.json` (the surface Claude reads), with the remote transport `type`
+// emitted. User-scoped servers there are auto-trusted, so no approval gate
+// (`enabledMcpjsonServers`) is written.
 #[test]
-fn mcp_approval_policy_auto_derived_from_resolved_servers() {
+fn resolved_servers_land_in_claude_json_mcp_servers() {
     use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp};
 
     let m = llmenv::merge::MergedManifest {
@@ -819,26 +821,35 @@ fn mcp_approval_policy_auto_derived_from_resolved_servers() {
         .materialize(&m, tmp.path())
         .expect("materialize");
 
-    let mcp_json = std::fs::read_to_string(tmp.path().join("mcp.json")).expect("mcp.json emitted");
-    let parsed: serde_json::Value = serde_json::from_str(&mcp_json).expect("parse mcp.json");
-
-    let enabled: Vec<&str> = parsed["enabledMcpjsonServers"]
-        .as_array()
-        .expect("auto-derived enabledMcpjsonServers")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    // mcp.json is dead and must never be written (#244 sub-point 3).
     assert!(
-        enabled.contains(&"playwright") && enabled.contains(&"icm"),
-        "every emitted server is auto-approved: {enabled:?}"
+        !tmp.path().join("mcp.json").exists(),
+        "legacy mcp.json must not be written"
+    );
+
+    let claude_json =
+        std::fs::read_to_string(tmp.path().join(".claude.json")).expect(".claude.json emitted");
+    let parsed: serde_json::Value = serde_json::from_str(&claude_json).expect("parse .claude.json");
+
+    let servers = parsed["mcpServers"]
+        .as_object()
+        .expect("mcpServers object present");
+    assert!(servers.contains_key("playwright"), "stdio server present");
+    assert_eq!(servers["playwright"]["command"], "npx");
+    assert_eq!(servers["icm"]["type"], "http", "remote carries type");
+    assert_eq!(servers["icm"]["url"], "http://still.local:9100");
+    assert!(
+        parsed.get("enabledMcpjsonServers").is_none(),
+        "no approval gate in .claude.json"
     );
 }
 
-// Issue #122: an explicit native_mcp `enabledMcpjsonServers` wins over the
-// auto-derived list — the native escape hatch is the higher-precedence overlay,
-// so a user who hand-curates the approval set is respected.
+// Issue #244: a stray `enabledMcpjsonServers` in a native_mcp fragment is a
+// project `.mcp.json` approval gate — irrelevant for the auto-trusted
+// user-scoped servers in `.claude.json` — so it is dropped, while the resolved
+// server still lands under `mcpServers`.
 #[test]
-fn native_mcp_approval_overrides_auto_derived() {
+fn native_mcp_enabled_list_is_dropped() {
     use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp};
 
     let mut native_mcp = BTreeMap::new();
@@ -867,21 +878,15 @@ fn native_mcp_approval_overrides_auto_derived() {
         .materialize(&m, tmp.path())
         .expect("materialize");
 
-    let mcp_json = std::fs::read_to_string(tmp.path().join("mcp.json")).expect("mcp.json emitted");
-    let parsed: serde_json::Value = serde_json::from_str(&mcp_json).expect("parse mcp.json");
-    let enabled: Vec<&str> = parsed["enabledMcpjsonServers"]
-        .as_array()
-        .expect("enabledMcpjsonServers present")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let claude_json =
+        std::fs::read_to_string(tmp.path().join(".claude.json")).expect(".claude.json emitted");
+    let parsed: serde_json::Value = serde_json::from_str(&claude_json).expect("parse .claude.json");
+    // Resolved server present under mcpServers...
+    assert_eq!(parsed["mcpServers"]["playwright"]["command"], "npx");
+    // ...and the approval-gate key is never written into .claude.json.
     assert!(
-        enabled.contains(&"only-this"),
-        "native curation present: {enabled:?}"
-    );
-    assert!(
-        !enabled.contains(&"playwright"),
-        "native list replaces auto-derived (native is the override): {enabled:?}"
+        parsed.get("enabledMcpjsonServers").is_none(),
+        "enabledMcpjsonServers dropped: {parsed}"
     );
 }
 

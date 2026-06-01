@@ -3,22 +3,31 @@
 Source: <https://code.claude.com/docs/en/mcp>, plus managed-mcp notes from the
 settings docs (fetched 2026-05-27).
 
-MCP (Model Context Protocol) servers extend Claude Code with external tools. This
-is the **one config surface llmenv generates fully** (`mcp.json`).
+MCP (Model Context Protocol) servers extend Claude Code with external tools.
+llmenv resolves MCP servers and merges them into the **top-level `mcpServers`
+object of `.claude.json`** — the surface Claude Code actually reads for
+user-scoped servers.
 
 ## Configuration locations
 
 | Scope | File |
 | --- | --- |
-| User | `~/.claude.json` |
+| User | `~/.claude.json` (top-level `mcpServers`) |
 | Project (shared, committed) | `.mcp.json` |
-| Local (per-project) | `~/.claude.json` |
+| Local (per-project) | `~/.claude.json` (per-project `mcpServers`) |
 | Plugin | `<plugin>/.mcp.json` |
 | Managed | `managed-mcp.json` in the managed settings dir |
 
-llmenv emits `mcp.json` inside `CLAUDE_CONFIG_DIR`.
+llmenv merges resolved servers into the top-level `mcpServers` of
+`.claude.json` inside `CLAUDE_CONFIG_DIR`. `.claude.json` is overwhelmingly
+foreign Claude state (`oauthAccount`, `projects`, `numStartups`, caches), so the
+adapter does a **read-merge-write**: it upserts llmenv servers by name into
+`mcpServers` and preserves every other key. A corrupt or non-object
+`.claude.json` is a hard error — the adapter refuses to overwrite rather than
+destroy Claude's session state. (#244 — the previously-emitted `mcp.json` in
+`CLAUDE_CONFIG_DIR` was never ingested by Claude and is no longer written.)
 
-## `.mcp.json` / `mcp.json` schema
+## `mcpServers` schema
 
 ```json
 {
@@ -61,26 +70,26 @@ CLI: `claude mcp add --transport http <name> <url> --header "Authorization: Bear
 
 ## Gaps vs llmenv (mostly parity — narrow gaps)
 
-llmenv's `write_mcp_json` (`src/adapter/claude_code.rs:93`) produces correct
-`mcpServers` entries: stdio (`command`/`args`/optional `env`) and remote (`url`).
-The YAML schema (`McpServer`, `McpTransport`) models stdio/http/sse with
-tag-intersection selection, and the `memory`/ICM backend desugars into a resolved
-MCP server. This surface is in good shape. Remaining gaps:
+llmenv's `merge_mcp_into_claude_json` (`src/adapter/claude_code.rs`) produces
+correct `mcpServers` entries: stdio (`command`/`args`/optional `env`) and remote
+(`type` + `url`). The YAML schema (`McpServer`, `McpTransport`) models
+stdio/http/sse with tag-intersection selection, and the `memory`/ICM backend
+desugars into a resolved MCP server. This surface is in good shape. Remaining
+gaps:
 
-1. **Remote `type` is dropped from output.** `write_mcp_json` emits remote servers
-   as `{ "url": url }` with no `"type"` field. Claude Code defaults stdio when
-   `command` is present and infers remote from `url`, so this likely works — but
-   for `sse` vs `http` disambiguation it may be ambiguous. Verify, and consider
-   emitting `"type"` explicitly. (`streamable-http` alias exists if needed.)
-2. **No remote auth headers.** The schema has no field for `--header` /
+1. **No remote auth headers.** The schema has no field for `--header` /
    `Authorization` bearer tokens on http/sse servers. Any authenticated remote
    MCP can't be expressed.
-3. **No approval policy passthrough.** llmenv generates the server *definitions*
-   but nothing sets `enableAllProjectMcpServers` / `enabledMcpjsonServers`. Since
-   llmenv writes to a private `CLAUDE_CONFIG_DIR`, servers there are user-scoped
-   and auto-trusted, so this may not matter — confirm against the trust model.
-4. **Managed MCP allow/deny lists** are unmodeled; out of scope for a personal
+2. **No stale-server pruning.** The adapter upserts llmenv servers by name but
+   tracks no owned-name set, so a server llmenv stops resolving lingers in
+   `.claude.json`'s `mcpServers` until removed by hand. (Deferred follow-up.)
+3. **Managed MCP allow/deny lists** are unmodeled; out of scope for a personal
    project but relevant if llmenv ever targets shared/enterprise configs.
+
+The approval-policy settings below (`enableAllProjectMcpServers`,
+`enabledMcpjsonServers`) gate project `.mcp.json` servers; llmenv's servers are
+user-scoped in a private `CLAUDE_CONFIG_DIR` and auto-trusted, so they need no
+approval passthrough.
 
 These are refinements, not the structural rebuild that `settings.json` and hooks
 need.

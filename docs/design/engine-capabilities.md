@@ -244,21 +244,25 @@ bundle fragments compose identically.
 4. Deep-merges each per-feature native fragment onto the generated subtree via
    `util::merge_json` (native is the higher-precedence overlay): `native_hooks`
    onto the `hooks` object, `native_plugins` onto settings top-level, `native_mcp`
-   onto the `mcp.json` doc. `mcp.json` is emitted when there are resolved servers
-   *or* a `native_mcp` fragment. The top-level `native.claude_code` catch-all is
-   overlaid onto the whole settings object **last** (highest precedence).
+   onto the built `mcpServers` map (only its `mcpServers` key propagates; a
+   native `enabledMcpjsonServers` is dropped — see O1). The resulting servers are
+   merged into the top-level `mcpServers` of `.claude.json` (read-merge-write,
+   foreign keys preserved) when there are resolved servers *or* a `native_mcp`
+   fragment. The top-level `native.claude_code` catch-all is overlaid onto the
+   whole settings object **last** (highest precedence).
 5. Emits a correctly-shaped `settings.json` (object-valued `hooks` and
    `permissions`; **no `mcp` key**). Optionally emit `$schema`.
 
 ## Open questions
 
-- **O1** — *Resolved (#122).* MCP enable/deny: llmenv auto-derives
-  `enabledMcpjsonServers` from the servers it emits — every resolved server is
-  auto-approved so the agent never prompts for a server llmenv itself put in
-  `mcp.json`. A `native.claude_code.enabledMcpjsonServers` (or `native_mcp`)
-  entry that sets the key **replaces** the derived list rather than unioning
-  with it: an approval list is a deliberate allowlist, so unioning could
-  silently re-approve a server the user meant to omit.
+- **O1** — *Resolved (#122, superseded by #244).* MCP enable/deny:
+  `enabledMcpjsonServers` is a project `.mcp.json` approval gate. llmenv writes
+  its servers into the top-level `mcpServers` of `.claude.json` in a private
+  `CLAUDE_CONFIG_DIR`, where user-scoped servers are auto-trusted and never
+  prompt. So the adapter no longer derives or writes `enabledMcpjsonServers`
+  (the old #122 behavior targeted the dead `mcp.json` and was removed in #244);
+  a `native_mcp` fragment's `enabledMcpjsonServers` key is dropped rather than
+  propagated.
 - **O2** — Neutral `default_mode` vocabulary: adopt Claude's
   (`acceptEdits`/`plan`/`default`/`bypassPermissions`) as the neutral set, or
   invent engine-neutral names? Claude's are reasonable defaults.
@@ -298,7 +302,7 @@ Tracking the two-layer invariant (generic + per-engine `native`) per feature:
 | Permissions | done | done (`native_permissions.<engine>`) | rendered into `settings.json`; native wins over conflicting neutral rule |
 | Hooks | done | done (`native_hooks.<engine>`) | fragment deep-merged onto the `hooks` object; shared events concat entries |
 | Plugins | done | done (`native_plugins.<engine>`) | fragment deep-merged onto settings top-level |
-| MCP servers | done | done (`native_mcp.<engine>`) | fragment deep-merged onto `mcp.json`; doc emitted even with no resolved servers |
+| MCP servers | done | done (`native_mcp.<engine>`) | `mcpServers` deep-merged into `.claude.json` (read-merge-write); merge runs when resolved servers *or* a fragment exist; native `enabledMcpjsonServers` dropped (#244) |
 | Top-level `native` (catch-all) | n/a | done | `Config.native` threads through `merge()` → `MergedManifest.native` |
 
 All four modeled features now satisfy both layers via the uniform

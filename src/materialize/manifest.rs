@@ -7,7 +7,7 @@
 //!   [`CacheManifest::content_hash`] is compared against the hash llmenv would
 //!   render now. A difference means the config changed in place and the running
 //!   agent should relaunch. This is one code path — no strict-vs-version branch.
-//! - **Reconciliation** (version-mode re-render): the recorded
+//! - **Reconciliation** (loose/normal re-render): the recorded
 //!   [`CacheManifest::owned`] set is exactly what llmenv wrote last time.
 //!   Deleting `previous − current` removes ghost files (a dropped `rules/*.md`,
 //!   a removed plugin) without ever touching files llmenv doesn't own (Claude's
@@ -33,6 +33,16 @@ pub struct CacheManifest {
     pub content_hash: String,
     /// llmenv-owned paths in this folder, relative + `/`-separated, sorted.
     pub owned: BTreeSet<String>,
+    /// Plaintext active tags that produced this render (#246). Recorded for
+    /// transparency — `ls`/`cat` of the dotfile reveals which selection a
+    /// shape-named folder corresponds to. Empty by default (older manifests and
+    /// the empty-selection convenience path).
+    #[serde(default)]
+    pub active_tags: BTreeSet<String>,
+    /// Plaintext directly-enabled bundles that produced this render (#246). See
+    /// [`Self::active_tags`].
+    #[serde(default)]
+    pub enabled_bundles: BTreeSet<String>,
 }
 
 impl CacheManifest {
@@ -57,7 +67,24 @@ impl CacheManifest {
         Self {
             content_hash: content_hash.into(),
             owned,
+            active_tags: BTreeSet::new(),
+            enabled_bundles: BTreeSet::new(),
         }
+    }
+
+    /// Attach the plaintext selection (active tags + directly-enabled bundles)
+    /// that produced this render (#246), for transparency in the dotfile. Kept
+    /// separate from [`Self::new`] so the manifest stays within the ≤5-positional
+    /// limit and callers without a selection (tests, internal renders) skip it.
+    #[must_use]
+    pub fn with_selection(
+        mut self,
+        active_tags: BTreeSet<String>,
+        enabled_bundles: BTreeSet<String>,
+    ) -> Self {
+        self.active_tags = active_tags;
+        self.enabled_bundles = enabled_bundles;
+        self
     }
 
     /// Read the manifest from `folder/.llmenv-manifest.json`. Returns `Ok(None)`
@@ -96,7 +123,7 @@ impl CacheManifest {
     }
 
     /// Paths owned by `self` (the previous render) but not by `current` — the
-    /// ghost files a version-mode re-render must delete. Everything outside this
+    /// ghost files a loose/normal re-render must delete. Everything outside this
     /// set is left untouched: either still-owned (rewritten in place) or never
     /// llmenv's to begin with.
     #[must_use]
@@ -153,6 +180,48 @@ mod tests {
             BTreeSet::from(["CLAUDE.md".to_string()]),
             "only the safe relative path is recorded"
         );
+    }
+
+    #[test]
+    fn new_has_empty_selection_by_default() {
+        let m = CacheManifest::new("abc", vec![PathBuf::from("CLAUDE.md")]);
+        assert!(m.active_tags.is_empty());
+        assert!(m.enabled_bundles.is_empty());
+    }
+
+    #[test]
+    fn with_selection_records_plaintext_and_roundtrips() {
+        // #246: the selection set is recorded plaintext for transparency and
+        // must survive a JSON round-trip so `doctor`/`cat` can show it.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = CacheManifest::new("deadbeef", vec![PathBuf::from("CLAUDE.md")]).with_selection(
+            BTreeSet::from(["rust".to_string(), "backend".to_string()]),
+            BTreeSet::from(["core".to_string()]),
+        );
+        m.write(tmp.path()).unwrap();
+        let back = CacheManifest::read(tmp.path()).unwrap().unwrap();
+        assert_eq!(back, m);
+        assert_eq!(
+            back.active_tags,
+            BTreeSet::from(["backend".to_string(), "rust".to_string()])
+        );
+        assert_eq!(back.enabled_bundles, BTreeSet::from(["core".to_string()]));
+    }
+
+    #[test]
+    fn manifest_without_selection_keys_deserializes() {
+        // Older folders (pre-#246) have no selection keys; `#[serde(default)]`
+        // must fill them with empty sets, not fail the read.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(MANIFEST_FILE),
+            br#"{"content_hash":"abc","owned":["CLAUDE.md"]}"#,
+        )
+        .unwrap();
+        let back = CacheManifest::read(tmp.path()).unwrap().unwrap();
+        assert_eq!(back.content_hash, "abc");
+        assert!(back.active_tags.is_empty());
+        assert!(back.enabled_bundles.is_empty());
     }
 
     #[test]

@@ -158,8 +158,8 @@ See [docs/mcp.md](docs/mcp.md) for the `LLMENV_ICM_CONTEXT` contract.
 ## Supported agents
 
 llmenv emits agent-native config through pluggable adapters. The current adapter
-surface targets **Claude Code** (`CLAUDE.md`, `settings.json`, `mcp.json`,
-hooks, permissions, plugins). The capability model is engine-neutral, with a
+surface targets **Claude Code** (`CLAUDE.md`, `settings.json`, `.claude.json`
+`mcpServers`, hooks, permissions, plugins). The capability model is engine-neutral, with a
 per-engine `native` escape hatch for keys that have no portable equivalent — see
 [docs/engines.md](docs/engines.md).
 

@@ -293,19 +293,20 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     );
 
     // Report the active cache layout so `doctor` explains the folder shape on
-    // disk (#196). Strict → content-addressed folders; version → one reused
-    // folder named after the binary version at the chosen fidelity.
+    // disk (#246). loose → shape-addressed; normal → <version_mm>/<shape>;
+    // strict → content-addressed folders.
     match config.cache.hashing {
+        crate::config::HashingMode::Loose => {
+            eprintln!("{pass} Cache hashing: loose (folder: <shape>)");
+        }
+        crate::config::HashingMode::Normal => {
+            eprintln!(
+                "{pass} Cache hashing: normal (folder: {}/<shape>)",
+                crate::materialize::cache::version_mm()
+            );
+        }
         crate::config::HashingMode::Strict => {
             eprintln!("{pass} Cache hashing: strict (content-addressed folders)");
-        }
-        crate::config::HashingMode::Version => {
-            let folder =
-                crate::materialize::cache::version_folder_name(config.cache.version_fidelity);
-            eprintln!(
-                "{pass} Cache hashing: version, fidelity {:?} (folder: {folder})",
-                config.cache.version_fidelity
-            );
         }
     }
 
@@ -313,9 +314,13 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     // that built the cached materializations (#173). Materialized folders live
     // under `<cache_dir>/<adapter>/`, so scan there — not the cache root, whose
     // children are adapter dirs and `marketplaces/`. Strict folders are
-    // `{VERSION_TAG}-{hash}`; version folders are the bare version (e.g. `1.2`).
+    // `{VERSION_TAG}-{hash}`; normal generation dirs are the bare `version_mm`
+    // (e.g. `1.2`). Loose mode has no version axis — its folders are bare shape
+    // digests with no version meaning, so the skew check is skipped entirely
+    // (a shape would be misread as an unknown "version").
     let adapter_cache = cache_dir.join(ClaudeCodeAdapter.name());
-    if let Ok(entries) = std::fs::read_dir(&adapter_cache) {
+    let skew_relevant = !matches!(config.cache.hashing, crate::config::HashingMode::Loose);
+    if let (true, Ok(entries)) = (skew_relevant, std::fs::read_dir(&adapter_cache)) {
         let mut cached_versions: Vec<String> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
@@ -340,10 +345,10 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
         }
         cached_versions.sort();
         cached_versions.dedup();
-        // Skew if no cached folder was built by *this* binary. A version-mode
-        // folder (e.g. `1.2`) matches when it equals the current version folder.
-        let version_folder =
-            crate::materialize::cache::version_folder_name(config.cache.version_fidelity);
+        // Skew if no cached folder was built by *this* binary. A normal-mode
+        // generation dir (e.g. `1.2`) matches when it equals the current
+        // `version_mm`.
+        let version_folder = crate::materialize::cache::version_mm();
         let current_built = |v: &String| v == VERSION_TAG || *v == version_folder;
         if !cached_versions.is_empty() {
             let cached_versions_str = cached_versions.join(", ");
@@ -841,13 +846,25 @@ fn build_and_materialize(
         return Ok(None);
     };
 
+    // The selection *shape* (#246) addresses the folder in loose/normal mode:
+    // active tags ∪ directly-enabled bundles. Bundles come from active scopes'
+    // `enable_bundles` (the manually-forced selection), kept separate from tags
+    // so the two namespaces can't alias into one shape.
+    let tags = &active.tags;
+    let bundles: BTreeSet<String> = active
+        .scopes
+        .iter()
+        .flat_map(|s| s.enable_bundles.iter().cloned())
+        .collect();
+    let shape = crate::materialize::cache::shape(tags, &bundles);
+
     let adapter = ClaudeCodeAdapter;
     let adapter_root = cache_root.join(adapter.name());
     let rendered = crate::materialize::materialize_with_mode(
         &manifest,
         &adapter_root,
         config.cache.hashing,
-        config.cache.version_fidelity,
+        &shape,
     )?;
     let cache_path = rendered.path;
 
@@ -857,13 +874,12 @@ fn build_and_materialize(
     // them with the generic bundle files to form llmenv's complete owned set
     // for this folder (#196). Idempotent per the adapter contract.
     let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
-    write_cache_manifest(
-        &cache_path,
-        &rendered.hash,
-        &manifest,
-        adapter_owned,
-        config.cache.hashing,
-    )?;
+    let owned = adapter_owned
+        .into_iter()
+        .chain(manifest.files.keys().cloned());
+    let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
+        .with_selection(tags.clone(), bundles);
+    write_cache_manifest(&cache_path, &current, config.cache.hashing)?;
 
     let mut env_vars = adapter.env_vars(&cache_path)?;
 
@@ -887,36 +903,33 @@ fn build_and_materialize(
     Ok(Some((cache_path, env_vars)))
 }
 
-/// Build the owned-set manifest dotfile for a freshly materialized folder and,
-/// in version mode, reconcile ghost files left by a prior render (#196).
+/// Write the owned-set manifest dotfile `current` for a freshly materialized
+/// folder and, in loose/normal mode, reconcile ghost files left by a prior
+/// render (#246).
 ///
-/// The owned set is the union of the adapter's reported paths and the generic
-/// bundle files copied by `materialize` (`manifest.files` keys). In version
-/// mode the folder is reused across renders, so any file llmenv owned last time
-/// but not this time (`previous − current`) is a ghost and is deleted — but
-/// only files llmenv recorded as its own; foreign files (Claude runtime state,
-/// a plugin's self-registered settings, #175) are never touched. The dotfile is
-/// written last so an interrupted render leaves the *previous* manifest intact.
+/// `current` already carries the union of the adapter's reported paths and the
+/// generic bundle files (`manifest.files` keys), plus the plaintext selection.
+/// In loose/normal mode the folder is reused across renders, so any file llmenv
+/// owned last time but not this time (`previous − current`) is a ghost and is
+/// deleted — but only files llmenv recorded as its own; foreign files (Claude
+/// runtime state, a plugin's self-registered settings, #175) are never touched.
+/// The dotfile is written last so an interrupted render leaves the *previous*
+/// manifest intact. Taking the pre-built `current` keeps this within the
+/// ≤5-positional-param limit even with the selection set added.
 fn write_cache_manifest(
     cache_path: &Path,
-    content_hash: &str,
-    manifest: &MergedManifest,
-    adapter_owned: Vec<PathBuf>,
+    current: &crate::materialize::manifest::CacheManifest,
     mode: crate::config::HashingMode,
 ) -> anyhow::Result<()> {
     use crate::materialize::manifest::CacheManifest;
 
-    let owned = adapter_owned
-        .into_iter()
-        .chain(manifest.files.keys().cloned());
-    let current = CacheManifest::new(content_hash, owned);
-
     // Strict folders are content-addressed and never reused, so there are no
-    // ghost files to reconcile — the dotfile is pure metadata there.
-    if matches!(mode, crate::config::HashingMode::Version)
+    // ghost files to reconcile — the dotfile is pure metadata there. Loose and
+    // normal both reuse a folder across renders and need reconciliation.
+    if !matches!(mode, crate::config::HashingMode::Strict)
         && let Some(previous) = CacheManifest::read(cache_path)?
     {
-        for ghost in previous.stale_against(&current) {
+        for ghost in previous.stale_against(current) {
             // The previous manifest is deserialized raw, bypassing
             // `CacheManifest::new`'s filter — a tampered dotfile could carry a
             // `..`/absolute path that `join` would resolve outside the cache.
@@ -1200,17 +1213,18 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
     let template = r#"cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 60
-  # How the materialized config folder is named (default: version):
-  #   version — folder named after the llmenv binary version; config edits
-  #             re-render into the SAME folder, so a running agent only picks up
-  #             changes on its next launch. Preserves in-session agent/plugin
-  #             state across re-renders.
-  #   strict  — folder named {version}-{content_hash}; every input change makes a
-  #             new folder. Stronger isolation, but fragments the cache.
-  # hashing: version
-  # Folder granularity when hashing is `version` (default: major_minor):
-  #   major | major_minor | full | commit
-  # version_fidelity: major_minor
+  # Cache-folder strictness dial (default: normal). One knob, three positions,
+  # ordered by how aggressively a folder is reused: loose ⊂ normal ⊂ strict.
+  #   loose  — folder = <shape>. Selection-addressed only; a binary upgrade
+  #            reuses the same folder. Fewest folders.
+  #   normal — folder = <major.minor>/<shape>. Config edits re-render into the
+  #            SAME folder, so a running agent only picks up changes on its next
+  #            launch; a minor version bump or selection change mints a new one.
+  #            Preserves in-session agent/plugin state across re-renders.
+  #   strict — folder = <version>-<content_hash>; every input change makes a new
+  #            folder. Strongest isolation, but fragments the cache.
+  # (<shape> is a digest of the active tags + enabled bundles.)
+  # hashing: normal
 
 # Scopes are lists — uncomment and fill in as needed.
 # scope:
@@ -1243,8 +1257,8 @@ bundle:
       AGENT: "claude"
 
 # MCP servers are selected by tag, like bundles, and rendered into the agent's
-# MCP config (mcp.json for Claude Code). Each is stdio (a command) or remote (a
-# url).
+# MCP config (the top-level mcpServers of .claude.json for Claude Code). Each is
+# stdio (a command) or remote (a url).
 # mcp:
 #   - name: playwright
 #     tags: [me]
@@ -1928,22 +1942,22 @@ fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Re
     let config = Config::load(&config_path)?;
     let cache_dir = expand_tilde(&config.cache.cache_dir)?;
 
-    // In version mode the current folder (e.g. "1.2") has no `{VERSION_TAG}-`
-    // prefix, so StaleOnly must be told its name or it would sweep the live
-    // config dir. Strict mode passes None — the prefix test identifies it.
-    let version_folder = match config.cache.hashing {
-        crate::config::HashingMode::Version => Some(
-            crate::materialize::cache::version_folder_name(config.cache.version_fidelity),
-        ),
-        crate::config::HashingMode::Strict => None,
+    // In normal mode the current generation dir (e.g. "1.2") has no
+    // `{VERSION_TAG}-` prefix, so StaleOnly must be told its name or it would
+    // sweep the live config dir. Loose mode has no version axis (every shape is
+    // current) and strict mode is identified by the prefix test — both pass None.
+    let current_version = match config.cache.hashing {
+        crate::config::HashingMode::Normal => Some(crate::materialize::cache::version_mm()),
+        crate::config::HashingMode::Loose | crate::config::HashingMode::Strict => None,
     };
 
-    // prune runs per adapter subdirectory: the version/VERSION_TAG folders live
-    // under `<cache_dir>/<adapter>/`, not directly under `cache_dir`.
+    // prune runs per adapter subdirectory: the generation/VERSION_TAG folders
+    // live under `<cache_dir>/<adapter>/`, not directly under `cache_dir`.
     let report = crate::materialize::cache::prune(
         &cache_dir.join(ClaudeCodeAdapter.name()),
         mode,
-        version_folder.as_deref(),
+        config.cache.hashing,
+        current_version.as_deref(),
         dry_run,
     )?;
 
@@ -1978,30 +1992,20 @@ mod tests {
         assert!(!is_content_hash(&format!("{}g", "a".repeat(63))), "non-hex");
     }
 
-    /// Build a minimal manifest whose generic `files` map points at real files
-    /// under `dir`, so [`write_cache_manifest`] records them as owned.
-    fn manifest_with_files(dir: &Path, names: &[&str]) -> MergedManifest {
-        let mut files = std::collections::BTreeMap::new();
-        for n in names {
-            let src = dir.join(format!("src-{n}"));
-            std::fs::write(&src, b"x").unwrap();
-            files.insert(PathBuf::from(*n), src);
-        }
-        MergedManifest {
-            files,
-            ..Default::default()
-        }
+    /// Build a [`CacheManifest`] the way `build_and_materialize` does — the
+    /// union of adapter-owned + generic bundle paths — directly from path names.
+    fn built(content_hash: &str, owned: &[&str]) -> CacheManifest {
+        CacheManifest::new(content_hash, owned.iter().map(PathBuf::from))
     }
 
     #[test]
-    fn write_cache_manifest_writes_dotfile_in_both_modes() {
-        for mode in [HashingMode::Strict, HashingMode::Version] {
+    fn write_cache_manifest_writes_dotfile_in_all_modes() {
+        for mode in [HashingMode::Loose, HashingMode::Normal, HashingMode::Strict] {
             let tmp = tempfile::tempdir().unwrap();
             let cache = tmp.path().join("folder");
             std::fs::create_dir_all(&cache).unwrap();
-            let m = manifest_with_files(tmp.path(), &["a.md"]);
-            write_cache_manifest(&cache, "hash1", &m, vec![PathBuf::from("CLAUDE.md")], mode)
-                .unwrap();
+            let current = built("hash1", &["CLAUDE.md", "a.md"]);
+            write_cache_manifest(&cache, &current, mode).unwrap();
             let read = CacheManifest::read(&cache).unwrap().unwrap();
             assert_eq!(read.content_hash, "hash1");
             assert!(read.owned.contains("CLAUDE.md"), "adapter-owned recorded");
@@ -2014,39 +2018,39 @@ mod tests {
     }
 
     #[test]
-    fn write_cache_manifest_version_mode_removes_ghost_files() {
-        // #196: a file owned in render N but not N+1 is deleted on N+1, while a
-        // foreign (never-owned) file in the same folder survives untouched.
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = tmp.path().join("1.2");
-        std::fs::create_dir_all(&cache).unwrap();
+    fn write_cache_manifest_reuse_modes_remove_ghost_files() {
+        // #246: a file owned in render N but not N+1 is deleted on N+1 in every
+        // folder-reusing mode (loose + normal), while a foreign (never-owned)
+        // file in the same folder survives untouched.
+        for mode in [HashingMode::Loose, HashingMode::Normal] {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache = tmp.path().join("folder");
+            std::fs::create_dir_all(&cache).unwrap();
 
-        // Render N: owns ghost.md (via adapter) + keep.md (generic).
-        let ghost = cache.join("ghost.md");
-        std::fs::write(&ghost, b"old").unwrap();
-        let m1 = manifest_with_files(tmp.path(), &["keep.md"]);
-        write_cache_manifest(
-            &cache,
-            "h1",
-            &m1,
-            vec![PathBuf::from("ghost.md")],
-            HashingMode::Version,
-        )
-        .unwrap();
+            // Render N: owns ghost.md + keep.md.
+            let ghost = cache.join("ghost.md");
+            std::fs::write(&ghost, b"old").unwrap();
+            write_cache_manifest(&cache, &built("h1", &["ghost.md", "keep.md"]), mode).unwrap();
 
-        // A foreign file Claude/a plugin wrote — never in any owned set.
-        let foreign = cache.join("foreign-state.json");
-        std::fs::write(&foreign, b"plugin state").unwrap();
+            // A foreign file Claude/a plugin wrote — never in any owned set.
+            let foreign = cache.join("foreign-state.json");
+            std::fs::write(&foreign, b"plugin state").unwrap();
 
-        // Render N+1: drops ghost.md from the owned set.
-        let m2 = manifest_with_files(tmp.path(), &["keep.md"]);
-        write_cache_manifest(&cache, "h2", &m2, vec![], HashingMode::Version).unwrap();
+            // Render N+1: drops ghost.md from the owned set.
+            write_cache_manifest(&cache, &built("h2", &["keep.md"]), mode).unwrap();
 
-        assert!(!ghost.exists(), "ghost owned file removed on re-render");
-        assert!(foreign.exists(), "foreign file survives reconciliation");
-        let read = CacheManifest::read(&cache).unwrap().unwrap();
-        assert_eq!(read.content_hash, "h2");
-        assert!(!read.owned.contains("ghost.md"));
+            assert!(
+                !ghost.exists(),
+                "ghost owned file removed on re-render ({mode:?})"
+            );
+            assert!(
+                foreign.exists(),
+                "foreign file survives reconciliation ({mode:?})"
+            );
+            let read = CacheManifest::read(&cache).unwrap().unwrap();
+            assert_eq!(read.content_hash, "h2");
+            assert!(!read.owned.contains("ghost.md"));
+        }
     }
 
     #[test]
@@ -2070,8 +2074,7 @@ mod tests {
         std::fs::write(cache.join(MANIFEST_FILE), tampered).unwrap();
 
         // Re-render dropping the traversal path from the owned set.
-        let m = manifest_with_files(tmp.path(), &[]);
-        write_cache_manifest(&cache, "new", &m, vec![], HashingMode::Version).unwrap();
+        write_cache_manifest(&cache, &built("new", &[]), HashingMode::Normal).unwrap();
 
         assert!(
             victim.exists(),
@@ -2087,15 +2090,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path().join("v1-hash");
         std::fs::create_dir_all(&cache).unwrap();
-        // Seed a prior manifest claiming ownership of a file now absent from
-        // the render — in version mode this would be deleted; in strict it isn't.
+        // Seed a prior manifest claiming ownership of a file now absent from the
+        // render — in a reuse mode this would be deleted; in strict it isn't.
         let prior = CacheManifest::new("old", vec![PathBuf::from("ghost.md")]);
         prior.write(&cache).unwrap();
         let bystander = cache.join("ghost.md");
         std::fs::write(&bystander, b"x").unwrap();
 
-        let m = manifest_with_files(tmp.path(), &[]);
-        write_cache_manifest(&cache, "new", &m, vec![], HashingMode::Strict).unwrap();
+        write_cache_manifest(&cache, &built("new", &[]), HashingMode::Strict).unwrap();
         assert!(
             bystander.exists(),
             "strict mode performs no ghost reconciliation"

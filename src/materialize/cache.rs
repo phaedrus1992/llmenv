@@ -1,9 +1,10 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
-use crate::config::{HashingMode, VersionFidelity};
+use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
 /// Stable SHA-256 of the merged manifest. Each field is length-prefixed
@@ -22,66 +23,74 @@ use crate::merge::MergedManifest;
 pub const VERSION_TAG: &str = env!("LLMENV_VERSION_TAG");
 
 /// Bare package version (`X.Y.Z`, or a semver prerelease like `1.2.3-rc.1`),
-/// baked in by `build.rs`. Source for the `version`-mode folder name at every
-/// fidelity below `commit`.
+/// baked in by `build.rs`. Source for the `normal`-mode `version_mm` folder
+/// segment.
 pub const PKG_VERSION: &str = env!("LLMENV_PKG_VERSION");
 
 /// Short git commit hash, or empty when built outside a git checkout (crates.io
-/// tarball). Appended at [`VersionFidelity::Commit`] fidelity.
+/// tarball). Carried in [`VERSION_TAG`] for `strict`-mode folder names.
 pub const GIT_HASH: &str = env!("LLMENV_GIT_HASH");
 
-/// Compose the on-disk folder name for the active [`HashingMode`].
+/// Compose the on-disk folder name (relative to the adapter root) for the
+/// active [`HashingMode`] (#246).
 ///
+/// - [`HashingMode::Loose`] → `<shape>`. Selection-addressed only; a binary
+///   upgrade reuses the same folder, so this returns just the shape digest.
+/// - [`HashingMode::Normal`] → `<version_mm>/<shape>`. Nests the shape under the
+///   `major.minor` version so a minor bump or selection change mints a new
+///   folder while content edits re-render in place.
 /// - [`HashingMode::Strict`] → `{VERSION_TAG}-{content_hash}`. Splitting the
 ///   version off the content hash keeps the hash a function of inputs only, so
 ///   two folders that differ in version prefix but share the same content hash
 ///   are byte-identical — useful for diffing across upgrades.
-/// - [`HashingMode::Version`] → the binary version at `fidelity` (the content
-///   hash is *not* in the name; it lives in the manifest dotfile). Content
-///   edits re-render into the same folder.
 #[must_use]
-pub fn folder_name(content_hash: &str, mode: HashingMode, fidelity: VersionFidelity) -> String {
+pub fn folder_name(mode: HashingMode, shape: &str, content_hash: &str) -> String {
     match mode {
+        HashingMode::Loose => shape.to_string(),
+        HashingMode::Normal => format!("{}/{}", version_mm(), shape),
         HashingMode::Strict => format!("{VERSION_TAG}-{content_hash}"),
-        HashingMode::Version => version_folder_name(fidelity),
     }
 }
 
-/// The `version`-mode folder name at `fidelity`, composed from [`PKG_VERSION`]
-/// and [`GIT_HASH`] (both baked in by `build.rs`). Filesystem-safe: package
-/// versions and git short-hashes contain only `[0-9A-Za-z.+-]`.
+/// The `major.minor` version segment used to nest `normal`-mode folders,
+/// composed from [`PKG_VERSION`] (baked in by `build.rs`). Filesystem-safe:
+/// package versions contain only `[0-9A-Za-z.+-]`.
 ///
-/// A version of `1.2.3` yields `1` / `1.2` / `1.2.3` / `1.2.3-hhhhhhhh`. A
-/// shorter-than-expected version (e.g. a bare `1`) degrades gracefully: each
-/// fidelity takes as many leading `.`-separated components as exist.
+/// A version of `1.2.3` yields `1.2`. A shorter-than-expected version (e.g. a
+/// bare `1`) degrades gracefully to whatever leading components exist.
 #[must_use]
-pub fn version_folder_name(fidelity: VersionFidelity) -> String {
-    match fidelity {
-        VersionFidelity::Major => {
-            let major = match PKG_VERSION.split('.').next() {
-                Some(m) => m,
-                None => PKG_VERSION,
-            };
-            major.to_string()
-        }
-        VersionFidelity::MajorMinor => {
-            let mut parts = PKG_VERSION.split('.');
-            let first = parts.next().unwrap_or_default();
-            if let Some(second) = parts.next() {
-                format!("{first}.{second}")
-            } else {
-                first.to_string()
-            }
-        }
-        VersionFidelity::Full => PKG_VERSION.to_string(),
-        VersionFidelity::Commit => {
-            if GIT_HASH.is_empty() {
-                PKG_VERSION.to_string()
-            } else {
-                format!("{PKG_VERSION}-{GIT_HASH}")
-            }
-        }
+pub fn version_mm() -> String {
+    let mut parts = PKG_VERSION.split('.');
+    let first = parts.next().unwrap_or_default();
+    if let Some(second) = parts.next() {
+        format!("{first}.{second}")
+    } else {
+        first.to_string()
     }
+}
+
+/// 12-hex-char digest of the active *selection shape* (#246): the set of active
+/// tags and the set of directly-enabled bundles.
+///
+/// The two sets are encoded in separate, length-prefixed groups (tags group
+/// then bundles group, each prefixed by its element count) so a tag named `foo`
+/// and a bundle named `foo` can never alias into the same shape. Each element
+/// is itself length-prefixed before its bytes so element boundaries are
+/// unambiguous. Both inputs are [`BTreeSet`]s, so iteration is already sorted —
+/// the shape is independent of insertion order.
+#[must_use]
+pub fn shape(tags: &BTreeSet<String>, bundles: &BTreeSet<String>) -> String {
+    let mut h = Sha256::new();
+    h.update((tags.len() as u64).to_le_bytes());
+    for tag in tags {
+        update_len_prefixed(&mut h, tag.as_bytes());
+    }
+    h.update((bundles.len() as u64).to_le_bytes());
+    for bundle in bundles {
+        update_len_prefixed(&mut h, bundle.as_bytes());
+    }
+    let digest = hex::encode(h.finalize());
+    digest[..12].to_string()
 }
 
 pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
@@ -187,18 +196,21 @@ pub struct PruneReport {
     pub kept: usize,
 }
 
-/// Prune cache folders under `cache_root` according to `mode`.
+/// Prune cache folders under `cache_root` according to `mode` (#246).
 ///
-/// `version_folder` is the current [`HashingMode::Version`] folder name (e.g.
-/// `1.2`) when version mode is active, or `None` in strict mode. It exists so a
-/// version-mode folder — which has no `{VERSION_TAG}-` prefix to recognize it
-/// by — is still counted as "current" and not swept by `StaleOnly`. In strict
-/// mode pass `None`; the prefix test alone identifies current folders.
+/// `hashing` selects how a folder is recognized as belonging to the *current*
+/// generation — the test that `StaleOnly` and `OlderThan` key off:
+/// - [`HashingMode::Loose`] — every shape folder is current (no version axis);
+///   `current_version` is ignored. `StaleOnly` therefore removes nothing but
+///   `*.tmp`, and only `All`/`OlderThan` trim shapes.
+/// - [`HashingMode::Normal`] — `current_version` is the live `version_mm`
+///   segment (e.g. `1.2`); the direct child of that name is current.
+/// - [`HashingMode::Strict`] — a `{VERSION_TAG}-…` folder is current;
+///   `current_version` is ignored.
 ///
 /// Behavior:
 /// - `*.tmp` staging dirs are always removed (orphaned partial writes).
-/// - `StaleOnly`: removes folders that are neither a `{VERSION_TAG}-…` folder
-///   (strict, current binary) nor `version_folder` (version mode, current).
+/// - `StaleOnly`: removes folders that aren't current for `hashing`.
 /// - `OlderThan(d)`: removes current folders older than `d`.
 /// - `All`: removes every folder unconditionally.
 ///
@@ -214,7 +226,8 @@ pub struct PruneReport {
 pub fn prune(
     cache_root: &Path,
     mode: PruneMode,
-    version_folder: Option<&str>,
+    hashing: HashingMode,
+    current_version: Option<&str>,
     dry_run: bool,
 ) -> anyhow::Result<PruneReport> {
     let mut report = PruneReport::default();
@@ -250,9 +263,14 @@ pub fn prune(
             continue;
         }
 
-        let is_current = entry.file_name().to_str().is_some_and(|name| {
-            name.starts_with(&format!("{VERSION_TAG}-")) || version_folder == Some(name)
-        });
+        let is_current = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| match hashing {
+                HashingMode::Loose => true,
+                HashingMode::Normal => current_version == Some(name),
+                HashingMode::Strict => name.starts_with(&format!("{VERSION_TAG}-")),
+            });
 
         let should_remove = match mode {
             PruneMode::All => true,
@@ -300,6 +318,12 @@ fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
 /// Remove cache subdirectories whose newest mtime is older than `older_than`.
 /// `*.tmp` staging directories are removed regardless of age — they represent
 /// orphaned partial writes from a previous crashed `materialize` call.
+///
+/// gc operates on the *direct children* of `cache_root`. In
+/// [`HashingMode::Normal`] those children are `<version_mm>` generation dirs, so
+/// collection happens at generation granularity: a `<version_mm>` dir is reaped
+/// only once *every* shape under it ages out. Per-shape collection within a live
+/// generation is a follow-up (see #246 deferred work).
 pub fn gc(cache_root: &Path, older_than: Duration) -> anyhow::Result<GcReport> {
     let mut report = GcReport::default();
     if !cache_root.exists() {
@@ -382,57 +406,112 @@ mod tests {
         p
     }
 
+    fn empty_shape() -> String {
+        shape(&BTreeSet::new(), &BTreeSet::new())
+    }
+
     #[test]
     fn strict_folder_name_is_version_tag_plus_hash() {
-        let name = folder_name("deadbeef", HashingMode::Strict, VersionFidelity::default());
+        let name = folder_name(HashingMode::Strict, &empty_shape(), "deadbeef");
         assert_eq!(name, format!("{VERSION_TAG}-deadbeef"));
     }
 
     #[test]
-    fn version_folder_name_nests_by_fidelity() {
-        // PKG_VERSION is baked at build time, so assert structural relationships
-        // rather than literal strings: each coarser fidelity is a prefix of the
-        // finer one, and commit is full (+ optional `-hash`).
-        let major = version_folder_name(VersionFidelity::Major);
-        let major_minor = version_folder_name(VersionFidelity::MajorMinor);
-        let full = version_folder_name(VersionFidelity::Full);
-        let commit = version_folder_name(VersionFidelity::Commit);
+    fn loose_folder_name_is_bare_shape() {
+        let s = empty_shape();
+        // Loose mode is selection-addressed only: the folder is exactly the
+        // shape, with no version segment and no content-hash suffix.
+        let name = folder_name(HashingMode::Loose, &s, "ignored-hash");
+        assert_eq!(name, s);
+    }
 
-        assert_eq!(
-            full, PKG_VERSION,
-            "full fidelity is the bare package version"
-        );
+    #[test]
+    fn normal_folder_name_nests_shape_under_version_mm() {
+        let s = empty_shape();
+        // Normal mode nests the shape under the major.minor version; the content
+        // hash is not part of the name (it lives in the manifest dotfile).
+        let name = folder_name(HashingMode::Normal, &s, "ignored-hash");
+        assert_eq!(name, format!("{}/{}", version_mm(), s));
+    }
+
+    #[test]
+    fn version_mm_is_two_leading_components() {
+        // version_mm takes the leading `major.minor` of PKG_VERSION (baked at
+        // build time), or degrades to whatever leading components exist.
+        let mm = version_mm();
         assert!(
-            major_minor.starts_with(&major),
-            "major ({major}) is a prefix of major_minor ({major_minor})"
+            PKG_VERSION.starts_with(&mm),
+            "version_mm ({mm}) must be a prefix of PKG_VERSION ({PKG_VERSION})"
         );
-        assert!(
-            full.starts_with(&major_minor),
-            "major_minor ({major_minor}) is a prefix of full ({full})"
-        );
-        if GIT_HASH.is_empty() {
-            assert_eq!(commit, full, "no git hash → commit degrades to full");
-        } else {
-            assert_eq!(commit, format!("{full}-{GIT_HASH}"));
+        let dots = PKG_VERSION.split('.').count();
+        if dots >= 2 {
+            let expected = {
+                let mut parts = PKG_VERSION.split('.');
+                let major = parts.next().unwrap();
+                let minor = parts.next().unwrap();
+                format!("{major}.{minor}")
+            };
+            assert_eq!(mm, expected, "version_mm is exactly major.minor");
         }
-        // Folder mode ignores the content hash argument entirely.
-        assert_eq!(
-            folder_name("ignored", HashingMode::Version, VersionFidelity::Full),
-            full
+    }
+
+    #[test]
+    fn shape_is_deterministic_and_12_hex() {
+        let mut tags = BTreeSet::new();
+        tags.insert("rust".to_string());
+        tags.insert("backend".to_string());
+        let bundles = BTreeSet::from(["core".to_string()]);
+        let a = shape(&tags, &bundles);
+        let b = shape(&tags, &bundles);
+        assert_eq!(a, b, "shape must be deterministic");
+        assert_eq!(a.len(), 12, "shape is 12 hex chars");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "shape is lowercase hex"
         );
     }
 
     #[test]
-    fn version_folder_name_takes_leading_components() {
-        // The major/major_minor split counts `.`-separated leading components.
-        let dots = PKG_VERSION.split('.').count();
-        if dots >= 2 {
-            assert_ne!(
-                version_folder_name(VersionFidelity::Major),
-                version_folder_name(VersionFidelity::MajorMinor),
-                "a >=2-component version distinguishes major from major_minor"
-            );
-        }
+    fn shape_is_order_independent() {
+        // BTreeSet iterates sorted, so insertion order cannot perturb the digest.
+        let mut a = BTreeSet::new();
+        a.insert("z".to_string());
+        a.insert("a".to_string());
+        a.insert("m".to_string());
+        let mut b = BTreeSet::new();
+        b.insert("a".to_string());
+        b.insert("m".to_string());
+        b.insert("z".to_string());
+        assert_eq!(shape(&a, &BTreeSet::new()), shape(&b, &BTreeSet::new()));
+    }
+
+    #[test]
+    fn shape_does_not_alias_tag_and_bundle_namespaces() {
+        // A tag named "foo" and a bundle named "foo" must not collide: the same
+        // string in the tag group vs the bundle group yields distinct shapes.
+        let foo = || BTreeSet::from(["foo".to_string()]);
+        let tag_foo = shape(&foo(), &BTreeSet::new());
+        let bundle_foo = shape(&BTreeSet::new(), &foo());
+        assert_ne!(
+            tag_foo, bundle_foo,
+            "tag/bundle namespaces must not alias into one shape"
+        );
+    }
+
+    #[test]
+    fn shape_distinguishes_grouping_boundary() {
+        // {tags: [a, b], bundles: []} vs {tags: [a], bundles: [b]} must differ —
+        // the length-prefixed grouping prevents the boundary from sliding.
+        let split_left = shape(
+            &BTreeSet::from(["a".to_string(), "b".to_string()]),
+            &BTreeSet::new(),
+        );
+        let split_across = shape(
+            &BTreeSet::from(["a".to_string()]),
+            &BTreeSet::from(["b".to_string()]),
+        );
+        assert_ne!(split_left, split_across);
     }
 
     #[cfg(unix)]
@@ -474,7 +553,7 @@ mod tests {
     fn prune_missing_root_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist");
-        let report = prune(&missing, PruneMode::All, None, false).unwrap();
+        let report = prune(&missing, PruneMode::All, HashingMode::Strict, None, false).unwrap();
         assert!(report.removed.is_empty());
         assert_eq!(report.kept, 0);
     }
@@ -484,7 +563,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         touch_dir(tmp.path(), &format!("{VERSION_TAG}-aaaa"));
         touch_dir(tmp.path(), "0.0.1-old-bbbb");
-        let report = prune(tmp.path(), PruneMode::All, None, false).unwrap();
+        let report = prune(tmp.path(), PruneMode::All, HashingMode::Strict, None, false).unwrap();
         assert_eq!(report.removed.len(), 2);
         assert_eq!(report.kept, 0);
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
@@ -495,7 +574,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let current = touch_dir(tmp.path(), &format!("{VERSION_TAG}-aaaa"));
         let stale = touch_dir(tmp.path(), "0.0.1-old-bbbb");
-        let report = prune(tmp.path(), PruneMode::StaleOnly, None, false).unwrap();
+        let report = prune(
+            tmp.path(),
+            PruneMode::StaleOnly,
+            HashingMode::Strict,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(report.kept, 1);
         assert!(report.removed.contains(&stale));
         assert!(!report.removed.contains(&current));
@@ -504,18 +590,46 @@ mod tests {
     }
 
     #[test]
-    fn prune_stale_only_keeps_version_mode_folder() {
-        // #196: a version-mode folder (e.g. "1.2") has no `{VERSION_TAG}-`
-        // prefix, so `StaleOnly` must be told the current version folder name
+    fn prune_stale_only_keeps_normal_version_folder() {
+        // #246: a normal-mode generation dir (e.g. "1.2") has no `{VERSION_TAG}-`
+        // prefix, so `StaleOnly` must be told the current `version_mm` segment
         // explicitly or it would wrongly sweep the live config dir.
         let tmp = tempfile::tempdir().unwrap();
         let current = touch_dir(tmp.path(), "1.2");
         let stale = touch_dir(tmp.path(), "1.1");
-        let report = prune(tmp.path(), PruneMode::StaleOnly, Some("1.2"), false).unwrap();
+        let report = prune(
+            tmp.path(),
+            PruneMode::StaleOnly,
+            HashingMode::Normal,
+            Some("1.2"),
+            false,
+        )
+        .unwrap();
         assert_eq!(report.kept, 1);
         assert!(current.exists(), "current version folder must survive");
         assert!(!stale.exists(), "older version folder is swept");
         assert!(report.removed.contains(&stale));
+    }
+
+    #[test]
+    fn prune_stale_only_in_loose_mode_keeps_all_shapes() {
+        // #246: loose mode has no version axis — every shape folder is current,
+        // so `StaleOnly` sweeps nothing (only `All`/`OlderThan` trim shapes).
+        let tmp = tempfile::tempdir().unwrap();
+        let a = touch_dir(tmp.path(), "aaaaaaaaaaaa");
+        let b = touch_dir(tmp.path(), "bbbbbbbbbbbb");
+        let report = prune(
+            tmp.path(),
+            PruneMode::StaleOnly,
+            HashingMode::Loose,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.kept, 2, "loose mode treats every shape as current");
+        assert!(report.removed.is_empty());
+        assert!(a.exists());
+        assert!(b.exists());
     }
 
     #[test]
@@ -531,7 +645,7 @@ mod tests {
             // A genuinely stale folder: a different version tag, so it lacks the
             // current `{VERSION_TAG}-` prefix and is a real prune candidate.
             let stale = touch_dir(tmp.path(), "0.0.1-old-deadbeef");
-            let report = prune(tmp.path(), mode, None, false).unwrap();
+            let report = prune(tmp.path(), mode, HashingMode::Strict, None, false).unwrap();
             assert!(state.exists(), "state dir must survive {mode:?}");
             assert!(
                 !report.removed.contains(&state),
@@ -569,7 +683,14 @@ mod tests {
     fn prune_always_removes_tmp_staging_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let staging = touch_dir(tmp.path(), &format!("{VERSION_TAG}-cccc.tmp"));
-        let report = prune(tmp.path(), PruneMode::StaleOnly, None, false).unwrap();
+        let report = prune(
+            tmp.path(),
+            PruneMode::StaleOnly,
+            HashingMode::Strict,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(report.removed.contains(&staging));
         assert!(!staging.exists());
     }
@@ -579,7 +700,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let a = touch_dir(tmp.path(), &format!("{VERSION_TAG}-aaaa"));
         let b = touch_dir(tmp.path(), "0.0.1-old-bbbb");
-        let report = prune(tmp.path(), PruneMode::All, None, true).unwrap();
+        let report = prune(tmp.path(), PruneMode::All, HashingMode::Strict, None, true).unwrap();
         // Reports what *would* be removed, but leaves the filesystem intact.
         assert_eq!(report.removed.len(), 2);
         assert!(a.exists());
@@ -595,6 +716,7 @@ mod tests {
         let report = prune(
             tmp.path(),
             PruneMode::OlderThan(Duration::ZERO),
+            HashingMode::Strict,
             None,
             false,
         )
@@ -620,7 +742,14 @@ mod tests {
         let link = cache_root.join("link");
         symlink(&outside, &link).unwrap();
 
-        let report = prune(&cache_root, PruneMode::All, None, false).unwrap();
+        let report = prune(
+            &cache_root,
+            PruneMode::All,
+            HashingMode::Strict,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(report.removed.contains(&link));
         // The link is gone; the target and its contents survive.
         assert!(!link.exists());
@@ -737,39 +866,53 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
+        // A shape from an arbitrary tag set, used to exercise folder_name layout.
+        fn arb_shape() -> impl Strategy<Value = String> {
+            proptest::collection::btree_set("[a-z]{1,8}", 0..4)
+                .prop_map(|tags| shape(&tags, &BTreeSet::new()))
+        }
+
         proptest! {
             #[test]
-            fn folder_name_strict_always_has_version_tag(hash in "[a-f0-9]{64}") {
-                let name = folder_name(&hash, HashingMode::Strict, VersionFidelity::default());
+            fn folder_name_strict_always_has_version_tag(
+                hash in "[a-f0-9]{64}", s in arb_shape()
+            ) {
+                let name = folder_name(HashingMode::Strict, &s, &hash);
                 prop_assert!(name.starts_with(&format!("{VERSION_TAG}-")),
                     "strict mode must always prefix with VERSION_TAG");
                 prop_assert!(name.ends_with(&hash), "strict mode must suffix with the hash");
             }
 
             #[test]
-            fn folder_name_version_ignores_hash(hash1 in "[a-f0-9]{64}", hash2 in "[a-f0-9]{64}") {
-                prop_assume!(hash1 != hash2);
-                let name1 = folder_name(&hash1, HashingMode::Version, VersionFidelity::Major);
-                let name2 = folder_name(&hash2, HashingMode::Version, VersionFidelity::Major);
-                // Version mode ignores the hash argument entirely.
-                prop_assert_eq!(name1, name2, "version mode must ignore the hash argument");
+            fn folder_name_loose_is_exactly_shape(
+                hash in "[a-f0-9]{64}", s in arb_shape()
+            ) {
+                // Loose mode ignores both the version axis and the content hash.
+                prop_assert_eq!(folder_name(HashingMode::Loose, &s, &hash), s);
             }
 
             #[test]
-            fn version_folder_name_nesting_is_monotonic(f1 in 0usize..4, f2 in 0usize..4) {
-                let fidelities = [
-                    VersionFidelity::Major,
-                    VersionFidelity::MajorMinor,
-                    VersionFidelity::Full,
-                    VersionFidelity::Commit,
-                ];
-                let name1 = version_folder_name(fidelities[f1]);
-                let name2 = version_folder_name(fidelities[f2]);
-                // Each fidelity is a prefix or equal to higher fidelities.
-                if f1 < f2 {
-                    prop_assert!(name2.starts_with(&name1) || name1 == name2,
-                        "fidelity {f1} should be a prefix of fidelity {f2}");
-                }
+            fn folder_name_normal_nests_shape_and_ignores_hash(
+                hash1 in "[a-f0-9]{64}", hash2 in "[a-f0-9]{64}", s in arb_shape()
+            ) {
+                prop_assume!(hash1 != hash2);
+                let name1 = folder_name(HashingMode::Normal, &s, &hash1);
+                let name2 = folder_name(HashingMode::Normal, &s, &hash2);
+                // Normal mode ignores the content hash: same shape → same folder.
+                prop_assert_eq!(&name1, &name2, "normal mode must ignore the hash argument");
+                prop_assert_eq!(name1, format!("{}/{}", version_mm(), s),
+                    "normal mode nests <shape> under <version_mm>");
+            }
+
+            #[test]
+            fn shape_is_always_12_hex(
+                tags in proptest::collection::btree_set("[a-z]{1,8}", 0..5),
+                bundles in proptest::collection::btree_set("[a-z]{1,8}", 0..5),
+            ) {
+                let s = shape(&tags, &bundles);
+                prop_assert_eq!(s.len(), 12, "shape is always 12 chars");
+                prop_assert!(s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                    "shape is lowercase hex");
             }
 
             #[test]

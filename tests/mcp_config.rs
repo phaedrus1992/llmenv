@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Tests for #58: the Claude Code adapter renders all resolved MCP servers
-//! into `mcp.json`. (Generalizes #14's ICM-only server/client emission.)
+//! Tests for #58 / #244: the Claude Code adapter renders all resolved MCP
+//! servers into the top-level `mcpServers` of `.claude.json` — the surface
+//! Claude Code actually reads. (Generalizes #14's ICM-only server/client
+//! emission; the legacy `mcp.json` was never ingested.)
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -23,9 +25,9 @@ fn empty_native() -> BTreeMap<String, serde_yaml::Value> {
     BTreeMap::new()
 }
 
-fn read_mcp_json(out: &std::path::Path) -> serde_json::Value {
-    let s = std::fs::read_to_string(out.join("mcp.json")).expect("read mcp.json");
-    serde_json::from_str(&s).expect("parse mcp.json")
+fn read_claude_json(out: &std::path::Path) -> serde_json::Value {
+    let s = std::fs::read_to_string(out.join(".claude.json")).expect("read .claude.json");
+    serde_json::from_str(&s).expect("parse .claude.json")
 }
 
 fn stdio(name: &str, command: &str, args: &[&str]) -> ResolvedMcp {
@@ -50,7 +52,7 @@ fn remote(name: &str, url: &str) -> ResolvedMcp {
 }
 
 #[test]
-fn mcp_json_emitted_when_mcps_present() {
+fn claude_json_emitted_when_mcps_present() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
         &empty_native(),
@@ -65,13 +67,17 @@ fn mcp_json_emitted_when_mcps_present() {
         .expect("materialize");
 
     assert!(
-        tmp.path().join("mcp.json").exists(),
-        "mcp.json should be emitted when manifest has resolved MCPs"
+        tmp.path().join(".claude.json").exists(),
+        ".claude.json should be emitted when manifest has resolved MCPs"
+    );
+    assert!(
+        !tmp.path().join("mcp.json").exists(),
+        "legacy mcp.json must never be written (#244)"
     );
 }
 
 #[test]
-fn mcp_json_registers_remote_client_url() {
+fn claude_json_registers_remote_client_url_and_type() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
         &empty_native(),
@@ -85,17 +91,19 @@ fn mcp_json_registers_remote_client_url() {
         .materialize(&m, tmp.path())
         .expect("materialize");
 
-    let v = read_mcp_json(tmp.path());
+    let v = read_claude_json(tmp.path());
     let icm = v["mcpServers"]["icm"].clone();
     assert_eq!(
         icm.get("url").and_then(|x| x.as_str()),
         Some("http://icm.lan:8765")
     );
+    // #244: remote entries MUST carry the transport type or Claude drops them.
+    assert_eq!(icm.get("type").and_then(|x| x.as_str()), Some("http"));
     assert!(icm.get("command").is_none(), "client mode has no command");
 }
 
 #[test]
-fn mcp_json_registers_stdio_command() {
+fn claude_json_registers_stdio_command() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
         &empty_native(),
@@ -109,14 +117,14 @@ fn mcp_json_registers_stdio_command() {
         .materialize(&m, tmp.path())
         .expect("materialize");
 
-    let v = read_mcp_json(tmp.path());
+    let v = read_claude_json(tmp.path());
     let icm = v["mcpServers"]["icm"].clone();
     assert_eq!(icm.get("command").and_then(|x| x.as_str()), Some("icm"));
     assert!(icm.get("url").is_none(), "server mode has no url");
 }
 
 #[test]
-fn mcp_json_renders_multiple_servers() {
+fn claude_json_renders_multiple_servers() {
     let mut m = merge(
         &llmenv::config::Capabilities::default(),
         &empty_native(),
@@ -133,7 +141,7 @@ fn mcp_json_renders_multiple_servers() {
         .materialize(&m, tmp.path())
         .expect("materialize");
 
-    let v = read_mcp_json(tmp.path());
+    let v = read_claude_json(tmp.path());
     let servers = v["mcpServers"].as_object().expect("mcpServers object");
     assert_eq!(servers.len(), 2, "both servers should be registered");
     assert!(servers.contains_key("playwright"));
@@ -191,7 +199,7 @@ fn hook_without_template_is_passed_through_unchanged() {
 }
 
 #[test]
-fn mcp_json_absent_when_no_mcps() {
+fn claude_json_not_written_when_no_mcps() {
     let m = merge(
         &llmenv::config::Capabilities::default(),
         &empty_native(),
@@ -204,8 +212,14 @@ fn mcp_json_absent_when_no_mcps() {
         .materialize(&m, tmp.path())
         .expect("materialize");
 
+    // With no resolved MCPs and no native fragment, the adapter must not touch
+    // .claude.json at all, and the dead mcp.json is never written.
+    assert!(
+        !tmp.path().join(".claude.json").exists(),
+        ".claude.json should not be written when manifest has no resolved MCPs"
+    );
     assert!(
         !tmp.path().join("mcp.json").exists(),
-        "mcp.json should not be emitted when manifest has no resolved MCPs"
+        "legacy mcp.json must never be written (#244)"
     );
 }

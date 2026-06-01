@@ -40,7 +40,7 @@ auto memory dir, plans dir. Plaintext storage warning applies to `~/.claude.json
 | `rules/*.md` | ✓ verbatim |
 | `settings.json` | ✗ stub only (wrong shape) |
 | `settings.local.json` | ✗ (n/a — single merged config) |
-| `mcp.json` / `.mcp.json` | ✓ full |
+| `.claude.json` `mcpServers` | ✓ merged (read-merge-write, foreign keys preserved) |
 | `skills/<name>/SKILL.md` | ~ validated only, not generated |
 | `commands/*.md` | ✗ (would byte-copy, unmodeled) |
 | `output-styles/*.md` | ✗ |

@@ -21,7 +21,7 @@ generate, validate, or model.
 | `rules/*.md` | `manifest.rules` (verbatim, frontmatter preserved) | Full |
 | copied bundle files | `manifest.files` (byte-copy; `hooks/*.json` get `{{ICM_MCP}}` substitution) | Full |
 | `skills/<name>/SKILL.md` | bundle files | **Validated only** (name+description frontmatter), not generated |
-| `mcp.json` | `manifest.mcps` (stdio `command`/`args`/`env`, remote `url`) | Full |
+| `.claude.json` `mcpServers` | `manifest.mcps` (stdio `command`/`args`/`env`, remote `type`+`url`); merged in, foreign keys preserved | Full |
 | `settings.json` | `generate_settings_json` | **Stub** — emits `{"hooks":[],"permissions":[],"mcp":[]}` |
 
 Key structural facts about llmenv:
@@ -31,17 +31,17 @@ Key structural facts about llmenv:
   network/host/user/project scopes; bundles, MCP servers, and the memory backend
   are all selected the same way.
 - The `memory` backend (ICM) desugars into a resolved MCP server and lands in
-  `mcp.json` alongside user MCP entries.
+  the top-level `mcpServers` of `.claude.json` alongside user MCP entries.
 
 ## The headline gap
 
 `generate_settings_json` is a placeholder (issue #34, closed-but-unimplemented —
 see [gap-analysis](./gap-analysis.md)). It emits a JSON object with
 three keys — and **`mcp` is not even a real `settings.json` key** (MCP servers
-live in `mcp.json` / `.mcp.json` / `~/.claude.json`, never in `settings.json`).
+live in `.mcp.json` / `~/.claude.json` `mcpServers`, never in `settings.json`).
 Meanwhile Claude Code's `settings.json` exposes ~120 user-relevant keys. Every
-config surface below except CLAUDE.md/rules/mcp.json is currently unreachable
-through llmenv.
+config surface below except CLAUDE.md/rules and the `.claude.json` `mcpServers`
+merge is currently unreachable through llmenv.
 
 ## Pages
 
@@ -50,7 +50,7 @@ through llmenv.
 - [permissions](./permissions.md) — allow/ask/deny rules, modes, sandbox
 - [skills-and-commands](./skills-and-commands.md) — SKILL.md, commands/*.md formats
 - [subagents](./subagents.md) — `.claude/agents/*.md` frontmatter
-- [mcp](./mcp.md) — `.mcp.json` schema, transports, scopes, managed MCP
+- [mcp](./mcp.md) — `.claude.json` `mcpServers` merge, schema, transports, scopes, managed MCP
 - [memory](./memory.md) — CLAUDE.md, rules, auto memory
 - [statusline-and-output-styles](./statusline-and-output-styles.md)
 - [plugins](./plugins.md) — plugin.json, marketplaces
