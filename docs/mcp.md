@@ -228,7 +228,7 @@ follows the tag rather than the project.
   automatically across all projects (see [Lifecycle hooks](#lifecycle-hooks)).
 - `llmenv-bundle:<bundle>` — memory keyed to a bundle, retrieved whenever that
   bundle fires. The TurnStart hook recalls this keyword automatically across all
-  projects (parallel to `llmenv-tag:<tag>`). See [Lifecycle hooks](#lifecycle-hooks).
+  projects (parallel to `llmenv-tag:<tag>`).
 
 ### Lifecycle hooks
 
