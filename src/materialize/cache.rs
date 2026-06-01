@@ -56,11 +56,21 @@ pub fn folder_name(content_hash: &str, mode: HashingMode, fidelity: VersionFidel
 /// fidelity takes as many leading `.`-separated components as exist.
 #[must_use]
 pub fn version_folder_name(fidelity: VersionFidelity) -> String {
-    let take =
-        |n: usize| -> String { PKG_VERSION.split('.').take(n).collect::<Vec<_>>().join(".") };
     match fidelity {
-        VersionFidelity::Major => take(1),
-        VersionFidelity::MajorMinor => take(2),
+        VersionFidelity::Major => PKG_VERSION
+            .split('.')
+            .next()
+            .unwrap_or(PKG_VERSION)
+            .to_string(),
+        VersionFidelity::MajorMinor => {
+            let mut parts = PKG_VERSION.split('.');
+            let first = parts.next().unwrap_or("");
+            if let Some(second) = parts.next() {
+                format!("{first}.{second}")
+            } else {
+                first.to_string()
+            }
+        }
         VersionFidelity::Full => PKG_VERSION.to_string(),
         VersionFidelity::Commit => {
             if GIT_HASH.is_empty() {
@@ -615,6 +625,14 @@ mod tests {
         assert!(outside.join("keep.txt").exists());
     }
 
+    /// Check if a string is exactly a 64-char lowercase hex SHA-256 hash.
+    #[must_use]
+    fn is_content_hash(s: &str) -> bool {
+        s.len() == 64
+            && s.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    }
+
     mod hash_properties {
         use super::*;
         use crate::merge::MergedManifest;
@@ -709,6 +727,73 @@ mod tests {
                 let ha = hash_manifest(&manifest("x", vec![], vec![], vec![mk(&h1)])).unwrap();
                 let hb = hash_manifest(&manifest("x", vec![], vec![], vec![mk(&h2)])).unwrap();
                 prop_assert_ne!(ha, hb, "a marketplace HEAD bump must invalidate the cache");
+            }
+        }
+    }
+
+    mod folder_naming {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn folder_name_strict_always_has_version_tag(hash in "[a-f0-9]{64}") {
+                let name = folder_name(&hash, HashingMode::Strict, VersionFidelity::default());
+                prop_assert!(name.starts_with(&format!("{VERSION_TAG}-")),
+                    "strict mode must always prefix with VERSION_TAG");
+                prop_assert!(name.ends_with(&hash), "strict mode must suffix with the hash");
+            }
+
+            #[test]
+            fn folder_name_version_ignores_hash(hash1 in "[a-f0-9]{64}", hash2 in "[a-f0-9]{64}") {
+                prop_assume!(hash1 != hash2);
+                let name1 = folder_name(&hash1, HashingMode::Version, VersionFidelity::Major);
+                let name2 = folder_name(&hash2, HashingMode::Version, VersionFidelity::Major);
+                // Version mode ignores the hash argument entirely.
+                prop_assert_eq!(name1, name2, "version mode must ignore the hash argument");
+            }
+
+            #[test]
+            fn version_folder_name_nesting_is_monotonic(f1 in 0usize..4, f2 in 0usize..4) {
+                let fidelities = [
+                    VersionFidelity::Major,
+                    VersionFidelity::MajorMinor,
+                    VersionFidelity::Full,
+                    VersionFidelity::Commit,
+                ];
+                let name1 = version_folder_name(fidelities[f1]);
+                let name2 = version_folder_name(fidelities[f2]);
+                // Each fidelity is a prefix or equal to higher fidelities.
+                if f1 < f2 {
+                    prop_assert!(name2.starts_with(&name1) || name1 == name2,
+                        "fidelity {f1} should be a prefix of fidelity {f2}");
+                }
+            }
+
+            #[test]
+            fn is_content_hash_accepts_valid_sha256(hash in "[a-f0-9]{64}") {
+                prop_assert!(is_content_hash(&hash), "64 lowercase hex chars should be valid");
+            }
+
+            #[test]
+            fn is_content_hash_rejects_wrong_length(len in 0usize..=256usize) {
+                prop_assume!(len != 64);
+                let s = "a".repeat(len);
+                prop_assert!(!is_content_hash(&s),
+                    "length {len} should not be valid (only 64 is)");
+            }
+
+            #[test]
+            fn is_content_hash_rejects_uppercase(s in "[A-F0-9]{64}") {
+                prop_assume!(s.chars().any(|c| c.is_ascii_uppercase()));
+                prop_assert!(!is_content_hash(&s),
+                    "uppercase hex should not be valid");
+            }
+
+            #[test]
+            fn is_content_hash_rejects_non_hex(s in "[g-z]{64}") {
+                prop_assert!(!is_content_hash(&s),
+                    "non-hex characters should not be valid");
             }
         }
     }
