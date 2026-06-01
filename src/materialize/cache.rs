@@ -66,10 +66,7 @@ pub fn version_folder_name(fidelity: VersionFidelity) -> String {
         }
         VersionFidelity::MajorMinor => {
             let mut parts = PKG_VERSION.split('.');
-            let first = match parts.next() {
-                Some(f) => f,
-                None => "",
-            };
+            let first = parts.next().unwrap_or_default();
             if let Some(second) = parts.next() {
                 format!("{first}.{second}")
             } else {
