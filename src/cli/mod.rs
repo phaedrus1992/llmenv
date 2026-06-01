@@ -449,7 +449,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
             orphan_count += 1;
         }
     }
-    if let Some(mem) = &config.memory {
+    if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref()) {
         let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
         if !has_emitted_tag {
             eprintln!("{warn} orphan memory: no scope emits its tags");
@@ -1444,7 +1444,14 @@ fn all_consumed_tags(config: &Config) -> HashSet<String> {
         .iter()
         .flat_map(|b| b.tags.iter().cloned())
         .chain(config.mcp.iter().flat_map(|m| m.tags.iter().cloned()))
-        .chain(config.memory.iter().flat_map(|m| m.tags.iter().cloned()))
+        .chain(
+            config
+                .features
+                .as_ref()
+                .and_then(|f| f.memory.as_ref())
+                .iter()
+                .flat_map(|m| m.tags.iter().cloned()),
+        )
         .collect()
 }
 
@@ -1472,7 +1479,7 @@ fn active_host_ids(active: &ActiveScopes) -> BTreeSet<String> {
 /// True if the ICM memory backend is active: configured, selected by tags, and
 /// this host is the designated server.
 fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
-    if let Some(mem) = &config.memory {
+    if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref()) {
         let selected = mem.tags.iter().any(|t| active.tags.contains(t));
         let is_server = active_host_ids(active).contains(&mem.server_host);
         selected && is_server
@@ -1491,7 +1498,7 @@ fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
 /// scope — so a host whose network can't be auto-detected can still be made the
 /// server by tagging it explicitly.
 fn local_memory_server_bind(config: &Config, active: &ActiveScopes) -> Option<String> {
-    let mem = config.memory.as_ref()?;
+    let mem = config.features.as_ref().and_then(|f| f.memory.as_ref())?;
     if is_memory_backend_active(config, active) {
         Some(format!("0.0.0.0:{}", mem.port))
     } else {
@@ -1708,7 +1715,7 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
             (m.name.clone(), is_active, is_orphan, detail)
         })
         .collect();
-    if let Some(mem) = &config.memory {
+    if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref()) {
         let is_active = mem.tags.iter().any(|t| active.tags.contains(t));
         let is_orphan = !mem.tags.iter().any(|t| emitted.contains(t));
         let detail = detail_for(MEMORY_MCP_NAME, "memory");

@@ -91,10 +91,11 @@ host:
   memhost:
     addr: "{addr}"
 
-memory:
-  server_host: memhost
-  port: {port}
-  tags: [test]
+features:
+  memory:
+    server_host: memhost
+    port: {port}
+    tags: [test]
 
 cache:
   sync_interval_minutes: 60
