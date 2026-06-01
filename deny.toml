@@ -7,14 +7,24 @@ yanked = "deny"
 
 [licenses]
 version = 2
+# All entries are permissive or weak-copyleft (MPL-2.0, file-scoped) and mutually
+# compatible for producing/distributing the `MIT OR Apache-2.0` binary. No strong
+# copyleft (GPL/AGPL/LGPL) is admitted. Audited in #249.
 allow = [
     "MIT",
+    "MIT-0",      # MIT No Attribution — strictly looser than MIT (aws-lc-sys)
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause", # aws-lc-sys
     "BSL-1.0",
+    "ISC",        # OpenBSD-style permissive (aws-lc-rs / aws-lc-sys)
     "MPL-2.0",
     "Unlicense",
     "Unicode-3.0",
+    # Permissive *data* license on the Mozilla CA root-cert bundle shipped by
+    # webpki-root-certs (via reqwest -> rustls-platform-verifier). No downstream
+    # obligations.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

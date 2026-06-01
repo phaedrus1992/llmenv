@@ -184,7 +184,7 @@ prek install --hook-type pre-commit --hook-type pre-push
 ```
 
 - `cargo fmt --check` runs on every commit (fast).
-- `cargo clippy -D warnings` and `cargo test` run on push (slower).
+- `cargo clippy -D warnings`, `cargo test`, and `cargo deny check` run on push (slower).
 
 Install `prek` from <https://github.com/j178/prek> if you don't have it.
 
@@ -195,3 +195,14 @@ llmenv follows [Semantic Versioning](https://semver.org/) and a
 once it is git-tagged — see [CHANGELOG.md](CHANGELOG.md) and the
 [releases page](https://github.com/phaedrus1992/llmenv/releases) for what has
 shipped.
+
+## License
+
+llmenv is dual-licensed under either [Apache-2.0](LICENSE-APACHE) or
+[MIT](LICENSE-MIT), at your option (`MIT OR Apache-2.0`).
+
+Binary distributions statically link third-party crates whose licenses require
+attribution; their notices are reproduced in
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) (a generated artifact). See
+[docs/licensing.md](docs/licensing.md) for the attribution and compatibility
+policy and how to regenerate the notices.

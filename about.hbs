@@ -1,0 +1,25 @@
+# Third-party licenses
+
+<!-- GENERATED FILE — do not edit by hand. Regenerate with `scripts/gen-attribution.sh`. -->
+
+llmenv is distributed under `MIT OR Apache-2.0` (see `LICENSE-MIT` and
+`LICENSE-APACHE`). Binary distributions statically link the third-party crates
+listed below; their copyright and permission notices are reproduced here to
+satisfy the attribution requirements of their licenses.
+
+Entries are grouped by license; a license that appears more than once carries a
+distinct copyright/notice variant that must be preserved separately.
+
+{{#each licenses}}
+## {{name}} ({{id}})
+
+Used by:
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

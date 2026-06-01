@@ -45,6 +45,11 @@ const sidebars: SidebarsConfig = {
       label: 'Operations',
       items: ['troubleshooting', 'homebrew-tap-setup', 'release', 'maintainers'],
     },
+    {
+      type: 'category',
+      label: 'Legal',
+      items: ['licensing', 'third-party-licenses'],
+    },
   ],
 };
 
