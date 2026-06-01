@@ -53,6 +53,20 @@
       "groupSlug": "github-actions-non-major",
     },
     {
+      "description": "Group Docusaurus package updates together (co-versioned; must move as a unit)",
+      "groupName": "docusaurus",
+      "groupSlug": "docusaurus",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["/^@docusaurus\//", "@easyops-cn/docusaurus-search-local"],
+    },
+    {
+      "description": "Group React package updates together",
+      "groupName": "react",
+      "groupSlug": "react",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["/^react/", "/^@mdx-js\//", "prism-react-renderer"],
+    },
+    {
       "groupName": "group Rust Serde package updates together",
       "groupSlug": "rust-serde",
       "matchManagers": ["cargo"],
