@@ -209,8 +209,11 @@ active) the project name and description. Its shape:
 Active tags: `office`, `rust`
 Bundles: `base`, `office-tools`
 
-Store scope-specific memory under keyword `llmenv-tag:<tag>` so it is
-retrievable across projects.
+Store scope-specific memory under keyword `llmenv-tag:<tag>` (per tag)
+or `llmenv-bundle:<bundle>` (per bundle) so it is retrievable across
+projects. On each turn, llmenv auto-recalls memory under these tags'
+`llmenv-tag:<tag>` and bundles' `llmenv-bundle:<bundle>` keywords
+across all projects.
 
 **Project:** MyApp — Customer-facing API
 ```
@@ -224,8 +227,8 @@ follows the tag rather than the project.
   environment where that tag is active. The TurnStart hook recalls this keyword
   automatically across all projects (see [Lifecycle hooks](#lifecycle-hooks)).
 - `llmenv-bundle:<bundle>` — memory keyed to a bundle, retrieved whenever that
-  bundle fires. *Convention only — automatic bundle recall is not yet
-  implemented ([#215](https://github.com/phaedrus1992/llmenv/issues/215)).*
+  bundle fires. The TurnStart hook recalls this keyword automatically across all
+  projects (parallel to `llmenv-tag:<tag>`).
 
 ### Lifecycle hooks
 
@@ -238,8 +241,9 @@ run in response to three neutral events:
 - **TurnStart** — `hook-run turn_start` injects recalled context at the start of
   each agent turn (`icm_memory_recall`). It issues a project-scoped recall for
   the active tags, then one **project-unfiltered** recall per active tag keyed on
-  that tag's `llmenv-tag:<tag>` keyword — so memory stored under a tag in one
-  project surfaces when the same tag activates in another
+  `llmenv-tag:<tag>`, and one **project-unfiltered** recall per active bundle
+  keyed on `llmenv-bundle:<bundle>` — so memory stored under a tag or bundle in
+  one project surfaces when the same tag or bundle activates in another
 - **SessionEnd** — `hook-run session_end` stores the active scope context
   (`icm_memory_store`) when the session closes
 
