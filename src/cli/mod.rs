@@ -1965,12 +1965,18 @@ fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Re
     for p in &report.removed {
         eprintln!("  {verb}: {}", p.display());
     }
+    for p in &report.failed {
+        eprintln!("  failed to remove: {}", p.display());
+    }
     eprintln!(
         "prune complete: {} {} entry(ies), kept {}",
         verb,
         report.removed.len(),
         report.kept
     );
+    if !report.failed.is_empty() {
+        eprintln!("  {} entry(ies) could not be removed", report.failed.len());
+    }
     Ok(())
 }
 
