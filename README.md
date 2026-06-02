@@ -165,15 +165,7 @@ per-engine `native` escape hatch for keys that have no portable equivalent — s
 
 ## Documentation
 
-- [Getting Started](https://phaedrus1992.github.io/llmenv/docs/getting-started) — install, shell hook, first run, first errors
-- [Concepts](https://phaedrus1992.github.io/llmenv/docs/concepts) — the scope → tag → bundle → materialize → adapter pipeline
-- [Configuration Reference](https://phaedrus1992.github.io/llmenv/docs/configuration) — every config block and field
-- [Commands](https://phaedrus1992.github.io/llmenv/docs/commands) — per-command reference
-- [Plugins](https://phaedrus1992.github.io/llmenv/docs/plugins) — marketplaces, plugin collections, `plugin-sync`
-- [MCP & Memory](https://phaedrus1992.github.io/llmenv/docs/mcp) — MCP servers, the ICM memory backend, env var contract
-- [Engines](https://phaedrus1992.github.io/llmenv/docs/engines) — engine capability model and per-engine escape hatches
-- [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting) — common failures and the commands that surface them
-- [Maintainers](https://phaedrus1992.github.io/llmenv/docs/maintainers) — release and tap-setup index
+Full documentation at **<https://phaedrus1992.github.io/llmenv/>**.
 
 ## Development
 
