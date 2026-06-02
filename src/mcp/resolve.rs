@@ -110,7 +110,7 @@ fn resolve_memory(
     Ok(ResolvedMcp {
         name: MEMORY_MCP_NAME.to_string(),
         kind: ResolvedKind::Remote {
-            url: format!("http://{}:{}", entry.addr, mem.port),
+            url: format!("http://{}:{}/mcp", entry.addr, mem.port),
             transport: McpTransport::Http,
         },
     })
@@ -227,7 +227,7 @@ mod tests {
             assert_eq!(resolved[0].name, MEMORY_MCP_NAME);
             match &resolved[0].kind {
                 ResolvedKind::Remote { url, transport } => {
-                    assert_eq!(url, "http://still.local:7878");
+                    assert_eq!(url, "http://still.local:7878/mcp");
                     assert_eq!(*transport, McpTransport::Http);
                 }
                 other => panic!("expected remote client, got {other:?}"),
