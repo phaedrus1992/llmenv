@@ -1,11 +1,18 @@
 [package]
 name = "llmenv"
-version = "1.0.0-rc1"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "Universal scope-aware environment for AI coding agents"
 repository = "https://github.com/phaedrus1992/llmenv"
+readme = "README.md"
+keywords = ["ai", "agents", "cli", "config", "environment"]
+categories = ["command-line-utilities", "development-tools", "config"]
+# Keep the published crate lean: the docs site, design docs, CI config, and dev
+# scripts are not needed to build or use llmenv. Tests and benches ship so the
+# crate stays verifiable from a crates.io checkout.
+exclude = ["/website", "/docs", "/.github", "/scripts", "/proptest-regressions"]
 
 [lints.rust]
 unsafe_code = "forbid"

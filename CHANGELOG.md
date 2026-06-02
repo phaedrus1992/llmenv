@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+<!-- next-header -->
+
+## [Unreleased] - ReleaseDate
+
+## [1.0.0] - 2026-06-01
 
 ### Changed
 
@@ -245,3 +249,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   filed as #65–#73. (#56)
 - **Documented `Config::load`'s path-expansion contract** — callers must expand
   `~` before calling; a `debug_assert` enforces this in debug builds. (#68)
+
+<!-- next-url -->
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/phaedrus1992/llmenv/releases/tag/v1.0.0
