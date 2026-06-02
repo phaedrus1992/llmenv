@@ -755,8 +755,9 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     }
 
     // Merge + materialize the agent config directory and let the adapter
-    // emit env vars pointing the agent at it. Failures here are logged but
-    // non-fatal: env vars from bundles still flow through.
+    // emit env vars pointing the agent at it. Failure here exits non-zero
+    // so callers (shell hooks, CI) can detect it — silently continuing
+    // without CLAUDE_CONFIG_DIR violates the export contract. (#281)
     match build_and_materialize(&config, &config_dir, &active, &firing) {
         Ok(Some((cache_path, extra_vars))) => {
             tracing::debug!("materialized agent config at {}", cache_path.display());
@@ -767,9 +768,7 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         Ok(None) => {
             tracing::debug!("no bundle content directories — skipping materialize");
         }
-        Err(e) => {
-            eprintln!("warning: agent materialization failed: {e}");
-        }
+        Err(e) => return Err(e).context("agent materialization failed"),
     }
 
     // Introspection vars: comma-separated, deterministic order. Scopes get
@@ -1089,11 +1088,24 @@ fn sync_marketplaces(
             out.push(rm);
             continue;
         };
-        let state = crate::plugins::cache::sync_marketplace(cache_root, market, refresh)
-            .with_context(|| format!("syncing marketplace '{}'", rm.name))?;
-        rm.install_location = Some(state.install_location.to_string_lossy().into_owned());
-        rm.head = state.head;
-        out.push(rm);
+        let sync_result = crate::plugins::cache::sync_marketplace(cache_root, market, refresh)
+            .with_context(|| format!("syncing marketplace '{}'", rm.name));
+        match sync_result {
+            Ok(state) => {
+                rm.install_location = Some(state.install_location.to_string_lossy().into_owned());
+                rm.head = state.head;
+                out.push(rm);
+            }
+            // (#281) During export (refresh=false), a marketplace that isn't cloned
+            // locally should not abort materialization — warn and skip so
+            // CLAUDE_CONFIG_DIR can still be emitted. run_plugin_sync (refresh=true)
+            // still propagates: an explicit sync that can't reach the remote is a
+            // real failure the user needs to see.
+            Err(e) if !refresh => eprintln!(
+                "warning: {e}\n  → plugins from this marketplace are excluded; run `llmenv plugin-sync` to fetch it"
+            ),
+            Err(e) => return Err(e),
+        }
     }
     Ok(out)
 }
@@ -2212,5 +2224,89 @@ mod tests {
         let url = "https://github.com/owner/repo.git";
         let sanitized = sanitize_git_url(url);
         assert_eq!(sanitized, url);
+    }
+
+    // #281: marketplace sync failure must not silently drop CLAUDE_CONFIG_DIR.
+
+    fn marketplace_config(name: &str, source: &str) -> Config {
+        Config {
+            marketplace: vec![crate::config::Marketplace {
+                name: name.into(),
+                source: source.into(),
+            }],
+            ..Config::default()
+        }
+    }
+
+    fn resolved_marketplace(name: &str) -> crate::plugins::resolve::ResolvedMarketplace {
+        crate::plugins::resolve::ResolvedMarketplace {
+            name: name.into(),
+            source: String::new(),
+            install_location: None,
+            head: None,
+        }
+    }
+
+    #[test]
+    fn sync_marketplaces_non_fatal_when_not_refreshing() {
+        // A marketplace whose source doesn't exist locally should be skipped
+        // (with a warning) during export (refresh=false) so that materialization
+        // can continue and CLAUDE_CONFIG_DIR is still emitted. (#281)
+        let config = marketplace_config("missing", "/nonexistent/path/to/plugins");
+        let tmp = tempfile::tempdir().unwrap();
+        let result = sync_marketplaces(
+            &config,
+            tmp.path(),
+            vec![resolved_marketplace("missing")],
+            false,
+        );
+        assert!(result.is_ok(), "non-refresh sync failure must be non-fatal");
+        assert!(
+            result.unwrap().is_empty(),
+            "failed marketplace is dropped from output"
+        );
+    }
+
+    #[test]
+    fn sync_marketplaces_propagates_error_when_refreshing() {
+        // An explicit plugin-sync (refresh=true) must still fail hard when a
+        // marketplace can't be synced, so the user knows the refresh failed. (#281)
+        let config = marketplace_config("missing", "/nonexistent/path/to/plugins");
+        let tmp = tempfile::tempdir().unwrap();
+        let result = sync_marketplaces(
+            &config,
+            tmp.path(),
+            vec![resolved_marketplace("missing")],
+            true,
+        );
+        assert!(result.is_err(), "refresh=true sync failure must propagate");
+    }
+
+    #[test]
+    fn sync_marketplaces_succeeds_when_marketplace_available() {
+        // A marketplace whose path source exists should succeed in both modes.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("my-market");
+        std::fs::create_dir(&src).unwrap();
+        let config = marketplace_config("local", &src.to_string_lossy());
+        let cache = tempfile::tempdir().unwrap();
+        for refresh in [false, true] {
+            let result = sync_marketplaces(
+                &config,
+                cache.path(),
+                vec![resolved_marketplace("local")],
+                refresh,
+            );
+            assert!(
+                result.is_ok(),
+                "available marketplace should succeed (refresh={refresh})"
+            );
+            let out = result.unwrap();
+            assert_eq!(out.len(), 1);
+            assert!(
+                out[0].install_location.is_some(),
+                "install_location filled in"
+            );
+        }
     }
 }
