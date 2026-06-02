@@ -10,13 +10,20 @@ This page takes you from zero to a working setup. For the conceptual model, read
 
 ## 1. Install
 
-Latest release:
+**Homebrew (macOS / Linux):**
+
+```bash
+brew tap phaedrus1992/tap
+brew install llmenv
+```
+
+**Cargo:**
 
 ```bash
 cargo install llmenv
 ```
 
-From source:
+**From source:**
 
 ```bash
 git clone https://github.com/phaedrus1992/llmenv.git
