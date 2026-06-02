@@ -12,6 +12,7 @@ use std::path::Path;
 
 const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 const DOCS_SITE: &str = "https://phaedrus1992.github.io/llmenv/";
+const DOCS_PREFIX: &str = "https://phaedrus1992.github.io/llmenv/docs/";
 
 fn read(rel: &str) -> String {
     let path = Path::new(MANIFEST_DIR).join(rel);
@@ -36,6 +37,31 @@ fn readme_has_no_relative_docs_links() {
         "README.md contains relative docs/ links that break on crates.io.\n\
          Replace with absolute Docusaurus URLs ({}*):\n{}",
         DOCS_SITE,
+        bad.join("\n")
+    );
+}
+
+/// Docusaurus is configured with `routeBasePath: 'docs'`, so doc pages are served
+/// at `.../llmenv/docs/<slug>`, not `.../llmenv/<slug>`. A link without the
+/// `/docs/` segment returns a 404.
+#[test]
+fn readme_absolute_doc_links_have_docs_prefix() {
+    let readme = read("README.md");
+    let site_base = "https://phaedrus1992.github.io/llmenv/";
+    let bad: Vec<&str> = readme
+        .lines()
+        .filter(|line| {
+            // Catch site links that skip the /docs/ segment.
+            // Exclude: site root itself (badges, homepage) — those are valid without /docs/.
+            line.contains(&format!("]({site_base}"))
+                && !line.contains(DOCS_PREFIX)
+                && !line.contains(&format!("]({site_base})")) // bare root link
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "README.md contains Docusaurus links missing the `/docs/` segment \
+         (routeBasePath='docs' means pages are at {DOCS_PREFIX}*):\n{}",
         bad.join("\n")
     );
 }
