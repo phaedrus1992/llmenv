@@ -132,6 +132,12 @@ pub struct Capabilities {
     /// Plugin ids as `<marketplace>:<plugin>`. A list — concatenates.
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// Whether the agent's built-in automatic memory is enabled. Optional scalar
+    /// — resolves by scope precedence (highest scope wins). When llmenv's ICM
+    /// memory backend is active, this defaults to `false` to prevent competition
+    /// between memory systems, but can be overridden here if needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_memory_enabled: Option<bool>,
     /// Per-engine native permission rule lists, keyed by engine name. The
     /// engine-only override for permissions — raw rule strings in the engine's
     /// own grammar, appended verbatim. Sibling to the neutral `permissions`
@@ -160,6 +166,7 @@ impl Capabilities {
         self.permissions.is_empty()
             && self.hooks.is_empty()
             && self.plugins.is_empty()
+            && self.auto_memory_enabled.is_none()
             && self.native_permissions.is_empty()
             && self.native_hooks.is_empty()
             && self.native_plugins.is_empty()

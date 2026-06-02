@@ -606,13 +606,15 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         settings.insert("permissions".into(), serde_json::Value::Object(perm_obj));
     }
 
-    // #123 (design O4): when llmenv's ICM memory backend is active (the `icm`
-    // MCP server is resolved), disable Claude's native auto memory so the two
-    // memory systems don't compete. Emitted before the native overlays so a user
-    // who explicitly sets `autoMemoryEnabled` via the top-level `native` catch-all
-    // still wins (native is the higher-precedence layer, applied last).
+    // #227/#123: manage auto memory enablement. When llmenv's ICM memory backend
+    // is active, disable Claude's auto memory to prevent competition. Only emit
+    // the key if: (1) explicitly set in config, or (2) ICM is active and we need
+    // to disable it. Emitted before native overlays so `native.claude_code.autoMemoryEnabled`
+    // can still override if set (native is the highest-precedence layer).
     let icm_active = manifest.mcps.iter().any(|m| m.name == ICM_MCP_NAME);
-    if icm_active {
+    if let Some(configured) = manifest.capabilities.auto_memory_enabled {
+        settings.insert("autoMemoryEnabled".into(), json!(configured));
+    } else if icm_active {
         settings.insert("autoMemoryEnabled".into(), json!(false));
     }
 

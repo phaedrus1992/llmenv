@@ -79,7 +79,7 @@ fn git_source_clones_into_cache_and_reports_head() {
         name: "demo".into(),
         source: "https://example.com/demo.git".into(),
     };
-    let state = sync_marketplace_with(cache.path(), &m, false, &git).expect("sync");
+    let state = sync_marketplace_with(cache.path(), &m, true, &git).expect("sync");
 
     assert!(state.install_location.join(".git").exists(), "cloned repo");
     let cache_root = std::fs::canonicalize(cache.path()).expect("canon cache");
@@ -102,7 +102,7 @@ fn second_sync_with_refresh_fast_forwards_to_new_head() {
         name: "demo".into(),
         source: "https://example.com/demo.git".into(),
     };
-    let first = sync_marketplace_with(cache.path(), &m, false, &git).expect("first sync");
+    let first = sync_marketplace_with(cache.path(), &m, true, &git).expect("first sync");
 
     git.advance_source("b".repeat(40).as_str());
 
@@ -124,7 +124,7 @@ fn refresh_false_does_not_advance_existing_clone() {
         name: "demo".into(),
         source: "https://example.com/demo.git".into(),
     };
-    let first = sync_marketplace_with(cache.path(), &m, false, &git).expect("first sync");
+    let first = sync_marketplace_with(cache.path(), &m, true, &git).expect("first sync");
 
     git.advance_source("b".repeat(40).as_str());
 
@@ -171,6 +171,34 @@ fn fd_transport_source_is_rejected() {
         "unexpected error: {err:#}"
     );
     assert_eq!(*git.clone_calls.borrow(), 0, "backend never invoked");
+}
+
+#[test]
+fn git_clone_failure_with_refresh_true_propagates() {
+    struct FailClone;
+    impl GitBackend for FailClone {
+        fn clone(&self, _: &str, _: &std::path::Path) -> anyhow::Result<()> {
+            anyhow::bail!("simulated clone failure")
+        }
+        fn pull(&self, _: &std::path::Path) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn head(&self, _: &std::path::Path) -> Option<String> {
+            None
+        }
+    }
+
+    let cache = tempdir().expect("cache");
+    let m = Marketplace {
+        name: "broken".into(),
+        source: "https://example.com/broken.git".into(),
+    };
+    let err = sync_marketplace_with(cache.path(), &m, true, &FailClone)
+        .expect_err("clone failure with refresh=true must propagate");
+    assert!(
+        format!("{err:#}").contains("simulated clone failure"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]
