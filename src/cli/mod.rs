@@ -1101,7 +1101,9 @@ fn sync_marketplaces(
             // CLAUDE_CONFIG_DIR can still be emitted. run_plugin_sync (refresh=true)
             // still propagates: an explicit sync that can't reach the remote is a
             // real failure the user needs to see.
-            Err(e) if !refresh => eprintln!("warning: {e}"),
+            Err(e) if !refresh => eprintln!(
+                "warning: {e}\n  → plugins from this marketplace are excluded; run `llmenv plugin-sync` to fetch it"
+            ),
             Err(e) => return Err(e),
         }
     }
