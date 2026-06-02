@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- **CHANGELOG on docs site** — the project changelog is now browseable at the
+  Docusaurus documentation site alongside the rest of the docs. (#258)
+
+### Fixed
+
+- **README doc links** — all relative documentation links in the README
+  replaced with absolute Docusaurus URLs; a missing `/docs/` path segment in
+  several links corrected. (#265, #266)
+
+### Changed
+
+- **CI path filters** — workflow jobs now run only when files relevant to that
+  job change (source, docs, CI configs), avoiding spurious runs on unrelated
+  commits.
+
 ## [1.0.0] - 2026-06-01
 
 ### Changed
