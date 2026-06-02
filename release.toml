@@ -1,0 +1,42 @@
+# cargo-release configuration (#257).
+# Reference: https://github.com/crate-ci/cargo-release/blob/master/docs/reference.md
+#
+# Releases are TAG-TRIGGERED. Pushing a `v*` tag fires
+# .github/workflows/release.yml, which builds the cross-platform binaries,
+# publishes to crates.io (publish-crate job), creates the GitHub Release, and
+# bumps the Homebrew formula.
+#
+# cargo-release therefore owns only the local, error-prone prep — bump the
+# version and roll the CHANGELOG into one commit. It does NOT publish, tag, or
+# push, because:
+#   - publish: crates.io is owned by CI; publishing here too would double-publish.
+#   - tag/push: `main` is protected (PR-only), so the prep commit lands via a PR
+#     and the `v*` tag is cut on the merged commit. See RELEASING.md.
+
+# Only cut releases from main or a release/* prep branch.
+allow-branch = ["main", "release/*"]
+
+# crates.io publish is owned by the publish-crate job in release.yml.
+publish = false
+
+# The v* tag is created on the merged main commit (see RELEASING.md), not by
+# cargo-release, so it matches what actually landed on the protected branch.
+tag = false
+push = false
+
+# Documents the tag format CI triggers on (the `v*` filter in release.yml).
+tag-name = "v{{version}}"
+
+pre-release-commit-message = "chore(release): {{version}}"
+
+# Keep-a-Changelog rollover. On `cargo release <level>` this turns the
+# `[Unreleased]` section into a dated, versioned section and re-seeds a fresh
+# `[Unreleased]` + compare link for the next cycle. Pattern from the
+# cargo-release FAQ (docs/faq.md#maintaining-changelog).
+pre-release-replacements = [
+  { file = "CHANGELOG.md", search = "Unreleased", replace = "{{version}}", min = 1 },
+  { file = "CHANGELOG.md", search = "\\.\\.\\.HEAD", replace = "...{{tag_name}}", exactly = 1 },
+  { file = "CHANGELOG.md", search = "ReleaseDate", replace = "{{date}}", exactly = 1 },
+  { file = "CHANGELOG.md", search = "<!-- next-header -->", replace = "<!-- next-header -->\n\n## [Unreleased] - ReleaseDate", exactly = 1 },
+  { file = "CHANGELOG.md", search = "<!-- next-url -->", replace = "<!-- next-url -->\n[Unreleased]: {{repository}}/compare/{{tag_name}}...HEAD", exactly = 1 },
+]
