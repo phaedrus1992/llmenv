@@ -47,7 +47,7 @@ Edit `~/.config/llmenv/config.yaml` to add scopes and bundles, then drop a
 tags. The shell hook re-evaluates on every prompt, so the active environment
 follows you between networks and repos.
 
-See [docs/getting-started.md](docs/getting-started.md) for the full first-run walkthrough.
+See [Getting Started](https://phaedrus1992.github.io/llmenv/getting-started) for the full first-run walkthrough.
 
 ## Concepts
 
@@ -65,7 +65,7 @@ native shape and exports the env vars that point the agent at it.
 
 When scopes of different kinds set conflicting scalar values, precedence runs
 **network → host → user → project** (project wins). See
-[docs/concepts.md](docs/concepts.md) for the full pipeline, precedence rules, and
+[Concepts](https://phaedrus1992.github.io/llmenv/concepts) for the full pipeline, precedence rules, and
 the marker-based project scope.
 
 ## Example
@@ -137,7 +137,7 @@ and plugins activate automatically.
 | `llmenv doctor [--gc]` | Validate wiring; optionally garbage-collect the cache |
 
 Every command accepts `--color <auto\|always\|never>`. Run `llmenv <command> --help`
-for full flag details. Per-command reference: [docs/commands.md](docs/commands.md).
+for full flag details. Per-command reference: [Commands](https://phaedrus1992.github.io/llmenv/commands).
 
 ## Introspection environment variables
 
@@ -153,7 +153,7 @@ context:
 | `LLMENV_PROJECT_ROOT` | absolute path | Directory of the deepest `.llmenv.yaml` (omitted if none) |
 | `LLMENV_ICM_CONTEXT` | text chunk | Active tags/bundles encoded for tag-scoped memory retrieval |
 
-See [docs/mcp.md](docs/mcp.md) for the `LLMENV_ICM_CONTEXT` contract.
+See [MCP & Memory](https://phaedrus1992.github.io/llmenv/mcp) for the `LLMENV_ICM_CONTEXT` contract.
 
 ## Supported agents
 
@@ -161,19 +161,19 @@ llmenv emits agent-native config through pluggable adapters. The current adapter
 surface targets **Claude Code** (`CLAUDE.md`, `settings.json`, `.claude.json`
 `mcpServers`, hooks, permissions, plugins). The capability model is engine-neutral, with a
 per-engine `native` escape hatch for keys that have no portable equivalent — see
-[docs/engines.md](docs/engines.md).
+[Engines](https://phaedrus1992.github.io/llmenv/engines).
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md) — install, shell hook, first run, first errors
-- [Concepts](docs/concepts.md) — the scope → tag → bundle → materialize → adapter pipeline
-- [Configuration Reference](docs/configuration.md) — every config block and field
-- [Commands](docs/commands.md) — per-command reference
-- [Plugins](docs/plugins.md) — marketplaces, plugin collections, `plugin-sync`
-- [MCP & Memory](docs/mcp.md) — MCP servers, the ICM memory backend, env var contract
-- [Engines](docs/engines.md) — engine capability model and per-engine escape hatches
-- [Troubleshooting](docs/troubleshooting.md) — common failures and the commands that surface them
-- [Maintainers](docs/maintainers.md) — release and tap-setup index
+- [Getting Started](https://phaedrus1992.github.io/llmenv/getting-started) — install, shell hook, first run, first errors
+- [Concepts](https://phaedrus1992.github.io/llmenv/concepts) — the scope → tag → bundle → materialize → adapter pipeline
+- [Configuration Reference](https://phaedrus1992.github.io/llmenv/configuration) — every config block and field
+- [Commands](https://phaedrus1992.github.io/llmenv/commands) — per-command reference
+- [Plugins](https://phaedrus1992.github.io/llmenv/plugins) — marketplaces, plugin collections, `plugin-sync`
+- [MCP & Memory](https://phaedrus1992.github.io/llmenv/mcp) — MCP servers, the ICM memory backend, env var contract
+- [Engines](https://phaedrus1992.github.io/llmenv/engines) — engine capability model and per-engine escape hatches
+- [Troubleshooting](https://phaedrus1992.github.io/llmenv/troubleshooting) — common failures and the commands that surface them
+- [Maintainers](https://phaedrus1992.github.io/llmenv/maintainers) — release and tap-setup index
 
 ## Development
 
@@ -204,5 +204,5 @@ llmenv is dual-licensed under either [Apache-2.0](LICENSE-APACHE) or
 Binary distributions statically link third-party crates whose licenses require
 attribution; their notices are reproduced in
 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) (a generated artifact). See
-[docs/licensing.md](docs/licensing.md) for the attribution and compatibility
+[Licensing & attribution](https://phaedrus1992.github.io/llmenv/licensing) for the attribution and compatibility
 policy and how to regenerate the notices.
