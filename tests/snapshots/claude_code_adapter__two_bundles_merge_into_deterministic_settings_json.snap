@@ -1,6 +1,6 @@
 ---
 source: tests/claude_code_adapter.rs
-assertion_line: 1026
+assertion_line: 1031
 expression: parsed
 ---
 hooks:

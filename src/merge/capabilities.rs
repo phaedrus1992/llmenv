@@ -73,6 +73,18 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let native_plugins = merge_native_feature(contributors, |c| &c.native_plugins);
     let native_mcp = merge_native_feature(contributors, |c| &c.native_mcp);
 
+    // Scalar resolution: highest precedence wins (not positional order).
+    // #227: resolve by explicit precedence comparison, matching resolve_default_mode.
+    let auto_memory_enabled = contributors
+        .iter()
+        .filter_map(|c| {
+            c.capabilities
+                .auto_memory_enabled
+                .map(|v| (c.precedence, v))
+        })
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v);
+
     Ok(Capabilities {
         permissions: Permissions {
             default_mode,
@@ -82,6 +94,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         },
         hooks,
         plugins,
+        auto_memory_enabled,
         native_permissions,
         native_hooks,
         native_plugins,

@@ -1091,23 +1091,25 @@ fn sync_marketplaces(
             out.push(rm);
             continue;
         };
-        let sync_result = crate::plugins::cache::sync_marketplace(cache_root, market, refresh)
-            .with_context(|| format!("syncing marketplace '{}'", rm.name));
+        let sync_result = crate::plugins::cache::sync_marketplace(cache_root, market, refresh);
         match sync_result {
             Ok(state) => {
                 rm.install_location = Some(state.install_location.to_string_lossy().into_owned());
                 rm.head = state.head;
                 out.push(rm);
             }
-            // (#281) During export (refresh=false), a marketplace that isn't cloned
+            // (#282) During export (refresh=false), a marketplace that isn't cloned
             // locally should not abort materialization — warn and skip so
             // CLAUDE_CONFIG_DIR can still be emitted. run_plugin_sync (refresh=true)
             // still propagates: an explicit sync that can't reach the remote is a
             // real failure the user needs to see.
-            Err(e) if !refresh => eprintln!(
-                "warning: {e}\n  → plugins from this marketplace are excluded; run `llmenv plugin-sync` to fetch it"
-            ),
-            Err(e) => return Err(e),
+            Err(crate::plugins::cache::SyncError::NotCloned { .. }) => {
+                eprintln!(
+                    "warning: marketplace '{}' not yet cloned\n  → plugins from this marketplace are excluded; run `llmenv plugin-sync` to fetch it",
+                    rm.name
+                );
+            }
+            Err(e) => return Err(anyhow::anyhow!("syncing marketplace '{}': {e}", rm.name)),
         }
     }
     Ok(out)
@@ -2273,10 +2275,32 @@ mod tests {
     }
 
     #[test]
-    fn sync_marketplaces_non_fatal_when_not_refreshing() {
-        // A marketplace whose source doesn't exist locally should be skipped
-        // (with a warning) during export (refresh=false) so that materialization
-        // can continue and CLAUDE_CONFIG_DIR is still emitted. (#281)
+    fn sync_marketplaces_git_not_cloned_non_fatal_when_not_refreshing() {
+        // A git marketplace that isn't cloned locally should be skipped (with a
+        // warning) during export (refresh=false) so materialization can continue
+        // and CLAUDE_CONFIG_DIR is still emitted. (#282)
+        let config = marketplace_config("remote", "https://github.com/example/plugins.git");
+        let tmp = tempfile::tempdir().unwrap();
+        let result = sync_marketplaces(
+            &config,
+            tmp.path(),
+            vec![resolved_marketplace("remote")],
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "git not-cloned during export must be non-fatal"
+        );
+        assert!(
+            result.unwrap().is_empty(),
+            "non-cloned marketplace is dropped from output"
+        );
+    }
+
+    #[test]
+    fn sync_marketplaces_path_not_exist_fatal() {
+        // A path source that doesn't exist is a configuration error and should
+        // fail hard, even during export (refresh=false). (#282)
         let config = marketplace_config("missing", "/nonexistent/path/to/plugins");
         let tmp = tempfile::tempdir().unwrap();
         let result = sync_marketplaces(
@@ -2285,11 +2309,7 @@ mod tests {
             vec![resolved_marketplace("missing")],
             false,
         );
-        assert!(result.is_ok(), "non-refresh sync failure must be non-fatal");
-        assert!(
-            result.unwrap().is_empty(),
-            "failed marketplace is dropped from output"
-        );
+        assert!(result.is_err(), "path source not existing must be fatal");
     }
 
     #[test]

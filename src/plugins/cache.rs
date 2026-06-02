@@ -9,10 +9,26 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use thiserror::Error;
 
 use crate::config::{Marketplace, MarketplaceSource};
 use crate::git;
 use crate::paths::expand_tilde;
+
+/// Typed errors from marketplace sync operations.
+#[derive(Debug, Error)]
+pub enum SyncError {
+    #[error("marketplace '{name}' not yet cloned (run `llmenv plugin-sync` to fetch)")]
+    NotCloned { name: String },
+    #[error("git clone failed for '{name}': {source}")]
+    CloneFailed {
+        name: String,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 /// Where all marketplace clones live, under the llmenv cache dir.
 #[must_use]
@@ -84,13 +100,14 @@ impl GitBackend for SystemGit {
 /// network or copy happens.
 ///
 /// # Errors
-/// Returns an error if a git clone fails on first use, or a local path source
-/// does not exist.
+/// Returns `SyncError::NotCloned` if a git marketplace is not yet cloned locally
+/// and refresh is false. Returns `SyncError::CloneFailed` if a git clone fails
+/// on first use. Returns `SyncError::Other` for path source resolution errors.
 pub fn sync_marketplace(
     cache_dir: &Path,
     m: &Marketplace,
     refresh: bool,
-) -> Result<MarketplaceState> {
+) -> Result<MarketplaceState, SyncError> {
     sync_marketplace_with(cache_dir, m, refresh, &SystemGit)
 }
 
@@ -98,40 +115,41 @@ pub fn sync_marketplace(
 /// clone/pull/head sequencing without a real `git` binary.
 ///
 /// # Errors
-/// Returns an error if a git clone fails on first use, or a local path source
-/// does not exist.
+/// Returns `SyncError::NotCloned` if a git marketplace is not yet cloned locally
+/// and refresh is false. Returns `SyncError::CloneFailed` if a git clone fails
+/// on first use. Returns `SyncError::Other` for path source resolution errors.
 pub fn sync_marketplace_with(
     cache_dir: &Path,
     m: &Marketplace,
     refresh: bool,
     git: &dyn GitBackend,
-) -> Result<MarketplaceState> {
+) -> Result<MarketplaceState, SyncError> {
     match m.classify_source() {
         MarketplaceSource::Path => sync_path(m),
         MarketplaceSource::Git => sync_git(cache_dir, m, refresh, git),
     }
 }
 
-fn sync_path(m: &Marketplace) -> Result<MarketplaceState> {
+fn sync_path(m: &Marketplace) -> Result<MarketplaceState, SyncError> {
     let expanded = expand_tilde(&m.source);
     let path = PathBuf::from(&expanded);
     if !path.exists() {
-        return Err(anyhow::anyhow!(
+        return Err(SyncError::Other(anyhow::anyhow!(
             "marketplace '{}': path source does not exist: {}",
             m.name,
             path.display()
-        ));
+        )));
     }
     // Canonicalize so the content token is stable regardless of how the path was
     // written (symlinks, trailing slashes, `~`). The location is mixed into the
     // scope hash, so a fall-back to the non-canonical path would make the same
     // config hash differently across runs — fail loudly instead.
-    let canonical = std::fs::canonicalize(&path).with_context(|| {
-        format!(
-            "marketplace '{}': canonicalizing path source {}",
+    let canonical = std::fs::canonicalize(&path).map_err(|e| {
+        SyncError::Other(anyhow::anyhow!(
+            "marketplace '{}': canonicalizing path source {}: {e}",
             m.name,
             path.display()
-        )
+        ))
     })?;
     Ok(MarketplaceState {
         install_location: canonical,
@@ -144,24 +162,36 @@ fn sync_git(
     m: &Marketplace,
     refresh: bool,
     git: &dyn GitBackend,
-) -> Result<MarketplaceState> {
+) -> Result<MarketplaceState, SyncError> {
     // Reject dangerous sources before touching the backend (real or fake): a
     // leading-dash source trips git's arg parsing, and the `ext::`/`fd::`
     // transports run arbitrary commands on clone. Validating here keeps the
     // check independent of the backend and runnable in tests.
-    reject_unsafe_source(&m.source)?;
+    reject_unsafe_source(&m.source).map_err(SyncError::Other)?;
 
     let dest = marketplace_path(cache_dir, &m.name);
 
     if dest.join(".git").exists() {
         if refresh {
-            git.pull(&dest)?;
+            git.pull(&dest).map_err(SyncError::Other)?;
         }
+    } else if !refresh {
+        // Marketplace not yet cloned and we're not refreshing (export path).
+        // This is a non-fatal condition — the marketplace just isn't available
+        // on this machine yet.
+        return Err(SyncError::NotCloned {
+            name: m.name.clone(),
+        });
     } else {
-        std::fs::create_dir_all(marketplace_cache_root(cache_dir))
-            .context("creating marketplace cache root")?;
+        // refresh=true and .git doesn't exist: attempt to clone.
+        std::fs::create_dir_all(marketplace_cache_root(cache_dir)).map_err(|e| {
+            SyncError::Other(anyhow::anyhow!("creating marketplace cache root: {e}"))
+        })?;
         git.clone(&m.source, &dest)
-            .with_context(|| format!("cloning marketplace '{}' from {}", m.name, m.source))?;
+            .map_err(|e| SyncError::CloneFailed {
+                name: m.name.clone(),
+                source: e,
+            })?;
     }
 
     let head = git.head(&dest);
@@ -282,6 +312,64 @@ mod tests {
         };
         let cache = tempfile::tempdir().unwrap();
         assert!(sync_marketplace(cache.path(), &m, false).is_err());
+    }
+
+    #[test]
+    fn git_not_cloned_on_export_returns_notcloned() {
+        struct NoGit;
+        impl GitBackend for NoGit {
+            fn clone(&self, _: &str, _: &std::path::Path) -> Result<()> {
+                unreachable!("should not attempt clone on export (refresh=false)")
+            }
+            fn pull(&self, _: &std::path::Path) -> Result<()> {
+                unreachable!("should not attempt pull")
+            }
+            fn head(&self, _: &std::path::Path) -> Option<String> {
+                None
+            }
+        }
+
+        let m = Marketplace {
+            name: "remote".into(),
+            source: "https://github.com/example/plugins".into(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let result = sync_marketplace_with(cache.path(), &m, false, &NoGit);
+        match result {
+            Err(SyncError::NotCloned { name }) => {
+                assert_eq!(name, "remote");
+            }
+            other => panic!("expected NotCloned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn git_clone_failure_returns_clonefailed() {
+        struct FailClone;
+        impl GitBackend for FailClone {
+            fn clone(&self, _: &str, _: &std::path::Path) -> Result<()> {
+                anyhow::bail!("simulated clone failure")
+            }
+            fn pull(&self, _: &std::path::Path) -> Result<()> {
+                unreachable!()
+            }
+            fn head(&self, _: &std::path::Path) -> Option<String> {
+                None
+            }
+        }
+
+        let m = Marketplace {
+            name: "broken".into(),
+            source: "https://github.com/example/plugins".into(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let result = sync_marketplace_with(cache.path(), &m, true, &FailClone);
+        match result {
+            Err(SyncError::CloneFailed { name, .. }) => {
+                assert_eq!(name, "broken");
+            }
+            other => panic!("expected CloneFailed, got {other:?}"),
+        }
     }
 
     #[test]
