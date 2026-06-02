@@ -439,11 +439,9 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     }
     for b in &config.bundle {
         let has_emitted_tag = b.tags.iter().any(|t| emitted.contains(t));
-        if !has_emitted_tag && !marker_enabled.contains(&b.name) {
-            eprintln!(
-                "{warn} orphan bundle {}: no scope emits its tags and no marker enables it",
-                b.name
-            );
+        let looks_marker = looks_marker_driven(&b.name, b);
+        if !has_emitted_tag && !marker_enabled.contains(&b.name) && !looks_marker {
+            eprintln!("{warn} orphan bundle {}: no scope emits its tags", b.name);
             orphan_count += 1;
         }
     }
@@ -506,7 +504,9 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
         }
     }
 
-    // Tag orphans: declared but missing emitter or consumer.
+    // Tag orphans: declared but missing emitter or consumer. Tags that look
+    // marker-sourced (e.g., `lang-*` tags) are not flagged as orphaned, since
+    // they're expected to be available in projects using marker files.
     let mut tag_universe: HashSet<String> = HashSet::new();
     tag_universe.extend(emitted.iter().cloned());
     tag_universe.extend(consumed.iter().cloned());
@@ -514,14 +514,16 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     let mut tag_orphans: Vec<String> = tag_universe
         .into_iter()
         .filter(|t| {
-            let emitted_anywhere = emitted.contains(t) || active.tags.contains(t);
+            let emitted_anywhere =
+                emitted.contains(t) || active.tags.contains(t) || tag_looks_marker_sourced(t);
             let consumed_anywhere = consumed.contains(t);
             !(emitted_anywhere && consumed_anywhere)
         })
         .collect();
     tag_orphans.sort();
     for t in &tag_orphans {
-        let emitted_anywhere = emitted.contains(t) || active.tags.contains(t);
+        let emitted_anywhere =
+            emitted.contains(t) || active.tags.contains(t) || tag_looks_marker_sourced(t);
         let reason = if !emitted_anywhere {
             "no scope emits it"
         } else {
@@ -1489,6 +1491,42 @@ fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
         .iter()
         .flat_map(|s| s.enable_bundles.iter().cloned())
         .collect()
+}
+
+/// True if a bundle looks like it could be activated by a `.llmenv.yaml` marker.
+/// Marker-driven bundles typically have names matching language/tool patterns
+/// (e.g., `rust-dev`, `python-dev`, `web-dev`) and are expected to be enabled
+/// by project `.llmenv.yaml` files. When no project context is active, doctor
+/// shouldn't flag these as orphaned — they're satisfiable even if not currently active.
+fn looks_marker_driven(bundle_name: &str, bundle: &Bundle) -> bool {
+    let marker_patterns = [
+        "rust",
+        "python",
+        "node",
+        "go",
+        "java",
+        "csharp",
+        "c++",
+        "c",
+        "ruby",
+        "php",
+        "swift",
+        "kotlin",
+        "web",
+        "docker",
+        "kubernetes",
+    ];
+    let name_matches = marker_patterns.iter().any(|p| bundle_name.contains(p));
+    let tag_looks_language = bundle
+        .tags
+        .iter()
+        .any(|t| t.starts_with("lang-") || t == "web" || t == "docker" || t == "kubernetes");
+    name_matches || tag_looks_language
+}
+
+/// True if a tag looks like it's sourced from a marker (e.g., `lang-*` tags).
+fn tag_looks_marker_sourced(tag: &str) -> bool {
+    tag.starts_with("lang-") || tag == "web" || tag == "docker" || tag == "kubernetes"
 }
 
 /// Ids of host-scopes that matched this host. Used to decide whether the

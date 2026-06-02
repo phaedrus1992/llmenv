@@ -120,7 +120,14 @@ pub fn materialize_with_mode(
 /// Stale llmenv-owned files from a prior render are reconciled separately by
 /// the orchestrator against the owned-set manifest — this function only writes
 /// the current content. Idempotent: re-copying the same bytes is harmless.
+///
+/// If `m.files` is empty, `dest` is not created (skip empty directories). If
+/// `dest` already exists but becomes empty after reconciliation, it will be
+/// cleaned up by the adapter or orchestrator's owned-set reconciliation.
 fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
+    if m.files.is_empty() {
+        return Ok(());
+    }
     std::fs::create_dir_all(dest)?;
     for (rel, abs) in &m.files {
         if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
