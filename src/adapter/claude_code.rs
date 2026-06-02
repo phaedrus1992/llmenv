@@ -1499,7 +1499,7 @@ mod tests {
             tmp.path(),
             &[remote_mcp(
                 "icm",
-                "http://still.local:9092",
+                "http://still.local:9092/mcp",
                 crate::config::McpTransport::Http,
             )],
             None,
@@ -1509,7 +1509,10 @@ mod tests {
             serde_json::from_slice(&std::fs::read(tmp.path().join(CLAUDE_JSON_FILE)).unwrap())
                 .unwrap();
         assert_eq!(doc["mcpServers"]["icm"]["type"], "http");
-        assert_eq!(doc["mcpServers"]["icm"]["url"], "http://still.local:9092");
+        assert_eq!(
+            doc["mcpServers"]["icm"]["url"],
+            "http://still.local:9092/mcp"
+        );
     }
 
     #[test]
