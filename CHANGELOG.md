@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`prune` no longer reports un-removed symlinks as removed** — a symlink whose
+  unlink failed was still counted in the `removed` list, so `llmenv prune`
+  claimed deletions it never made. The failed unlink stays non-fatal (pruning
+  continues) but is now logged and reported under a separate `failed` list, and
+  the CLI surfaces "failed to remove" lines and a count. (#255)
+
 - **Corrupt cache manifest now logged** — a `.llmenv-manifest.json` that fails
   to parse is still treated as "no prior knowledge" (non-fatal, the documented
   behavior), but the discard now emits a `tracing::warn!` instead of being

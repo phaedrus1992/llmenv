@@ -194,6 +194,10 @@ pub enum PruneMode {
 pub struct PruneReport {
     pub removed: Vec<PathBuf>,
     pub kept: usize,
+    /// Entries prune attempted to unlink but could not (a non-fatal symlink
+    /// removal failure — see [`remove_link`]). Kept separate from `removed` so
+    /// the report never claims work it didn't do (#255).
+    pub failed: Vec<PathBuf>,
 }
 
 /// Prune cache folders under `cache_root` according to `mode` (#246).
@@ -306,13 +310,24 @@ fn remove_dir(p: &Path, dry_run: bool, report: &mut PruneReport) -> anyhow::Resu
 }
 
 /// Record a symlink removal, performing the unlink unless `dry_run`.
+///
+/// A failed unlink is non-fatal: pruning continues over the rest of the cache
+/// root. But the failure is recorded in `report.failed` and logged, never
+/// reported as `removed` — claiming a removal that didn't happen misleads the
+/// caller (#255). Under `dry_run` no unlink is attempted, so the entry is
+/// always reported as an intended removal.
 fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
-    if !dry_run {
-        // A failed unlink here is non-fatal: report what we attempted and
-        // continue pruning the rest of the cache root.
-        let _ = std::fs::remove_file(p);
+    if dry_run {
+        report.removed.push(p.to_path_buf());
+        return;
     }
-    report.removed.push(p.to_path_buf());
+    match std::fs::remove_file(p) {
+        Ok(()) => report.removed.push(p.to_path_buf()),
+        Err(e) => {
+            tracing::warn!(path = %p.display(), error = %e, "failed to unlink cache symlink; skipping");
+            report.failed.push(p.to_path_buf());
+        }
+    }
 }
 
 /// Remove cache subdirectories whose newest mtime is older than `older_than`.
@@ -754,6 +769,39 @@ mod tests {
         // The link is gone; the target and its contents survive.
         assert!(!link.exists());
         assert!(outside.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn prune_failed_unlink_recorded_as_failed_not_removed() {
+        // #255: a symlink whose unlink fails must NOT be reported as removed —
+        // that claimed work the prune never did. remove_link stays non-fatal
+        // (pruning continues) but surfaces the failure in `failed`, not `removed`.
+        let mut report = PruneReport::default();
+        // A path under a non-existent parent: the real unlink fails (NotFound),
+        // exercising the failure branch deterministically without perms hacks.
+        let missing = Path::new("/nonexistent-llmenv-255-dir/dangling-link");
+        remove_link(missing, false, &mut report);
+        assert!(
+            report.removed.is_empty(),
+            "a failed unlink must never be reported as removed"
+        );
+        assert_eq!(
+            report.failed,
+            vec![missing.to_path_buf()],
+            "the failed unlink is surfaced in `failed`"
+        );
+    }
+
+    #[test]
+    fn prune_dry_run_symlink_reports_intended_removal() {
+        // Dry-run attempts no unlink, so nothing can fail: the link is still
+        // reported as a would-remove entry and never lands in `failed` (#255
+        // must not regress the dry-run contract).
+        let mut report = PruneReport::default();
+        let missing = Path::new("/nonexistent-llmenv-255-dir/dangling-link");
+        remove_link(missing, true, &mut report);
+        assert_eq!(report.removed, vec![missing.to_path_buf()]);
+        assert!(report.failed.is_empty());
     }
 
     /// Check if a string is exactly a 64-char lowercase hex SHA-256 hash.
