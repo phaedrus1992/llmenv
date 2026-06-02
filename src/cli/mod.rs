@@ -447,7 +447,8 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     }
     for m in &config.mcp {
         let has_emitted_tag = m.tags.iter().any(|t| emitted.contains(t));
-        if !has_emitted_tag {
+        let looks_marker = m.tags.iter().any(|t| tag_looks_marker_sourced(t));
+        if !has_emitted_tag && !looks_marker {
             eprintln!("{warn} orphan mcp {}: no scope emits its tags", m.name);
             orphan_count += 1;
         }
@@ -1493,40 +1494,26 @@ fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
         .collect()
 }
 
-/// True if a bundle looks like it could be activated by a `.llmenv.yaml` marker.
-/// Marker-driven bundles typically have names matching language/tool patterns
-/// (e.g., `rust-dev`, `python-dev`, `web-dev`) and are expected to be enabled
-/// by project `.llmenv.yaml` files. When no project context is active, doctor
-/// shouldn't flag these as orphaned — they're satisfiable even if not currently active.
-fn looks_marker_driven(bundle_name: &str, bundle: &Bundle) -> bool {
-    let marker_patterns = [
-        "rust",
-        "python",
-        "node",
-        "go",
-        "java",
-        "csharp",
-        "c++",
-        "c",
-        "ruby",
-        "php",
-        "swift",
-        "kotlin",
-        "web",
-        "docker",
-        "kubernetes",
-    ];
-    let name_matches = marker_patterns.iter().any(|p| bundle_name.contains(p));
-    let tag_looks_language = bundle
-        .tags
-        .iter()
-        .any(|t| t.starts_with("lang-") || t == "web" || t == "docker" || t == "kubernetes");
-    name_matches || tag_looks_language
+/// True if a tag looks like it's sourced from a marker (e.g., `lang-*` tags).
+/// Only tags with the `lang-` prefix are considered marker-sourced, since that
+/// prefix is enforced by the marker system itself. Exact-string matches like
+/// `"web"` would suppress legitimate orphan warnings for user-defined tags.
+fn tag_looks_marker_sourced(tag: &str) -> bool {
+    tag.starts_with("lang-")
 }
 
-/// True if a tag looks like it's sourced from a marker (e.g., `lang-*` tags).
-fn tag_looks_marker_sourced(tag: &str) -> bool {
-    tag.starts_with("lang-") || tag == "web" || tag == "docker" || tag == "kubernetes"
+/// True if a bundle looks like it could be activated by a `.llmenv.yaml` marker.
+/// Marker-driven bundles typically have names matching language/tool patterns
+/// (e.g., `rust-dev`, `python-dev`) and are expected to be enabled by project
+/// `.llmenv.yaml` files. When no project context is active, doctor shouldn't
+/// flag these as orphaned — they're satisfiable even if not currently active.
+fn looks_marker_driven(bundle_name: &str, bundle: &Bundle) -> bool {
+    let marker_patterns = [
+        "rust", "python", "node", "go", "java", "csharp", "c++", "ruby", "php", "swift", "kotlin",
+    ];
+    let name_matches = marker_patterns.iter().any(|p| bundle_name.contains(p));
+    let tag_matches = bundle.tags.iter().any(|t| tag_looks_marker_sourced(t));
+    name_matches || tag_matches
 }
 
 /// Ids of host-scopes that matched this host. Used to decide whether the
