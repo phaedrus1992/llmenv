@@ -809,7 +809,7 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
             ResolvedMcp {
                 name: "icm".into(),
                 kind: ResolvedKind::Remote {
-                    url: "http://still.local:9100".into(),
+                    url: "http://still.local:9100/mcp".into(),
                     transport: llmenv::config::McpTransport::Http,
                 },
             },
@@ -837,7 +837,7 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
     assert!(servers.contains_key("playwright"), "stdio server present");
     assert_eq!(servers["playwright"]["command"], "npx");
     assert_eq!(servers["icm"]["type"], "http", "remote carries type");
-    assert_eq!(servers["icm"]["url"], "http://still.local:9100");
+    assert_eq!(servers["icm"]["url"], "http://still.local:9100/mcp");
     assert!(
         parsed.get("enabledMcpjsonServers").is_none(),
         "no approval gate in .claude.json"
@@ -902,7 +902,7 @@ fn auto_memory_disabled_when_icm_active() {
         mcps: vec![ResolvedMcp {
             name: "icm".into(),
             kind: ResolvedKind::Remote {
-                url: "http://still.local:9100".into(),
+                url: "http://still.local:9100/mcp".into(),
                 transport: llmenv::config::McpTransport::Http,
             },
         }],
@@ -968,7 +968,7 @@ fn user_native_auto_memory_overrides_icm_default() {
         mcps: vec![ResolvedMcp {
             name: "icm".into(),
             kind: ResolvedKind::Remote {
-                url: "http://still.local:9100".into(),
+                url: "http://still.local:9100/mcp".into(),
                 transport: llmenv::config::McpTransport::Http,
             },
         }],

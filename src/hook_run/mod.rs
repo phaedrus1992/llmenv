@@ -170,7 +170,7 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
 
-    let url = memory_url(&config, &active)
+    let url = memory_url(&config, &active)?
         .ok_or_else(|| anyhow::anyhow!("no memory backend active for this scope"))?;
 
     // Recall query: the sorted active tags. Store content: the llmenv context
@@ -222,12 +222,13 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
 fn memory_url(
     config: &crate::config::Config,
     active: &crate::scope::ActiveScopes,
-) -> Option<String> {
-    let resolved = resolve_mcps(config, &active.tags).ok()?;
-    resolved.into_iter().find_map(|m| match m.kind {
+) -> anyhow::Result<Option<String>> {
+    let resolved = resolve_mcps(config, &active.tags)
+        .map_err(|e| anyhow::anyhow!("failed to resolve MCP servers: {e}"))?;
+    Ok(resolved.into_iter().find_map(|m| match m.kind {
         ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some(url),
         _ => None,
-    })
+    }))
 }
 
 /// Validate a tag to prevent query injection. Tags must be alphanumeric with
