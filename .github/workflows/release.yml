@@ -102,7 +102,9 @@ jobs:
           GH_RUN_ID: ${{ github.run_id }}
         run: |
           ARTIFACT_HASH=$(sha256sum assets/"${ARTIFACT_NAME}" | awk '{print $1}')
+          export ARTIFACT_HASH
           PROVENANCE_FILE="${ARTIFACT_NAME}.intoto.jsonl"
+          export PROVENANCE_FILE
 
           python3 << 'PYTHON_EOF'
           import json
