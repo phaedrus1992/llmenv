@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.1] - 2026-06-02
+
 ### Added
 
 - **CHANGELOG on docs site** — the project changelog is now browseable at the
@@ -268,5 +270,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `~` before calling; a `debug_assert` enforces this in debug builds. (#68)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/{{tag_name}}...HEAD
+[1.0.1]: https://github.com/phaedrus1992/llmenv/compare/v1.0.0...{{tag_name}}
 [1.0.0]: https://github.com/phaedrus1992/llmenv/releases/tag/v1.0.0
