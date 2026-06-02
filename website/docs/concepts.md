@@ -20,7 +20,7 @@ llmenv resolves your environment through one fixed pipeline:
                                                           ┌────────────┐
                                                           │  adapter   │  CLAUDE.md,
                                                           │   emit     │  settings.json,
-                                                          └─────┬──────┘  mcp.json + env vars
+                                                          └─────┬──────┘  .claude.json + env vars
                                                                 ▼
                                                             the agent
 ```
@@ -79,25 +79,30 @@ to a directory under the cache. The folder name depends on the `cache.hashing`
 mode:
 
 ```
-# version mode (default): folder named after the binary version
-<cache_dir>/<adapter>/<version>/
+# loose: folder named by content shape only
+<cache_dir>/<adapter>/<shape>/
 
-# strict mode: folder named after the content hash
+# normal (default): folder named by version + content shape
+<cache_dir>/<adapter>/<version_mm>/<shape>/
+
+# strict: folder named by version tag + full content hash
 <cache_dir>/<adapter>/<VERSION_TAG>-<content_hash>/
 ```
 
-- **`version`** (default) names the folder after the running binary's version at
-  `cache.version_fidelity` (`major` | `major_minor` | `full` | `commit`;
-  default `major_minor`). Content edits re-render **into the same folder**, so a
-  running agent only picks up changes when you relaunch it. This keeps the
-  folder stable for the whole session — important because that folder is the
-  agent's live config dir and holds in-session state llmenv doesn't own (Claude's
-  runtime files, third-party plugin state). The content hash is **not** in the
-  name; it lives in the manifest dotfile (below).
-- **`strict`** names the folder `<VERSION_TAG>-<content_hash>`, where
-  `<content_hash>` is a SHA-256 of the merged manifest — any input change mints a
+Where `shape` is a 12-hex SHA-256 over the active tags ∪ enabled bundles.
+
+- **`loose`** — no version component; the folder is stable across binary upgrades.
+  Content edits re-render into the same folder.
+- **`normal`** (default) — folder name includes the major.minor version. Churns on
+  minor version bumps; stable within a release. Content edits re-render into the
+  same folder, so a running agent only picks up changes when you relaunch it. This
+  keeps the folder stable for the whole session — important because that folder is
+  the agent's live config dir and holds in-session state llmenv doesn't own
+  (Claude's runtime files, third-party plugin state). The content hash lives in
+  the manifest dotfile (below), not the folder name.
+- **`strict`** — folder is `<VERSION_TAG>-<content_hash>`. Any input change mints a
   fresh folder, so re-materializing identical inputs is free and configs never
-  collide. Stronger isolation at the cost of fragmenting the cache.
+  collide. Strongest isolation at the cost of cache fragmentation.
 - Every materialized folder gets a `.llmenv-manifest.json` dotfile recording the
   content hash and the **set of files llmenv owns** in that folder. The hash
   drives drift detection; the owned set drives reconciliation.
@@ -115,10 +120,11 @@ mode:
 ## Adapter emit
 
 An **adapter** renders the materialized manifest into an engine's native shape.
-The Claude Code adapter writes `CLAUDE.md` (rules), `settings.json` (permissions,
-hooks, plugins), and `mcp.json` (MCP servers) — all with `0600` permissions —
-then returns the env vars that point the agent at the directory
-(`CLAUDE_CONFIG_DIR`). It also registers a `SessionStart` hook running
+The Claude Code adapter writes `CLAUDE.md` (rules) and `settings.json`
+(permissions, hooks, plugins) — both with `0600` permissions — and merges
+resolved MCP servers into the `mcpServers` object of `.claude.json` (preserving
+any foreign keys the user or plugins wrote there). It then returns the env vars
+that point the agent at the directory (`CLAUDE_CONFIG_DIR`). It also registers a `SessionStart` hook running
 `llmenv check-stale`, which compares the content hash recorded in the booted
 folder's `.llmenv-manifest.json` against the hash llmenv would render now and
 warns you to restart when they differ. This is what surfaces an in-place

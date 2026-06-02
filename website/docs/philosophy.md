@@ -38,7 +38,7 @@ Each active scope contributes **tags** to the active set — arbitrary labels yo
 
 **Contributors** (bundles, MCP servers, plugins, memory) select on those tags. If *any* of a contributor's tags is in the active set, it fires.
 
-The result is **materialized** into a content-hashed config directory. The adapter (e.g. the Claude Code adapter) emits agent-native files (`settings.json`, `mcp.json`, `CLAUDE.md`) into it and sets the agent's config pointer there.
+The result is **materialized** into a content-hashed config directory. The adapter (e.g. the Claude Code adapter) writes `settings.json` and `CLAUDE.md` into it, merges MCP servers into `.claude.json`, and sets the agent's config pointer there.
 
 The shell hook re-evaluates on every prompt. Move networks, move into a new repo — the right config follows you, automatically.
 
@@ -54,7 +54,7 @@ Capabilities are declared once in an engine-neutral vocabulary (`capabilities.pe
 
 ### Content-hashed materialization
 
-The materialized folder is named after your binary version (or, in strict mode, a content hash of the merged manifest). Identical inputs are free — no re-rendering. The manifest dotfile tracks which files llmenv owns; re-renders clean up stale files without touching anything it didn't create. Foreign state (a plugin's runtime files, Claude's session cache) survives config edits.
+The materialized folder is named after your binary version and content shape (`normal` mode, the default), or a precise content hash (`strict` mode). Identical inputs are free — no re-rendering. The manifest dotfile tracks which files llmenv owns; re-renders clean up stale files without touching anything it didn't create. Foreign state (a plugin's runtime files, Claude's session cache) survives config edits.
 
 ### Precedence
 

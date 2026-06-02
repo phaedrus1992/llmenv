@@ -73,14 +73,11 @@ permissions):
 |------|------|
 | `CLAUDE.md` | the merged `AGENTS.md` / rules content |
 | `settings.json` | permissions, hooks, plugins (+ `native_*` overrides, + `native:` catch-all) |
-| `mcp.json` | resolved MCP servers (+ `native_mcp`) |
+| `.claude.json` | resolved MCP servers upserted into `mcpServers`; foreign keys preserved (+ `native_mcp`) |
 
 It also:
 
 - sets `CLAUDE_CONFIG_DIR` to the materialized directory so Claude Code uses it;
-- derives `enabledMcpjsonServers` from every server llmenv emits (so the agent
-  never re-prompts to approve a server llmenv configured) — a `native_mcp`
-  override of the key replaces the derived list;
 - emits `autoMemoryEnabled: false` when the ICM memory server is present, so ICM
   and Claude's native auto-memory don't both write (a `native` override wins);
 - registers a `SessionStart` hook running `llmenv check-stale` for drift
