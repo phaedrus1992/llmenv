@@ -43,7 +43,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Operations',
-      items: ['troubleshooting', 'homebrew-tap-setup', 'release', 'maintainers'],
+      items: ['troubleshooting', 'homebrew-tap-setup', 'release', 'changelog', 'maintainers'],
     },
     {
       type: 'category',
