@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.2] - 2026-06-02
+
 ### Fixed
 
 - Fix marketplace sync failure silently dropping `CLAUDE_CONFIG_DIR` on export;
