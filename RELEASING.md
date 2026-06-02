@@ -93,6 +93,20 @@ all three deliberately:
 If branch protection is ever lifted for the maintainer, `release.toml` can be
 switched to `tag = true` / `push = true` for a single-command release.
 
+## Security of the release trigger
+
+The release is fired by the `v*` tag, and `release.yml` hands `CARGO_REGISTRY_TOKEN`
+and `HOMEBREW_TAP_TOKEN` to whatever commit that tag points at. Two protections
+keep an attacker from pushing a malicious tag straight to a publish:
+
+- **`main` is branch-protected** so release content lands through review.
+- **Add a tag protection rule for `v*`** (repo Settings → Tags) so only
+  maintainers can create release tags.
+
+If either protection is ever lifted, **rotate both secrets** — a contributor who
+can push a `v*` tag or an arbitrary `main` commit can otherwise publish under the
+project's crates.io and Homebrew credentials.
+
 ## The 1.0.0 release
 
 1.0.0 is already prepared on `main`: `Cargo.toml` is at `1.0.0` and `CHANGELOG.md`
