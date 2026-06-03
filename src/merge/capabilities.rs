@@ -72,6 +72,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let native_hooks = merge_native_feature(contributors, |c| &c.native_hooks);
     let native_plugins = merge_native_feature(contributors, |c| &c.native_plugins);
     let native_mcp = merge_native_feature(contributors, |c| &c.native_mcp);
+    let native = merge_native_flat(contributors);
 
     // Scalar resolution: highest precedence wins (not positional order).
     // #227: resolve by explicit precedence comparison, matching resolve_default_mode.
@@ -99,6 +100,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         native_hooks,
         native_plugins,
         native_mcp,
+        native,
     })
 }
 
@@ -127,6 +129,36 @@ fn merge_native_feature(
                     let mut fragment = fragment.clone();
                     normalize_yaml(&mut fragment);
                     merged.insert(engine.clone(), fragment);
+                }
+            }
+        }
+    }
+    merged
+}
+
+/// Merge the flat `native:` map across all contributors.
+///
+/// Unlike `merge_native_feature`, which is keyed per-engine, this operates on
+/// a flat `BTreeMap<String, Value>` where each top-level key is deep-merged
+/// ([`merge_yaml`]) across contributors in ascending precedence order so the
+/// highest-precedence contributor wins on any scalar collision.
+fn merge_native_flat(
+    contributors: &[CapabilityContributor],
+) -> BTreeMap<String, serde_yaml::Value> {
+    let mut ordered: Vec<&CapabilityContributor> = contributors.iter().collect();
+    ordered.sort_by_key(|c| c.precedence);
+
+    let mut merged: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+    for c in &ordered {
+        for (key, fragment) in &c.capabilities.native {
+            match merged.get_mut(key) {
+                Some(existing) => merge_yaml(existing, fragment.clone()),
+                None => {
+                    // Normalize on first insert so the result matches what the
+                    // merge path produces — same rationale as merge_native_feature.
+                    let mut fragment = fragment.clone();
+                    normalize_yaml(&mut fragment);
+                    merged.insert(key.clone(), fragment);
                 }
             }
         }
@@ -385,6 +417,58 @@ mod tests {
         assert_eq!(out.permissions.default_mode, None);
     }
 
+    // #291: native: blocks from bundle.yaml must be merged into the output.
+    #[test]
+    fn bundle_native_is_merged_into_capabilities() {
+        let mut native = BTreeMap::new();
+        native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str::<serde_yaml::Value>("statusLine: test").unwrap(),
+        );
+        let caps = Capabilities {
+            native,
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("bundle 'x'", 1, caps)]).unwrap();
+        assert!(
+            out.native.contains_key("claude_code"),
+            "native: from bundle must appear in merged output"
+        );
+    }
+
+    #[test]
+    fn native_blocks_deep_merge_across_contributors() {
+        let mut native_a = BTreeMap::new();
+        native_a.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str::<serde_yaml::Value>("keyA: 1").unwrap(),
+        );
+        let mut native_b = BTreeMap::new();
+        native_b.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str::<serde_yaml::Value>("keyB: 2").unwrap(),
+        );
+        let caps_a = Capabilities {
+            native: native_a,
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            native: native_b,
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        let map = out.native["claude_code"].as_mapping().expect("mapping");
+        assert!(
+            map.contains_key(serde_yaml::Value::String("keyA".into())),
+            "keyA from lower-precedence contributor must survive"
+        );
+        assert!(
+            map.contains_key(serde_yaml::Value::String("keyB".into())),
+            "keyB from higher-precedence contributor must survive"
+        );
+    }
+
     mod props {
         use super::*;
         use proptest::prelude::*;
@@ -398,26 +482,45 @@ mod tests {
             })
         }
 
-        // Contributors carrying only list fields (allow rules + plugins), so the
-        // scalar default_mode never forces a same-precedence conflict. precedence
-        // is irrelevant to list merging and left at a constant.
+        // Contributors carrying only list fields (allow rules + plugins) plus a
+        // small native: map, so the scalar default_mode never forces a
+        // same-precedence conflict. precedence is irrelevant to list merging and
+        // left at a constant.
         fn arb_list_contributor() -> impl Strategy<Value = CapabilityContributor> {
             (
                 "[a-z]{1,4}",
                 prop::collection::vec(arb_rule(), 0..4),
                 prop::collection::vec("[a-z:]{1,6}", 0..4),
+                prop::option::of(("[a-z]{1,4}", "[a-z]{1,6}").prop_map(|(key, val)| {
+                    let mut m = serde_yaml::Mapping::new();
+                    m.insert(
+                        serde_yaml::Value::String(key),
+                        serde_yaml::Value::String(val),
+                    );
+                    serde_yaml::Value::Mapping(m)
+                })),
             )
-                .prop_map(|(name, allow, plugins)| CapabilityContributor {
-                    name,
-                    precedence: 1,
-                    capabilities: Capabilities {
-                        permissions: Permissions {
-                            allow,
+                .prop_map(|(name, allow, plugins, native_val)| {
+                    let native = if let Some(val) = native_val {
+                        let mut n = BTreeMap::new();
+                        n.insert("test_engine".to_string(), val);
+                        n
+                    } else {
+                        BTreeMap::new()
+                    };
+                    CapabilityContributor {
+                        name,
+                        precedence: 1,
+                        capabilities: Capabilities {
+                            permissions: Permissions {
+                                allow,
+                                ..Default::default()
+                            },
+                            plugins,
+                            native,
                             ..Default::default()
                         },
-                        plugins,
-                        ..Default::default()
-                    },
+                    }
                 })
         }
 

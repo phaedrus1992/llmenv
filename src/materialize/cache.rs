@@ -165,6 +165,15 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
             mk.install_location.as_deref().unwrap_or("").as_bytes(),
         );
     }
+    // Mix in native: passthrough values so adding/editing a native key (top-level
+    // or bundle-contributed) invalidates the cache and forces re-materialization (#292).
+    h.update((m.native.len() as u64).to_le_bytes());
+    for (key, value) in &m.native {
+        update_len_prefixed(&mut h, key.as_bytes());
+        let serialized = serde_yaml::to_string(value)
+            .map_err(|e| anyhow::anyhow!("serializing native key '{key}': {e}"))?;
+        update_len_prefixed(&mut h, serialized.as_bytes());
+    }
     Ok(hex::encode(h.finalize()))
 }
 
@@ -989,5 +998,59 @@ mod tests {
                     "non-hex characters should not be valid");
             }
         }
+    }
+
+    // #292: editing a native: key must invalidate the hash.
+    #[test]
+    fn hash_manifest_changes_when_native_changes() {
+        use std::collections::BTreeMap;
+
+        let mut native_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        native_a.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("statusLine: hello").unwrap(),
+        );
+        let mut native_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        native_b.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("statusLine: world").unwrap(),
+        );
+
+        let manifest_a = MergedManifest {
+            native: native_a,
+            ..MergedManifest::default()
+        };
+        let manifest_b = MergedManifest {
+            native: native_b,
+            ..MergedManifest::default()
+        };
+
+        assert_ne!(
+            hash_manifest(&manifest_a).unwrap(),
+            hash_manifest(&manifest_b).unwrap(),
+            "changing a native: value must produce a different hash"
+        );
+    }
+
+    // Hashing is stable: the same manifest always produces the same hash.
+    #[test]
+    fn hash_manifest_native_is_stable() {
+        use std::collections::BTreeMap;
+
+        let mut native: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("statusLine: stable").unwrap(),
+        );
+        let manifest = MergedManifest {
+            native,
+            ..MergedManifest::default()
+        };
+
+        assert_eq!(
+            hash_manifest(&manifest).unwrap(),
+            hash_manifest(&manifest).unwrap(),
+            "hash_manifest must be deterministic"
+        );
     }
 }

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use llmenv::config::{Capabilities, Config};
-use llmenv::merge::merge;
+use llmenv::merge::{BundleRef, merge};
 
 /// Issue #96: Config deserializes top-level native.claude_code passthrough
 #[test]
@@ -107,6 +107,41 @@ native_plugins:
         caps.native_plugins.contains_key("claude_code"),
         "native_plugins should have claude_code key"
     );
+}
+
+/// Issue #291: a bundle.yaml with a native: block must appear in MergedManifest.native.
+/// Repro: bundle contributes native.claude_code.statusLine — it was silently dropped before this fix.
+#[test]
+fn bundle_native_block_is_rendered_in_merged_output() {
+    use std::collections::BTreeMap;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle_dir = tmp.path().join("my-bundle");
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+    std::fs::write(
+        bundle_dir.join("bundle.yaml"),
+        "native:\n  claude_code:\n    statusLine: foo\n",
+    )
+    .unwrap();
+
+    let bundle = BundleRef {
+        name: "my-bundle".into(),
+        path: bundle_dir,
+        precedence: 1,
+    };
+
+    let merged = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).expect("merge");
+
+    assert!(
+        merged.native.contains_key("claude_code"),
+        "bundle native: block must appear in MergedManifest.native (repro #291)"
+    );
+    let status = merged.native["claude_code"]
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("statusLine".into())))
+        .and_then(serde_yaml::Value::as_str)
+        .expect("statusLine must be present");
+    assert_eq!(status, "foo", "statusLine value must be preserved");
 }
 
 /// Issue #97: Capabilities carries a container-level `native_mcp` map (per-engine
