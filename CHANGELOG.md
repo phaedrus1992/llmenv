@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add `effort_level` and `advisor_size` as first-class capability fields; rendered
+  into `settings.json` as `effortLevel` and `advisorSize` for engine adapters to
+  consume (`advisor_size` uses generic sizes `"small"`, `"medium"`, `"large"` so
+  adapters map to engine-specific models via `native` overrides)
+- Add `env` field to `NetworkScope`, `HostScope`, and `UserScope`; environment
+  variables declared on a scope are injected when that scope matches, extending
+  the existing bundle-level env-var pattern to all scope types
+
+### Changed
+
+- Rename `bundle.vars` to `bundle.env`; the old key `vars` is still accepted as
+  a backward-compatible alias so existing configs continue to work
+
 ## [1.0.5] - 2026-06-03
 
 ### Changed
