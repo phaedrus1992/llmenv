@@ -158,6 +158,11 @@ pub struct Capabilities {
     /// Opaque to llmenv.
     #[serde(default)]
     pub native_mcp: std::collections::BTreeMap<String, serde_yaml::Value>,
+    /// Per-engine opaque passthrough values merged verbatim into the engine's
+    /// native config by adapters. Identical shape to the top-level `native:`
+    /// block in `config.yaml`; bundle contributions deep-merge with it.
+    #[serde(default)]
+    pub native: std::collections::BTreeMap<String, serde_yaml::Value>,
 }
 
 impl Capabilities {
@@ -171,6 +176,7 @@ impl Capabilities {
             && self.native_hooks.is_empty()
             && self.native_plugins.is_empty()
             && self.native_mcp.is_empty()
+            && self.native.is_empty()
     }
 }
 

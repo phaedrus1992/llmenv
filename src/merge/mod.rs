@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Capabilities;
 use crate::mcp::resolve::ResolvedMcp;
 use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
+use crate::util::{merge_yaml, normalize_yaml};
 use capabilities::{CapabilityContributor, merge_capabilities};
 use rules::RuleFile;
 
@@ -51,7 +52,8 @@ pub struct MergedManifest {
     pub capabilities: Capabilities,
     /// Per-engine opaque passthrough values (e.g. `claude_code: {alwaysThinkingEnabled: true}`).
     /// These are merged verbatim into the engine's native config by adapters.
-    /// Source: top-level `config.yaml` `native:` block.
+    /// Sources: top-level `config.yaml` `native:` block (highest precedence) deep-merged
+    /// with `native:` blocks from each selected bundle's `bundle.yaml`.
     pub native: std::collections::BTreeMap<String, serde_yaml::Value>,
 }
 
@@ -102,12 +104,29 @@ pub fn merge(
         }
     }
 
+    let merged_caps = merge_capabilities(&contributors)?;
+
+    // Merge bundle native: blocks (lower precedence) with the top-level native:
+    // block (highest precedence). Start with bundle contributions, then overlay
+    // the top-level so it always wins on scalar collisions.
+    let mut merged_native = merged_caps.native.clone();
+    for (key, value) in native {
+        match merged_native.get_mut(key) {
+            Some(existing) => merge_yaml(existing, value.clone()),
+            None => {
+                let mut normalized = value.clone();
+                normalize_yaml(&mut normalized);
+                merged_native.insert(key.clone(), normalized);
+            }
+        }
+    }
+
     Ok(MergedManifest {
         agents_md: agents_md::concat(&agents_parts),
         files,
         rules: rule_files,
-        native: native.clone(),
-        capabilities: merge_capabilities(&contributors)?,
+        native: merged_native,
+        capabilities: merged_caps,
         ..MergedManifest::default()
     })
 }
@@ -160,4 +179,101 @@ fn walk(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use tempfile::tempdir;
+
+    // #291: a bundle.yaml with a native: block must contribute to MergedManifest.native.
+    #[test]
+    fn bundle_native_block_appears_in_merged_output() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("my-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "native:\n  claude_code:\n    statusLine: bundle-value\n",
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "my-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+
+        assert!(
+            manifest.native.contains_key("claude_code"),
+            "bundle native: block must appear in MergedManifest.native"
+        );
+    }
+
+    // Top-level native: must win over bundle native: on scalar collision.
+    #[test]
+    fn top_level_native_wins_over_bundle_native_on_collision() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "native:\n  claude_code:\n    key: from-bundle\n",
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let mut top_native: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        top_native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: from-top").unwrap(),
+        );
+
+        let manifest = merge(&Capabilities::default(), &top_native, &[bundle]).unwrap();
+
+        let val = manifest.native["claude_code"]
+            .as_mapping()
+            .and_then(|m| m.get(serde_yaml::Value::String("key".into())))
+            .and_then(serde_yaml::Value::as_str)
+            .expect("key must be present");
+        assert_eq!(val, "from-top", "top-level native: must win over bundle");
+    }
+
+    // Top-level-only native insert must be normalized the same way as a bundle-contributed insert.
+    // A sequence value contributed via top-level native: must compare equal (after YAML round-trip)
+    // to the same sequence contributed via a bundle, because both paths normalize.
+    #[test]
+    fn top_level_native_insert_is_normalized() {
+        // A sequence contributed only via top-level native: (no bundle collision).
+        // After normalize_yaml the sequence tags are stripped, so a round-trip
+        // produces the canonical form rather than a tagged representation.
+        let mut top_native: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        top_native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("seq:\n  - one\n  - two\n").unwrap(),
+        );
+
+        let manifest = merge(&Capabilities::default(), &top_native, &[]).unwrap();
+
+        let val = manifest
+            .native
+            .get("claude_code")
+            .expect("claude_code key must be present");
+
+        // After normalization the mapping tag must be absent (plain, not tagged).
+        let re_serialized = serde_yaml::to_string(val).expect("must serialize");
+        assert!(
+            !re_serialized.contains("!!"),
+            "normalized value must not contain YAML tags: {re_serialized}"
+        );
+    }
 }

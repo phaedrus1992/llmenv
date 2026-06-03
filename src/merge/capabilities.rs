@@ -72,6 +72,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let native_hooks = merge_native_feature(contributors, |c| &c.native_hooks);
     let native_plugins = merge_native_feature(contributors, |c| &c.native_plugins);
     let native_mcp = merge_native_feature(contributors, |c| &c.native_mcp);
+    let native = merge_native_flat(contributors);
 
     // Scalar resolution: highest precedence wins (not positional order).
     // #227: resolve by explicit precedence comparison, matching resolve_default_mode.
@@ -99,6 +100,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         native_hooks,
         native_plugins,
         native_mcp,
+        native,
     })
 }
 
@@ -132,6 +134,19 @@ fn merge_native_feature(
         }
     }
     merged
+}
+
+/// Merge the flat `native:` map across all contributors.
+///
+/// The flat `native:` map has the same structure as per-engine maps: each
+/// top-level key is deep-merged ([`merge_yaml`]) across contributors in
+/// ascending precedence order so the highest-precedence contributor wins on any
+/// scalar collision.  Delegates to [`merge_native_feature`] with the `native`
+/// field accessor.
+fn merge_native_flat(
+    contributors: &[CapabilityContributor],
+) -> BTreeMap<String, serde_yaml::Value> {
+    merge_native_feature(contributors, |c| &c.native)
 }
 
 /// Resolve the `default_mode` scalar across contributors: highest precedence
@@ -385,6 +400,58 @@ mod tests {
         assert_eq!(out.permissions.default_mode, None);
     }
 
+    // #291: native: blocks from bundle.yaml must be merged into the output.
+    #[test]
+    fn bundle_native_is_merged_into_capabilities() {
+        let mut native = BTreeMap::new();
+        native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str::<serde_yaml::Value>("statusLine: test").unwrap(),
+        );
+        let caps = Capabilities {
+            native,
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("bundle 'x'", 1, caps)]).unwrap();
+        assert!(
+            out.native.contains_key("claude_code"),
+            "native: from bundle must appear in merged output"
+        );
+    }
+
+    #[test]
+    fn native_blocks_deep_merge_across_contributors() {
+        let mut native_a = BTreeMap::new();
+        native_a.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str::<serde_yaml::Value>("keyA: 1").unwrap(),
+        );
+        let mut native_b = BTreeMap::new();
+        native_b.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str::<serde_yaml::Value>("keyB: 2").unwrap(),
+        );
+        let caps_a = Capabilities {
+            native: native_a,
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            native: native_b,
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        let map = out.native["claude_code"].as_mapping().expect("mapping");
+        assert!(
+            map.contains_key(serde_yaml::Value::String("keyA".into())),
+            "keyA from lower-precedence contributor must survive"
+        );
+        assert!(
+            map.contains_key(serde_yaml::Value::String("keyB".into())),
+            "keyB from higher-precedence contributor must survive"
+        );
+    }
+
     mod props {
         use super::*;
         use proptest::prelude::*;
@@ -398,26 +465,45 @@ mod tests {
             })
         }
 
-        // Contributors carrying only list fields (allow rules + plugins), so the
-        // scalar default_mode never forces a same-precedence conflict. precedence
-        // is irrelevant to list merging and left at a constant.
+        // Contributors carrying only list fields (allow rules + plugins) plus a
+        // small native: map, so the scalar default_mode never forces a
+        // same-precedence conflict.
+        //
+        // Varies engine names, precedence (1-10), and number of engines (0-3) to
+        // exercise merge_native_flat across realistic multi-engine,
+        // multi-precedence scenarios.
         fn arb_list_contributor() -> impl Strategy<Value = CapabilityContributor> {
+            let arb_engine_entry =
+                ("[a-z_]{1,8}", "[a-z]{1,4}", "[a-z]{1,6}").prop_map(|(engine, key, val)| {
+                    let mut m = serde_yaml::Mapping::new();
+                    m.insert(
+                        serde_yaml::Value::String(key),
+                        serde_yaml::Value::String(val),
+                    );
+                    (engine, serde_yaml::Value::Mapping(m))
+                });
             (
                 "[a-z]{1,4}",
+                1u8..=10,
                 prop::collection::vec(arb_rule(), 0..4),
                 prop::collection::vec("[a-z:]{1,6}", 0..4),
+                prop::collection::vec(arb_engine_entry, 0..3),
             )
-                .prop_map(|(name, allow, plugins)| CapabilityContributor {
-                    name,
-                    precedence: 1,
-                    capabilities: Capabilities {
-                        permissions: Permissions {
-                            allow,
+                .prop_map(|(name, precedence, allow, plugins, engine_entries)| {
+                    let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
+                    CapabilityContributor {
+                        name,
+                        precedence,
+                        capabilities: Capabilities {
+                            permissions: Permissions {
+                                allow,
+                                ..Default::default()
+                            },
+                            plugins,
+                            native,
                             ..Default::default()
                         },
-                        plugins,
-                        ..Default::default()
-                    },
+                    }
                 })
         }
 

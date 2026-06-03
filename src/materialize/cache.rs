@@ -165,12 +165,44 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
             mk.install_location.as_deref().unwrap_or("").as_bytes(),
         );
     }
+    // Mix in native: passthrough values so adding/editing a native key (top-level
+    // or bundle-contributed) invalidates the cache and forces re-materialization (#292).
+    h.update((m.native.len() as u64).to_le_bytes());
+    for (key, value) in &m.native {
+        update_len_prefixed(&mut h, key.as_bytes());
+        let serialized = serde_yaml::to_string(value)
+            .map_err(|e| anyhow::anyhow!("serializing native key '{key}': {e}"))?;
+        update_len_prefixed(&mut h, serialized.as_bytes());
+    }
+    // Mix in capability-native fragments rendered by adapters but previously
+    // unhashed: native_hooks, native_plugins, native_mcp. Same encoding as
+    // m.native above — engine key + serialized YAML fragment.
+    hash_native_capability_map(&mut h, &m.capabilities.native_hooks)?;
+    hash_native_capability_map(&mut h, &m.capabilities.native_plugins)?;
+    hash_native_capability_map(&mut h, &m.capabilities.native_mcp)?;
     Ok(hex::encode(h.finalize()))
 }
 
 fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
     h.update((data.len() as u64).to_le_bytes());
     h.update(data);
+}
+
+/// Hash a per-engine YAML map (e.g. `capabilities.native_hooks`) into `h`.
+/// Uses the same length-prefix encoding as `m.native` so the two are domain-
+/// separated by the call order rather than a prefix byte.
+fn hash_native_capability_map(
+    h: &mut Sha256,
+    map: &std::collections::BTreeMap<String, serde_yaml::Value>,
+) -> anyhow::Result<()> {
+    h.update((map.len() as u64).to_le_bytes());
+    for (key, value) in map {
+        update_len_prefixed(h, key.as_bytes());
+        let serialized = serde_yaml::to_string(value)
+            .map_err(|e| anyhow::anyhow!("serializing native capability key '{key}': {e}"))?;
+        update_len_prefixed(h, serialized.as_bytes());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -989,5 +1021,176 @@ mod tests {
                     "non-hex characters should not be valid");
             }
         }
+    }
+
+    // #292: editing a native: key must invalidate the hash.
+    #[test]
+    fn hash_manifest_changes_when_native_changes() {
+        use std::collections::BTreeMap;
+
+        let mut native_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        native_a.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("statusLine: hello").unwrap(),
+        );
+        let mut native_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        native_b.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("statusLine: world").unwrap(),
+        );
+
+        let manifest_a = MergedManifest {
+            native: native_a,
+            ..MergedManifest::default()
+        };
+        let manifest_b = MergedManifest {
+            native: native_b,
+            ..MergedManifest::default()
+        };
+
+        assert_ne!(
+            hash_manifest(&manifest_a).unwrap(),
+            hash_manifest(&manifest_b).unwrap(),
+            "changing a native: value must produce a different hash"
+        );
+    }
+
+    // Editing a capabilities.native_hooks key must invalidate the hash.
+    #[test]
+    fn hash_manifest_changes_when_native_hooks_changes() {
+        use crate::config::Capabilities;
+        use std::collections::BTreeMap;
+
+        let mut hooks_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        hooks_a.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: value-a").unwrap(),
+        );
+        let mut hooks_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        hooks_b.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: value-b").unwrap(),
+        );
+
+        let manifest_a = MergedManifest {
+            capabilities: Capabilities {
+                native_hooks: hooks_a,
+                ..Capabilities::default()
+            },
+            ..MergedManifest::default()
+        };
+        let manifest_b = MergedManifest {
+            capabilities: Capabilities {
+                native_hooks: hooks_b,
+                ..Capabilities::default()
+            },
+            ..MergedManifest::default()
+        };
+
+        assert_ne!(
+            hash_manifest(&manifest_a).unwrap(),
+            hash_manifest(&manifest_b).unwrap(),
+            "changing a capabilities.native_hooks value must produce a different hash"
+        );
+    }
+
+    // Editing a capabilities.native_plugins key must invalidate the hash.
+    #[test]
+    fn hash_manifest_changes_when_native_plugins_changes() {
+        use crate::config::Capabilities;
+        use std::collections::BTreeMap;
+
+        let mut plugins_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        plugins_a.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: value-a").unwrap(),
+        );
+        let mut plugins_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        plugins_b.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: value-b").unwrap(),
+        );
+
+        let manifest_a = MergedManifest {
+            capabilities: Capabilities {
+                native_plugins: plugins_a,
+                ..Capabilities::default()
+            },
+            ..MergedManifest::default()
+        };
+        let manifest_b = MergedManifest {
+            capabilities: Capabilities {
+                native_plugins: plugins_b,
+                ..Capabilities::default()
+            },
+            ..MergedManifest::default()
+        };
+
+        assert_ne!(
+            hash_manifest(&manifest_a).unwrap(),
+            hash_manifest(&manifest_b).unwrap(),
+            "changing a capabilities.native_plugins value must produce a different hash"
+        );
+    }
+
+    // Editing a capabilities.native_mcp key must invalidate the hash.
+    #[test]
+    fn hash_manifest_changes_when_native_mcp_changes() {
+        use crate::config::Capabilities;
+        use std::collections::BTreeMap;
+
+        let mut mcp_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        mcp_a.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: value-a").unwrap(),
+        );
+        let mut mcp_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        mcp_b.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: value-b").unwrap(),
+        );
+
+        let manifest_a = MergedManifest {
+            capabilities: Capabilities {
+                native_mcp: mcp_a,
+                ..Capabilities::default()
+            },
+            ..MergedManifest::default()
+        };
+        let manifest_b = MergedManifest {
+            capabilities: Capabilities {
+                native_mcp: mcp_b,
+                ..Capabilities::default()
+            },
+            ..MergedManifest::default()
+        };
+
+        assert_ne!(
+            hash_manifest(&manifest_a).unwrap(),
+            hash_manifest(&manifest_b).unwrap(),
+            "changing a capabilities.native_mcp value must produce a different hash"
+        );
+    }
+
+    // Hashing is stable: the same manifest always produces the same hash.
+    #[test]
+    fn hash_manifest_native_is_stable() {
+        use std::collections::BTreeMap;
+
+        let mut native: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("statusLine: stable").unwrap(),
+        );
+        let manifest = MergedManifest {
+            native,
+            ..MergedManifest::default()
+        };
+
+        assert_eq!(
+            hash_manifest(&manifest).unwrap(),
+            hash_manifest(&manifest).unwrap(),
+            "hash_manifest must be deterministic"
+        );
     }
 }
