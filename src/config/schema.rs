@@ -142,13 +142,10 @@ pub struct Capabilities {
     /// — resolves by scope precedence. Engine-specific via native override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_level: Option<String>,
-    /// Advisor/expert model to use (e.g., model name). Optional scalar — resolves by
-    /// scope precedence. Engine-specific via native override.
+    /// Advisor/expert capability size ("small", "medium", "large"). Optional scalar — resolves by
+    /// scope precedence. Adapters map to their engine-specific models via native overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advisor_model: Option<String>,
-    /// Environment variables to inject into agent context. A list — concatenates.
-    #[serde(default)]
-    pub env: Vec<EnvVar>,
+    pub advisor_size: Option<String>,
     /// Per-engine native permission rule lists, keyed by engine name. The
     /// engine-only override for permissions — raw rule strings in the engine's
     /// own grammar, appended verbatim. Sibling to the neutral `permissions`
@@ -184,8 +181,7 @@ impl Capabilities {
             && self.plugins.is_empty()
             && self.auto_memory_enabled.is_none()
             && self.effort_level.is_none()
-            && self.advisor_model.is_none()
-            && self.env.is_empty()
+            && self.advisor_size.is_none()
             && self.native_permissions.is_empty()
             && self.native_hooks.is_empty()
             && self.native_plugins.is_empty()
@@ -315,6 +311,9 @@ pub struct NetworkScope {
     pub r#match: NetworkMatch,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -330,6 +329,9 @@ pub struct HostScope {
     pub r#match: HostMatch,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -343,6 +345,9 @@ pub struct UserScope {
     pub r#match: UserMatch,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -355,8 +360,10 @@ pub struct Bundle {
     pub name: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default)]
-    pub vars: std::collections::BTreeMap<String, String>,
+    /// Environment variables to inject when this bundle is selected.
+    /// Deprecated name `vars` accepted for backward compat.
+    #[serde(default, alias = "vars")]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// A reachable address for a named host, used by the `memory` backend to
