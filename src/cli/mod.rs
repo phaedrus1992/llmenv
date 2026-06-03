@@ -648,7 +648,7 @@ fn shell_escape(s: &str) -> String {
 /// Applied to adapter-returned env vars before they propagate, so the
 /// `export NAME=...` contract holds regardless of which emission path runs.
 fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Result<()> {
-    for (name, _) in vars {
+    for (name, _) in env {
         validate_var_name(name)?;
     }
     Ok(())

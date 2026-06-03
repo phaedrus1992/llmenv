@@ -619,6 +619,7 @@ mod tests {
                             cidr: cidr.clone(),
                         },
                         tags: vec![],
+                        env: Default::default(),
                     })
                     .collect();
                 let host = ids
@@ -631,6 +632,7 @@ mod tests {
                             hostname: hostname.clone(),
                         },
                         tags: vec![],
+                        env: Default::default(),
                     })
                     .collect();
                 let user = ids
@@ -641,6 +643,7 @@ mod tests {
                         id: id.clone(),
                         r#match: UserMatch { user: user.clone() },
                         tags: vec![],
+                        env: Default::default(),
                     })
                     .collect();
                 (network, host, user)
@@ -737,104 +740,106 @@ mod tests {
     }
 
     proptest! {
-        #[test]
-        fn prop_config_yaml_roundtrip(config in arb_config()) {
-            let yaml_str = serde_yaml::to_string(&config).expect("serialize failed");
-            let deserialized: Config = serde_yaml::from_str(&yaml_str).expect("deserialize failed");
-            prop_assert_eq!(config, deserialized, "roundtrip should preserve config");
-        }
-
-        #[test]
-        fn prop_config_validate_enforces_unique_scope_ids(
-            id in arb_string(),
-        ) {
-            let network = vec![
-                NetworkScope {
-                    id: id.clone(),
-                    r#match: NetworkMatch { gateway_mac: None, ssid: None, cidr: None },
-                    tags: vec![],
-                },
-                NetworkScope {
-                    id, // Duplicate ID
-                    r#match: NetworkMatch { gateway_mac: None, ssid: None, cidr: None },
-                    tags: vec![],
-                },
-            ];
-
-            let config = Config {
-                cache: Cache::default(),
-                capabilities: Default::default(),
-                native: Default::default(),
-                scope: Scopes { network, host: vec![], user: vec![] },
-                bundle: vec![],
-                mcp: vec![],
-                features: None,
-                marketplace: vec![],
-                plugin_collection: vec![],
-                state: Default::default(),
-                host: Default::default(),
-            };
-            prop_assert!(
-                config.validate().is_err(),
-                "config with duplicate scope IDs should fail validation"
-            );
-        }
-
-        #[test]
-        fn prop_config_validate_enforces_bundle_tags(
-            names in prop::collection::vec(arb_string(), 1..3)
-        ) {
-            let mut bundles = names.iter()
-                .map(|name| Bundle { name: name.clone(), tags: vec!["tag1".to_string()], env: Default::default() })
-                .collect::<Vec<_>>();
-            if !bundles.is_empty() {
-                bundles[0].tags.clear();
+            #[test]
+            fn prop_config_yaml_roundtrip(config in arb_config()) {
+                let yaml_str = serde_yaml::to_string(&config).expect("serialize failed");
+                let deserialized: Config = serde_yaml::from_str(&yaml_str).expect("deserialize failed");
+                prop_assert_eq!(config, deserialized, "roundtrip should preserve config");
             }
-            let config = Config {
-                cache: Cache::default(),
-                capabilities: Default::default(),
-                native: Default::default(),
-                scope: Scopes::default(),
-                bundle: bundles,
-                mcp: vec![],
-                features: None,
-                marketplace: vec![],
-                plugin_collection: vec![],
-                state: Default::default(),
-                host: Default::default(),
-            };
-            prop_assert!(
-                config.validate().is_err(),
-                "config with empty bundle tags should fail validation"
-            );
-        }
 
-        #[test]
-        fn prop_config_validate_enforces_unique_bundle_names(
-            name in arb_string(),
-        ) {
-            let config = Config {
-                cache: Cache::default(),
-                capabilities: Default::default(),
-                native: Default::default(),
-                scope: Scopes::default(),
-                bundle: vec![
-                    Bundle { name: name.clone(), tags: vec!["tag1".to_string()], env: Default::default() },
-                    Bundle { name, tags: vec!["tag2".to_string()], env: Default::default() },
-                ],
-                mcp: vec![],
-                features: None,
-                marketplace: vec![],
-                plugin_collection: vec![],
-                state: Default::default(),
-                host: Default::default(),
-            };
-            prop_assert!(
-                config.validate().is_err(),
-                "config with duplicate bundle names should fail validation"
-            );
+            #[test]
+            fn prop_config_validate_enforces_unique_scope_ids(
+                id in arb_string(),
+            ) {
+                let network = vec![
+                    NetworkScope {
+                        id: id.clone(),
+                        r#match: NetworkMatch { gateway_mac: None, ssid: None, cidr: None },
+                        tags: vec![],
+                    env: Default::default(),
+    },
+                    NetworkScope {
+                        id, // Duplicate ID
+                        r#match: NetworkMatch { gateway_mac: None, ssid: None, cidr: None },
+                        tags: vec![],
+                    env: Default::default(),
+    },
+                ];
+
+                let config = Config {
+                    cache: Cache::default(),
+                    capabilities: Default::default(),
+                    native: Default::default(),
+                    scope: Scopes { network, host: vec![], user: vec![] },
+                    bundle: vec![],
+                    mcp: vec![],
+                    features: None,
+                    marketplace: vec![],
+                    plugin_collection: vec![],
+                    state: Default::default(),
+                    host: Default::default(),
+                };
+                prop_assert!(
+                    config.validate().is_err(),
+                    "config with duplicate scope IDs should fail validation"
+                );
+            }
+
+            #[test]
+            fn prop_config_validate_enforces_bundle_tags(
+                names in prop::collection::vec(arb_string(), 1..3)
+            ) {
+                let mut bundles = names.iter()
+                    .map(|name| Bundle { name: name.clone(), tags: vec!["tag1".to_string()], env: Default::default() })
+                    .collect::<Vec<_>>();
+                if !bundles.is_empty() {
+                    bundles[0].tags.clear();
+                }
+                let config = Config {
+                    cache: Cache::default(),
+                    capabilities: Default::default(),
+                    native: Default::default(),
+                    scope: Scopes::default(),
+                    bundle: bundles,
+                    mcp: vec![],
+                    features: None,
+                    marketplace: vec![],
+                    plugin_collection: vec![],
+                    state: Default::default(),
+                    host: Default::default(),
+                };
+                prop_assert!(
+                    config.validate().is_err(),
+                    "config with empty bundle tags should fail validation"
+                );
+            }
+
+            #[test]
+            fn prop_config_validate_enforces_unique_bundle_names(
+                name in arb_string(),
+            ) {
+                let config = Config {
+                    cache: Cache::default(),
+                    capabilities: Default::default(),
+                    native: Default::default(),
+                    scope: Scopes::default(),
+                    bundle: vec![
+                        Bundle { name: name.clone(), tags: vec!["tag1".to_string()], env: Default::default() },
+                        Bundle { name, tags: vec!["tag2".to_string()], env: Default::default() },
+                    ],
+                    mcp: vec![],
+                    features: None,
+                    marketplace: vec![],
+                    plugin_collection: vec![],
+                    state: Default::default(),
+                    host: Default::default(),
+                };
+                prop_assert!(
+                    config.validate().is_err(),
+                    "config with duplicate bundle names should fail validation"
+                );
+            }
         }
-    }
 
     #[test]
     fn test_valid_config_passes_validation() {
@@ -851,6 +856,7 @@ mod tests {
                         cidr: None,
                     },
                     tags: vec![],
+                    env: Default::default(),
                 }],
                 host: vec![],
                 user: vec![],
@@ -885,6 +891,7 @@ mod tests {
                         cidr: Some("192.168.1.0/33".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 host: vec![],
                 user: vec![],
@@ -915,6 +922,7 @@ mod tests {
                         cidr: Some("256.256.256.256/24".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 host: vec![],
                 user: vec![],
@@ -976,6 +984,7 @@ mod tests {
                         cidr: None,
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 host: vec![],
                 user: vec![],
@@ -1006,6 +1015,7 @@ mod tests {
                         cidr: None,
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 host: vec![],
                 user: vec![],
@@ -1035,6 +1045,7 @@ mod tests {
                         hostname: Some("-invalid.local".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 user: vec![],
             },
@@ -1063,6 +1074,7 @@ mod tests {
                         hostname: Some("invalid-".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 user: vec![],
             },
@@ -1091,6 +1103,7 @@ mod tests {
                         hostname: Some("invalid..local".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 user: vec![],
             },
@@ -1121,6 +1134,7 @@ mod tests {
                         hostname: Some(format!("{long_label}.example.com")),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 user: vec![],
             },
@@ -1151,6 +1165,7 @@ mod tests {
                         cidr: Some("01.168.1.0/24".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 host: vec![],
                 user: vec![],
@@ -1180,6 +1195,7 @@ mod tests {
                         hostname: Some("foo-.example.com".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 user: vec![],
             },
@@ -1208,6 +1224,7 @@ mod tests {
                         hostname: Some("foo.-example.com".to_string()),
                     },
                     tags: vec!["tag1".to_string()],
+                    env: Default::default(),
                 }],
                 user: vec![],
             },
@@ -1224,8 +1241,8 @@ mod tests {
 
     #[test]
     fn test_invalid_var_name_starts_with_digit() {
-        let mut vars = std::collections::BTreeMap::new();
-        vars.insert("123var".to_string(), "value".to_string());
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("123var".to_string(), "value".to_string());
         let config = Config {
             cache: Cache::default(),
             capabilities: Default::default(),
@@ -1234,7 +1251,7 @@ mod tests {
             bundle: vec![Bundle {
                 name: "test".to_string(),
                 tags: vec!["tag1".to_string()],
-                vars,
+                env,
             }],
             mcp: vec![],
             features: None,
@@ -1248,8 +1265,8 @@ mod tests {
 
     #[test]
     fn test_invalid_var_name_contains_hyphen() {
-        let mut vars = std::collections::BTreeMap::new();
-        vars.insert("my-var".to_string(), "value".to_string());
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("my-var".to_string(), "value".to_string());
         let config = Config {
             cache: Cache::default(),
             capabilities: Default::default(),
@@ -1258,7 +1275,7 @@ mod tests {
             bundle: vec![Bundle {
                 name: "test".to_string(),
                 tags: vec!["tag1".to_string()],
-                vars,
+                env,
             }],
             mcp: vec![],
             features: None,
@@ -1272,10 +1289,10 @@ mod tests {
 
     #[test]
     fn test_valid_var_names() {
-        let mut vars = std::collections::BTreeMap::new();
-        vars.insert("MY_VAR".to_string(), "value1".to_string());
-        vars.insert("_private".to_string(), "value2".to_string());
-        vars.insert("var123".to_string(), "value3".to_string());
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("MY_VAR".to_string(), "value1".to_string());
+        env.insert("_private".to_string(), "value2".to_string());
+        env.insert("var123".to_string(), "value3".to_string());
         let config = Config {
             cache: Cache::default(),
             capabilities: Default::default(),
@@ -1284,7 +1301,7 @@ mod tests {
             bundle: vec![Bundle {
                 name: "test".to_string(),
                 tags: vec!["tag1".to_string()],
-                vars,
+                env,
             }],
             mcp: vec![],
             features: None,

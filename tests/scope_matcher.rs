@@ -13,6 +13,7 @@ fn cfg() -> Config {
                     hostname: Some("fixed".into()),
                 },
                 tags: vec!["icm-server".into()],
+                env: Default::default(),
             }],
             user: vec![UserScope {
                 id: "u".into(),
@@ -20,6 +21,7 @@ fn cfg() -> Config {
                     user: Some("breed".into()),
                 },
                 tags: vec!["base".into()],
+                env: Default::default(),
             }],
             ..Default::default()
         },
@@ -103,6 +105,7 @@ fn network_matcher_uses_gateway_mac() {
                     cidr: None,
                 },
                 tags: vec!["home".into()],
+                env: Default::default(),
             }],
             ..Default::default()
         },
@@ -127,6 +130,7 @@ fn network_matcher_rejects_wrong_mac() {
                     cidr: None,
                 },
                 tags: vec!["home".into()],
+                env: Default::default(),
             }],
             ..Default::default()
         },
@@ -149,6 +153,7 @@ fn host_matcher_is_case_insensitive() {
                     hostname: Some("Fixed".into()),
                 },
                 tags: vec!["t".into()],
+                env: Default::default(),
             }],
             ..Default::default()
         },
@@ -173,6 +178,7 @@ fn network_matcher_is_case_insensitive() {
                     cidr: None,
                 },
                 tags: vec!["home".into()],
+                env: Default::default(),
             }],
             ..Default::default()
         },
