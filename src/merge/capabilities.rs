@@ -138,32 +138,15 @@ fn merge_native_feature(
 
 /// Merge the flat `native:` map across all contributors.
 ///
-/// Unlike `merge_native_feature`, which is keyed per-engine, this operates on
-/// a flat `BTreeMap<String, Value>` where each top-level key is deep-merged
-/// ([`merge_yaml`]) across contributors in ascending precedence order so the
-/// highest-precedence contributor wins on any scalar collision.
+/// The flat `native:` map has the same structure as per-engine maps: each
+/// top-level key is deep-merged ([`merge_yaml`]) across contributors in
+/// ascending precedence order so the highest-precedence contributor wins on any
+/// scalar collision.  Delegates to [`merge_native_feature`] with the `native`
+/// field accessor.
 fn merge_native_flat(
     contributors: &[CapabilityContributor],
 ) -> BTreeMap<String, serde_yaml::Value> {
-    let mut ordered: Vec<&CapabilityContributor> = contributors.iter().collect();
-    ordered.sort_by_key(|c| c.precedence);
-
-    let mut merged: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
-    for c in &ordered {
-        for (key, fragment) in &c.capabilities.native {
-            match merged.get_mut(key) {
-                Some(existing) => merge_yaml(existing, fragment.clone()),
-                None => {
-                    // Normalize on first insert so the result matches what the
-                    // merge path produces — same rationale as merge_native_feature.
-                    let mut fragment = fragment.clone();
-                    normalize_yaml(&mut fragment);
-                    merged.insert(key.clone(), fragment);
-                }
-            }
-        }
-    }
-    merged
+    merge_native_feature(contributors, |c| &c.native)
 }
 
 /// Resolve the `default_mode` scalar across contributors: highest precedence
@@ -484,33 +467,33 @@ mod tests {
 
         // Contributors carrying only list fields (allow rules + plugins) plus a
         // small native: map, so the scalar default_mode never forces a
-        // same-precedence conflict. precedence is irrelevant to list merging and
-        // left at a constant.
+        // same-precedence conflict.
+        //
+        // Varies engine names, precedence (1-10), and number of engines (0-3) to
+        // exercise merge_native_flat across realistic multi-engine,
+        // multi-precedence scenarios.
         fn arb_list_contributor() -> impl Strategy<Value = CapabilityContributor> {
-            (
-                "[a-z]{1,4}",
-                prop::collection::vec(arb_rule(), 0..4),
-                prop::collection::vec("[a-z:]{1,6}", 0..4),
-                prop::option::of(("[a-z]{1,4}", "[a-z]{1,6}").prop_map(|(key, val)| {
+            let arb_engine_entry =
+                ("[a-z_]{1,8}", "[a-z]{1,4}", "[a-z]{1,6}").prop_map(|(engine, key, val)| {
                     let mut m = serde_yaml::Mapping::new();
                     m.insert(
                         serde_yaml::Value::String(key),
                         serde_yaml::Value::String(val),
                     );
-                    serde_yaml::Value::Mapping(m)
-                })),
+                    (engine, serde_yaml::Value::Mapping(m))
+                });
+            (
+                "[a-z]{1,4}",
+                1u8..=10,
+                prop::collection::vec(arb_rule(), 0..4),
+                prop::collection::vec("[a-z:]{1,6}", 0..4),
+                prop::collection::vec(arb_engine_entry, 0..3),
             )
-                .prop_map(|(name, allow, plugins, native_val)| {
-                    let native = if let Some(val) = native_val {
-                        let mut n = BTreeMap::new();
-                        n.insert("test_engine".to_string(), val);
-                        n
-                    } else {
-                        BTreeMap::new()
-                    };
+                .prop_map(|(name, precedence, allow, plugins, engine_entries)| {
+                    let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
                     CapabilityContributor {
                         name,
-                        precedence: 1,
+                        precedence,
                         capabilities: Capabilities {
                             permissions: Permissions {
                                 allow,

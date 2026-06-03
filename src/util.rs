@@ -25,7 +25,12 @@ pub fn dedup<T: PartialEq>(items: &mut Vec<T>) {
 /// - **Scalars** (and any shape mismatch, e.g. mapping vs. sequence) are
 ///   overwritten by `src` — the later, higher-precedence contributor wins.
 ///   Contributors are fed lowest-precedence first, so `src` always outranks
-///   `dst` on a scalar collision.
+///   `dst` on a scalar collision.  Type conflicts (e.g. `dst` is a mapping and
+///   `src` is a scalar, or vice versa) are treated as a complete replacement:
+///   there is no safe structural merge across types, so the higher-precedence
+///   value wins unconditionally.  Callers such as the `native:` merge pipeline
+///   should be aware that a contributor changing a key's type will clobber the
+///   lower-precedence value entirely.
 pub fn merge_yaml(dst: &mut serde_yaml::Value, src: serde_yaml::Value) {
     use serde_yaml::Value;
     match (dst, src) {
