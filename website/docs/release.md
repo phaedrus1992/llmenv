@@ -4,12 +4,12 @@ llmenv follows semantic versioning and automates release distribution via GitHub
 
 ## Overview
 
-Releases are triggered by pushing a version tag (`v*`) to the **main branch only**. The release workflow:
+Releases are triggered by pushing a `v*` tag. The release workflow:
 
 1. **Builds binaries** for macOS (arm64, x86_64) and Linux (x86_64)
-2. **Generates SHA256 checksums** for all binaries (automatic)
+2. **Generates SHA256 checksums** and SLSA v1.0 provenance attestations
 3. **Publishes to crates.io** (requires valid `CARGO_REGISTRY_TOKEN` secret)
-4. **Creates a GitHub Release** with pre-built binaries and checksums attached
+4. **Creates a GitHub Release** with binaries, checksums, SLSA provenance, and the changelog notes for the version in the release body
 
 ## Changelog
 
@@ -45,30 +45,37 @@ number in the entry, e.g. `(#63)`.
 
 ### When cutting a release (and only then)
 
-1. Decide the version `X.Y.Z` from the nature of the `[Unreleased]` entries
-   (breaking → major, feature → minor, fix-only → patch).
-2. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and add a fresh empty
-   `## [Unreleased]` above it.
-3. Bump `version` in `Cargo.toml` to `X.Y.Z` and run `cargo build` so
-   `Cargo.lock` updates in the same commit.
-4. Commit (`chore: release X.Y.Z`), then proceed to **Version Tags** below to
-   tag and push.
+Use [`cargo-release`](https://github.com/crate-ci/cargo-release) to prepare the
+bump. It atomically renames `[Unreleased]` → `[X.Y.Z] - YYYY-MM-DD`, re-seeds a
+fresh `[Unreleased]`, bumps `Cargo.toml`, updates `Cargo.lock`, and makes a
+single `chore(release): X.Y.Z` commit.
 
-The version bump, changelog rename, and lockfile update land **together** in the
-release commit — never piecemeal across unrelated changes.
+```bash
+cargo release <patch|minor|major>            # dry-run preview (default)
+cargo release <patch|minor|major> --execute  # apply
+```
+
+It is configured (in `release.toml`) to **not** tag, publish, or push — all
+three happen in the steps below. Full details in [`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RELEASING.md).
 
 ## Version Tags
 
-Create a tag in the format `vX.Y.Z` and push it to the **main branch**:
+`main` is PR-protected, so the version-bump commit lands through a PR first.
+After merge, tag the merged commit and push the tag — **that is what fires the
+release workflow.**
 
 ```bash
-# Version already bumped in Cargo.toml + CHANGELOG.md (see Changelog section)
-cargo build --release  # Test locally first
-git tag -a vX.Y.Z -m "Release vX.Y.Z"
-git push origin main vX.Y.Z  # Push to main branch
+# 1. Create a prep branch, run cargo-release, open a PR, merge it.
+git switch main && git pull
+
+# 2. Tag the merged commit and push the tag.
+git tag -a "vX.Y.Z" -m "vX.Y.Z"
+git push origin "vX.Y.Z"
 ```
 
-**Important:** Tags must be pushed from the main branch. Releases triggered from feature branches are blocked by the workflow.
+The release workflow triggers on any `v*` tag push. Tags should always point at a
+commit on `main`; the workflow has no branch filter, so a tag pointed at a stale
+commit would still fire — make sure you're tagging the merged result.
 
 ## Binary Distribution
 
@@ -79,16 +86,27 @@ Pre-built binaries are attached to each release on GitHub:
 - `llmenv-macos-x86_64` — macOS Intel (x86_64)
 - `llmenv-macos-aarch64` — macOS Apple Silicon (arm64)
 - `checksums.txt` — SHA256 checksums for all binaries
+- `*.intoto.jsonl` — SLSA v1.0 provenance attestations (one per binary)
 
 ### Verify Binary Integrity
 
-Each release includes a `checksums.txt` file. Verify downloaded binaries:
+Each release includes `checksums.txt`. Verify downloaded binaries:
 
 ```bash
 sha256sum -c checksums.txt
 ```
 
-All binaries are automatically checksummed during the release build.
+### Verify Supply Chain (SLSA)
+
+Each binary ships with a SLSA v1.0 provenance attestation. Verify that the
+binary was built by GitHub Actions from the claimed source:
+
+```bash
+slsa-verifier verify-artifact \
+  --artifact-path=<binary> \
+  --provenance=<provenance.intoto.jsonl> \
+  --source-uri=github.com/phaedrus1992/llmenv
+```
 
 ### crates.io
 
@@ -151,36 +169,40 @@ cargo yank --vers X.Y.Z
 
 ## Secrets Configuration
 
-The release workflow requires:
-- `CARGO_REGISTRY_TOKEN` — crates.io API token (scoped to publish only)
+The release workflow requires two secrets (repo Settings → Secrets and variables → Actions):
 
-Set this in the repository settings under Secrets and variables → Actions.
+- `CARGO_REGISTRY_TOKEN` — crates.io API token (scoped to publish only)
+- `HOMEBREW_TAP_TOKEN` — GitHub PAT with write access to `phaedrus1992/homebrew-tap`
 
 **Security notes:**
 - The token is passed via environment variable (never command-line arguments)
 - GitHub Actions automatically masks secret values in logs
 - Always use fine-grained tokens with minimal scope (publish-only)
 
-## Future Work: SLSA Provenance and Homebrew Automation
+## Branch Strategy
 
-The following enhancements are tracked for future releases:
+Feature development happens on `main`. Each major.minor version gets a
+`release/X.X.x` branch (created from the release tag) for managing bug fixes
+without picking up new feature work.
 
-### SLSA Build Provenance
-- Integrate `slsa-framework/slsa-github-generator` for cryptographic proof of build chain
-- Attach SLSA provenance to GitHub releases
-- Enables users to verify binaries were built from claimed source by GitHub Actions
+**Backport policy** — fixes are applied (when feasible) to:
 
-### Homebrew Automation
-- Auto-generate and update Formula/llmenv.rb SHA256 hashes after release
-- Reduce manual steps and error potential in the homebrew-tap repo
-- Trigger automation from llmenv release workflow
+| Branch | Description |
+|--------|-------------|
+| `release/X.X.x` | Current major.minor — always patched |
+| `release/X.(X-1).x` | Previous minor of the current major — always patched |
+| `release/(X-1).Y.x` | Last minor branch of the previous major — always patched |
+
+Fix `main` first, cherry-pick to applicable release branches, then cut a patch
+release from the branch. Full workflow in
+[`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RELEASING.md).
 
 ## Troubleshooting
 
 **Release workflow doesn't trigger**
-- Verify tag was pushed to the **main branch**
-- Workflow only runs when tag is pushed to main, not feature branches
-- Check GitHub Actions tab for workflow run details
+- Verify the tag was pushed: `git push origin "vX.Y.Z"`
+- Check GitHub Actions tab for the workflow run
+- Confirm the tag format matches `v*` (the workflow trigger pattern)
 
 **Publish fails with "unauthorized"**
 - Verify `CARGO_REGISTRY_TOKEN` is valid and has `publish` scope

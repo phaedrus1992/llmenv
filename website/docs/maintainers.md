@@ -8,6 +8,14 @@ Operational docs for releasing and packaging llmenv.
 - [Homebrew tap setup](homebrew-tap-setup.md) — configuring and publishing the
   Homebrew tap.
 
+## Branch strategy
+
+Feature development happens on `main`. Each major.minor version gets a
+`release/X.X.x` long-lived branch for bug fix backports. Fixes land on `main`
+first, then are cherry-picked to the current minor, previous minor, and the last
+minor of the previous major. See [release.md](release.md#branch-strategy) for the
+full backport policy and patch-release workflow.
+
 ## Versioning invariant
 
 A version exists only once it has been git-tagged. Until then, every change goes
