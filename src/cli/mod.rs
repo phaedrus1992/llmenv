@@ -647,8 +647,8 @@ fn shell_escape(s: &str) -> String {
 /// Reject any var in `vars` whose name isn't a valid shell identifier.
 /// Applied to adapter-returned env vars before they propagate, so the
 /// `export NAME=...` contract holds regardless of which emission path runs.
-fn reject_invalid_var_names(vars: &[(String, String)]) -> anyhow::Result<()> {
-    for (name, _) in vars {
+fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Result<()> {
+    for (name, _) in env {
         validate_var_name(name)?;
     }
     Ok(())
@@ -745,7 +745,7 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     // Collect env vars from firing bundles only.
     let mut vars = std::collections::BTreeMap::new();
     for bundle in &firing {
-        for (key, value) in &bundle.vars {
+        for (key, value) in &bundle.env {
             vars.insert(key.clone(), value.clone());
         }
     }
@@ -774,7 +774,7 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         Err(e) => return Err(e).context("agent materialization failed"),
     }
 
-    // Introspection vars: comma-separated, deterministic order. Scopes get
+    // Introspection env: comma-separated, deterministic order. Scopes get
     // a `<kind>:<id>` prefix so the kind is visible without re-running
     // `llmenv scope ls`. Tags come from a BTreeSet (already sorted); bundles
     // are emitted in declaration order.
@@ -1270,7 +1270,7 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
 bundle:
   - name: base
     tags: [me]
-    vars:
+    env:
       AGENT: "claude"
 
 # MCP servers are selected by tag, like bundles, and rendered into the agent's

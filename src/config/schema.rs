@@ -138,6 +138,14 @@ pub struct Capabilities {
     /// between memory systems, but can be overridden here if needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_memory_enabled: Option<bool>,
+    /// Agent reasoning effort level (e.g., "low", "medium", "high"). Optional scalar
+    /// — resolves by scope precedence. Engine-specific via native override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_level: Option<String>,
+    /// Advisor/expert capability size ("small", "medium", "large"). Optional scalar — resolves by
+    /// scope precedence. Adapters map to their engine-specific models via native overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor_size: Option<String>,
     /// Per-engine native permission rule lists, keyed by engine name. The
     /// engine-only override for permissions — raw rule strings in the engine's
     /// own grammar, appended verbatim. Sibling to the neutral `permissions`
@@ -172,6 +180,8 @@ impl Capabilities {
             && self.hooks.is_empty()
             && self.plugins.is_empty()
             && self.auto_memory_enabled.is_none()
+            && self.effort_level.is_none()
+            && self.advisor_size.is_none()
             && self.native_permissions.is_empty()
             && self.native_hooks.is_empty()
             && self.native_plugins.is_empty()
@@ -240,6 +250,14 @@ pub struct PermissionRule {
     pub paths: Vec<String>,
 }
 
+/// An environment variable to inject into agent context. `name` is the variable
+/// name; `value` is the value. Both are required.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
+}
+
 /// A hook registration. `command` paths in `handler` are bundle-relative when
 /// declared in a `bundle.yaml`, resolved at materialize time.
 #[derive(Debug, Clone, Deserialize, Serialize, Eq)]
@@ -293,6 +311,9 @@ pub struct NetworkScope {
     pub r#match: NetworkMatch,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -308,6 +329,9 @@ pub struct HostScope {
     pub r#match: HostMatch,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -321,6 +345,9 @@ pub struct UserScope {
     pub r#match: UserMatch,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -333,8 +360,10 @@ pub struct Bundle {
     pub name: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default)]
-    pub vars: std::collections::BTreeMap<String, String>,
+    /// Environment variables to inject when this bundle is selected.
+    /// Deprecated name `vars` accepted for backward compat.
+    #[serde(default, alias = "vars")]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// A reachable address for a named host, used by the `memory` backend to

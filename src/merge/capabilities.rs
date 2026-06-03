@@ -96,6 +96,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         hooks,
         plugins,
         auto_memory_enabled,
+        effort_level: None,
+        advisor_size: None,
         native_permissions,
         native_hooks,
         native_plugins,

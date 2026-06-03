@@ -618,6 +618,14 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         settings.insert("autoMemoryEnabled".into(), json!(false));
     }
 
+    // #221: Render first-class capability fields (effort level, advisor size)
+    if let Some(effort_level) = &manifest.capabilities.effort_level {
+        settings.insert("effortLevel".into(), json!(effort_level));
+    }
+    if let Some(advisor_size) = &manifest.capabilities.advisor_size {
+        settings.insert("advisorSize".into(), json!(advisor_size));
+    }
+
     // Plugins (#59): declare marketplaces + enabled plugins into settings.json.
     // llmenv owns the marketplace clone in its cache, so each marketplace points
     // Claude at that checkout via a `directory` source (no re-fetch). Plugins are
@@ -678,11 +686,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 /// dropped from config must actually disappear, and `permissions` must never be
 /// weakened by a stale union. The one shared key, `hooks`, is handled specially
 /// (see [`reconcile_settings`]) so a plugin's self-registered hook survives.
-const LLMENV_OWNED_SETTINGS_KEYS: [&str; 5] = [
+const LLMENV_OWNED_SETTINGS_KEYS: [&str; 7] = [
     "permissions",
     "enabledPlugins",
     "extraKnownMarketplaces",
     "autoMemoryEnabled",
+    "effortLevel",
+    "advisorSize",
     "hooks",
 ];
 
