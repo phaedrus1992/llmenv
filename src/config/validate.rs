@@ -93,6 +93,15 @@ pub enum ValidateError {
         plugin: String,
         marketplace: String,
     },
+    #[error(
+        "conflicting scalar values for '{key}' in tags {tags}: {contributors}. \
+         Same-precedence scopes may not define conflicting scalars (use native overrides or change tag sets)"
+    )]
+    TagConflictSameScopeScalar {
+        key: String,
+        tags: String,
+        contributors: String,
+    },
 }
 
 /// A marketplace name is safe to use as a single filesystem path component and

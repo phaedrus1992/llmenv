@@ -138,6 +138,17 @@ pub struct Capabilities {
     /// between memory systems, but can be overridden here if needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_memory_enabled: Option<bool>,
+    /// Agent reasoning effort level (e.g., "low", "medium", "high"). Optional scalar
+    /// — resolves by scope precedence. Engine-specific via native override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_level: Option<String>,
+    /// Advisor/expert model to use (e.g., model name). Optional scalar — resolves by
+    /// scope precedence. Engine-specific via native override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor_model: Option<String>,
+    /// Environment variables to inject into agent context. A list — concatenates.
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
     /// Per-engine native permission rule lists, keyed by engine name. The
     /// engine-only override for permissions — raw rule strings in the engine's
     /// own grammar, appended verbatim. Sibling to the neutral `permissions`
@@ -172,6 +183,9 @@ impl Capabilities {
             && self.hooks.is_empty()
             && self.plugins.is_empty()
             && self.auto_memory_enabled.is_none()
+            && self.effort_level.is_none()
+            && self.advisor_model.is_none()
+            && self.env.is_empty()
             && self.native_permissions.is_empty()
             && self.native_hooks.is_empty()
             && self.native_plugins.is_empty()
@@ -238,6 +252,14 @@ pub struct PermissionRule {
     pub pattern: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+}
+
+/// An environment variable to inject into agent context. `name` is the variable
+/// name; `value` is the value. Both are required.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 /// A hook registration. `command` paths in `handler` are bundle-relative when
