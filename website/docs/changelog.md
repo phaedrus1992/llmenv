@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.0.3] - 2026-06-03
 
+### Fixed
+
+- Fix `reconcile_settings` silently dropping native passthrough keys (e.g.
+  `statusLine`, `cleanupPeriodDays`) on re-renders when `settings.json` already
+  exists; non-owned keys from `fresh` are now written through on every render
+
 ## [1.0.2] - 2026-06-02
 
 ### Fixed

@@ -759,6 +759,16 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
         }
     }
 
+    // Native passthrough keys: any key llmenv computed into `fresh` (e.g. via
+    // overlay_native) that is not a modeled-feature key gets written through on
+    // every render. Plugin-foreign keys that are on disk but absent from `fresh`
+    // are left untouched — they aren't touched by this loop.
+    for (key, val) in fresh_obj {
+        if !LLMENV_OWNED_SETTINGS_KEYS.contains(&key.as_str()) {
+            merged_obj.insert(key.clone(), val.clone());
+        }
+    }
+
     Ok(merged)
 }
 
@@ -1441,6 +1451,29 @@ mod tests {
         let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
         let out = reconcile_settings(&path, fresh.clone()).unwrap();
         assert_eq!(out, fresh);
+    }
+
+    #[test]
+    fn reconcile_native_passthrough_written_on_rerender() {
+        // Native-overlay keys (e.g. `statusLine`, `cleanupPeriodDays`) that llmenv
+        // computes into `fresh` but that are not in LLMENV_OWNED_SETTINGS_KEYS must
+        // be written through on every re-render, not silently dropped because the
+        // file already exists.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        // Simulate an existing file that has no statusLine yet.
+        write_json(&path, &serde_json::json!({ "permissions": { "deny": [] } }));
+        let fresh = serde_json::json!({
+            "permissions": { "deny": [] },
+            "statusLine": { "type": "command", "command": "my-status-script" },
+            "cleanupPeriodDays": 365,
+        });
+        let out = reconcile_settings(&path, fresh).unwrap();
+        assert_eq!(
+            out["statusLine"]["command"], "my-status-script",
+            "native passthrough key must survive re-render"
+        );
+        assert_eq!(out["cleanupPeriodDays"], 365);
     }
 
     // ---- merge_mcp_into_claude_json (#244): mcpServers into .claude.json ----
