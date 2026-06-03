@@ -28,17 +28,19 @@ Create `Formula/llmenv.rb` using the template from the llmenv docs. The formula:
 
 **Template:** See `.tmp/homebrew-formula-llmenv.rb` in the llmenv repository.
 
-### 4. Update SHA256 Hashes
+### 4. SHA256 Hashes
 
-After each release, update the SHA256 hashes in `Formula/llmenv.rb`:
+SHA256 hashes are updated automatically by the `update-homebrew` job in
+`release.yml`. When a `v*` tag is pushed, that job reads the checksums from the
+build artifacts and triggers the `update-formula.yml` workflow in
+`phaedrus1992/homebrew-tap` via the `HOMEBREW_TAP_TOKEN` secret.
+
+For the initial setup (before automation is wired), compute hashes manually:
 
 ```bash
-# Download the binary and compute its hash
 curl -L https://github.com/phaedrus1992/llmenv/releases/download/vX.Y.Z/llmenv-macos-aarch64 | shasum -a 256
 curl -L https://github.com/phaedrus1992/llmenv/releases/download/vX.Y.Z/llmenv-macos-x86_64 | shasum -a 256
 ```
-
-Update the `sha256` values in `Formula/llmenv.rb`.
 
 ### 5. Test Locally
 
@@ -53,9 +55,9 @@ brew install --build-from-source ./Formula/llmenv.rb
 llmenv --version
 ```
 
-### 6. CI/CD (Optional)
+### 6. CI/CD
 
-Add a GitHub Actions workflow to the tap repo to validate the formula:
+Add a GitHub Actions workflow to the tap repo to validate the formula on each PR:
 
 ```yaml
 name: Validate Formula
@@ -75,14 +77,14 @@ jobs:
 
 ## Workflow Integration
 
-The llmenv main repository's `release.yml` workflow handles:
-1. Building binaries for macOS (arm64, x86_64)
-2. Creating GitHub releases with binaries attached
-3. Publishing to crates.io
+The llmenv main repository's `release.yml` workflow is fully automated:
+1. Builds binaries for macOS (arm64, x86_64) and Linux (x86_64)
+2. Creates a GitHub Release with binaries, checksums, and SLSA provenance
+3. Publishes to crates.io
+4. **Automatically** triggers `update-formula.yml` in `phaedrus1992/homebrew-tap`
+   with the new version and SHA256 hashes via the `HOMEBREW_TAP_TOKEN` secret
 
-**Manual step:** After release, update `Formula/llmenv.rb` with new SHA256 hashes and open a PR in the tap repo.
-
-**Automation opportunity:** Future enhancement could auto-generate and update the formula via a workflow.
+No manual formula update is needed after a release.
 
 ## Installation Instructions
 
@@ -103,13 +105,15 @@ brew install phaedrus1992/homebrew-tap/llmenv
 
 ### Upgrade Release
 
-When llmenv releases a new version:
+Formula updates are handled automatically by the release workflow (see
+[Workflow Integration](#workflow-integration)). If you need to update manually
+(e.g. to recover from a failed automation run):
 
-1. Check GitHub releases for new binaries
-2. Update `version` in `Formula/llmenv.rb`
-3. Compute and update SHA256 hashes
-4. Test locally
-5. Commit and push to the tap repo
+1. Download the new binaries from the GitHub release
+2. Compute SHA256: `shasum -a 256 llmenv-macos-*`
+3. Update `version` and `sha256` values in `Formula/llmenv.rb`
+4. Test locally: `brew install --build-from-source ./Formula/llmenv.rb`
+5. Open a PR in the tap repo
 
 ### Troubleshooting
 

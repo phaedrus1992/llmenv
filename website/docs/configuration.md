@@ -19,10 +19,11 @@ The config directory is resolved in this order:
 | `native:` | map (per engine) | Opaque per-engine passthrough for keys no feature models |
 | `bundle:` | list | Environment-variable + file bundles |
 | `mcp:` | list | MCP server declarations |
-| `memory:` | map | llmenv's memory backend topology |
+| `features:` | map | Feature flags; currently holds `memory:` (ICM backend topology) |
+| `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
 | `marketplace:` | list | Plugin marketplaces (git URL or local path) |
 | `plugin-collection:` | list | Named bags of plugins, selected by tag |
-| `host:` | map | Host name → reachable address (used by `memory:`) |
+| `host:` | map | Host name → reachable address (used by `features.memory:`) |
 
 All blocks are optional. Scopes (except project), bundles, MCP servers, plugin
 collections, and the memory backend all share the same selection model: they
@@ -223,7 +224,12 @@ mcp:
 
 See [MCP & Memory](mcp.md) for the full model.
 
-## `memory:`
+## `features:`
+
+Feature flags. Currently holds one entry: `memory:`, which configures llmenv's
+ICM memory backend. Additional feature flags may be nested here in future versions.
+
+### `features.memory:`
 
 llmenv's own memory backend (ICM), modeled as a single networked service. One
 host runs the daemon; every host connects to it over HTTP. The server host's
@@ -251,6 +257,30 @@ features:
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
+
+## `state:`
+
+Durable per-tool state relocation. The materialized cache folder is renamed on
+every version or config change, so tool state written under `CLAUDE_CONFIG_DIR`
+is lost on each churn. llmenv always exports `LLMENV_STATE_DIR` pointing at a
+stable sibling directory (no content hash; never garbage-collected). Each entry
+under `state.tools` additionally emits one env var pointing a specific tool's
+state into a per-tool subdirectory of that stable dir.
+
+```yaml
+state:
+  tools:
+    - env: CONTEXT_MODE_DATA_DIR   # var the tool reads to locate its state
+      subdir: context-mode          # → $LLMENV_STATE_DIR/context-mode
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `env` | yes | Env var the tool honors (e.g. `CONTEXT_MODE_DATA_DIR`) |
+| `subdir` | yes | Single path component under `$LLMENV_STATE_DIR` (no separators) |
+
+`env` names must be `[A-Z][A-Z0-9_]*`. A handful of system-reserved names
+(`HOME`, `PATH`, `USER`, etc.) are rejected.
 
 ## `marketplace:` and `plugin-collection:`
 

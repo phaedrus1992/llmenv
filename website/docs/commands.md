@@ -63,6 +63,8 @@ behind `status`, including which contributors fired.
 llmenv scope-ls
 ```
 
+Alias: `llmenv scopes`
+
 List configured scopes (network/host/user/project), marking which are active and
 which are orphaned (tags no contributor consumes).
 
@@ -72,6 +74,8 @@ which are orphaned (tags no contributor consumes).
 llmenv tag-ls
 ```
 
+Alias: `llmenv tags`
+
 List all tags across scopes and contributors, marking active and orphaned tags.
 
 ## `bundle-ls`
@@ -80,6 +84,8 @@ List all tags across scopes and contributors, marking active and orphaned tags.
 llmenv bundle-ls
 ```
 
+Alias: `llmenv bundles`
+
 List configured bundles, marking those that fire for the current environment.
 
 ## `mcp-ls`
@@ -87,6 +93,8 @@ List configured bundles, marking those that fire for the current environment.
 ```
 llmenv mcp-ls
 ```
+
+Alias: `llmenv mcps`
 
 List the MCP servers selected for the current environment, with each server's
 resolved role and transport (stdio / http / sse). Includes the memory backend
@@ -98,6 +106,8 @@ when active.
 llmenv marketplace-ls
 ```
 
+Alias: `llmenv marketplaces`
+
 List configured plugin marketplaces, marking those referenced by selected
 plugins.
 
@@ -106,6 +116,8 @@ plugins.
 ```
 llmenv plugin-ls
 ```
+
+Alias: `llmenv plugins`
 
 List configured plugins, marking those selected by the active scope and showing
 their source collection.

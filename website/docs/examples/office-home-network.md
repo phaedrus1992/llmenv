@@ -36,7 +36,7 @@ mcp:
 2. It detects the current gateway MAC and matches it to a `network` scope.
 3. The matching scope adds `office` or `home` to the active tag set.
 4. The MCP server whose tags intersect the active set is included; the other is not.
-5. The adapter writes `mcp.json` into the config directory. Claude Code picks it up on the next session.
+5. The adapter upserts the selected server into `mcpServers` in `.claude.json`. Claude Code picks it up on the next session.
 
 If you're on an unknown network (traveling, coffee shop) neither scope matches and neither MCP loads.
 

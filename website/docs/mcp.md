@@ -3,7 +3,7 @@
 llmenv treats MCP (Model Context Protocol) servers as a first-class config
 concept. Servers are declared once under `mcp:`, attached to scopes via tags
 (the same selection model as bundles), and rendered by each adapter into its
-agent-native config (for Claude Code: `mcp.json`).
+agent-native config (for Claude Code: upserted into `mcpServers` in `.claude.json`).
 
 llmenv's own memory backend is configured separately under `memory:`. It is a
 single networked service, not a generic MCP entry — its implementation (ICM,

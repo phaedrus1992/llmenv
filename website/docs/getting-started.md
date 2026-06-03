@@ -149,6 +149,7 @@ See [Configuration](configuration.md) for the complete schema.
 | `llmenv plugin-sync` | Sync plugin marketplaces into the cache |
 | `llmenv sync` | Commit and push config to GitHub |
 | `llmenv check-stale` | Warn if the running agent's config drifted |
+| `llmenv hook-run <session_start\|turn_start\|session_end>` | Inject ICM memory context (invoked by agent runtime) |
 | `llmenv prune [--all] [--older-than DUR] [--dry-run]` | Clean stale cache folders |
 | `llmenv doctor [--gc]` | Run diagnostics (optionally GC) |
 
