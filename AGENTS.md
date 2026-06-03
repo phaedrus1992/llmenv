@@ -3,9 +3,9 @@
 ## Versioning, Changelog & Releases
 
 Before doing **anything** that touches the version number, `CHANGELOG.md`, or a
-release — read [`docs/release.md`](docs/release.md) and follow it.
+release — read [`RELEASING.md`](RELEASING.md) and follow it.
 
-Key invariant (full details in `docs/release.md`):
+Key invariants (full details in `RELEASING.md`):
 
 - **A version only exists once it has been git-tagged.** Until then every change
   goes under `## [Unreleased]` in `CHANGELOG.md`.
@@ -14,6 +14,10 @@ Key invariant (full details in `docs/release.md`):
   `Cargo.toml`, regenerating `Cargo.lock`, all in one release commit, then
   tagging `vX.Y.Z`).
 - `git tag -l` is the source of truth. No tag → no version section, no bump.
+- **Branch strategy:** `main` = new features. Each major.minor gets a
+  `release/X.X.x` branch for bug fixes. Fixes land on `main` first, then are
+  cherry-picked to the current minor, previous minor, and the last minor of
+  the previous major. See `RELEASING.md` §Branch strategy for the full policy.
 
 ## Licensing & Attribution
 

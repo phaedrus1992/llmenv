@@ -16,6 +16,55 @@ prep: bumping the version and rolling `CHANGELOG.md` into a single commit. It is
 configured (in [`release.toml`](release.toml)) to **not** publish, tag, or push
 — see [Why cargo-release does so little](#why-cargo-release-does-so-little).
 
+## Branch strategy
+
+Feature development happens on `main`. Each major.minor version gets a long-lived
+`release/X.X.x` branch (created from the release tag) for managing bug fixes
+without picking up new feature work.
+
+**Backport policy** — fixes are applied (when feasible) to:
+
+| Branch | Description |
+|--------|-------------|
+| `release/X.X.x` | Current major.minor — always patched |
+| `release/X.(X-1).x` | Previous minor of the current major — always patched |
+| `release/(X-1).Y.x` | Last minor branch of the previous major — always patched |
+
+Fix `main` first (canonical source), then cherry-pick to the applicable release
+branches. Only skip a backport when the fix does not apply cleanly and the effort
+to adapt it outweighs the value — document the skip in the PR description.
+
+### Creating a release branch
+
+After tagging a new major.minor (e.g. `v1.1.0`), branch immediately from that
+tag so the branch starts at exactly what was released:
+
+```bash
+git checkout -b release/1.1.x v1.1.0
+git push -u origin release/1.1.x
+```
+
+### Cutting a patch release from a release branch
+
+The flow mirrors the main-branch release, but targets the release branch instead
+of main. Fix commits should already be cherry-picked onto the branch before this.
+
+```bash
+git switch release/1.1.x && git pull
+cargo release patch            # dry-run preview
+cargo release patch --execute  # bump Cargo.toml + roll CHANGELOG + commit
+git push -u origin HEAD
+gh pr create --base release/1.1.x --fill
+# After merge, tag the merged commit:
+git switch release/1.1.x && git pull
+git tag -a "v1.1.1" -m "v1.1.1"
+git push origin "v1.1.1"
+```
+
+`cargo release patch` on the release branch bumps only within its minor line
+(1.1.0 → 1.1.1). CHANGELOG entries accumulate on the release branch; do not
+merge the release-branch CHANGELOG back to `main` — the two diverge intentionally.
+
 ## One-time setup
 
 ```bash
