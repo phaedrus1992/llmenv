@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Capabilities;
 use crate::mcp::resolve::ResolvedMcp;
 use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
-use crate::util::merge_yaml;
+use crate::util::{merge_yaml, normalize_yaml};
 use capabilities::{CapabilityContributor, merge_capabilities};
 use rules::RuleFile;
 
@@ -114,7 +114,9 @@ pub fn merge(
         match merged_native.get_mut(key) {
             Some(existing) => merge_yaml(existing, value.clone()),
             None => {
-                merged_native.insert(key.clone(), value.clone());
+                let mut normalized = value.clone();
+                normalize_yaml(&mut normalized);
+                merged_native.insert(key.clone(), normalized);
             }
         }
     }
@@ -244,5 +246,34 @@ mod tests {
             .and_then(serde_yaml::Value::as_str)
             .expect("key must be present");
         assert_eq!(val, "from-top", "top-level native: must win over bundle");
+    }
+
+    // Top-level-only native insert must be normalized the same way as a bundle-contributed insert.
+    // A sequence value contributed via top-level native: must compare equal (after YAML round-trip)
+    // to the same sequence contributed via a bundle, because both paths normalize.
+    #[test]
+    fn top_level_native_insert_is_normalized() {
+        // A sequence contributed only via top-level native: (no bundle collision).
+        // After normalize_yaml the sequence tags are stripped, so a round-trip
+        // produces the canonical form rather than a tagged representation.
+        let mut top_native: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        top_native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("seq:\n  - one\n  - two\n").unwrap(),
+        );
+
+        let manifest = merge(&Capabilities::default(), &top_native, &[]).unwrap();
+
+        let val = manifest
+            .native
+            .get("claude_code")
+            .expect("claude_code key must be present");
+
+        // After normalization the mapping tag must be absent (plain, not tagged).
+        let re_serialized = serde_yaml::to_string(val).expect("must serialize");
+        assert!(
+            !re_serialized.contains("!!"),
+            "normalized value must not contain YAML tags: {re_serialized}"
+        );
     }
 }
