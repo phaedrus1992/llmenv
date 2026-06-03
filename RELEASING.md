@@ -30,9 +30,18 @@ without picking up new feature work.
 | `release/X.(X-1).x` | Previous minor of the current major — always patched |
 | `release/(X-1).Y.x` | Last minor branch of the previous major — always patched |
 
-Fix `main` first (canonical source), then cherry-pick to the applicable release
-branches. Only skip a backport when the fix does not apply cleanly and the effort
-to adapt it outweighs the value — document the skip in the PR description.
+Fix in the **oldest applicable branch** first, then merge forward through the
+chain to carry the fix (and its CHANGELOG entry) into newer branches
+automatically. Only skip a backport when the fix does not apply to an older
+branch — document the skip in the PR description.
+
+**Example:** a fix that applies to 1.0, 1.1, and main:
+1. Land fix on `release/1.0.x`
+2. Merge `release/1.0.x` → `release/1.1.x`
+3. Merge `release/1.1.x` → `main`
+
+The CHANGELOG entry written on `release/1.0.x` propagates forward via the merges
+— no cherry-picking or duplicate entries needed.
 
 ### Creating a release branch
 
@@ -46,9 +55,6 @@ git push -u origin release/1.1.x
 
 ### Cutting a patch release from a release branch
 
-The flow mirrors the main-branch release, but targets the release branch instead
-of main. Fix commits should already be cherry-picked onto the branch before this.
-
 ```bash
 git switch release/1.1.x && git pull
 cargo release patch            # dry-run preview
@@ -61,9 +67,8 @@ git tag -a "v1.1.1" -m "v1.1.1"
 git push origin "v1.1.1"
 ```
 
-`cargo release patch` on the release branch bumps only within its minor line
-(1.1.0 → 1.1.1). CHANGELOG entries accumulate on the release branch; do not
-merge the release-branch CHANGELOG back to `main` — the two diverge intentionally.
+After the patch tag is pushed, merge forward into the next release branch (or
+`main`) so the fix and its CHANGELOG entry propagate.
 
 ## One-time setup
 

@@ -15,9 +15,9 @@ Key invariants (full details in `RELEASING.md`):
   tagging `vX.Y.Z`).
 - `git tag -l` is the source of truth. No tag → no version section, no bump.
 - **Branch strategy:** `main` = new features. Each major.minor gets a
-  `release/X.X.x` branch for bug fixes. Fixes land on `main` first, then are
-  cherry-picked to the current minor, previous minor, and the last minor of
-  the previous major. See `RELEASING.md` §Branch strategy for the full policy.
+  `release/X.X.x` branch for bug fixes. Fix in the oldest applicable branch
+  first, then merge forward — the fix and its CHANGELOG entry propagate
+  automatically. See `RELEASING.md` §Branch strategy for the full policy.
 
 ## Licensing & Attribution
 

@@ -11,10 +11,10 @@ Operational docs for releasing and packaging llmenv.
 ## Branch strategy
 
 Feature development happens on `main`. Each major.minor version gets a
-`release/X.X.x` long-lived branch for bug fix backports. Fixes land on `main`
-first, then are cherry-picked to the current minor, previous minor, and the last
-minor of the previous major. See [release.md](release.md#branch-strategy) for the
-full backport policy and patch-release workflow.
+`release/X.X.x` long-lived branch for bug fixes. Fix in the oldest applicable
+branch first, then merge forward — the fix and its CHANGELOG entry propagate
+automatically. See [release.md](release.md#branch-strategy) for the full policy
+and patch-release workflow.
 
 ## Versioning invariant
 

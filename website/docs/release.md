@@ -193,9 +193,10 @@ without picking up new feature work.
 | `release/X.(X-1).x` | Previous minor of the current major — always patched |
 | `release/(X-1).Y.x` | Last minor branch of the previous major — always patched |
 
-Fix `main` first, cherry-pick to applicable release branches, then cut a patch
-release from the branch. Full workflow in
-[`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RELEASING.md).
+Fix in the **oldest applicable branch** first, then merge forward through the
+chain (`release/1.0.x` → `release/1.1.x` → `main`). The fix and its CHANGELOG
+entry propagate automatically via the merges — no cherry-picking needed. Full
+workflow in [`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RELEASING.md).
 
 ## Troubleshooting
 
