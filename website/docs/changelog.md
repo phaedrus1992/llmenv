@@ -17,7 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+- GitHub release notes now include inline SHA256 checksums and the changelog
+  section for the released version; checksums no longer require downloading a
+  separate `checksums.txt` attachment to verify
+
+### Fixed
+
+- Fix documentation referencing `mcp.json` for MCP server configuration;
+  servers have been written to `mcpServers` in `.claude.json` since v1.0.0
+- Fix `state:` key and `features.memory:` subsection missing from
+  configuration reference
+- Fix `hook-run` command and command aliases (`scopes`, `tags`, `bundles`,
+  `mcps`, `marketplaces`, `plugins`) missing from commands reference
+- Add SLSA provenance verification instructions to release documentation;
+  SLSA artifacts have been published since v1.0.0 but were undocumented
+
 ## [1.0.4] - 2026-06-03
+
+Aborted release. CI pipeline issue.
 
 ## [1.0.3] - 2026-06-03
 
