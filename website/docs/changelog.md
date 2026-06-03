@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.5] - 2026-06-03
+
 ### Changed
 
 - GitHub release notes now include inline SHA256 checksums and the changelog
