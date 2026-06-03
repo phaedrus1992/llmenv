@@ -245,6 +245,41 @@ jobs:
           fi
           VERSION="${GH_REF#refs/tags/v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Build release body
+        env:
+          VERSION: ${{ steps.extract_version.outputs.version }}
+        run: |
+          # Extract changelog section for this version. Use index() for literal
+          # match so version dots aren't treated as awk regex metacharacters.
+          # $0 is an awk field variable; SC2016 fires because it sees $ in single quotes.
+          # shellcheck disable=SC2016
+          awk -v ver="[${VERSION}]" '
+            index($0, "## " ver) == 1 { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md | sed '/./,$!d' > changelog-notes.txt
+
+          {
+            cat changelog-notes.txt
+            echo ""
+            echo "## Binary Checksums"
+            echo ""
+            echo '```'
+            cat checksums/checksums.txt
+            echo '```'
+            echo ""
+            echo "Verify integrity:"
+            echo '```bash'
+            echo "sha256sum -c checksums.txt"
+            echo '```'
+            echo ""
+            echo "## Supply Chain Security"
+            echo ""
+            echo "SLSA v1.0 provenance attestations included. Verify:"
+            echo '```bash'
+            echo "slsa-verifier verify-artifact --artifact-path=<binary> --provenance=<provenance.intoto.jsonl> --source-uri=github.com/phaedrus1992/llmenv"
+            echo '```'
+          } > release-body.md
       - name: Create Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
@@ -254,20 +289,7 @@ jobs:
             provenance/*.intoto.jsonl
           draft: false
           prerelease: false
-          body: |
-            ## Binary Checksums
-
-            Verify binary integrity:
-            ```bash
-            sha256sum -c checksums.txt
-            ```
-
-            ## Supply Chain Security
-
-            SLSA v1.0 provenance attestations are included in this release. Verify authenticity:
-            ```bash
-            slsa-verifier verify-artifact --artifact-path=<binary> --provenance=<provenance.intoto.jsonl> --source-uri=github.com/phaedrus1992/llmenv
-            ```
+          body_path: release-body.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
