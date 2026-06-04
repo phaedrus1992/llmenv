@@ -7,6 +7,33 @@ use crate::config::Config;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// Run a scope-detection command and capture its stdout.
+///
+/// Returns `None` on spawn error, non-zero exit, or non-UTF-8 output. These
+/// detectors run on every shell prompt, so a failure is intentionally silent at
+/// the return value (→ the scope simply doesn't match); the `tracing::debug!`
+/// keeps the cause recoverable under `RUST_LOG=debug` without spamming normal
+/// runs. `Command::output()` detaches stdin and captures stderr, so this never
+/// blocks on a prompt nor leaks to the terminal (#307).
+pub(crate) fn capture_stdout(label: &str, program: &str, args: &[&str]) -> Option<String> {
+    let out = match std::process::Command::new(program).args(args).output() {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::debug!("{label}: spawning {program} failed: {e}");
+            return None;
+        }
+    };
+    if !out.status.success() {
+        tracing::debug!(
+            "{label}: {program} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveScope {
     pub id: String,

@@ -35,31 +35,10 @@ fn detect_linux() -> Option<String> {
     parse_linux_neigh_mac(&neigh)
 }
 
-// `Command::output()` detaches stdin and captures (does not leak) stderr, so
-// this hot-path detector — run on every shell prompt — neither blocks on a
-// prompt nor pollutes the terminal. Failures are intentionally silent at the
-// return value (→ `None` → the network scope simply doesn't match); a
-// `tracing::debug!` makes the cause recoverable under `RUST_LOG=debug` without
-// spamming normal runs (#307).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run(args: &[&str]) -> Option<String> {
     let (cmd, rest) = args.split_first()?;
-    let out = match std::process::Command::new(cmd).args(rest).output() {
-        Ok(out) => out,
-        Err(e) => {
-            tracing::debug!("gateway-mac detection: spawning {cmd} failed: {e}");
-            return None;
-        }
-    };
-    if !out.status.success() {
-        tracing::debug!(
-            "gateway-mac detection: {cmd} exited {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        return None;
-    }
-    String::from_utf8(out.stdout).ok()
+    super::capture_stdout("gateway-mac detection", cmd, rest)
 }
 
 #[must_use]
