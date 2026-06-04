@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix `mcp-proxy` spawned during `llmenv export` inheriting the calling shell's
+  stdio; when the export was sourced over SSH via `source <(llmenv export)` the
+  proxy wrote its logs into the process-substitution pipe, flooding the terminal
+  with `command not found: INFO:` lines. The proxy now redirects stdio to
+  `/dev/null` and starts in its own process group so terminal job-control
+  signals no longer reach it
+
 ## [1.0.5] - 2026-06-03
 
 ### Changed

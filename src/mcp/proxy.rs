@@ -5,7 +5,7 @@
 //! pidfile points at a live process and spawns a new one otherwise.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsureOutcome {
@@ -196,16 +196,60 @@ pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
         .rsplit_once(':')
         .map(|(_, p)| p)
         .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
+    // Parse-don't-validate: the port is forwarded verbatim into the child's
+    // argv (`--port <port>`), so a non-numeric suffix like `--config /tmp/x`
+    // would be read by mcp-proxy as extra flags. Reject anything that isn't a
+    // real u16 before it reaches the (stderr-silenced) daemon.
+    let port: u16 = port
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bind port {port:?} is not a valid u16: {e}"))?;
     let (program, leading) = mcp_proxy_command()?;
-    let child = Command::new(program)
-        .args(leading)
+    let mut cmd = Command::new(program);
+    cmd.args(leading)
         .arg("--port")
-        .arg(port)
+        .arg(port.to_string())
         .arg("--")
         .arg("icm")
-        .arg("serve")
-        .spawn()?;
+        .arg("serve");
+    configure_detached(&mut cmd);
+    let child = cmd.spawn()?;
     Ok(child.id())
+}
+
+/// Configures `cmd` to run as a detached background daemon rather than a
+/// foreground child of the calling shell.
+///
+/// `llmenv export` is sourced on every prompt via `source <(llmenv export)`,
+/// whose process substitution makes the export's stdout the very pipe the shell
+/// `source`s. A spawned `mcp-proxy` that inherits these handles writes its log
+/// lines straight into that pipe, where the shell then tries to execute them as
+/// commands (`command not found: INFO:`) and floods the terminal (#298). It
+/// would also be killed by terminal job-control signals (^C / SIGHUP on SSH
+/// disconnect) sent to the foreground process group.
+///
+/// On all platforms stdio is redirected to the null device, which is the part
+/// that fixes the pipe pollution. On Unix the child additionally joins a new
+/// process group (`process_group(0)`) so foreground-group job-control signals
+/// (`^C`) don't reach it; this does *not* start a new session, so a `setsid`
+/// daemon would still share the controlling terminal — acceptable here because
+/// `llmenv export` exits immediately after spawning, leaving the proxy
+/// reparented to init. `setsid` is intentionally not used to avoid pulling in
+/// `libc` (mirrors the `is_alive` rationale below).
+fn configure_detached(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // 0 = make the child its own group leader.
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        // No process-group API in std on non-Unix; only the stdio redirect
+        // above applies. Process-group isolation is unavailable here.
+    }
 }
 
 fn read_pidfile(pid_path: &Path) -> anyhow::Result<Option<u32>> {
@@ -288,6 +332,42 @@ mod tests {
         assert!(
             !is_executable(dir.path()),
             "a directory should not count as an executable file"
+        );
+    }
+
+    #[test]
+    fn configure_detached_spawns_child_in_new_process_group() {
+        use super::configure_detached;
+        use std::process::Command;
+
+        // `sleep` is alive long enough to inspect; we kill it before asserting.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        configure_detached(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn sleep");
+        let child_pid = child.id();
+
+        let pgid = |pid: u32| -> String {
+            let out = Command::new("ps")
+                .args(["-o", "pgid=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let child_pgid = pgid(child_pid);
+
+        // Clean up before asserting so a failed assertion never leaks the child.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // process_group(0) makes the child its own group leader: its pgid equals
+        // its own pid. Asserting the exact value (not merely "differs from the
+        // parent") pins the documented guarantee — a child merely moved into
+        // some other foreign group would not satisfy this (#298).
+        assert_eq!(
+            child_pgid,
+            child_pid.to_string(),
+            "configure_detached must make the child its own process-group leader"
         );
     }
 

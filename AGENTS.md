@@ -18,6 +18,13 @@ Key invariants (full details in `RELEASING.md`):
   `release/X.X.x` branch for bug fixes. Fix in the oldest applicable branch
   first, then merge forward — the fix and its CHANGELOG entry propagate
   automatically. See `RELEASING.md` §Branch strategy for the full policy.
+- **Picking a base branch for an issue:** before branching, look at the issue's
+  milestone (or version label). If a matching `release/X.Y.x` branch exists on
+  the remote, branch from it — **not** from `main`. Example: an issue in the
+  `1.0` milestone is a 1.0.x patch and must branch from `origin/release/1.0.x`,
+  so it doesn't drag in unreleased feature work that lives only on `main`. Only
+  fall back to `main` when no matching release branch exists. Check with
+  `git ls-remote --heads origin 'release/*'`.
 
 ## Licensing & Attribution
 
