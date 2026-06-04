@@ -15,10 +15,18 @@ pub const GIT_CONFIG_FLAGS: &[&str] = &[
     "core.hooksPath=/dev/null",
 ];
 
-/// Apply security config flags to a git command.
+/// Apply security config flags to a git command, with stdin detached.
+///
+/// No git operation in this codebase reads from stdin, so stdin is nulled at
+/// construction: a command invoked with a non-interactive stdin (CI, or the
+/// `source <(llmenv export)` eval context) can never block on an interactive
+/// prompt such as a credential helper (#299, #307). Centralizing it here means
+/// every `secure_git()` call site — including `.status()`/`.spawn()` callers
+/// that would otherwise inherit the parent's stdin — gets the guarantee.
 pub fn secure_git() -> Command {
     let mut cmd = Command::new("git");
     cmd.args(GIT_CONFIG_FLAGS);
+    cmd.stdin(Stdio::null());
     cmd
 }
 

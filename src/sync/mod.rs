@@ -15,6 +15,81 @@ fn has_unpushed_commits(repo: &Path) -> bool {
     git::has_unpushed_commits(repo)
 }
 
+/// Result of [`commit_and_push`]: whether a commit was actually pushed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// A commit was created and pushed to origin.
+    Pushed,
+    /// The working tree was clean — nothing to commit or push.
+    NothingToCommit,
+}
+
+/// Run a git subcommand in `repo`, capturing its output. On a non-zero exit the
+/// captured stderr is surfaced in the returned error so failures are loud, and
+/// capturing (rather than inheriting) stdout/stderr keeps git's chatter out of
+/// a piped `llmenv export` eval context (#307).
+///
+/// # Errors
+/// Returns an error if git cannot be spawned or exits non-zero (stderr included).
+fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
+    let output = git::secure_git()
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("failed to spawn git to {what}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to {what}: {}",
+            git_failure_detail(&output.stderr, &output.stdout)
+        );
+    }
+    Ok(())
+}
+
+/// Human-readable failure detail from a git process's captured output.
+///
+/// Prefers stderr but falls back to stdout when stderr is empty (e.g. a
+/// `git add` index/permission error can print to stdout, which would otherwise
+/// leave the message as a bare `failed to …: `). Control and ANSI escape bytes
+/// are stripped so a hostile remote's error text cannot manipulate the user's
+/// terminal (#307).
+fn git_failure_detail(stderr: &[u8], stdout: &[u8]) -> String {
+    let raw = if stderr.is_empty() { stdout } else { stderr };
+    String::from_utf8_lossy(raw)
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect()
+}
+
+/// Stage, commit, and push every change in `repo` to origin.
+///
+/// "Nothing to commit" is detected up front by inspecting the working tree
+/// after staging — not by misreading `git commit`'s exit code — so a commit
+/// that fails for a real reason (e.g. missing identity) surfaces as an error
+/// instead of being mistaken for a clean tree. A failed `git push` is likewise
+/// surfaced rather than silently treated as success (#307).
+///
+/// # Errors
+/// Returns an error if any git step fails to spawn or exits non-zero.
+pub fn commit_and_push(repo: &Path, message: &str) -> Result<SyncOutcome> {
+    run_git_checked(repo, &["add", "-A"], "stage changes (git add -A)")?;
+
+    // After staging, an empty `status --porcelain` means there is genuinely
+    // nothing to commit — distinct from `git commit` failing for another reason.
+    if !working_tree_dirty(repo) {
+        return Ok(SyncOutcome::NothingToCommit);
+    }
+
+    run_git_checked(
+        repo,
+        &["commit", "-m", message],
+        "create commit (git commit)",
+    )?;
+    run_git_checked(repo, &["push"], "push config (git push)")?;
+    Ok(SyncOutcome::Pushed)
+}
+
 /// Path to the sync state file within state_dir.
 pub fn state_path(state_dir: &Path) -> PathBuf {
     state_dir.join("sync.json")
@@ -113,6 +188,8 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::git_failure_detail;
+
     #[test]
     fn git_config_flags_protect_against_hooks() {
         use crate::git::GIT_CONFIG_FLAGS;
@@ -125,5 +202,24 @@ mod tests {
                 "core.hooksPath=/dev/null"
             ]
         );
+    }
+
+    #[test]
+    fn git_failure_detail_prefers_stderr() {
+        assert_eq!(git_failure_detail(b"  boom  \n", b"ignored"), "boom");
+    }
+
+    #[test]
+    fn git_failure_detail_falls_back_to_stdout_when_stderr_empty() {
+        // `git add` index/permission errors can print to stdout, leaving stderr
+        // empty — without the fallback the message is just "failed to X: ".
+        assert_eq!(git_failure_detail(b"", b"index locked\n"), "index locked");
+    }
+
+    #[test]
+    fn git_failure_detail_strips_control_and_ansi_sequences() {
+        // A hostile remote's error text must not manipulate the terminal.
+        let hostile = b"\x1b[2Jcleared\x1b]0;title\x07";
+        assert_eq!(git_failure_detail(hostile, b""), "[2Jcleared]0;title");
     }
 }
