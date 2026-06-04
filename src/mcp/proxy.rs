@@ -5,7 +5,7 @@
 //! pidfile points at a live process and spawns a new one otherwise.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsureOutcome {
@@ -15,10 +15,30 @@ pub enum EnsureOutcome {
     Spawned,
 }
 
+/// How long to wait for a TCP connection attempt to the proxy bind address.
+///
+/// 200 ms is enough for a local loopback bind (typically < 1 ms) while being
+/// short enough that a failed check doesn't visibly stall the shell prompt.
+const LIVENESS_TCP_TIMEOUT_MS: u64 = 200;
+
+/// How long to wait after spawning before probing the proxy's TCP port.
+///
+/// The proxy needs a moment to open its listening socket. 300 ms covers the
+/// typical interpreter startup + bind time on a busy machine without noticeably
+/// delaying `llmenv export`.
+const SPAWN_SETTLE_MS: u64 = 300;
+
 /// Ensures that `mcp-proxy` is running, bound to `bind`. Reads `pid_path` to
 /// check for an existing instance; if alive, returns
 /// [`EnsureOutcome::AlreadyRunning`]. Otherwise calls `spawn(bind)` and writes
 /// the returned pid to `pid_path`.
+///
+/// Liveness is checked by attempting a TCP connection to `bind`. This is more
+/// reliable than a PID-existence check (`kill -0`): it proves the proxy has
+/// opened its socket and is accepting connections, not just that *some* process
+/// holds the PID (PID-reuse TOCTOU, #300). A post-spawn probe also surfaces
+/// bind/startup failures that were previously invisible after stderr was
+/// silenced (#301).
 ///
 /// Concurrency: a sibling `<pid_path>.lock` file is created with
 /// `O_CREAT|O_EXCL`. The first writer wins the lock and does the
@@ -33,15 +53,15 @@ pub enum EnsureOutcome {
 ///
 /// # Errors
 /// Returns an error if the pidfile contents cannot be parsed, the parent
-/// directory cannot be created, the spawn callback fails, or writing the
-/// pidfile fails.
+/// directory cannot be created, the spawn callback fails, writing the pidfile
+/// fails, or the proxy does not become reachable within the settle window.
 pub fn ensure_running<F>(bind: &str, pid_path: &Path, spawn: F) -> anyhow::Result<EnsureOutcome>
 where
     F: FnOnce(&str) -> anyhow::Result<u32>,
 {
-    if let Some(existing) = read_pidfile(pid_path)?
-        && is_alive(existing)
-    {
+    // Fast path: existing proxy is already accepting connections (#300 — TCP
+    // probe rather than kill-0 avoids the PID-reuse TOCTOU).
+    if read_pidfile(pid_path)?.is_some() && probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
         return Ok(EnsureOutcome::AlreadyRunning);
     }
 
@@ -62,14 +82,28 @@ where
             let result = (|| -> anyhow::Result<EnsureOutcome> {
                 // Re-check inside the lock: another writer may have raced us
                 // past the early-out and published a live pid between our
-                // check above and our lock acquisition.
-                if let Some(existing) = read_pidfile(pid_path)?
-                    && is_alive(existing)
-                {
+                // check above and our lock acquisition (#300).
+                if read_pidfile(pid_path)?.is_some() && probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
                     return Ok(EnsureOutcome::AlreadyRunning);
                 }
                 let pid = spawn(bind)?;
                 write_pidfile_atomic(pid_path, pid)?;
+
+                // Post-spawn liveness check (#301): give the proxy time to bind
+                // its socket, then verify it's actually accepting connections.
+                // This surfaces startup failures (bad port, missing binary, etc.)
+                // that were previously invisible after stderr was silenced.
+                std::thread::sleep(std::time::Duration::from_millis(SPAWN_SETTLE_MS));
+                if !probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+                    let _ = std::fs::remove_file(pid_path);
+                    anyhow::bail!(
+                        "mcp-proxy spawned (pid {pid}) but did not bind to {bind} \
+                         within {}ms; check that the port is free and mcp-proxy is \
+                         correctly installed",
+                        SPAWN_SETTLE_MS
+                    );
+                }
+
                 Ok(EnsureOutcome::Spawned)
             })();
             let _ = std::fs::remove_file(&lock_path);
@@ -79,9 +113,7 @@ where
             // Another caller is mid-spawn. Trust that it will publish a live
             // pid and re-read; if the pidfile still looks dead, surface that
             // as an error rather than racing again — callers can retry.
-            if let Some(existing) = read_pidfile(pid_path)?
-                && is_alive(existing)
-            {
+            if read_pidfile(pid_path)?.is_some() && probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
                 Ok(EnsureOutcome::AlreadyRunning)
             } else {
                 Err(anyhow::anyhow!(
@@ -196,16 +228,60 @@ pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
         .rsplit_once(':')
         .map(|(_, p)| p)
         .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
+    // Parse-don't-validate: the port is forwarded verbatim into the child's
+    // argv (`--port <port>`), so a non-numeric suffix like `--config /tmp/x`
+    // would be read by mcp-proxy as extra flags. Reject anything that isn't a
+    // real u16 before it reaches the (stderr-silenced) daemon.
+    let port: u16 = port
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bind port {port:?} is not a valid u16: {e}"))?;
     let (program, leading) = mcp_proxy_command()?;
-    let child = Command::new(program)
-        .args(leading)
+    let mut cmd = Command::new(program);
+    cmd.args(leading)
         .arg("--port")
-        .arg(port)
+        .arg(port.to_string())
         .arg("--")
         .arg("icm")
-        .arg("serve")
-        .spawn()?;
+        .arg("serve");
+    configure_detached(&mut cmd);
+    let child = cmd.spawn()?;
     Ok(child.id())
+}
+
+/// Configures `cmd` to run as a detached background daemon rather than a
+/// foreground child of the calling shell.
+///
+/// `llmenv export` is sourced on every prompt via `source <(llmenv export)`,
+/// whose process substitution makes the export's stdout the very pipe the shell
+/// `source`s. A spawned `mcp-proxy` that inherits these handles writes its log
+/// lines straight into that pipe, where the shell then tries to execute them as
+/// commands (`command not found: INFO:`) and floods the terminal (#298). It
+/// would also be killed by terminal job-control signals (^C / SIGHUP on SSH
+/// disconnect) sent to the foreground process group.
+///
+/// On all platforms stdio is redirected to the null device, which is the part
+/// that fixes the pipe pollution. On Unix the child additionally joins a new
+/// process group (`process_group(0)`) so foreground-group job-control signals
+/// (`^C`) don't reach it; this does *not* start a new session, so a `setsid`
+/// daemon would still share the controlling terminal — acceptable here because
+/// `llmenv export` exits immediately after spawning, leaving the proxy
+/// reparented to init. `setsid` is intentionally not used to avoid pulling in
+/// `libc` (mirrors the `is_alive` rationale below).
+fn configure_detached(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // 0 = make the child its own group leader.
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        // No process-group API in std on non-Unix; only the stdio redirect
+        // above applies. Process-group isolation is unavailable here.
+    }
 }
 
 fn read_pidfile(pid_path: &Path) -> anyhow::Result<Option<u32>> {
@@ -223,19 +299,44 @@ fn read_pidfile(pid_path: &Path) -> anyhow::Result<Option<u32>> {
     Ok(Some(pid))
 }
 
-/// True if `pid` is a live process. On Unix this sends signal 0 (no-op delivery
-/// check). On other platforms it conservatively returns false so callers
-/// always re-spawn.
+/// Probes `bind` (e.g. `"127.0.0.1:7700"`) by attempting a TCP connection with
+/// a `timeout_ms`-millisecond deadline. Returns `true` if the connect succeeds,
+/// meaning the proxy has opened its socket and is accepting connections.
+///
+/// This is the preferred liveness check over `kill -0` because it eliminates
+/// the PID-reuse TOCTOU (#300): a recycled PID that belongs to an unrelated
+/// process will not be listening on the proxy's port, so the probe correctly
+/// returns `false`.
+///
+/// A failed probe (port not yet open, wrong process on port) returns `false`
+/// without surfacing the underlying `io::Error` — callers treat any non-success
+/// as "not alive" and act accordingly.
+#[must_use]
+pub fn probe_tcp(bind: &str, timeout_ms: u64) -> bool {
+    use std::net::TcpStream;
+    let Ok(addr) = bind.parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(timeout_ms)).is_ok()
+}
+
+/// True if `pid` is a live process via a `kill -0` signal-0 check.
+///
+/// # Note on TOCTOU
+/// This check is subject to PID-reuse races: a recycled PID that belongs to an
+/// unrelated process returns `true` even though the proxy is no longer running
+/// (#300). Callers that have access to the bind address should prefer
+/// [`probe_tcp`], which proves the proxy is actually serving.
+///
+/// On non-Unix platforms this conservatively returns `false` so callers always
+/// re-spawn.
 #[must_use]
 pub fn is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // SAFETY: kill(2) with sig=0 performs only the permission/existence
-        // check and never delivers a signal. pid is forwarded as i32 via
-        // libc::pid_t; we cap at i32::MAX to avoid wrap.
-        let pid_i32 = i32::try_from(pid).unwrap_or(i32::MAX);
         // We avoid pulling libc as a dependency by going through std::process
-        // — but std doesn't expose signal-0. Shell-out is reliable and cheap.
+        // — std doesn't expose kill(2) with sig=0 directly.
+        let pid_i32 = i32::try_from(pid).unwrap_or(i32::MAX);
         let status = Command::new("kill")
             .arg("-0")
             .arg(pid_i32.to_string())
@@ -291,6 +392,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn configure_detached_spawns_child_in_new_process_group() {
+        use super::configure_detached;
+        use std::process::Command;
+
+        // `sleep` is alive long enough to inspect; we kill it before asserting.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        configure_detached(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn sleep");
+        let child_pid = child.id();
+
+        let pgid = |pid: u32| -> String {
+            let out = Command::new("ps")
+                .args(["-o", "pgid=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let child_pgid = pgid(child_pid);
+
+        // Clean up before asserting so a failed assertion never leaks the child.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // process_group(0) makes the child its own group leader: its pgid equals
+        // its own pid. Asserting the exact value (not merely "differs from the
+        // parent") pins the documented guarantee — a child merely moved into
+        // some other foreign group would not satisfy this (#298).
+        assert_eq!(
+            child_pgid,
+            child_pid.to_string(),
+            "configure_detached must make the child its own process-group leader"
+        );
+    }
+
     mod props {
         use super::super::{read_pidfile, write_pidfile_atomic};
         use proptest::prelude::*;
@@ -320,5 +457,138 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// probe_tcp returns false for an unparseable or unroutable address (#300).
+    /// This is the core property we depend on: a recycled PID that belongs to an
+    /// unrelated process will not be listening on the proxy's port.
+    #[test]
+    fn probe_tcp_returns_false_for_invalid_address() {
+        use super::probe_tcp;
+        // An unparseable address can never connect.
+        assert!(!probe_tcp("not-a-valid-address", 200));
+        // Port 0 is never bound by a real server.
+        assert!(!probe_tcp("127.0.0.1:0", 200));
+    }
+
+    /// probe_tcp returns true when a real TCP listener exists (#300/#301).
+    #[test]
+    fn probe_tcp_returns_true_for_open_port() {
+        use super::probe_tcp;
+        use std::net::TcpListener;
+
+        // Bind an ephemeral port to act as the "proxy".
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        let bind = addr.to_string();
+
+        assert!(
+            probe_tcp(&bind, 200),
+            "probe_tcp must return true when a listener is bound on {bind}"
+        );
+    }
+
+    /// ensure_running treats a pidfile + no listener as dead and spawns (#300).
+    /// Simulates the PID-reuse scenario: the pidfile has a pid but nothing is
+    /// listening on the bind address, so ensure_running must not return
+    /// AlreadyRunning — it must spawn.
+    #[test]
+    fn ensure_running_spawns_when_pidfile_exists_but_port_is_not_bound() {
+        use super::{EnsureOutcome, ensure_running, probe_tcp, write_pidfile_atomic};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        // Grab a free port then drop the listener so the port is closed.
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr").port()
+        };
+        let bind = format!("127.0.0.1:{port}");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+
+        // Seed the pidfile with a plausible but stale PID.
+        write_pidfile_atomic(&pid_path, 99_999).expect("write pidfile");
+
+        // Confirm nothing is listening (port is free).
+        assert!(!probe_tcp(&bind, 50), "port must be closed before test");
+
+        // The spawn closure binds a listener *inside* itself so the port is
+        // closed before ensure_running's fast-path probe, simulating a stale
+        // pidfile with a recycled PID (#300). We store the listener in an Arc
+        // so it stays alive for the post-spawn TCP probe.
+        let held_listener: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
+        let held2 = Arc::clone(&held_listener);
+        let bind_clone = bind.clone();
+        let result = ensure_running(&bind, &pid_path, move |_b| {
+            let l = TcpListener::bind(&bind_clone as &str).expect("bind for spawn simulation");
+            *held2.lock().expect("lock") = Some(l);
+            Ok(42_u32)
+        });
+
+        assert!(result.is_ok(), "ensure_running failed: {:?}", result);
+        assert_eq!(
+            result.unwrap(),
+            EnsureOutcome::Spawned,
+            "must spawn when pidfile exists but port is not bound (PID-reuse scenario)"
+        );
+        // Drop the listener.
+        drop(held_listener);
+    }
+
+    /// ensure_running returns AlreadyRunning when the proxy is actually bound (#300).
+    #[test]
+    fn ensure_running_returns_already_running_when_port_is_bound() {
+        use super::{EnsureOutcome, ensure_running, write_pidfile_atomic};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let bind = format!("127.0.0.1:{port}");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+        write_pidfile_atomic(&pid_path, 12_345).expect("write pidfile");
+
+        let result = ensure_running(&bind, &pid_path, |_| {
+            panic!("spawn must not be called when proxy is already running")
+        });
+
+        assert_eq!(
+            result.expect("ensure_running"),
+            EnsureOutcome::AlreadyRunning,
+            "must return AlreadyRunning when port is bound"
+        );
+    }
+
+    /// ensure_running surfaces a clear error when the spawn callback succeeds
+    /// but the proxy never binds its port (#301).
+    #[test]
+    fn ensure_running_errors_when_spawn_succeeds_but_port_never_binds() {
+        use super::ensure_running;
+
+        // Use a closed port — spawn returns Ok but nothing ever binds.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr").port()
+            // l drops here, port closed
+        };
+        let bind = format!("127.0.0.1:{port}");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+
+        let result = ensure_running(&bind, &pid_path, |_| Ok(99_999));
+
+        assert!(
+            result.is_err(),
+            "ensure_running must error when spawn succeeds but port never binds"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("did not bind"),
+            "error message should mention bind failure, got: {msg}"
+        );
     }
 }
