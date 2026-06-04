@@ -196,11 +196,18 @@ pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
         .rsplit_once(':')
         .map(|(_, p)| p)
         .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
+    // Parse-don't-validate: the port is forwarded verbatim into the child's
+    // argv (`--port <port>`), so a non-numeric suffix like `--config /tmp/x`
+    // would be read by mcp-proxy as extra flags. Reject anything that isn't a
+    // real u16 before it reaches the (stderr-silenced) daemon.
+    let port: u16 = port
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bind port {port:?} is not a valid u16: {e}"))?;
     let (program, leading) = mcp_proxy_command()?;
     let mut cmd = Command::new(program);
     cmd.args(leading)
         .arg("--port")
-        .arg(port)
+        .arg(port.to_string())
         .arg("--")
         .arg("icm")
         .arg("serve");
@@ -220,9 +227,14 @@ pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
 /// would also be killed by terminal job-control signals (^C / SIGHUP on SSH
 /// disconnect) sent to the foreground process group.
 ///
-/// Both are fixed here: stdio is redirected to `/dev/null`, and on Unix the
-/// child joins a new process group (`process_group(0)`) so foreground-group
-/// signals never reach it.
+/// On all platforms stdio is redirected to the null device, which is the part
+/// that fixes the pipe pollution. On Unix the child additionally joins a new
+/// process group (`process_group(0)`) so foreground-group job-control signals
+/// (`^C`) don't reach it; this does *not* start a new session, so a `setsid`
+/// daemon would still share the controlling terminal — acceptable here because
+/// `llmenv export` exits immediately after spawning, leaving the proxy
+/// reparented to init. `setsid` is intentionally not used to avoid pulling in
+/// `libc` (mirrors the `is_alive` rationale below).
 fn configure_detached(cmd: &mut Command) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -230,9 +242,13 @@ fn configure_detached(cmd: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        // 0 = make the child its own group leader, detaching it from the
-        // caller's foreground process group.
+        // 0 = make the child its own group leader.
         cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        // No process-group API in std on non-Unix; only the stdio redirect
+        // above applies. Process-group isolation is unavailable here.
     }
 }
 
@@ -339,21 +355,19 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         let child_pgid = pgid(child_pid);
-        let parent_pgid = pgid(std::process::id());
 
         // Clean up before asserting so a failed assertion never leaks the child.
         let _ = child.kill();
         let _ = child.wait();
 
-        assert!(
-            !child_pgid.is_empty(),
-            "child pgid should be readable via ps"
-        );
-        // process_group(0) makes the child its own group leader, so its pgid
-        // differs from the test runner's foreground group (#298).
-        assert_ne!(
-            child_pgid, parent_pgid,
-            "configure_detached must place the child in its own process group"
+        // process_group(0) makes the child its own group leader: its pgid equals
+        // its own pid. Asserting the exact value (not merely "differs from the
+        // parent") pins the documented guarantee — a child merely moved into
+        // some other foreign group would not satisfy this (#298).
+        assert_eq!(
+            child_pgid,
+            child_pid.to_string(),
+            "configure_detached must make the child its own process-group leader"
         );
     }
 
