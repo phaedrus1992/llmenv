@@ -401,6 +401,18 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
                 path.display()
             ));
         }
+
+        // Check for hardcoded ~/.claude paths in skill content (#311).
+        // Skills must use ${CLAUDE_PLUGIN_ROOT} or relative paths so they work
+        // when CLAUDE_CONFIG_DIR points to a materialized llmenv folder.
+        if content.contains("~/.claude") || content.contains("$HOME/.claude") {
+            return Err(anyhow::anyhow!(
+                "Skill {} contains hardcoded ~/.claude or $HOME/.claude paths. \
+                 Use ${{CLAUDE_PLUGIN_ROOT}} or relative paths instead so the skill \
+                 works when CLAUDE_CONFIG_DIR is set to a materialized llmenv folder.",
+                path.display()
+            ));
+        }
     }
 
     Ok(())
