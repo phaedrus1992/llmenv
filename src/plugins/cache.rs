@@ -229,7 +229,7 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
         anyhow::bail!(
             "git clone failed for {}: {}",
             git::sanitize_git_url(source),
-            git::git_failure_detail(&output.stderr, output.status)
+            git::git_failure_detail(&output.stderr, &output.stdout, output.status)
         );
     }
     Ok(())
@@ -250,7 +250,7 @@ fn git_pull(repo: &Path) -> Result<()> {
         anyhow::bail!(
             "git fetch failed at {}: {}",
             repo.display(),
-            git::git_failure_detail(&fetch_out.stderr, fetch_out.status)
+            git::git_failure_detail(&fetch_out.stderr, &fetch_out.stdout, fetch_out.status)
         );
     }
     let reset_out = git::secure_git()
@@ -262,7 +262,7 @@ fn git_pull(repo: &Path) -> Result<()> {
         tracing::debug!(
             "marketplace refresh did not fast-forward at {}: {}",
             repo.display(),
-            git::git_failure_detail(&reset_out.stderr, reset_out.status)
+            git::git_failure_detail(&reset_out.stderr, &reset_out.stdout, reset_out.status)
         );
     }
     Ok(())

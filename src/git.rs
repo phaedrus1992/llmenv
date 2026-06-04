@@ -52,18 +52,29 @@ pub fn sanitize_git_url(url: &str) -> String {
 }
 
 /// Build a human-readable failure detail from a git subprocess's captured
-/// output. Prefers `stderr` (where git writes diagnostics), falls back to the
-/// exit status when stderr is empty. The result is credential-scrubbed via
-/// [`sanitize_git_url`] so a failing clone/fetch of a URL with embedded
-/// credentials never echoes the secret to the terminal or logs (#312).
+/// output. Prefers `stderr` (where git writes diagnostics), falls back to
+/// `stdout` (some errors — e.g. a `git add` index lock — print there), then to
+/// the exit status when both are empty. Control and ANSI escape bytes are
+/// stripped so a hostile remote's error text can't manipulate the terminal
+/// (#307), and the result is credential-scrubbed via [`sanitize_git_url`] so a
+/// URL with embedded credentials never echoes the secret to the terminal or
+/// logs (#312).
 #[must_use]
-pub fn git_failure_detail(stderr: &[u8], status: std::process::ExitStatus) -> String {
-    let stderr = String::from_utf8_lossy(stderr);
-    let trimmed = stderr.trim();
-    if trimmed.is_empty() {
+pub fn git_failure_detail(
+    stderr: &[u8],
+    stdout: &[u8],
+    status: std::process::ExitStatus,
+) -> String {
+    let raw = if stderr.is_empty() { stdout } else { stderr };
+    let cleaned: String = String::from_utf8_lossy(raw)
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect();
+    if cleaned.is_empty() {
         format!("exit code {status}")
     } else {
-        sanitize_git_url(trimmed)
+        sanitize_git_url(&cleaned)
     }
 }
 
@@ -164,11 +175,18 @@ mod tests {
 
     #[test]
     fn git_failure_detail_prefers_stderr() {
-        // A non-empty stderr is returned (credential-scrubbed) over the exit code.
         use std::os::unix::process::ExitStatusExt;
         let status = std::process::ExitStatus::from_raw(1 << 8);
-        let detail = git_failure_detail(b"fatal: repository not found\n", status);
+        let detail = git_failure_detail(b"fatal: repository not found\n", b"ignored", status);
         assert_eq!(detail, "fatal: repository not found");
+    }
+
+    #[test]
+    fn git_failure_detail_falls_back_to_stdout_when_stderr_empty() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let detail = git_failure_detail(b"", b"index locked\n", status);
+        assert_eq!(detail, "index locked");
     }
 
     #[test]
@@ -177,16 +195,26 @@ mod tests {
         let status = std::process::ExitStatus::from_raw(1 << 8);
         let detail = git_failure_detail(
             b"fatal: could not read from https://user:tok@github.com/x.git\n",
+            b"",
             status,
         );
         assert!(!detail.contains("tok"), "credential leaked: {detail}");
     }
 
     #[test]
+    fn git_failure_detail_strips_control_and_ansi_sequences() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let hostile = b"\x1b[2Jcleared\x1b]0;title";
+        let detail = git_failure_detail(hostile, b"", status);
+        assert_eq!(detail, "[2Jcleared]0;title");
+    }
+
+    #[test]
     fn git_failure_detail_falls_back_to_exit_code() {
         use std::os::unix::process::ExitStatusExt;
         let status = std::process::ExitStatus::from_raw(128 << 8);
-        let detail = git_failure_detail(b"   \n", status);
+        let detail = git_failure_detail(b"   \n", b"", status);
         assert!(detail.contains("exit code"), "got: {detail}");
     }
 
