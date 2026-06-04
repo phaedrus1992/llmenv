@@ -387,20 +387,23 @@ fn validate_skill_frontmatter(skill_md: &Path, skill_dir: &Path) -> anyhow::Resu
     Ok(())
 }
 
-/// Scan every readable text file under `skill_dir` for hardcoded config paths
-/// (#311). Covers scripts and helper files, not just SKILL.md. Non-UTF-8 files
-/// (binaries) are skipped — only text can carry a path reference we'd flag.
-fn scan_skill_files_for_hardcoded_paths(skill_dir: &Path) -> anyhow::Result<()> {
-    for entry in walkdir::WalkDir::new(skill_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_file() {
+/// Scan every readable text file under `dir` (recursively) for hardcoded config
+/// paths (#311). Covers scripts and helper files, not just SKILL.md. Symlinks
+/// are not followed (the caller verified `dir` itself is in-bounds), and
+/// non-UTF-8 files (binaries) are skipped — only text can carry a flaggable path.
+fn scan_skill_files_for_hardcoded_paths(dir: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(entry.path()) {
-            reject_hardcoded_config_path(&content, &entry.path().display().to_string())?;
+        if meta.is_dir() {
+            scan_skill_files_for_hardcoded_paths(&path)?;
+        } else if meta.is_file()
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            reject_hardcoded_config_path(&content, &path.display().to_string())?;
         }
     }
     Ok(())
