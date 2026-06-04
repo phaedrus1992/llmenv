@@ -5,7 +5,7 @@
 //! pidfile points at a live process and spawns a new one otherwise.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsureOutcome {
@@ -197,15 +197,43 @@ pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
         .map(|(_, p)| p)
         .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
     let (program, leading) = mcp_proxy_command()?;
-    let child = Command::new(program)
-        .args(leading)
+    let mut cmd = Command::new(program);
+    cmd.args(leading)
         .arg("--port")
         .arg(port)
         .arg("--")
         .arg("icm")
-        .arg("serve")
-        .spawn()?;
+        .arg("serve");
+    configure_detached(&mut cmd);
+    let child = cmd.spawn()?;
     Ok(child.id())
+}
+
+/// Configures `cmd` to run as a detached background daemon rather than a
+/// foreground child of the calling shell.
+///
+/// `llmenv export` is sourced on every prompt via `source <(llmenv export)`,
+/// whose process substitution makes the export's stdout the very pipe the shell
+/// `source`s. A spawned `mcp-proxy` that inherits these handles writes its log
+/// lines straight into that pipe, where the shell then tries to execute them as
+/// commands (`command not found: INFO:`) and floods the terminal (#298). It
+/// would also be killed by terminal job-control signals (^C / SIGHUP on SSH
+/// disconnect) sent to the foreground process group.
+///
+/// Both are fixed here: stdio is redirected to `/dev/null`, and on Unix the
+/// child joins a new process group (`process_group(0)`) so foreground-group
+/// signals never reach it.
+fn configure_detached(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // 0 = make the child its own group leader, detaching it from the
+        // caller's foreground process group.
+        cmd.process_group(0);
+    }
 }
 
 fn read_pidfile(pid_path: &Path) -> anyhow::Result<Option<u32>> {
@@ -288,6 +316,44 @@ mod tests {
         assert!(
             !is_executable(dir.path()),
             "a directory should not count as an executable file"
+        );
+    }
+
+    #[test]
+    fn configure_detached_spawns_child_in_new_process_group() {
+        use super::configure_detached;
+        use std::process::Command;
+
+        // `sleep` is alive long enough to inspect; we kill it before asserting.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        configure_detached(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn sleep");
+        let child_pid = child.id();
+
+        let pgid = |pid: u32| -> String {
+            let out = Command::new("ps")
+                .args(["-o", "pgid=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let child_pgid = pgid(child_pid);
+        let parent_pgid = pgid(std::process::id());
+
+        // Clean up before asserting so a failed assertion never leaks the child.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            !child_pgid.is_empty(),
+            "child pgid should be readable via ps"
+        );
+        // process_group(0) makes the child its own group leader, so its pgid
+        // differs from the test runner's foreground group (#298).
+        assert_ne!(
+            child_pgid, parent_pgid,
+            "configure_detached must place the child in its own process group"
         );
     }
 
