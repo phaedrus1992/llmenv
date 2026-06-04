@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with `command not found: INFO:` lines. The proxy now redirects stdio to
   `/dev/null` and starts in its own process group so terminal job-control
   signals no longer reach it
+- Fix `llmenv sync` silently reporting success when `git push` failed; a
+  rejected or failed push is now surfaced as an error with git's own message
+- Fix git operations potentially hanging on a credential prompt when run with a
+  non-interactive stdin (CI, or a sourced `llmenv export`); all git subprocesses
+  now detach stdin so they fail fast instead of blocking
 
 ## [1.0.5] - 2026-06-03
 
