@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add GitHub Actions workflow to auto-close issues when PRs merge to `release/*`
+  branches; GitHub's native auto-close only works on the default branch, so this
+  workflow parses merged PR bodies for closing keywords and closes referenced
+  issues via the API
+
 ### Fixed
 
 - Fix `mcp-proxy` spawned during `llmenv export` inheriting the calling shell's
