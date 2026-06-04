@@ -29,13 +29,27 @@ fn port_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Allocates an ephemeral TCP port by binding then dropping the listener.
-/// Returns `(port, bind_str)` where the port is guaranteed free at the time
-/// of return (though there's a small TOCTOU window — acceptable for tests).
+/// Allocates an ephemeral TCP port by binding then dropping the listener, and
+/// confirms the released port is actually closed before returning it.
+///
+/// On macOS the kernel reuses just-freed ephemeral ports aggressively, so a
+/// bare bind-then-drop can hand back a port that still probes as open (a prior
+/// listener draining, or the same number reassigned). Tests that assert
+/// "port must be closed before test" then flake. We re-pick until a probe
+/// confirms the port refuses connections. Callers must hold [`port_guard`] so
+/// no sibling test reopens the port between this check and use.
 fn free_port() -> (u16, String) {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = l.local_addr().expect("addr").port();
-    (port, format!("127.0.0.1:{port}"))
+    for _ in 0..50 {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = l.local_addr().expect("addr").port();
+        let bind = format!("127.0.0.1:{port}");
+        drop(l);
+        if !probe_tcp(&bind, 50) {
+            return (port, bind);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("could not obtain a confirmed-closed ephemeral port after retries");
 }
 
 #[derive(Default)]

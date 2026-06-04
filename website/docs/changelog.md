@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with `command not found: INFO:` lines. The proxy now redirects stdio to
   `/dev/null` and starts in its own process group so terminal job-control
   signals no longer reach it
+
 ## [1.0.5] - 2026-06-03
 
 ### Changed
