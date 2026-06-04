@@ -2,6 +2,7 @@ use crate::git;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing;
 
 /// True if the repo's working tree has staged or unstaged changes.
 fn working_tree_dirty(repo: &Path) -> bool {
@@ -150,13 +151,17 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     }
 
     // Attempt fetch — silent on failure (network issues are transient and
-    // we don't want to spam every shell prompt while offline).
-    let _ = git::secure_git()
+    // we don't want to spam every shell prompt while offline). Log spawn errors
+    // at debug level in case git binary is missing or broken.
+    if let Err(e) = git::secure_git()
         .args(["fetch"])
         .current_dir(repo)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("git fetch spawn error in {}: {}", repo.display(), e);
+    }
 
     // Attempt fast-forward pull. Suppress git's stderr — we'll print our
     // own one-line warning on failure rather than git's two-line message.

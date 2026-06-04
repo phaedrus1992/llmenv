@@ -218,15 +218,19 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
 }
 
 fn git_clone(source: &str, dest: &Path) -> Result<()> {
-    let status = git::secure_git()
+    let output = git::secure_git()
         .args(["clone", "--depth", "1", "--", source])
         .arg(dest)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .output()
         .context("spawning git clone")?;
-    if !status.success() {
-        anyhow::bail!("git clone failed for {source}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("clone failed with exit code {}", output.status)
+        } else {
+            stderr
+        };
+        anyhow::bail!("git clone failed for {source}: {detail}");
     }
     Ok(())
 }
@@ -237,30 +241,42 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
 /// `reset` (no upstream change / diverged) keeps the current checkout and is
 /// non-fatal: the clone is still usable, it just didn't advance.
 fn git_pull(repo: &Path) -> Result<()> {
-    let fetch_status = git::secure_git()
+    let fetch_out = git::secure_git()
         .args(["fetch", "--depth", "1"])
         .current_dir(repo)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .output()
         .context("spawning git fetch")?;
-    if !fetch_status.success() {
+    if !fetch_out.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_out.stderr)
+            .trim()
+            .to_string();
         anyhow::bail!(
-            "git fetch failed at {} (network or remote error)",
-            repo.display()
+            "git fetch failed at {}: {}",
+            repo.display(),
+            if stderr.is_empty() {
+                format!("exit code {}", fetch_out.status)
+            } else {
+                stderr
+            }
         );
     }
-    let reset_status = git::secure_git()
+    let reset_out = git::secure_git()
         .args(["reset", "--hard", "@{u}"])
         .current_dir(repo)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .output()
         .context("spawning git reset")?;
-    if !reset_status.success() {
+    if !reset_out.status.success() {
+        let stderr = String::from_utf8_lossy(&reset_out.stderr)
+            .trim()
+            .to_string();
         tracing::debug!(
-            "marketplace refresh did not fast-forward at {}; keeping current checkout",
-            repo.display()
+            "marketplace refresh did not fast-forward at {}: {}",
+            repo.display(),
+            if stderr.is_empty() {
+                format!("exit code {}", reset_out.status)
+            } else {
+                stderr
+            }
         );
     }
     Ok(())
@@ -268,17 +284,41 @@ fn git_pull(repo: &Path) -> Result<()> {
 
 /// Resolve the current HEAD sha of a git checkout, or `None` if it can't be read.
 fn git_head(repo: &Path) -> Option<String> {
-    let output = git::secure_git()
+    let output = match git::secure_git()
         .args(["rev-parse", "HEAD"])
         .current_dir(repo)
-        .stderr(std::process::Stdio::null())
         .output()
-        .ok()?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::debug!("git rev-parse HEAD failed at {}: {}", repo.display(), e);
+            return None;
+        }
+    };
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim();
+        tracing::debug!(
+            "git rev-parse HEAD failed at {} with exit {}: {}",
+            repo.display(),
+            output.status,
+            stderr
+        );
         return None;
     }
-    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if sha.is_empty() { None } else { Some(sha) }
+    match String::from_utf8(output.stdout) {
+        Ok(sha) => {
+            let sha = sha.trim().to_string();
+            if sha.is_empty() { None } else { Some(sha) }
+        }
+        Err(e) => {
+            tracing::debug!(
+                "git rev-parse HEAD output invalid UTF-8 at {}: {}",
+                repo.display(),
+                e
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]

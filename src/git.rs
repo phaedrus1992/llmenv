@@ -44,24 +44,53 @@ pub fn working_tree_dirty(repo: &Path) -> bool {
 /// Returns false if there's no upstream, git fails, or output can't be parsed —
 /// we only want to nudge the user when we're certain there are unpushed commits.
 pub fn has_unpushed_commits(repo: &Path) -> bool {
-    let output = secure_git()
+    let output = match secure_git()
         .args(["rev-list", "--count", "@{u}..HEAD"])
         .current_dir(repo)
-        .stderr(Stdio::null())
-        .output();
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::debug!("git rev-list count failed at {}: {}", repo.display(), e);
+            return false;
+        }
+    };
 
-    let Ok(output) = output else { return false };
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim();
+        tracing::debug!(
+            "git rev-list count failed at {} with exit {}: {}",
+            repo.display(),
+            output.status,
+            stderr
+        );
         return false;
     }
 
-    let count = std::str::from_utf8(&output.stdout)
-        .unwrap_or("0")
-        .trim()
-        .parse::<u32>()
-        .unwrap_or(0);
+    let count_str = match std::str::from_utf8(&output.stdout) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(
+                "git rev-list count output invalid UTF-8 at {}: {}",
+                repo.display(),
+                e
+            );
+            return false;
+        }
+    };
 
-    count > 0
+    match count_str.trim().parse::<u32>() {
+        Ok(count) => count > 0,
+        Err(e) => {
+            tracing::debug!(
+                "git rev-list count parse failed at {} for '{}': {}",
+                repo.display(),
+                count_str.trim(),
+                e
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
