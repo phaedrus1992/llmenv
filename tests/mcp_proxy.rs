@@ -10,10 +10,24 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use llmenv::mcp::proxy::{EnsureOutcome, ensure_running, is_alive, probe_tcp};
 use tempfile::tempdir;
+
+/// Serializes every test that allocates an ephemeral port. cargo runs the tests
+/// in a binary in parallel, and [`free_port`] releases its port before the test
+/// asserts the port is closed (or before the spawn callback rebinds it). A
+/// sibling test binding `127.0.0.1:0` can grab that just-freed port and flake
+/// the victim. Holding this lock across the whole body of every port-touching
+/// test removes the intra-binary race. A poisoned lock (a prior test panicked
+/// mid-body) is recovered rather than propagated — the guarded data is `()`.
+fn port_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Allocates an ephemeral TCP port by binding then dropping the listener.
 /// Returns `(port, bind_str)` where the port is guaranteed free at the time
@@ -64,6 +78,7 @@ fn spawner(log: Arc<SpawnLog>) -> impl Fn(&str) -> anyhow::Result<u32> {
 
 #[test]
 fn ensure_running_spawns_when_no_pidfile() {
+    let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let (_, bind) = free_port();
@@ -81,6 +96,7 @@ fn ensure_running_spawns_when_no_pidfile() {
 
 #[test]
 fn ensure_running_passes_bind_to_spawner() {
+    let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let (_, bind) = free_port();
@@ -102,6 +118,7 @@ fn ensure_running_passes_bind_to_spawner() {
 fn ensure_running_no_op_when_proxy_is_listening() {
     // The proxy is "alive" when it has a pidfile AND is accepting TCP connections.
     // This is the new contract (#300 — TCP probe replaces kill-0).
+    let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
 
@@ -131,6 +148,7 @@ fn ensure_running_no_op_when_proxy_is_listening() {
 fn ensure_running_respawns_when_pidfile_exists_but_port_closed() {
     // Pidfile exists but port is not bound — simulates a stale pidfile or PID
     // reuse: a different process holds the old PID but the proxy is gone (#300).
+    let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let (_, bind) = free_port();
@@ -171,6 +189,7 @@ fn ensure_running_respawns_when_pidfile_exists_but_port_closed() {
 fn ensure_running_errors_when_spawn_succeeds_but_port_never_binds() {
     // Spawn callback returns Ok but never binds the port — simulates a crashed
     // or misconfigured mcp-proxy that exits before opening its socket (#301).
+    let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let (_, bind) = free_port();
@@ -199,6 +218,7 @@ fn ensure_running_errors_when_spawn_succeeds_but_port_never_binds() {
 fn ensure_running_errors_when_lock_is_held_and_port_closed() {
     // Simulate a peer holding the lockfile mid-spawn: pidfile is stale and
     // port is not bound. ensure_running must NOT spawn and must surface an error.
+    let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let lock_path: PathBuf = tmp.path().join("mcp-proxy.pid.lock");
@@ -221,6 +241,7 @@ fn ensure_running_errors_when_lock_is_held_and_port_closed() {
 fn ensure_running_accepts_peer_published_pid_when_listening() {
     // Peer holds the lock AND the proxy is now listening. We must observe
     // AlreadyRunning rather than racing them (#300).
+    let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let lock_path: PathBuf = tmp.path().join("mcp-proxy.pid.lock");
@@ -276,6 +297,7 @@ fn probe_tcp_returns_false_for_invalid_address() {
 
 #[test]
 fn probe_tcp_returns_true_for_open_port() {
+    let _guard = port_guard();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
     let bind = format!("127.0.0.1:{port}");
