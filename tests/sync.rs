@@ -141,4 +141,19 @@ fn commit_and_push_pushes_change_to_remote() {
     std::fs::write(work.join("config.yaml"), b"x: 2\n").unwrap();
     let outcome = sync::commit_and_push(&work, "Update llmenv config").unwrap();
     assert_eq!(outcome, sync::SyncOutcome::Pushed);
+
+    // Confirm the commit actually landed in the bare remote — guards against a
+    // vacuous pass where `Pushed` is returned but the remote ref never moved.
+    let remote_log = std::process::Command::new("git")
+        .args(["log", "--oneline", "-1"])
+        .current_dir(&remote)
+        .output()
+        .unwrap();
+    assert!(remote_log.status.success(), "reading remote log failed");
+    let remote_head = String::from_utf8_lossy(&remote_log.stdout);
+    assert!(
+        remote_head.contains("Update llmenv config"),
+        "remote HEAD should be the pushed commit, got: {}",
+        remote_head.trim()
+    );
 }
