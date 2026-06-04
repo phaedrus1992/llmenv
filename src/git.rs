@@ -57,7 +57,7 @@ pub fn has_unpushed_commits(repo: &Path) -> bool {
     };
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         tracing::debug!(
             "git rev-list count failed at {} with exit {}: {}",
             repo.display(),

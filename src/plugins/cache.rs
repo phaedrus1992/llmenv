@@ -296,7 +296,7 @@ fn git_head(repo: &Path) -> Option<String> {
         }
     };
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         tracing::debug!(
             "git rev-parse HEAD failed at {} with exit {}: {}",
             repo.display(),
