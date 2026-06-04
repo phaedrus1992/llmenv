@@ -15,6 +15,63 @@ fn has_unpushed_commits(repo: &Path) -> bool {
     git::has_unpushed_commits(repo)
 }
 
+/// Result of [`commit_and_push`]: whether a commit was actually pushed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// A commit was created and pushed to origin.
+    Pushed,
+    /// The working tree was clean — nothing to commit or push.
+    NothingToCommit,
+}
+
+/// Run a git subcommand in `repo`, capturing its output. On a non-zero exit the
+/// captured stderr is surfaced in the returned error so failures are loud, and
+/// capturing (rather than inheriting) stdout/stderr keeps git's chatter out of
+/// a piped `llmenv export` eval context (#307).
+///
+/// # Errors
+/// Returns an error if git cannot be spawned or exits non-zero (stderr included).
+fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
+    let output = git::secure_git()
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("failed to spawn git to {what}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("failed to {what}: {}", stderr.trim());
+    }
+    Ok(())
+}
+
+/// Stage, commit, and push every change in `repo` to origin.
+///
+/// "Nothing to commit" is detected up front by inspecting the working tree
+/// after staging — not by misreading `git commit`'s exit code — so a commit
+/// that fails for a real reason (e.g. missing identity) surfaces as an error
+/// instead of being mistaken for a clean tree. A failed `git push` is likewise
+/// surfaced rather than silently treated as success (#307).
+///
+/// # Errors
+/// Returns an error if any git step fails to spawn or exits non-zero.
+pub fn commit_and_push(repo: &Path, message: &str) -> Result<SyncOutcome> {
+    run_git_checked(repo, &["add", "-A"], "stage changes (git add -A)")?;
+
+    // After staging, an empty `status --porcelain` means there is genuinely
+    // nothing to commit — distinct from `git commit` failing for another reason.
+    if !working_tree_dirty(repo) {
+        return Ok(SyncOutcome::NothingToCommit);
+    }
+
+    run_git_checked(
+        repo,
+        &["commit", "-m", message],
+        "create commit (git commit)",
+    )?;
+    run_git_checked(repo, &["push"], "push config (git push)")?;
+    Ok(SyncOutcome::Pushed)
+}
+
 /// Path to the sync state file within state_dir.
 pub fn state_path(state_dir: &Path) -> PathBuf {
     state_dir.join("sync.json")

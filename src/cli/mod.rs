@@ -1927,34 +1927,14 @@ fn run_plugin_sync() -> anyhow::Result<()> {
 
 fn run_sync() -> anyhow::Result<()> {
     let config_dir = paths::config_dir()?;
-
-    // Stage all changes in config_dir
-    git::secure_git()
-        .args(["add", "-A"])
-        .current_dir(&config_dir)
-        .status()
-        .context("failed to stage changes (git add -A)")?;
-
-    // Commit (allow empty if nothing changed)
-    let commit_result = git::secure_git()
-        .args(["commit", "-m", "Update llmenv config"])
-        .current_dir(&config_dir)
-        .status()
-        .context("failed to create commit (git commit)")?;
-
-    if !commit_result.success() {
-        eprintln!("No changes to commit (working tree clean)");
-        return Ok(());
+    match crate::sync::commit_and_push(&config_dir, "Update llmenv config")? {
+        crate::sync::SyncOutcome::NothingToCommit => {
+            eprintln!("No changes to commit (working tree clean)");
+        }
+        crate::sync::SyncOutcome::Pushed => {
+            eprintln!("✓ Synced config to GitHub");
+        }
     }
-
-    // Push to origin
-    git::secure_git()
-        .args(["push"])
-        .current_dir(&config_dir)
-        .status()
-        .context("failed to push config (git push)")?;
-
-    eprintln!("✓ Synced config to GitHub");
     Ok(())
 }
 

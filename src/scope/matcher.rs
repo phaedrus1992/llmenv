@@ -90,9 +90,24 @@ impl Env {
     }
 }
 
+// `Command::output()` detaches stdin and captures stderr, so this never blocks
+// on a prompt or leaks to the terminal. A failure yields `None` (host scope
+// won't match on hostname); a `tracing::debug!` keeps the cause diagnosable
+// under `RUST_LOG=debug` without noise on the hot path (#307).
 fn detect_hostname() -> Option<String> {
-    let out = std::process::Command::new("hostname").output().ok()?;
+    let out = match std::process::Command::new("hostname").output() {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::debug!("hostname detection: spawn failed: {e}");
+            return None;
+        }
+    };
     if !out.status.success() {
+        tracing::debug!(
+            "hostname detection: exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         return None;
     }
     let s = String::from_utf8(out.stdout).ok()?;
