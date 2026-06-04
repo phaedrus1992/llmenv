@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add `effort_level` and `advisor_size` as first-class capability fields; rendered
+  into `settings.json` as `effortLevel` and `advisorSize` for engine adapters to
+  consume (`advisor_size` uses generic sizes `"small"`, `"medium"`, `"large"` so
+  adapters map to engine-specific models via `native` overrides)
+- Add `env` field to `NetworkScope`, `HostScope`, and `UserScope`; environment
+  variables declared on a scope are injected when that scope matches, extending
+  the existing bundle-level env-var pattern to all scope types
+- Add GitHub Actions workflow to auto-close issues when PRs merge to `release/*`
+  branches; GitHub's native auto-close only works on the default branch, so this
+  workflow parses merged PR bodies for closing keywords and closes referenced
+  issues via the API
+
+### Changed
+
+- Rename `bundle.vars` to `bundle.env`; the old key `vars` is still accepted as
+  a backward-compatible alias so existing configs continue to work
+
 ### Fixed
 
 - Fix `mcp-proxy` spawned during `llmenv export` inheriting the calling shell's
@@ -25,7 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with `command not found: INFO:` lines. The proxy now redirects stdio to
   `/dev/null` and starts in its own process group so terminal job-control
   signals no longer reach it
-
 ## [1.0.5] - 2026-06-03
 
 ### Changed

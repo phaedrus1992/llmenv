@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `env` field to `NetworkScope`, `HostScope`, and `UserScope`; environment
   variables declared on a scope are injected when that scope matches, extending
   the existing bundle-level env-var pattern to all scope types
+- Add GitHub Actions workflow to auto-close issues when PRs merge to `release/*`
+  branches; GitHub's native auto-close only works on the default branch, so this
+  workflow parses merged PR bodies for closing keywords and closes referenced
+  issues via the API
 
 ### Changed
 
