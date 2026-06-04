@@ -224,13 +224,13 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
         .output()
         .context("spawning git clone")?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() {
-            format!("clone failed with exit code {}", output.status)
-        } else {
-            stderr
-        };
-        anyhow::bail!("git clone failed for {source}: {detail}");
+        // Both the source URL and git's stderr can carry embedded credentials —
+        // scrub both before they reach the user's terminal (#312).
+        anyhow::bail!(
+            "git clone failed for {}: {}",
+            git::sanitize_git_url(source),
+            git::git_failure_detail(&output.stderr, output.status)
+        );
     }
     Ok(())
 }
@@ -247,17 +247,10 @@ fn git_pull(repo: &Path) -> Result<()> {
         .output()
         .context("spawning git fetch")?;
     if !fetch_out.status.success() {
-        let stderr = String::from_utf8_lossy(&fetch_out.stderr)
-            .trim()
-            .to_string();
         anyhow::bail!(
             "git fetch failed at {}: {}",
             repo.display(),
-            if stderr.is_empty() {
-                format!("exit code {}", fetch_out.status)
-            } else {
-                stderr
-            }
+            git::git_failure_detail(&fetch_out.stderr, fetch_out.status)
         );
     }
     let reset_out = git::secure_git()
@@ -266,17 +259,10 @@ fn git_pull(repo: &Path) -> Result<()> {
         .output()
         .context("spawning git reset")?;
     if !reset_out.status.success() {
-        let stderr = String::from_utf8_lossy(&reset_out.stderr)
-            .trim()
-            .to_string();
         tracing::debug!(
             "marketplace refresh did not fast-forward at {}: {}",
             repo.display(),
-            if stderr.is_empty() {
-                format!("exit code {}", reset_out.status)
-            } else {
-                stderr
-            }
+            git::git_failure_detail(&reset_out.stderr, reset_out.status)
         );
     }
     Ok(())

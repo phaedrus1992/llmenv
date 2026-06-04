@@ -30,6 +30,43 @@ pub fn secure_git() -> Command {
     cmd
 }
 
+/// Scrub embedded credentials from a git URL before it lands in an error
+/// message or log. A URL like `https://user:token@host/path` becomes
+/// `https://***@host/path`; an SSH-style `user@host:path` becomes `***@host:path`.
+/// Returns the input unchanged when no `@` userinfo is present.
+#[must_use]
+pub fn sanitize_git_url(url: &str) -> String {
+    if let Some(at_pos) = url.find('@') {
+        if let Some(proto_end) = url.find("://") {
+            if at_pos > proto_end {
+                let (proto, rest) = url.split_at(proto_end + 3);
+                if let Some(host_start) = rest.find('@') {
+                    return format!("{}***@{}", proto, &rest[host_start + 1..]);
+                }
+            }
+        } else {
+            return format!("***{}", &url[at_pos..]);
+        }
+    }
+    url.to_string()
+}
+
+/// Build a human-readable failure detail from a git subprocess's captured
+/// output. Prefers `stderr` (where git writes diagnostics), falls back to the
+/// exit status when stderr is empty. The result is credential-scrubbed via
+/// [`sanitize_git_url`] so a failing clone/fetch of a URL with embedded
+/// credentials never echoes the secret to the terminal or logs (#312).
+#[must_use]
+pub fn git_failure_detail(stderr: &[u8], status: std::process::ExitStatus) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        format!("exit code {status}")
+    } else {
+        sanitize_git_url(trimmed)
+    }
+}
+
 /// Check if the working tree has staged or unstaged changes.
 pub fn working_tree_dirty(repo: &Path) -> bool {
     secure_git()
@@ -102,6 +139,55 @@ mod tests {
         let cmd = secure_git();
         // Just verify command is created; actual flag testing is in integration tests
         assert_eq!(cmd.get_program(), "git");
+    }
+
+    #[test]
+    fn sanitize_git_url_http_with_credentials() {
+        let url = "https://user:password@github.com/owner/repo.git";
+        assert_eq!(
+            sanitize_git_url(url),
+            "https://***@github.com/owner/repo.git"
+        );
+    }
+
+    #[test]
+    fn sanitize_git_url_ssh() {
+        let url = "git@github.com:owner/repo.git";
+        assert_eq!(sanitize_git_url(url), "***@github.com:owner/repo.git");
+    }
+
+    #[test]
+    fn sanitize_git_url_no_credentials() {
+        let url = "https://github.com/owner/repo.git";
+        assert_eq!(sanitize_git_url(url), url);
+    }
+
+    #[test]
+    fn git_failure_detail_prefers_stderr() {
+        // A non-empty stderr is returned (credential-scrubbed) over the exit code.
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let detail = git_failure_detail(b"fatal: repository not found\n", status);
+        assert_eq!(detail, "fatal: repository not found");
+    }
+
+    #[test]
+    fn git_failure_detail_scrubs_credentials_in_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let detail = git_failure_detail(
+            b"fatal: could not read from https://user:tok@github.com/x.git\n",
+            status,
+        );
+        assert!(!detail.contains("tok"), "credential leaked: {detail}");
+    }
+
+    #[test]
+    fn git_failure_detail_falls_back_to_exit_code() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(128 << 8);
+        let detail = git_failure_detail(b"   \n", status);
+        assert!(detail.contains("exit code"), "got: {detail}");
     }
 
     #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
