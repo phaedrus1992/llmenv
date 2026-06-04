@@ -19,25 +19,53 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // Cap the number of issues a single PR body can close, to bound API
+            // calls and prevent a crafted/runaway PR body from exhausting the
+            // GITHUB_TOKEN rate limit.
+            const MAX_ISSUES = 20;
             const body = context.payload.pull_request.body || '';
-            // Match "Closes #N", "Fixes #N", "Resolves #N" (case-insensitive, various tenses)
-            const re = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            // Match "Closes #N", "Fixes #N", "Resolves #N" (case-insensitive,
+            // various tenses). Allow zero-or-more whitespace and an optional
+            // colon to mirror GitHub's own autoclose parser.
+            const re = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s*#(\d+)/gi;
             const issues = new Set();
-            let match;
-            while ((match = re.exec(body)) !== null) {
-              issues.add(parseInt(match[1], 10));
-            }
-
-            for (const issueNum of issues) {
-              await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNum,
-                state: 'closed',
-              });
-              console.log(`Closed issue #${issueNum}`);
+            for (const m of body.matchAll(re)) {
+              const n = parseInt(m[1], 10);
+              if (n > 0) issues.add(n);
+              if (issues.size >= MAX_ISSUES) break;
             }
 
             if (issues.size === 0) {
-              console.log('No issues found in PR body to close.');
+              core.info('No issues found in PR body to close.');
+              return;
+            }
+
+            for (const issueNum of issues) {
+              // Verify the issue exists in this repo and is open before closing.
+              // A missing issue (cross-repo ref, typo, crafted number) is skipped
+              // rather than failing the whole job.
+              try {
+                const { data: issue } = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNum,
+                });
+                if (issue.state !== 'open') {
+                  core.info(`Issue #${issueNum} already ${issue.state}, skipping.`);
+                  continue;
+                }
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNum,
+                  state: 'closed',
+                });
+                core.info(`Closed issue #${issueNum}`);
+              } catch (err) {
+                if (err.status === 404) {
+                  core.warning(`Issue #${issueNum} not found, skipping.`);
+                  continue;
+                }
+                throw err;
+              }
             }
