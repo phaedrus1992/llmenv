@@ -450,5 +450,90 @@ mod tests {
                 ResolveError::BundleMcpReservedName(MEMORY_MCP_NAME.into())
             );
         }
+
+        mod props {
+            use super::*;
+            use proptest::prelude::*;
+
+            // A resolvable stdio server at index idx, with arbitrary tags.
+            fn arb_bundle_server(idx: usize) -> impl Strategy<Value = McpServer> {
+                prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |ts| McpServer {
+                    name: format!("bsrv-{idx}"),
+                    tags: ts,
+                    transport: McpTransport::Stdio,
+                    command: Some("echo".into()),
+                    args: vec![],
+                    env: BTreeMap::new(),
+                    url: None,
+                })
+            }
+
+            fn arb_servers_and_tags() -> impl Strategy<Value = (Vec<McpServer>, BTreeSet<String>)> {
+                let servers = (0usize..5)
+                    .prop_flat_map(|n| (0..n).map(arb_bundle_server).collect::<Vec<_>>());
+                let active = prop::collection::btree_set("[a-z]{1,4}", 0..6);
+                (servers, active)
+            }
+
+            proptest! {
+                // Every tagless entry appears in the output.
+                #[test]
+                fn tagless_entries_always_resolved(
+                    (servers, active) in arb_servers_and_tags()
+                ) {
+                    let resolved = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    let tagless_count = servers.iter().filter(|s| s.tags.is_empty()).count();
+                    let tagless_in_output = resolved
+                        .iter()
+                        .filter(|r| servers.iter().any(|s| s.name == r.name && s.tags.is_empty()))
+                        .count();
+                    prop_assert_eq!(tagless_count, tagless_in_output);
+                }
+
+                // Tagged entries with no active-tag match are absent.
+                #[test]
+                fn tagged_entries_absent_when_no_match(
+                    (servers, active) in arb_servers_and_tags()
+                ) {
+                    let resolved = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    let resolved_names: BTreeSet<&str> =
+                        resolved.iter().map(|r| r.name.as_str()).collect();
+                    for s in &servers {
+                        if !s.tags.is_empty() && !s.tags.iter().any(|t| active.contains(t)) {
+                            prop_assert!(
+                                !resolved_names.contains(s.name.as_str()),
+                                "tagged server {} with no matching tag must be absent",
+                                s.name
+                            );
+                        }
+                    }
+                }
+
+                // Output count = tagless count + matched-tagged count.
+                #[test]
+                fn output_count_equals_tagless_plus_matched(
+                    (servers, active) in arb_servers_and_tags()
+                ) {
+                    let resolved = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    let expected = servers
+                        .iter()
+                        .filter(|s| {
+                            s.tags.is_empty() || s.tags.iter().any(|t| active.contains(t))
+                        })
+                        .count();
+                    prop_assert_eq!(resolved.len(), expected);
+                }
+
+                // Resolution is deterministic.
+                #[test]
+                fn resolve_bundle_mcps_is_deterministic(
+                    (servers, active) in arb_servers_and_tags()
+                ) {
+                    let a = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    let b = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    prop_assert_eq!(a, b);
+                }
+            }
+        }
     }
 }
