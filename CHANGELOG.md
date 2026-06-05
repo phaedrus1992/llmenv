@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.6] - 2026-06-05
+
 ### Added
 
 - Add `effort_level` and `advisor_size` as first-class capability fields; rendered
@@ -203,7 +205,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/phaedrus1992/llmenv/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/phaedrus1992/llmenv/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/phaedrus1992/llmenv/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/phaedrus1992/llmenv/compare/v1.0.2...v1.0.3

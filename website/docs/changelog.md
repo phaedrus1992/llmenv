@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.6] - 2026-06-05
+
 ### Added
 
 - Add `effort_level` and `advisor_size` as first-class capability fields; rendered
