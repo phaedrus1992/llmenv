@@ -861,8 +861,9 @@ fn bundle_mcp_entries_render_into_claude_json() {
     .expect("merge");
 
     let active_tags: BTreeSet<String> = BTreeSet::new();
-    manifest.mcps =
-        resolve_bundle_mcps(&manifest.capabilities.mcp, &active_tags).expect("resolve bundle mcps");
+    manifest.mcps.extend(
+        resolve_bundle_mcps(&manifest.capabilities.mcp, &active_tags).expect("resolve bundle mcps"),
+    );
 
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
@@ -900,9 +901,10 @@ fn bundle_mcp_tagged_entry_active_when_tag_matches() {
     )
     .expect("merge");
 
-    let active_tags: BTreeSet<String> = ["feature-playwright".to_string()].into_iter().collect();
-    manifest.mcps =
-        resolve_bundle_mcps(&manifest.capabilities.mcp, &active_tags).expect("resolve bundle mcps");
+    let active_tags: BTreeSet<String> = BTreeSet::from(["feature-playwright".to_string()]);
+    manifest.mcps.extend(
+        resolve_bundle_mcps(&manifest.capabilities.mcp, &active_tags).expect("resolve bundle mcps"),
+    );
 
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
@@ -924,6 +926,58 @@ fn bundle_mcp_tagged_entry_active_when_tag_matches() {
         servers.contains_key("playwright"),
         "tagged entry must be active when tag matches"
     );
+}
+
+// Issue #329 (combined path): global MCPs and bundle MCPs are both rendered;
+// bundle comes after global in declaration order (last-write-wins in json map).
+#[test]
+fn global_and_bundle_mcps_both_render() {
+    use llmenv::mcp::resolve::{ResolvedKind, ResolvedMcp, resolve_bundle_mcps};
+    use std::collections::BTreeSet;
+
+    let bundles = vec![fixture_bundle("with-mcp")];
+    let mut manifest = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
+
+    // Simulate a pre-resolved global MCP (as build_manifest does via resolve_mcps).
+    manifest.mcps.push(ResolvedMcp {
+        name: "global-tool".into(),
+        kind: ResolvedKind::Stdio {
+            command: "global-cmd".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        },
+    });
+    manifest.mcps.extend(
+        resolve_bundle_mcps(&manifest.capabilities.mcp, &BTreeSet::new())
+            .expect("resolve bundle mcps"),
+    );
+
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let claude_json =
+        std::fs::read_to_string(tmp.path().join(".claude.json")).expect(".claude.json emitted");
+    let parsed: serde_json::Value = serde_json::from_str(&claude_json).expect("parse");
+
+    let servers = parsed["mcpServers"]
+        .as_object()
+        .expect("mcpServers present");
+    assert!(
+        servers.contains_key("global-tool"),
+        "global mcp must render"
+    );
+    assert!(
+        servers.contains_key("ctx"),
+        "bundle mcp must render alongside global"
+    );
+    assert_eq!(servers["global-tool"]["command"], "global-cmd");
 }
 
 // Issue #244: a stray `enabledMcpjsonServers` in a native_mcp fragment is a
