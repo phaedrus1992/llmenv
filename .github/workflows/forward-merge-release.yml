@@ -1,0 +1,179 @@
+name: Forward-merge release branches
+
+on:
+  push:
+    branches:
+      - 'release/**'
+
+# Default to read-only; the job that needs write declares it explicitly.
+permissions:
+  contents: read
+
+concurrency:
+  group: forward-merge-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  forward-merge:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Detect release branches
+        id: detect
+        run: |
+          set -euo pipefail
+          CURRENT=$(git rev-parse --abbrev-ref HEAD)
+          # `git branch -r` indents each line with two spaces; strip that (and the
+          # `origin/` prefix) before matching, otherwise the cascade compares
+          # "  release/1.0.x" against "release/1.0.x", never matches the current
+          # branch, and aborts with "not a versioned release branch".
+          BRANCHES=$(git branch -r | sed 's|^[[:space:]]*origin/||' \
+            | grep -E '^release/[0-9]+\.[0-9]+\.x$' | sort -V)
+          # Random delimiter so a branch literally named "EOF" can't break the
+          # multiline output value (GitHub-recommended pattern).
+          DELIM="branches-$(uuidgen)"
+          {
+            echo "current=$CURRENT"
+            echo "branches<<$DELIM"
+            echo "$BRANCHES"
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ensure label exists
+        continue-on-error: true
+        run: |
+          gh label create forward-merge-conflict \
+            --description "Conflict in forward-merge release cascade" \
+            --color "d73a4a" || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Forward-merge cascade
+        env:
+          CURRENT: ${{ steps.detect.outputs.current }}
+          BRANCHES: ${{ steps.detect.outputs.branches }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Build target list: every newer release branch (semver order) + main.
+          TARGETS=()
+          FOUND=0
+          while IFS= read -r BRANCH; do
+            if [[ "$FOUND" -eq 1 ]]; then
+              TARGETS+=("$BRANCH")
+            fi
+            if [[ "$BRANCH" == "$CURRENT" ]]; then
+              FOUND=1
+            fi
+          done <<< "$BRANCHES"
+
+          # Guard: the pushed branch must be a recognized versioned release line.
+          # The trigger (release/**) is broader than the X.Y.x regex, so a branch
+          # like release/foo would otherwise fall through and merge into main.
+          if [[ "$FOUND" -eq 0 ]]; then
+            echo "::warning::$CURRENT is not a versioned release/X.Y.x branch; skipping cascade"
+            exit 0
+          fi
+
+          TARGETS+=("main")
+
+          # Track whether the cascade halted early so the run fails visibly
+          # rather than silently leaving downstream targets unmerged.
+          HALTED=""
+
+          # Open a conflict PR for a halted hop. Reuses an existing merge branch
+          # rather than force-overwriting it (which would destroy in-progress
+          # resolution work).
+          open_conflict_pr() {
+            local src="$1" tgt="$2" merge_branch="$3"
+            if git ls-remote --exit-code --heads origin "$merge_branch" >/dev/null 2>&1; then
+              echo "::warning::$merge_branch already exists; not overwriting in-progress resolution"
+              return
+            fi
+            git checkout -B "$merge_branch" "origin/$tgt"
+            git merge "origin/$src" || true
+            git push origin "$merge_branch" --force-with-lease
+            local body="Forward-merge conflict between $src and $tgt. Resolve and merge."
+            gh pr create --base "$tgt" --head "$merge_branch" \
+              --title "Merge $src into $tgt (conflicts)" \
+              --body "$body" \
+              --label "forward-merge-conflict" || true
+          }
+
+          for TARGET in "${TARGETS[@]}"; do
+            echo "::group::Forward-merge $CURRENT → $TARGET"
+            TARGET_SHA=$(git rev-parse "origin/$TARGET" 2>/dev/null || echo "")
+            CURRENT_SHA=$(git rev-parse "origin/$CURRENT")
+
+            if [[ "$TARGET_SHA" == "$CURRENT_SHA" ]]; then
+              echo "Target $TARGET already up to date"
+              echo "::endgroup::"
+              continue
+            fi
+
+            git fetch origin "$CURRENT" "$TARGET" 2>/dev/null || true
+            git checkout -q "origin/$TARGET"
+
+            MERGE_BRANCH="forward-merge/$CURRENT-to-$TARGET"
+
+            if ! git merge --no-commit --no-ff "origin/$CURRENT" 2>/dev/null; then
+              git merge --abort || true
+              open_conflict_pr "$CURRENT" "$TARGET" "$MERGE_BRANCH"
+              echo "::error::Cascade halted: conflict merging $CURRENT into $TARGET"
+              echo "::endgroup::"
+              HALTED="conflict at $TARGET"
+              break
+            fi
+
+            git merge --abort || true
+
+            git checkout -q "origin/$TARGET"
+            git merge --no-edit "origin/$CURRENT"
+
+            # Land the merge directly so the fix propagates automatically — main
+            # is the final target and is forward-merged the same way as every
+            # release branch, with no manual step. If a target is branch-protected
+            # the push is rejected; fall back to opening a PR and halt so the
+            # remaining (now un-merged) targets aren't silently skipped.
+            if git push origin HEAD:"$TARGET" 2>/dev/null; then
+              echo "Pushed directly to $TARGET"
+            else
+              git checkout -B "$MERGE_BRANCH" "origin/$TARGET"
+              git push origin "$MERGE_BRANCH" --force-with-lease
+
+              gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
+                --title "Forward-merge $CURRENT into $TARGET" \
+                --body "Direct push to $TARGET blocked by branch protection; opening PR." || true
+
+              echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
+              echo "::endgroup::"
+              HALTED="protected branch $TARGET"
+              break
+            fi
+
+            echo "::endgroup::"
+          done
+
+          if [[ -n "$HALTED" ]]; then
+            echo "Forward-merge cascade halted ($HALTED); downstream targets not merged"
+            exit 1
+          fi
+
+          echo "Forward-merge cascade completed"

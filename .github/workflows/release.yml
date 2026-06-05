@@ -35,10 +35,10 @@ jobs:
     outputs:
       checksums: ${{ steps.checksum.outputs.hashes }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -46,13 +46,9 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: rustup target add "${TARGET}"
-      # zizmor: ignore[cache-poisoning] — cache is skipped on tag pushes via `if:`
-      # below; the conditional guard makes the cache-poisoning audit a false
-      # positive (zizmor static analysis doesn't trace step-level conditionals).
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        with:
-          cache-on-failure: false
+      # No build cache here on purpose: this workflow only runs on `v*` tag
+      # pushes, and release binaries are built from a clean checkout so the
+      # published artifact can't inherit a poisoned cache entry.
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
@@ -165,10 +161,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
       - name: Extract version from tag
@@ -219,7 +215,7 @@ jobs:
     outputs:
       release_version: ${{ steps.extract_version.outputs.version }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
       - name: Download all artifacts
@@ -281,17 +277,30 @@ jobs:
             echo '```'
           } > release-body.md
       - name: Create Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
-        with:
-          files: |
-            release-assets/llmenv-*
-            checksums/checksums.txt
-            provenance/*.intoto.jsonl
-          draft: false
-          prerelease: false
-          body_path: release-body.md
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # `gh release` ships with the runner, so we avoid a third-party action.
+          # Stay idempotent for a re-pushed tag (mirrors the crates.io publish
+          # step): update an existing release in place instead of hard-failing.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --notes-file release-body.md --latest
+            gh release upload "${TAG}" --clobber \
+              release-assets/llmenv-* \
+              checksums/checksums.txt \
+              provenance/*.intoto.jsonl
+          else
+            gh release create "${TAG}" \
+              release-assets/llmenv-* \
+              checksums/checksums.txt \
+              provenance/*.intoto.jsonl \
+              --title "${TAG}" \
+              --notes-file release-body.md \
+              --verify-tag \
+              --latest
+          fi
 
   update-homebrew:
     name: Update Homebrew formula
@@ -301,7 +310,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
       - name: Download all artifacts

@@ -1,5 +1,15 @@
 use std::process::Command;
 
+/// Security flags mirroring `git::GIT_CONFIG_FLAGS` (a build script can't import
+/// the crate it builds). Suppress hook and fsmonitor execution so a compromised
+/// checkout can't run arbitrary code during `cargo build`.
+const GIT_CONFIG_FLAGS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
 fn main() {
     // Re-run if HEAD moves (new commit, branch switch). Best-effort: missing
     // .git (e.g. crates.io tarball build) just leaves LLMENV_GIT_HASH unset
@@ -8,6 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/refs/heads");
 
     let hash = Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
@@ -17,6 +28,7 @@ fn main() {
         .unwrap_or_default();
 
     let dirty = Command::new("git")
+        .args(GIT_CONFIG_FLAGS)
         .args(["status", "--porcelain"])
         .output()
         .ok()

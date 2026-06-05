@@ -2,6 +2,7 @@ use crate::git;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing;
 
 /// True if the repo's working tree has staged or unstaged changes.
 fn working_tree_dirty(repo: &Path) -> bool {
@@ -13,6 +14,65 @@ fn working_tree_dirty(repo: &Path) -> bool {
 /// the user when we're certain.
 fn has_unpushed_commits(repo: &Path) -> bool {
     git::has_unpushed_commits(repo)
+}
+
+/// Result of [`commit_and_push`]: whether a commit was actually pushed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// A commit was created and pushed to origin.
+    Pushed,
+    /// The working tree was clean — nothing to commit or push.
+    NothingToCommit,
+}
+
+/// Run a git subcommand in `repo`, capturing its output. On a non-zero exit the
+/// captured stderr is surfaced in the returned error so failures are loud, and
+/// capturing (rather than inheriting) stdout/stderr keeps git's chatter out of
+/// a piped `llmenv export` eval context (#307).
+///
+/// # Errors
+/// Returns an error if git cannot be spawned or exits non-zero (stderr included).
+fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
+    let output = git::secure_git()
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("failed to spawn git to {what}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to {what}: {}",
+            git::git_failure_detail(&output.stderr, &output.stdout, output.status)
+        );
+    }
+    Ok(())
+}
+
+/// Stage, commit, and push every change in `repo` to origin.
+///
+/// "Nothing to commit" is detected up front by inspecting the working tree
+/// after staging — not by misreading `git commit`'s exit code — so a commit
+/// that fails for a real reason (e.g. missing identity) surfaces as an error
+/// instead of being mistaken for a clean tree. A failed `git push` is likewise
+/// surfaced rather than silently treated as success (#307).
+///
+/// # Errors
+/// Returns an error if any git step fails to spawn or exits non-zero.
+pub fn commit_and_push(repo: &Path, message: &str) -> Result<SyncOutcome> {
+    run_git_checked(repo, &["add", "-A"], "stage changes (git add -A)")?;
+
+    // After staging, an empty `status --porcelain` means there is genuinely
+    // nothing to commit — distinct from `git commit` failing for another reason.
+    if !working_tree_dirty(repo) {
+        return Ok(SyncOutcome::NothingToCommit);
+    }
+
+    run_git_checked(
+        repo,
+        &["commit", "-m", message],
+        "create commit (git commit)",
+    )?;
+    run_git_checked(repo, &["push"], "push config (git push)")?;
+    Ok(SyncOutcome::Pushed)
 }
 
 /// Path to the sync state file within state_dir.
@@ -75,13 +135,17 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     }
 
     // Attempt fetch — silent on failure (network issues are transient and
-    // we don't want to spam every shell prompt while offline).
-    let _ = git::secure_git()
+    // we don't want to spam every shell prompt while offline). Log spawn errors
+    // at debug level in case git binary is missing or broken.
+    if let Err(e) = git::secure_git()
         .args(["fetch"])
         .current_dir(repo)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("git fetch spawn error in {}: {}", repo.display(), e);
+    }
 
     // Attempt fast-forward pull. Suppress git's stderr — we'll print our
     // own one-line warning on failure rather than git's two-line message.
@@ -102,9 +166,16 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
         );
         write_state(state_dir, now)?;
     } else {
-        // Some other pull failure (non-fast-forward, network, etc.). Don't
-        // update state so we retry on next tick.
-        tracing::debug!("git pull did not complete successfully; will retry on next pull interval");
+        // Some other pull failure (non-fast-forward, diverged, conflict, auth).
+        // Don't update state so we retry on next tick — but surface a one-line
+        // nudge so a persistently-broken sync isn't silently swallowed across
+        // every shell prompt (stderr was suppressed, so point at `llmenv sync`
+        // for the detail).
+        eprintln!(
+            "llmenv: config in {} could not fast-forward (diverged or network error) — \
+             run `llmenv sync` for details",
+            repo.display()
+        );
     }
 
     Ok(())

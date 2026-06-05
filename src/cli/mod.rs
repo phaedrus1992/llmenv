@@ -367,7 +367,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     if is_git_repo(&config_dir) {
         match check_git_remote(&config_dir) {
             Ok(remote) => {
-                let safe_url = sanitize_git_url(&remote);
+                let safe_url = crate::git::sanitize_git_url(&remote);
                 eprintln!("{pass} Git remote reachable: {}", safe_url);
             }
             Err(e) => eprintln!("{warn} Git remote check failed: {}", e),
@@ -621,22 +621,6 @@ fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
 
     let remote = String::from_utf8(output.stdout)?.trim().to_string();
     Ok(remote)
-}
-
-fn sanitize_git_url(url: &str) -> String {
-    if let Some(at_pos) = url.find('@') {
-        if let Some(proto_end) = url.find("://") {
-            if at_pos > proto_end {
-                let (proto, rest) = url.split_at(proto_end + 3);
-                if let Some(host_start) = rest.find('@') {
-                    return format!("{}***@{}", proto, &rest[host_start + 1..]);
-                }
-            }
-        } else {
-            return format!("***{}", &url[at_pos..]);
-        }
-    }
-    url.to_string()
 }
 
 fn shell_escape(s: &str) -> String {
@@ -1927,34 +1911,14 @@ fn run_plugin_sync() -> anyhow::Result<()> {
 
 fn run_sync() -> anyhow::Result<()> {
     let config_dir = paths::config_dir()?;
-
-    // Stage all changes in config_dir
-    git::secure_git()
-        .args(["add", "-A"])
-        .current_dir(&config_dir)
-        .status()
-        .context("failed to stage changes (git add -A)")?;
-
-    // Commit (allow empty if nothing changed)
-    let commit_result = git::secure_git()
-        .args(["commit", "-m", "Update llmenv config"])
-        .current_dir(&config_dir)
-        .status()
-        .context("failed to create commit (git commit)")?;
-
-    if !commit_result.success() {
-        eprintln!("No changes to commit (working tree clean)");
-        return Ok(());
+    match crate::sync::commit_and_push(&config_dir, "Update llmenv config")? {
+        crate::sync::SyncOutcome::NothingToCommit => {
+            eprintln!("No changes to commit (working tree clean)");
+        }
+        crate::sync::SyncOutcome::Pushed => {
+            eprintln!("✓ Synced config to GitHub");
+        }
     }
-
-    // Push to origin
-    git::secure_git()
-        .args(["push"])
-        .current_dir(&config_dir)
-        .status()
-        .context("failed to push config (git push)")?;
-
-    eprintln!("✓ Synced config to GitHub");
     Ok(())
 }
 
@@ -2230,27 +2194,6 @@ mod tests {
     fn expand_tilde_no_tilde() {
         let result = expand_tilde("/absolute/path").unwrap();
         assert_eq!(result, PathBuf::from("/absolute/path"));
-    }
-
-    #[test]
-    fn sanitize_git_url_http_with_credentials() {
-        let url = "https://user:password@github.com/owner/repo.git";
-        let sanitized = sanitize_git_url(url);
-        assert_eq!(sanitized, "https://***@github.com/owner/repo.git");
-    }
-
-    #[test]
-    fn sanitize_git_url_ssh() {
-        let url = "git@github.com:owner/repo.git";
-        let sanitized = sanitize_git_url(url);
-        assert_eq!(sanitized, "***@github.com:owner/repo.git");
-    }
-
-    #[test]
-    fn sanitize_git_url_no_credentials() {
-        let url = "https://github.com/owner/repo.git";
-        let sanitized = sanitize_git_url(url);
-        assert_eq!(sanitized, url);
     }
 
     // #281: marketplace sync failure must not silently drop CLAUDE_CONFIG_DIR.

@@ -91,12 +91,7 @@ impl Env {
 }
 
 fn detect_hostname() -> Option<String> {
-    let out = std::process::Command::new("hostname").output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8(out.stdout).ok()?;
-    Some(s.trim().to_string())
+    super::capture_stdout("hostname detection", "hostname", &[]).map(|s| s.trim().to_string())
 }
 
 #[must_use]
