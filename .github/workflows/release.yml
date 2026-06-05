@@ -256,7 +256,15 @@ jobs:
           ' CHANGELOG.md | sed '/./,$!d' > changelog-notes.txt
 
           # Reflow prose paragraphs for readable GitHub release notes (#320).
+          if [[ ! -s changelog-notes.txt ]]; then
+            echo "ERROR: changelog-notes.txt is missing or empty" >&2
+            exit 1
+          fi
           python3 scripts/reflow-markdown.py < changelog-notes.txt > changelog-notes-reflowed.txt
+          if [[ $? -ne 0 ]] || [[ ! -s changelog-notes-reflowed.txt ]]; then
+            echo "ERROR: reflow failed or produced empty output; using original notes" >&2
+            cp changelog-notes.txt changelog-notes-reflowed.txt
+          fi
 
           {
             cat changelog-notes-reflowed.txt

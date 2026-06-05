@@ -78,8 +78,20 @@ def reflow_markdown(text: str) -> str:
         joined = ' '.join(p.strip() for p in paragraph)
         result.append(joined)
 
+    if in_code_block:
+        print("reflow-markdown: unclosed code fence in input — aborting", file=sys.stderr)
+        sys.exit(1)
+
     return '\n'.join(result)
 
 if __name__ == '__main__':
-    text = sys.stdin.read()
-    print(reflow_markdown(text), end='')
+    try:
+        text = sys.stdin.read()
+    except OSError as exc:
+        print(f"reflow-markdown: failed to read stdin: {exc}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        print(reflow_markdown(text), end='')
+        sys.stdout.flush()
+    except BrokenPipeError:
+        pass  # stdout closed, exit silently

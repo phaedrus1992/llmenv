@@ -33,15 +33,11 @@ fn reflow_prose_paragraphs() {
 - Another bug fix"#;
 
     // Find and run the reflow script
-    let script_path = "/Users/ranger/git/llmenv/scripts/reflow-markdown.py";
-    assert!(
-        std::path::Path::new(script_path).exists(),
-        "reflow script not found at {}",
-        script_path
-    );
+    let script_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/reflow-markdown.py");
 
     let mut child = Command::new("python3")
-        .arg(script_path)
+        .arg(&script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -88,9 +84,10 @@ should stay as-is
 
 Another paragraph on multiple lines"#;
 
-    let script_path = "/Users/ranger/git/llmenv/scripts/reflow-markdown.py";
+    let script_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/reflow-markdown.py");
     let mut child = Command::new("python3")
-        .arg(script_path)
+        .arg(&script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
