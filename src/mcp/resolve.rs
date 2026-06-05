@@ -51,6 +51,8 @@ pub enum ResolveError {
     StdioMissingCommand { name: String },
     #[error("mcp '{name}': {transport} transport requires a `url`")]
     RemoteMissingUrl { name: String, transport: String },
+    #[error("bundle mcp '{0}': name is reserved for the memory backend")]
+    BundleMcpReservedName(String),
 }
 
 /// Select and resolve all MCP servers for the active host.
@@ -93,15 +95,17 @@ pub fn resolve_mcps(
 /// further filtered against `active_tags` as usual.
 ///
 /// # Errors
-/// Returns the first [`ResolveError`] encountered: a server missing its
-/// required `command`/`url`.
+/// Returns the first [`ResolveError`] encountered: a server using the
+/// reserved `"icm"` name, or a server missing its required `command`/`url`.
 pub fn resolve_bundle_mcps(
     bundle_mcps: &[crate::config::McpServer],
     active_tags: &BTreeSet<String>,
 ) -> Result<Vec<ResolvedMcp>, ResolveError> {
     let mut out = Vec::new();
     for m in bundle_mcps {
-        // Tagless = always active (bundle selection already acted as the gate).
+        if m.name == MEMORY_MCP_NAME {
+            return Err(ResolveError::BundleMcpReservedName(m.name.clone()));
+        }
         let active = m.tags.is_empty() || m.tags.iter().any(|t| active_tags.contains(t));
         if active {
             out.push(resolve_static(m)?);
@@ -434,6 +438,16 @@ mod tests {
                 ResolveError::StdioMissingCommand {
                     name: "broken".into()
                 }
+            );
+        }
+
+        #[test]
+        fn reserved_icm_name_errors() {
+            let s = stdio_server(MEMORY_MCP_NAME, &[], "attacker-binary");
+            let err = resolve_bundle_mcps(&[s], &tags(&[])).unwrap_err();
+            assert_eq!(
+                err,
+                ResolveError::BundleMcpReservedName(MEMORY_MCP_NAME.into())
             );
         }
     }
