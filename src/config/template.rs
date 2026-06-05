@@ -136,6 +136,7 @@ bundle:
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
 
