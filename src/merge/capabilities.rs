@@ -4,9 +4,9 @@
 //! each selected bundle's `bundle.yaml`. They compose by **value shape**, not
 //! key identity (see `docs/design/engine-capabilities.md`, D2):
 //!
-//! - **Lists** (`allow`/`ask`/`deny`, `hooks`, `plugins`, and the per-engine
-//!   `native` rule lists) → concatenate across contributors, then dedup.
-//!   Order-independent union; no winner problem.
+//! - **Lists** (`allow`/`ask`/`deny`, `hooks`, `plugins`, `mcp`, and the
+//!   per-engine `native` rule lists) → concatenate across contributors, then
+//!   dedup. Order-independent union; no winner problem.
 //! - **Scalars** (`default_mode`) → the highest-precedence contributor wins.
 //!   Two contributors at the **same** precedence setting different values is an
 //!   unresolvable ambiguity → hard-error naming both. Loud beats silent.
@@ -37,6 +37,7 @@ pub struct CapabilityContributor {
 pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Result<Capabilities> {
     let mut hooks = Vec::new();
     let mut plugins = Vec::new();
+    let mut mcp = Vec::new();
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -46,6 +47,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         let caps = &c.capabilities;
         hooks.extend(caps.hooks.iter().cloned());
         plugins.extend(caps.plugins.iter().cloned());
+        mcp.extend(caps.mcp.iter().cloned());
         allow.extend(caps.permissions.allow.iter().cloned());
         ask.extend(caps.permissions.ask.iter().cloned());
         deny.extend(caps.permissions.deny.iter().cloned());
@@ -59,6 +61,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
 
     dedup(&mut hooks);
     dedup(&mut plugins);
+    dedup(&mut mcp);
     dedup(&mut allow);
     dedup(&mut ask);
     dedup(&mut deny);
@@ -95,6 +98,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         },
         hooks,
         plugins,
+        mcp,
         auto_memory_enabled,
         effort_level: None,
         advisor_size: None,
@@ -402,6 +406,57 @@ mod tests {
         assert_eq!(out.permissions.default_mode, None);
     }
 
+    // #329: mcp entries from bundle.yaml must concatenate and dedup.
+    #[test]
+    fn mcp_entries_concatenate_across_contributors() {
+        use crate::config::{McpServer, McpTransport};
+        let server = |name: &str| McpServer {
+            name: name.into(),
+            tags: vec![],
+            transport: McpTransport::Stdio,
+            command: Some("cmd".into()),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+        };
+        let caps_a = Capabilities {
+            mcp: vec![server("ctx")],
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            mcp: vec![server("playwright")],
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        assert_eq!(out.mcp.len(), 2);
+    }
+
+    #[test]
+    fn mcp_entries_are_deduped() {
+        use crate::config::{McpServer, McpTransport};
+        let server = McpServer {
+            name: "ctx".into(),
+            tags: vec![],
+            transport: McpTransport::Stdio,
+            command: Some("cmd".into()),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+        };
+        let caps_a = Capabilities {
+            mcp: vec![server.clone()],
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            mcp: vec![server],
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        assert_eq!(out.mcp.len(), 1, "duplicate mcp entries must be deduped");
+    }
+
     // #291: native: blocks from bundle.yaml must be merged into the output.
     #[test]
     fn bundle_native_is_merged_into_capabilities() {
@@ -456,6 +511,7 @@ mod tests {
 
     mod props {
         use super::*;
+        use crate::config::{McpServer, McpTransport};
         use proptest::prelude::*;
         use std::collections::BTreeSet;
 
@@ -467,8 +523,22 @@ mod tests {
             })
         }
 
-        // Contributors carrying only list fields (allow rules + plugins) plus a
-        // small native: map, so the scalar default_mode never forces a
+        fn arb_mcp_server() -> impl Strategy<Value = McpServer> {
+            ("[a-z]{1,6}", prop::collection::vec("[a-z]{1,4}", 0..3)).prop_map(|(name, tags)| {
+                McpServer {
+                    name,
+                    tags,
+                    transport: McpTransport::Stdio,
+                    command: Some("cmd".into()),
+                    args: vec![],
+                    env: BTreeMap::new(),
+                    url: None,
+                }
+            })
+        }
+
+        // Contributors carrying only list fields (allow rules + plugins + mcp)
+        // plus a small native: map, so the scalar default_mode never forces a
         // same-precedence conflict.
         //
         // Varies engine names, precedence (1-10), and number of engines (0-3) to
@@ -489,9 +559,10 @@ mod tests {
                 1u8..=10,
                 prop::collection::vec(arb_rule(), 0..4),
                 prop::collection::vec("[a-z:]{1,6}", 0..4),
+                prop::collection::vec(arb_mcp_server(), 0..3),
                 prop::collection::vec(arb_engine_entry, 0..3),
             )
-                .prop_map(|(name, precedence, allow, plugins, engine_entries)| {
+                .prop_map(|(name, precedence, allow, plugins, mcp, engine_entries)| {
                     let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
                     CapabilityContributor {
                         name,
@@ -502,6 +573,7 @@ mod tests {
                                 ..Default::default()
                             },
                             plugins,
+                            mcp,
                             native,
                             ..Default::default()
                         },
@@ -515,6 +587,10 @@ mod tests {
 
         fn plugin_set(caps: &Capabilities) -> BTreeSet<String> {
             caps.plugins.iter().cloned().collect()
+        }
+
+        fn mcp_name_set(caps: &Capabilities) -> BTreeSet<String> {
+            caps.mcp.iter().map(|m| m.name.clone()).collect()
         }
 
         proptest! {
@@ -575,8 +651,8 @@ mod tests {
             }
 
             // List union is order-independent: permuting contributors yields the
-            // same *set* of allow rules and plugins (first-seen order may differ,
-            // but membership is invariant).
+            // same *set* of allow rules, plugins, and mcp names (first-seen order
+            // may differ, but membership is invariant).
             #[test]
             fn list_union_is_order_independent(
                 contribs in prop::collection::vec(arb_list_contributor(), 0..5)
@@ -587,6 +663,7 @@ mod tests {
                 let backward = merge_capabilities(&reversed).unwrap();
                 prop_assert_eq!(allow_set(&forward), allow_set(&backward));
                 prop_assert_eq!(plugin_set(&forward), plugin_set(&backward));
+                prop_assert_eq!(mcp_name_set(&forward), mcp_name_set(&backward));
             }
 
             // Output lists carry no duplicates.
@@ -599,6 +676,13 @@ mod tests {
                 prop_assert_eq!(allow_len, allow_set(&out).len());
                 let plugin_len = out.plugins.len();
                 prop_assert_eq!(plugin_len, plugin_set(&out).len());
+                // mcp dedup: no two equal entries survive
+                for (i, m) in out.mcp.iter().enumerate() {
+                    prop_assert!(
+                        !out.mcp[..i].contains(m),
+                        "duplicate mcp entry at index {i}: {m:?}"
+                    );
+                }
             }
 
             // The strictly-highest-precedence contributor's default_mode always

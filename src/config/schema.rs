@@ -132,6 +132,11 @@ pub struct Capabilities {
     /// Plugin ids as `<marketplace>:<plugin>`. A list — concatenates.
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// MCP servers declared inside a bundle. A list — concatenates across contributors.
+    /// Tagless entries are active whenever the bundle is selected; tagged entries are
+    /// further filtered by scope tag intersection. Neutral counterpart to `native_mcp`.
+    #[serde(default)]
+    pub mcp: Vec<McpServer>,
     /// Whether the agent's built-in automatic memory is enabled. Optional scalar
     /// — resolves by scope precedence (highest scope wins). When llmenv's ICM
     /// memory backend is active, this defaults to `false` to prevent competition
@@ -179,6 +184,7 @@ impl Capabilities {
         self.permissions.is_empty()
             && self.hooks.is_empty()
             && self.plugins.is_empty()
+            && self.mcp.is_empty()
             && self.auto_memory_enabled.is_none()
             && self.effort_level.is_none()
             && self.advisor_size.is_none()

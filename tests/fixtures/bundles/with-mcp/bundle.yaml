@@ -1,0 +1,10 @@
+mcp:
+  - name: ctx
+    command: ctx-mcp
+  - name: playwright
+    command: npx
+    args: ["-y", "@playwright/mcp@latest"]
+    tags: ["feature-playwright"]
+permissions:
+  allow:
+    - { tool: Bash, pattern: "cargo *" }
