@@ -130,6 +130,8 @@ enum Command {
         #[arg(short, long)]
         tag: Option<String>,
     },
+    /// Regenerate the materialized config without exporting shell variables
+    Regenerate,
     /// Generate shell hook code
     Hook {
         /// Shell type: zsh or bash
@@ -211,6 +213,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Export { scope, tag }) => {
             run_export(scope, tag)?;
+        }
+        Some(Command::Regenerate) => {
+            run_regenerate()?;
         }
         Some(Command::Hook { shell }) => {
             run_hook(&shell)?;
@@ -815,6 +820,56 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     Ok(())
 }
 
+fn run_regenerate() -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let config_dir = paths::config_dir()?;
+
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+
+    // Collect firing bundles (same logic as run_export)
+    let manually_enabled: BTreeSet<&str> = active
+        .scopes
+        .iter()
+        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+        .collect();
+    let firing: Vec<&Bundle> = config
+        .bundle
+        .iter()
+        .filter(|b| {
+            b.tags.iter().any(|bt| active.tags.contains(bt))
+                || manually_enabled.contains(b.name.as_str())
+        })
+        .collect();
+
+    // Materialize the config
+    match build_and_materialize(&config, &config_dir, &active, &firing) {
+        Ok(Some((cache_path, _))) => {
+            eprintln!("✓ Regenerated config at {}", cache_path.display());
+            eprintln!(
+                "  Tags: {}",
+                active.tags.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+            eprintln!(
+                "  Bundles: {}",
+                firing
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            eprintln!("\n  Restart your shell session or source the config to load changes.");
+        }
+        Ok(None) => {
+            eprintln!("✓ No bundle content to materialize");
+        }
+        Err(e) => return Err(e).context("config regeneration failed"),
+    }
+
+    Ok(())
+}
+
 type Materialized = (PathBuf, Vec<(String, String)>);
 
 /// Build BundleRefs for firing bundles in scope-precedence order, merge them
@@ -1206,12 +1261,8 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
     }
 
     let config_path = config_dir.join("config.yaml");
-    if config_path.exists() {
-        eprintln!("Config already exists at {}", config_path.display());
-        return Ok(());
-    }
-
-    let template = r#"cache:
+    if !config_path.exists() {
+        let template = r#"cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 60
   # Cache-folder strictness dial (default: normal). One knob, three positions,
@@ -1286,12 +1337,84 @@ bundle:
 #     - env: CONTEXT_MODE_DATA_DIR   # tool reads this to find its state
 #       subdir: context-mode         # → $LLMENV_STATE_DIR/context-mode
 "#;
-    std::fs::write(&config_path, template)
-        .with_context(|| format!("writing template to {}", config_path.display()))?;
-    eprintln!("Created template config at {}", config_path.display());
+        std::fs::write(&config_path, template)
+            .with_context(|| format!("writing template to {}", config_path.display()))?;
+        eprintln!("Created template config at {}", config_path.display());
 
-    Config::load(&config_path)?;
-    eprintln!("✓ Config validated successfully");
+        Config::load(&config_path)?;
+        eprintln!("✓ Config validated successfully");
+    } else {
+        eprintln!("Config already exists at {}", config_path.display());
+    }
+
+    let agents_path = config_dir.join("AGENTS.md");
+    if !agents_path.exists() {
+        let agents_template = r#"# Agent Orientation
+
+This directory contains llmenv configuration. Agents (Claude Code, Copilot, Gemini CLI)
+operating here will have access to the merged config and bundles.
+
+## Key Files & Directories
+
+- **config.yaml** — Main configuration. Declares scopes, bundles, MCP servers, state locations.
+- **bundles/** — Bundle directories. Each bundle contains files merged into agent config:
+  - `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` — Agent instructions (loaded automatically)
+  - `skills/` — Custom skills directory
+  - `hooks/` — Hook definitions
+  - `mcp.json` — MCP server configurations (optional)
+- **state/** — Durable per-tool state (managed by llmenv; don't write here directly)
+- **.llmenv.yaml** — Project scope marker (place in project roots, not here)
+
+## Where to Add Things
+
+### New Agent Instructions
+Create or edit a bundle's `CLAUDE.md` (Claude Code), `AGENTS.md` (all agents), or `GEMINI.md` (Gemini CLI):
+```
+bundles/myname/CLAUDE.md
+```
+
+### New Skills
+Add to a bundle's `skills/` directory:
+```
+bundles/myname/skills/my-skill.json
+```
+
+### New Hooks
+Add to a bundle's `hooks/` directory or declare in `config.yaml`:
+```
+bundles/myname/hooks/some-hook.sh
+```
+
+### MCP Servers
+Either add to a bundle's `mcp.json` or declare in `config.yaml` under `mcp:`.
+
+### Per-Tool Durable State
+Declare in `config.yaml` under `state: tools:`:
+```yaml
+state:
+  tools:
+    - env: MY_TOOL_STATE_DIR
+      subdir: my-tool
+```
+
+## Scopes & Tags
+
+Scopes (network, host, user, project) emit **tags** when they match. Bundles and other
+resources fire when one of their tags is in the active tag set. See `config.yaml` comments
+for examples.
+
+---
+
+For more, see the llmenv documentation and the `config.yaml` template comments.
+"#;
+
+        std::fs::write(&agents_path, agents_template)
+            .with_context(|| format!("writing agents template to {}", agents_path.display()))?;
+        eprintln!(
+            "Created agent orientation guide at {}",
+            agents_path.display()
+        );
+    }
 
     Ok(())
 }
