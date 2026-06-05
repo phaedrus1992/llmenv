@@ -1231,9 +1231,14 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
         return Ok(());
     }
 
-    let template = r#"cache:
+    let template = r#"# llmenv configuration
+# See https://phaedrus1992.github.io/llmenv/docs/configuration for the complete schema
+
+cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 60
+  # Optional: minutes to retain cached materializations (default: 168 = 7 days)
+  # cache_retention_hours: 168
   # Cache-folder strictness dial (default: normal). One knob, three positions,
   # ordered by how aggressively a folder is reused: loose ⊂ normal ⊂ strict.
   #   loose  — folder = <shape>. Selection-addressed only; a binary upgrade
@@ -1244,12 +1249,15 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
   #            Preserves in-session agent/plugin state across re-renders.
   #   strict — folder = <version>-<content_hash>; every input change makes a new
   #            folder. Strongest isolation, but fragments the cache.
-  # (<shape> is a digest of the active tags + enabled bundles.)
   # hashing: normal
 
-# Scopes are lists — uncomment and fill in as needed.
+# Scopes: match environment conditions (network, host, user, project) and emit tags.
+# Uncomment and fill in as needed.
 # scope:
 #   network:
+#     - id: office
+#       match: { gateway_mac: "aa:bb:cc:dd:ee:ff" }
+#       tags: [office]
 #     - id: home
 #       match: { ssid: "MyHomeWiFi" }
 #       tags: [home]
@@ -1267,44 +1275,84 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
 # directory upward to $HOME. Example `.llmenv.yaml`:
 #   id: myapp
 #   name: MyApp
-#   tags: [myapp]
+#   description: "Optional description"
+#   tags: [myapp, rust]
 #   enable_bundles: [base]   # optional: force-enable bundles regardless of tags
 
-# Bundles fire when one of their tags is emitted by a matching scope.
+# Bundles: named collections of config that fire on tag match.
+# Uncomment and edit as needed.
 bundle:
   - name: base
     tags: [me]
     vars:
       AGENT: "claude"
+  # - name: office-only
+  #   tags: [office]
+  #   vars:
+  #     WORK_MCP: "office-server"
 
-# MCP servers are selected by tag, like bundles, and rendered into the agent's
-# MCP config (the top-level mcpServers of .claude.json for Claude Code). Each is
-# stdio (a command) or remote (a url).
+# MCP servers: selected onto scopes by tag intersection, rendered into the agent's
+# MCP config. Each is either stdio (command) or remote (url).
 # mcp:
 #   - name: playwright
 #     tags: [me]
-#     command: npx
-#     args: ["-y", "@playwright/mcp@latest"]
+#     transport:
+#       type: stdio
+#       command: npx
+#       args: ["-y", "@playwright/mcp@latest"]
+#   # - name: office-internal
+#   #   tags: [office]
+#   #   transport:
+#   #     type: remote
+#   #     url: http://office-mcp.internal:3000
 
-# llmenv's memory backend: one host runs it, every host connects over the
-# network. `host:` maps the server host name to a reachable address.
+# Plugin marketplaces: git sources or local paths for agent plugins.
+# marketplace:
+#   - name: github-marketplace
+#     url: https://github.com/you/llmenv-plugins.git
+#   - name: local-plugins
+#     path: ~/.config/llmenv/local-plugins
+
+# Plugin collections: named bags of plugins selected by tag, like bundles.
+# plugin-collection:
+#   - name: base-plugins
+#     tags: [me]
+#     plugins:
+#       - github-marketplace:useful-plugin
+#       - github-marketplace:another-plugin
+
+# Per-engine native config (passthrough). Keys match engine names (e.g. claude_code).
+# llmenv does not interpret these — adapters merge them verbatim into the engine's
+# native settings. Escape hatch for non-portable keys.
+# native:
+#   claude_code:
+#     customSetting: value
+
+# llmenv's memory backend (ICM). Optional. One host runs the daemon,
+# others connect as network clients.
+# features:
+#   memory:
+#     server_host: my-laptop  # must exist in the host: table below
+#     port: 7878
+#     tags: [me]
+
+# Host directory: maps logical host names to reachable addresses.
+# Used by the memory backend topology to build client connection URLs.
 # host:
 #   my-laptop:
 #     addr: "my-laptop.local"
-# memory:
-#   server_host: my-laptop
-#   port: 7878
-#   tags: [me]
+#   office-server:
+#     addr: "office-server.internal"
 
-# Durable per-tool state (#175). The materialized config folder is renamed on
-# every version/config change, so tool state written under CLAUDE_CONFIG_DIR is
-# lost. llmenv guarantees a stable state dir (sibling of the hashed folders,
-# never garbage-collected) and always exports LLMENV_STATE_DIR pointing at it.
-# Declare a tool's relocation env var here to point it at a per-tool subdir:
+# Durable state relocation: tools that persist state to CLAUDE_CONFIG_DIR
+# lose it when llmenv re-materializes (on config edits or version bumps).
+# Declare tools here to point them at a stable, hash-independent state directory.
 # state:
 #   tools:
 #     - env: CONTEXT_MODE_DATA_DIR   # tool reads this to find its state
 #       subdir: context-mode         # → $LLMENV_STATE_DIR/context-mode
+#     - env: MY_TOOL_STATE
+#       subdir: my-tool
 "#;
     std::fs::write(&config_path, template)
         .with_context(|| format!("writing template to {}", config_path.display()))?;
@@ -1312,6 +1360,70 @@ bundle:
 
     Config::load(&config_path)?;
     eprintln!("✓ Config validated successfully");
+
+    let readme_path = config_dir.join("README.md");
+    let readme_content = r#"# llmenv Configuration
+
+This directory contains your llmenv configuration.
+
+## Layout
+
+- **config.yaml** — Main configuration file. Declares scopes, bundles, MCP servers,
+  plugins, and the memory backend. Edit this to define which environments activate
+  in which contexts (networks, hosts, users, projects).
+
+- **.llmenv.yaml** — Project markers (one per project). Drop a marker file at the
+  root of any project directory to give that project its own scope, tags, and
+  enabled bundles. llmenv discovers these by walking upward from the current
+  directory.
+
+- **bundles/** — Bundle content directories. Each directory here matches a
+  `bundle:` entry in `config.yaml`. Bundles can contain:
+  - YAML files (`bundle.yaml`) with MCP servers, hooks, and other capabilities
+  - Environment variables
+  - Plugin declarations
+
+## Getting Started
+
+1. **Edit config.yaml** to add your first scopes (network, host, user) and a bundle.
+   See the comments in the file for examples and reference the [Configuration docs](https://phaedrus1992.github.io/llmenv/docs/configuration).
+
+2. **Install the shell hook** to activate llmenv on every prompt:
+
+   ```bash
+   eval "$(llmenv hook zsh)"      # Add to ~/.zshrc
+   # or
+   eval "$(llmenv hook bash)"     # Add to ~/.bashrc
+   ```
+
+3. **Verify setup**:
+
+   ```bash
+   llmenv doctor        # Check for configuration errors
+   llmenv status        # Show active scopes and tags
+   llmenv export        # Preview the exported environment
+   ```
+
+4. **Add projects** by creating `.llmenv.yaml` marker files at project roots.
+
+## Concepts
+
+- **Scopes** — Describe where you are (network/host/user/project). Each emits **tags**.
+- **Tags** — Labels that trigger bundles, MCP servers, plugins, and memory.
+- **Bundles** — Fire when their tags match the active set. Contribute config, env vars, and capabilities.
+- **Materialize** — llmenv combines active scopes/bundles into a content-addressed config directory.
+- **Adapter** — Renders the materialized config into the agent's native format (e.g. Claude Code).
+
+## Documentation
+
+- [Getting Started](https://phaedrus1992.github.io/llmenv/docs/getting-started) — First-run walkthrough
+- [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) — Complete schema reference
+- [Concepts](https://phaedrus1992.github.io/llmenv/docs/concepts) — Scopes, tags, bundles, precedence
+- [Main Site](https://phaedrus1992.github.io/llmenv/) — All documentation
+"#;
+    std::fs::write(&readme_path, readme_content)
+        .with_context(|| format!("writing README to {}", readme_path.display()))?;
+    eprintln!("Created README at {}", readme_path.display());
 
     Ok(())
 }
