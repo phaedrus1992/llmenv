@@ -21,27 +21,7 @@ project tagged `rust`". llmenv lets you declare configuration once, attach it to
 
 ## Install
 
-**Homebrew (macOS / Linux):**
-
-```bash
-brew tap phaedrus1992/tap
-brew install llmenv
-```
-
-**Cargo:**
-
-```bash
-cargo install llmenv
-```
-
-**From source:**
-
-```bash
-git clone https://github.com/phaedrus1992/llmenv.git
-cd llmenv
-cargo build --release
-./target/release/llmenv --help
-```
+See [Getting Started — Install](https://phaedrus1992.github.io/llmenv/docs/getting-started#1-install) for complete instructions (Homebrew, Cargo, from source).
 
 ## Quick start
 
