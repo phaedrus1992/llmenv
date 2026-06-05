@@ -1,7 +1,7 @@
 # Local git hooks for llmenv, managed by prek (https://github.com/j178/prek).
-# Install after cloning:  prek install --hook-type pre-commit --hook-type pre-push
+# Install after cloning:  prek install --hook-type pre-commit
 #
-# fmt runs on every commit (fast); clippy, tests, and cargo-deny run on push only (slow).
+# Only fmt runs locally (fast). Clippy, tests, and cargo-deny run in CI only.
 repos:
   - repo: local
     hooks:
@@ -11,21 +11,3 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
-      - id: cargo-clippy
-        name: cargo clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
-      - id: cargo-test
-        name: cargo test
-        entry: cargo test --all-features
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
-      - id: cargo-deny
-        name: cargo deny check
-        entry: cargo deny check
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
