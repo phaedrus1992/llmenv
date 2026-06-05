@@ -237,7 +237,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.7...HEAD
+[1.0.7]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/phaedrus1992/llmenv/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/phaedrus1992/llmenv/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/phaedrus1992/llmenv/compare/v1.0.3...v1.0.4
