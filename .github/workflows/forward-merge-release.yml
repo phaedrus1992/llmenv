@@ -39,7 +39,12 @@ jobs:
         run: |
           set -euo pipefail
           CURRENT=$(git rev-parse --abbrev-ref HEAD)
-          BRANCHES=$(git branch -r | grep 'origin/release/[0-9]*\.[0-9]*\.x$' | sed 's|origin/||' | sort -V)
+          # `git branch -r` indents each line with two spaces; strip that (and the
+          # `origin/` prefix) before matching, otherwise the cascade compares
+          # "  release/1.0.x" against "release/1.0.x", never matches the current
+          # branch, and aborts with "not a versioned release branch".
+          BRANCHES=$(git branch -r | sed 's|^[[:space:]]*origin/||' \
+            | grep -E '^release/[0-9]+\.[0-9]+\.x$' | sort -V)
           # Random delimiter so a branch literally named "EOF" can't break the
           # multiline output value (GitHub-recommended pattern).
           DELIM="branches-$(uuidgen)"
