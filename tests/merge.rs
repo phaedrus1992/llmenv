@@ -4,6 +4,22 @@ use llmenv::merge::{BundleRef, merge};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+// #295: helpers for same-scope conflict tests
+fn bundle_with_mode(tmp: &tempfile::TempDir, name: &str, mode: &str) -> BundleRef {
+    let dir = tmp.path().join(name);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("bundle.yaml"),
+        format!("permissions:\n  default_mode: {mode}\n"),
+    )
+    .expect("write bundle.yaml");
+    BundleRef {
+        name: name.into(),
+        path: dir,
+        precedence: 1, // same scope kind = same precedence
+    }
+}
+
 fn bundle(name: &str) -> BundleRef {
     BundleRef {
         name: name.into(),
@@ -155,4 +171,80 @@ fn later_bundle_overwrites_on_path_collision() {
     let abs = by_rel.get(&key).expect("collision key");
     let contents = std::fs::read_to_string(abs).expect("read");
     assert_eq!(contents, "from b", "later bundle should win");
+}
+
+// #295: two bundles at the same scope-kind precedence setting conflicting default_mode must
+// hard-error, naming both bundles and the conflicting key.
+#[test]
+fn same_scope_bundles_with_conflicting_default_mode_errors() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let a = bundle_with_mode(&tmp, "tag-work", "acceptEdits");
+    let b = bundle_with_mode(&tmp, "tag-home", "plan");
+
+    let err = merge(&Capabilities::default(), &empty_native(), &[a, b])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("conflicting default_mode"),
+        "error must mention the conflicting key; got: {err}"
+    );
+    assert!(
+        err.contains("tag-work") && err.contains("tag-home"),
+        "error must name both conflicting bundles; got: {err}"
+    );
+}
+
+// #295: two bundles at the same precedence agreeing on default_mode must not error.
+#[test]
+fn same_scope_bundles_with_matching_default_mode_ok() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let a = bundle_with_mode(&tmp, "tag-rust", "acceptEdits");
+    let b = bundle_with_mode(&tmp, "tag-work", "acceptEdits");
+
+    let m = merge(&Capabilities::default(), &empty_native(), &[a, b]).expect("no conflict");
+    assert_eq!(
+        m.capabilities.permissions.default_mode,
+        Some(llmenv::config::PermissionMode::AcceptEdits),
+    );
+}
+
+// #295: higher-precedence scope wins over lower-precedence on conflicting default_mode (no error).
+#[test]
+fn different_scope_precedence_higher_wins_no_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Simulate: one bundle from a network scope (low precedence=1),
+    // one from a project scope (high precedence=4).
+    let low_dir = tmp.path().join("net-bundle");
+    std::fs::create_dir_all(&low_dir).expect("mkdir");
+    std::fs::write(
+        low_dir.join("bundle.yaml"),
+        "permissions:\n  default_mode: acceptEdits\n",
+    )
+    .expect("write");
+    let high_dir = tmp.path().join("proj-bundle");
+    std::fs::create_dir_all(&high_dir).expect("mkdir");
+    std::fs::write(
+        high_dir.join("bundle.yaml"),
+        "permissions:\n  default_mode: plan\n",
+    )
+    .expect("write");
+
+    let low = BundleRef {
+        name: "net-bundle".into(),
+        path: low_dir,
+        precedence: 1,
+    };
+    let high = BundleRef {
+        name: "proj-bundle".into(),
+        path: high_dir,
+        precedence: 4,
+    };
+
+    // Different precedence levels → higher wins, no conflict error.
+    let m = merge(&Capabilities::default(), &empty_native(), &[low, high]).expect("no conflict");
+    assert_eq!(
+        m.capabilities.permissions.default_mode,
+        Some(llmenv::config::PermissionMode::Plan),
+        "higher-precedence bundle should win"
+    );
 }

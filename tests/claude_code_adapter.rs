@@ -1019,12 +1019,17 @@ fn two_bundles_merge_into_deterministic_settings_json() {
     let parsed: serde_json::Value =
         serde_json::from_str(&settings_json).expect("parse settings.json");
 
-    // PreToolUse has exactly two entries: the deduped Bash/guard.sh and the
-    // distinct Edit/fmt.sh. If dedup regressed, this would be three.
+    // PreToolUse has exactly three entries: the deduped Bash/guard.sh, the
+    // distinct Edit/fmt.sh, and the auto-injected config-guard hook (#289).
+    // If bundle dedup regressed this would be four.
     let pre = parsed["hooks"]["PreToolUse"]
         .as_array()
         .expect("PreToolUse array");
-    assert_eq!(pre.len(), 2, "guard.sh deduped, fmt.sh survives: {pre:#?}");
+    assert_eq!(
+        pre.len(),
+        3,
+        "guard.sh deduped, fmt.sh survives, config-guard added: {pre:#?}"
+    );
 
     // Snapshot pins the full deterministic shape: ordering, dedup, permission
     // union, and native passthrough merge across both bundles.
