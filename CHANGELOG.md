@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add `llmenv config-context` subcommand, auto-registered as a `SessionStart` hook
+  by the Claude Code adapter; emits source config file and bundles directory paths
+  as `hookSpecificOutput.additionalContext` so the agent always knows where to edit
+  llmenv config rather than touching managed cache files
+- Add `llmenv config-guard` subcommand, auto-registered as a `PreToolUse` hook
+  (matcher: `Write`, `Edit`, `MultiEdit`) by the Claude Code adapter; warns when the
+  agent writes to a path inside the managed cache directory and redirects to the
+  source config; always exits 0 (fail-soft, never blocks the write)
+
+### Changed
+
+- Replace ASCII pipeline and precedence diagrams in the concepts and philosophy
+  documentation pages with Mermaid flowcharts; the diagrams now render as proper
+  graphs on the Docusaurus docs site
+
 ## [1.0.6] - 2026-06-05
 
 ### Added
