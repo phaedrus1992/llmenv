@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   branches; GitHub's native auto-close only works on the default branch, so this
   workflow parses merged PR bodies for closing keywords and closes referenced
   issues via the API
+- Add GitHub Actions workflow to forward-merge `release/*` branches through the
+  release chain into `main`; a fix pushed to an older release line cascades
+  forward through newer lines automatically, opening a labeled PR (and halting)
+  on the first conflict or protected branch instead of being dropped
 
 ### Changed
 
@@ -44,6 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with `command not found: INFO:` lines. The proxy now redirects stdio to
   `/dev/null` and starts in its own process group so terminal job-control
   signals no longer reach it
+- Fix `llmenv sync` silently reporting success when `git push` failed; a
+  rejected or failed push is now surfaced as an error with git's own message
+- Fix git operations potentially hanging on a credential prompt when run with a
+  non-interactive stdin (CI, or a sourced `llmenv export`); all git subprocesses
+  now detach stdin so they fail fast instead of blocking
+- Fix materialized skills failing silently when they referenced bundled scripts
+  via hardcoded `~/.claude` paths; such paths resolve against the default config
+  dir, not the materialized folder llmenv actually boots. Materialization now
+  rejects skills (and rules/CLAUDE.md) carrying `~/.claude` or `$HOME/.claude`
+  paths, naming the offending file
+- Fix marketplace `git clone`/`fetch` failures hiding git's diagnostic output;
+  the underlying stderr is now surfaced (auth failure, bad URL, disk full are
+  distinguishable) with any embedded credentials scrubbed from the message
+- Fix `llmenv` config auto-pull silently swallowing a failed fast-forward
+  (diverged history, conflict, network); a one-line nudge now points at
+  `llmenv sync` instead of failing invisibly on every shell prompt
 
 ## [1.0.5] - 2026-06-03
 

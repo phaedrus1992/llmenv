@@ -38,11 +38,7 @@ fn detect_linux() -> Option<String> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run(args: &[&str]) -> Option<String> {
     let (cmd, rest) = args.split_first()?;
-    let out = std::process::Command::new(cmd).args(rest).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8(out.stdout).ok()
+    super::capture_stdout("gateway-mac detection", cmd, rest)
 }
 
 #[must_use]
