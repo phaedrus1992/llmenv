@@ -293,6 +293,69 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Token-efficiency checks emitted as part of `llmenv doctor`.
+///
+/// Warns on env-var patterns that degrade context efficiency. Prints validated
+/// numeric values only; raw env var strings are never echoed to the terminal to
+/// prevent terminal escape sequence injection from crafted env values.
+fn run_doctor_token_efficiency(config: &Config, use_color: bool, pass: &str, warn: &str) {
+    let info = if use_color { "\u{2139}" } else { "i" };
+    eprintln!();
+    eprintln!("Token-efficiency checks:");
+
+    match std::env::var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") {
+        Ok(val) => match val.parse::<u32>() {
+            Ok(pct) if pct <= 70 => eprintln!("{pass} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct}"),
+            Ok(pct) => eprintln!(
+                "{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct} (recommend ≤70 for PreCompact cleanup)"
+            ),
+            Err(_) => {
+                eprintln!("{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE has invalid (non-numeric) value")
+            }
+        },
+        Err(_) => eprintln!(
+            "{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE not set (recommend 50 for PreCompact headroom)"
+        ),
+    }
+
+    match std::env::var("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
+        Ok(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
+        Ok(Err(_)) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value"),
+        Err(_) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
+    }
+
+    match std::env::var("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
+        Ok(Ok(n)) => eprintln!("{pass} MAX_MCP_OUTPUT_TOKENS={n}"),
+        Ok(Err(_)) => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS has invalid (non-numeric) value"),
+        Err(_) => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
+    }
+
+    match std::env::var("ENABLE_PROMPT_CACHING_1H") {
+        Ok(val) if val.eq_ignore_ascii_case("true") || val == "1" => {
+            eprintln!("{pass} ENABLE_PROMPT_CACHING_1H=true (1h cache TTL enabled)")
+        }
+        Ok(_) => eprintln!("{warn} ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)"),
+        Err(_) => {
+            eprintln!("{warn} ENABLE_PROMPT_CACHING_1H not set (recommend true for 1h cache reuse)")
+        }
+    }
+
+    match std::env::var("CLAUDE_CODE_SUBAGENT_MODEL") {
+        Ok(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
+        Err(_) => {
+            eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL not set (default: claude-sonnet-4-6)")
+        }
+    }
+
+    let has_context_mode = config.mcp.iter().any(|m| m.name.contains("context-mode"));
+    if has_context_mode {
+        eprintln!("{pass} context-mode MCP server is configured");
+    } else {
+        eprintln!("{warn} context-mode MCP not configured (load-bearing for token efficiency)");
+        eprintln!("{warn}   → Install context-mode plugin and add to mcp: section in config.yaml");
+    }
+}
+
 /// Validates adapter wiring: file layout, config parse, no silent breakage.
 fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     let pass = doctor_pass(use_color);
@@ -579,6 +642,8 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
             eprintln!("{warn}   → Move or rewrite this hook in your config or bundle YAML");
         }
     }
+
+    run_doctor_token_efficiency(&config, use_color, &pass, &warn);
 
     eprintln!("{pass} Doctor check complete.");
 
@@ -1148,15 +1213,34 @@ fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
 
 /// `llmenv config-context`: emit source config paths into SessionStart context (#289).
 ///
-/// Always exits 0 (fail-soft). If paths cannot be resolved, skips silently.
+/// Always exits 0 (fail-soft). Warns to stderr if paths cannot be resolved so
+/// the operator can diagnose the failure; never silently substitutes wrong paths.
 fn run_config_context() {
-    // Fix B: use expand_tilde on fallback strings so the agent never sees a
-    // literal `~` that its shell won't further expand.
-    let config_path = paths::config_path()
-        .unwrap_or_else(|_| PathBuf::from(paths::expand_tilde("~/.config/llmenv/config.yaml")));
-    let bundles_dir = paths::config_dir()
-        .unwrap_or_else(|_| PathBuf::from(paths::expand_tilde("~/.config/llmenv")))
-        .join("bundles");
+    let config_path = match paths::config_path() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("llmenv config-context: failed to resolve config path: {e}");
+            let output = serde_json::json!({
+                "hookSpecificOutput": {
+                    "additionalContext":
+                        "llmenv config-context: could not resolve config path. \
+                         Run `llmenv doctor` to diagnose."
+                }
+            });
+            println!("{output}");
+            return;
+        }
+    };
+    let bundles_dir = match paths::config_dir() {
+        Ok(d) => d.join("bundles"),
+        Err(e) => {
+            eprintln!("llmenv config-context: failed to resolve config dir: {e}");
+            config_path
+                .parent()
+                .map(|p| p.join("bundles"))
+                .unwrap_or_else(|| PathBuf::from(paths::expand_tilde("~/.config/llmenv/bundles")))
+        }
+    };
 
     let text = format!(
         "llmenv source config:\n\
@@ -1192,40 +1276,58 @@ fn run_config_guard() {
         return;
     }
 
-    // Fix A: locate the `claude-code` adapter dir in the CLAUDE_CONFIG_DIR path
+    // Locate the `claude-code` adapter dir in the CLAUDE_CONFIG_DIR path
     // and take its parent as cache_root. This works for all hashing modes:
     //   Normal  → <root>/claude-code/<version>/<shape>  (3 levels below root)
     //   Loose   → <root>/claude-code/<shape>            (2 levels below root)
     //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
     // Walking up to find "claude-code" and taking its parent is invariant to depth.
-    let cache_root = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .and_then(|dir| {
+    let default_cache = PathBuf::from(paths::expand_tilde("~/.cache/llmenv"));
+    let cache_root = match std::env::var("CLAUDE_CONFIG_DIR") {
+        Err(_) => default_cache, // expected when not running inside a hook
+        Ok(dir) => {
             let path = PathBuf::from(&dir);
-            path.ancestors()
-                .skip(1) // skip the leaf shape directory itself
+            match path
+                .ancestors()
+                .skip(1)
                 .find(|p| p.file_name().map(|n| n == "claude-code").unwrap_or(false))
                 .and_then(|p| p.parent().map(PathBuf::from))
-        })
-        .unwrap_or_else(|| PathBuf::from(paths::expand_tilde("~/.cache/llmenv")));
+            {
+                Some(root) => root,
+                None => {
+                    eprintln!(
+                        "llmenv config-guard: could not locate cache root from \
+                         CLAUDE_CONFIG_DIR={dir}; falling back to default"
+                    );
+                    default_cache
+                }
+            }
+        }
+    };
 
-    // Fix E: removed dead `.or_else(|| ti.get("path"))` — no Claude Code
-    // Write/Edit/MultiEdit tool sends a `path` field; the field is always `file_path`.
-    let file_path = serde_json::from_str::<serde_json::Value>(&stdin_buf)
-        .ok()
-        .and_then(|v| {
-            v.get("tool_input")
-                .and_then(|ti| ti.get("file_path"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        });
+    // Non-empty stdin that fails JSON parsing means the hook payload format
+    // changed — log it so payload format mismatches are operator-visible.
+    let parsed = serde_json::from_str::<serde_json::Value>(&stdin_buf);
+    let file_path = match parsed {
+        Ok(v) => v
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        Err(e) => {
+            if !stdin_buf.trim().is_empty() {
+                eprintln!("llmenv config-guard: failed to parse hook payload: {e}");
+            }
+            None
+        }
+    };
 
     let Some(path_str) = file_path else {
         return;
     };
 
-    let expanded = PathBuf::from(paths::expand_tilde(&path_str));
-    if expanded.starts_with(&cache_root) {
+    let expanded = paths::expand_tilde(&path_str);
+    if is_within_cache(&cache_root, &expanded) {
         let config_path = paths::config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| paths::expand_tilde("~/.config/llmenv/config.yaml"));
@@ -1310,6 +1412,12 @@ fn build_bundle_refs(
             }
             let path = bundles_dir.join(name);
             if !path.exists() {
+                tracing::warn!(
+                    "bundle '{}' has no content directory at {}; \
+                     skipping (vars-only bundle, or missing/deleted directory)",
+                    name,
+                    path.display()
+                );
                 return;
             }
             seen.insert(name.to_owned());
@@ -1401,127 +1509,7 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
         return Ok(());
     }
 
-    let template = r#"# llmenv configuration
-# See https://phaedrus1992.github.io/llmenv/docs/configuration for the complete schema
-
-cache:
-  cache_dir: "~/.cache/llmenv"
-  sync_interval_minutes: 60
-  # Optional: minutes to retain cached materializations (default: 168 = 7 days)
-  # cache_retention_hours: 168
-  # Cache-folder strictness dial (default: normal). One knob, three positions,
-  # ordered by how aggressively a folder is reused: loose ⊂ normal ⊂ strict.
-  #   loose  — folder = <shape>. Selection-addressed only; a binary upgrade
-  #            reuses the same folder. Fewest folders.
-  #   normal — folder = <major.minor>/<shape>. Config edits re-render into the
-  #            SAME folder, so a running agent only picks up changes on its next
-  #            launch; a minor version bump or selection change mints a new one.
-  #            Preserves in-session agent/plugin state across re-renders.
-  #   strict — folder = <version>-<content_hash>; every input change makes a new
-  #            folder. Strongest isolation, but fragments the cache.
-  # hashing: normal
-
-# Scopes: match environment conditions (network, host, user, project) and emit tags.
-# Uncomment and fill in as needed.
-# scope:
-#   network:
-#     - id: office
-#       match: { gateway_mac: "aa:bb:cc:dd:ee:ff" }
-#       tags: [office]
-#     - id: home
-#       match: { ssid: "MyHomeWiFi" }
-#       tags: [home]
-#   host:
-#     - id: laptop
-#       match: { hostname: "my-laptop" }
-#       tags: [laptop]
-#   user:
-#     - id: me
-#       match: { user: "alice" }
-#       tags: [me]
-#
-# Project scopes are NOT declared here. Drop a `.llmenv.yaml` marker file in a
-# project directory instead; llmenv discovers it by walking the current
-# directory upward to $HOME. Example `.llmenv.yaml`:
-#   id: myapp
-#   name: MyApp
-#   description: "Optional description"
-#   tags: [myapp, rust]
-#   enable_bundles: [base]   # optional: force-enable bundles regardless of tags
-
-# Bundles: named collections of config that fire on tag match.
-# Uncomment and edit as needed.
-bundle:
-  - name: base
-    tags: [me]
-    env:
-      AGENT: "claude"
-  # - name: office-only
-  #   tags: [office]
-  #   vars:
-  #     WORK_MCP: "office-server"
-
-# MCP servers: selected onto scopes by tag intersection, rendered into the agent's
-# MCP config. Each is either stdio (command) or remote (url).
-# mcp:
-#   - name: playwright
-#     tags: [me]
-#     type: stdio           # optional, default is stdio
-#     command: npx
-#     args: ["-y", "@playwright/mcp@latest"]
-#   # - name: office-internal
-#   #   tags: [office]
-#   #   type: remote
-#   #   url: http://office-mcp.internal:3000
-
-# Plugin marketplaces: git sources or local paths for agent plugins.
-# marketplace:
-#   - name: github-marketplace
-#     url: https://github.com/you/llmenv-plugins.git
-#   - name: local-plugins
-#     path: ~/.config/llmenv/local-plugins
-
-# Plugin collections: named bags of plugins selected by tag, like bundles.
-# plugin-collection:
-#   - name: base-plugins
-#     tags: [me]
-#     plugins:
-#       - github-marketplace:useful-plugin
-#       - github-marketplace:another-plugin
-
-# Per-engine native config (passthrough). Keys match engine names (e.g. claude_code).
-# llmenv does not interpret these — adapters merge them verbatim into the engine's
-# native settings. Escape hatch for non-portable keys.
-# native:
-#   claude_code:
-#     customSetting: value
-
-# llmenv's memory backend (ICM). Optional. One host runs the daemon,
-# others connect as network clients.
-# features:
-#   memory:
-#     server_host: my-laptop  # must exist in the host: table below
-#     port: 7878
-#     tags: [me]
-
-# Host directory: maps logical host names to reachable addresses.
-# Used by the memory backend topology to build client connection URLs.
-# host:
-#   my-laptop:
-#     addr: "my-laptop.local"
-#   office-server:
-#     addr: "office-server.internal"
-
-# Durable state relocation: tools that persist state to CLAUDE_CONFIG_DIR
-# lose it when llmenv re-materializes (on config edits or version bumps).
-# Declare tools here to point them at a stable, hash-independent state directory.
-# state:
-#   tools:
-#     - env: CONTEXT_MODE_DATA_DIR   # tool reads this to find its state
-#       subdir: context-mode         # → $LLMENV_STATE_DIR/context-mode
-#     - env: MY_TOOL_STATE
-#       subdir: my-tool
-"#;
+    let template = crate::config::template::generate_template();
     std::fs::write(&config_path, template)
         .with_context(|| format!("writing template to {}", config_path.display()))?;
     eprintln!("Created template config at {}", config_path.display());
@@ -2715,6 +2703,109 @@ mod tests {
                 out[0].install_location.is_some(),
                 "install_location filled in"
             );
+        }
+    }
+}
+
+/// Lexically normalize a path: resolve `..` and `.` components without touching
+/// the filesystem. This prevents `..`-based traversal bypasses when checking
+/// path prefixes on paths that may not exist yet.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Pure path-prefix check: does `expanded_path` lie within `cache_root`?
+///
+/// Normalizes `..` components lexically (no filesystem access) so traversal
+/// paths like `/cache/llmenv/../../../etc/passwd` cannot bypass the check.
+#[must_use]
+fn is_within_cache(cache_root: &std::path::Path, expanded_path: &str) -> bool {
+    let path = normalize_path(std::path::Path::new(expanded_path));
+    path.starts_with(cache_root)
+}
+
+#[cfg(test)]
+mod config_guard_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn test_is_within_cache_basic() {
+        let cache_root = std::path::Path::new("/home/user/.cache/llmenv");
+        assert!(is_within_cache(
+            cache_root,
+            "/home/user/.cache/llmenv/config"
+        ));
+        assert!(is_within_cache(
+            cache_root,
+            "/home/user/.cache/llmenv/data/file.txt"
+        ));
+        assert!(!is_within_cache(
+            cache_root,
+            "/home/user/.config/llmenv/config.yaml"
+        ));
+        assert!(!is_within_cache(
+            cache_root,
+            "/home/user/.cache/llmenv-adjacent/file"
+        ));
+    }
+
+    #[test]
+    fn test_is_within_cache_empty_path() {
+        let cache_root = std::path::Path::new("/cache");
+        assert!(!is_within_cache(cache_root, ""));
+    }
+
+    #[test]
+    fn test_is_within_cache_dot_dot_escape() {
+        let cache_root = std::path::Path::new("/cache/llmenv");
+        // After normalization, /cache/llmenv/../../../etc/passwd → /etc/passwd,
+        // which does not start with /cache/llmenv.
+        let escaped = "/cache/llmenv/../../../etc/passwd";
+        assert!(!is_within_cache(cache_root, escaped));
+    }
+
+    // Property-based tests
+    proptest! {
+        #[test]
+        fn prop_within_cache_reflexive(ref cache_root in r"/[a-z/]+") {
+            let path = std::path::Path::new(cache_root);
+            prop_assert!(is_within_cache(path, cache_root));
+        }
+
+        #[test]
+        fn prop_within_cache_child_paths(ref cache_root in r"/[a-z/]+", ref suffix in r"[a-z0-9]+") {
+            let path = std::path::Path::new(cache_root);
+            let child = format!("{}/{}", cache_root, suffix);
+            prop_assert!(is_within_cache(path, &child));
+        }
+
+        #[test]
+        fn prop_sibling_paths_not_within(ref cache_root in r"/cache/[a-z]+") {
+            let path = std::path::Path::new(cache_root);
+            // Adjacent directory with similar prefix should not match
+            if let Some(base) = cache_root.rfind('/') {
+                let sibling = format!("{}{}", &cache_root[..=base], "other");
+                prop_assert!(!is_within_cache(path, &sibling));
+            }
+        }
+
+        #[test]
+        fn prop_no_panic_on_arbitrary_strings(ref cache_root in r"/[a-z/]*", ref path_str in ".*") {
+            let path = std::path::Path::new(cache_root);
+            // Should never panic, even on malformed paths
+            let _ = is_within_cache(path, path_str);
         }
     }
 }
