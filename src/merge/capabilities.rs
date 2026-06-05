@@ -4,9 +4,9 @@
 //! each selected bundle's `bundle.yaml`. They compose by **value shape**, not
 //! key identity (see `docs/design/engine-capabilities.md`, D2):
 //!
-//! - **Lists** (`allow`/`ask`/`deny`, `hooks`, `plugins`, and the per-engine
-//!   `native` rule lists) → concatenate across contributors, then dedup.
-//!   Order-independent union; no winner problem.
+//! - **Lists** (`allow`/`ask`/`deny`, `hooks`, `plugins`, `mcp`, and the
+//!   per-engine `native` rule lists) → concatenate across contributors, then
+//!   dedup. Order-independent union; no winner problem.
 //! - **Scalars** (`default_mode`) → the highest-precedence contributor wins.
 //!   Two contributors at the **same** precedence setting different values is an
 //!   unresolvable ambiguity → hard-error naming both. Loud beats silent.
@@ -37,6 +37,7 @@ pub struct CapabilityContributor {
 pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Result<Capabilities> {
     let mut hooks = Vec::new();
     let mut plugins = Vec::new();
+    let mut mcp = Vec::new();
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -46,6 +47,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         let caps = &c.capabilities;
         hooks.extend(caps.hooks.iter().cloned());
         plugins.extend(caps.plugins.iter().cloned());
+        mcp.extend(caps.mcp.iter().cloned());
         allow.extend(caps.permissions.allow.iter().cloned());
         ask.extend(caps.permissions.ask.iter().cloned());
         deny.extend(caps.permissions.deny.iter().cloned());
@@ -59,6 +61,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
 
     dedup(&mut hooks);
     dedup(&mut plugins);
+    dedup(&mut mcp);
     dedup(&mut allow);
     dedup(&mut ask);
     dedup(&mut deny);
@@ -95,6 +98,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         },
         hooks,
         plugins,
+        mcp,
         auto_memory_enabled,
         native_permissions,
         native_hooks,
@@ -398,6 +402,57 @@ mod tests {
         let a = contributor("a", 0, with_allow(vec![rule("Bash", "x")]));
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.permissions.default_mode, None);
+    }
+
+    // #329: mcp entries from bundle.yaml must concatenate and dedup.
+    #[test]
+    fn mcp_entries_concatenate_across_contributors() {
+        use crate::config::{McpServer, McpTransport};
+        let server = |name: &str| McpServer {
+            name: name.into(),
+            tags: vec![],
+            transport: McpTransport::Stdio,
+            command: Some("cmd".into()),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+        };
+        let caps_a = Capabilities {
+            mcp: vec![server("ctx")],
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            mcp: vec![server("playwright")],
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        assert_eq!(out.mcp.len(), 2);
+    }
+
+    #[test]
+    fn mcp_entries_are_deduped() {
+        use crate::config::{McpServer, McpTransport};
+        let server = McpServer {
+            name: "ctx".into(),
+            tags: vec![],
+            transport: McpTransport::Stdio,
+            command: Some("cmd".into()),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+        };
+        let caps_a = Capabilities {
+            mcp: vec![server.clone()],
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            mcp: vec![server],
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        assert_eq!(out.mcp.len(), 1, "duplicate mcp entries must be deduped");
     }
 
     // #291: native: blocks from bundle.yaml must be merged into the output.

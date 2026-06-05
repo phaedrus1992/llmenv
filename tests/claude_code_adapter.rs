@@ -844,6 +844,88 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
     );
 }
 
+// Issue #329: mcp: entries in bundle.yaml are resolved and rendered into
+// `.claude.json` mcpServers. Tagless entries are always active; tagged entries
+// require an active scope tag match.
+#[test]
+fn bundle_mcp_entries_render_into_claude_json() {
+    use llmenv::mcp::resolve::resolve_bundle_mcps;
+    use std::collections::BTreeSet;
+
+    let bundles = vec![fixture_bundle("with-mcp")];
+    let mut manifest = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
+
+    let active_tags: BTreeSet<String> = BTreeSet::new();
+    manifest.mcps =
+        resolve_bundle_mcps(&manifest.capabilities.mcp, &active_tags).expect("resolve bundle mcps");
+
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let claude_json =
+        std::fs::read_to_string(tmp.path().join(".claude.json")).expect(".claude.json emitted");
+    let parsed: serde_json::Value = serde_json::from_str(&claude_json).expect("parse");
+
+    let servers = parsed["mcpServers"]
+        .as_object()
+        .expect("mcpServers present");
+    assert!(
+        servers.contains_key("ctx"),
+        "tagless bundle mcp must be active: {servers:?}"
+    );
+    assert!(
+        !servers.contains_key("playwright"),
+        "tagged bundle mcp with no matching active tag must be inactive: {servers:?}"
+    );
+}
+
+// Issue #329 (tagged variant): bundle mcp with a matching tag is active.
+#[test]
+fn bundle_mcp_tagged_entry_active_when_tag_matches() {
+    use llmenv::mcp::resolve::resolve_bundle_mcps;
+    use std::collections::BTreeSet;
+
+    let bundles = vec![fixture_bundle("with-mcp")];
+    let mut manifest = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &bundles,
+    )
+    .expect("merge");
+
+    let active_tags: BTreeSet<String> = ["feature-playwright".to_string()].into_iter().collect();
+    manifest.mcps =
+        resolve_bundle_mcps(&manifest.capabilities.mcp, &active_tags).expect("resolve bundle mcps");
+
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let claude_json =
+        std::fs::read_to_string(tmp.path().join(".claude.json")).expect(".claude.json emitted");
+    let parsed: serde_json::Value = serde_json::from_str(&claude_json).expect("parse");
+
+    let servers = parsed["mcpServers"]
+        .as_object()
+        .expect("mcpServers present");
+    assert!(
+        servers.contains_key("ctx"),
+        "tagless entry must still be active"
+    );
+    assert!(
+        servers.contains_key("playwright"),
+        "tagged entry must be active when tag matches"
+    );
+}
+
 // Issue #244: a stray `enabledMcpjsonServers` in a native_mcp fragment is a
 // project `.mcp.json` approval gate — irrelevant for the auto-trusted
 // user-scoped servers in `.claude.json` — so it is dropped, while the resolved

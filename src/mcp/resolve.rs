@@ -84,6 +84,32 @@ pub fn resolve_mcps(
     Ok(out)
 }
 
+/// Select and resolve MCP servers contributed by bundle `capabilities.mcp`
+/// entries.
+///
+/// Bundle-level MCP entries follow a relaxed tag rule compared to top-level
+/// servers: an entry with **no tags** is always active (the bundle's own scope
+/// selection already acted as the gate). An entry that *does* carry tags is
+/// further filtered against `active_tags` as usual.
+///
+/// # Errors
+/// Returns the first [`ResolveError`] encountered: a server missing its
+/// required `command`/`url`.
+pub fn resolve_bundle_mcps(
+    bundle_mcps: &[crate::config::McpServer],
+    active_tags: &BTreeSet<String>,
+) -> Result<Vec<ResolvedMcp>, ResolveError> {
+    let mut out = Vec::new();
+    for m in bundle_mcps {
+        // Tagless = always active (bundle selection already acted as the gate).
+        let active = m.tags.is_empty() || m.tags.iter().any(|t| active_tags.contains(t));
+        if active {
+            out.push(resolve_static(m)?);
+        }
+    }
+    Ok(out)
+}
+
 /// Render a plain server entry by its transport.
 fn resolve_static(m: &McpServer) -> Result<ResolvedMcp, ResolveError> {
     let kind = match m.transport {
@@ -349,6 +375,66 @@ mod tests {
                 let b = resolve_mcps(&cfg, &active).expect("resolve");
                 prop_assert_eq!(a, b);
             }
+        }
+    }
+
+    // #329: resolve_bundle_mcps — tagless entries always active; tagged entries
+    // filtered by active_tags.
+    mod bundle_mcps {
+        use super::*;
+
+        #[test]
+        fn tagless_entry_always_active() {
+            let server = stdio_server("ctx", &[], "ctx-mcp");
+            let resolved = resolve_bundle_mcps(&[server], &tags(&[])).unwrap();
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].name, "ctx");
+        }
+
+        #[test]
+        fn tagged_entry_active_when_tag_matches() {
+            let server = stdio_server("playwright", &["user-ranger"], "npx");
+            let resolved = resolve_bundle_mcps(&[server], &tags(&["user-ranger"])).unwrap();
+            assert_eq!(resolved.len(), 1);
+        }
+
+        #[test]
+        fn tagged_entry_inactive_when_no_tag_matches() {
+            let server = stdio_server("playwright", &["user-ranger"], "npx");
+            let resolved = resolve_bundle_mcps(&[server], &tags(&["network-office"])).unwrap();
+            assert!(resolved.is_empty());
+        }
+
+        #[test]
+        fn mix_of_tagless_and_tagged() {
+            let always = stdio_server("always", &[], "always-mcp");
+            let sometimes = stdio_server("sometimes", &["home"], "sometimes-mcp");
+            let never = stdio_server("never", &["work"], "never-mcp");
+
+            let resolved =
+                resolve_bundle_mcps(&[always, sometimes, never], &tags(&["home"])).unwrap();
+            assert_eq!(resolved.len(), 2);
+            assert!(resolved.iter().any(|m| m.name == "always"));
+            assert!(resolved.iter().any(|m| m.name == "sometimes"));
+        }
+
+        #[test]
+        fn empty_input_yields_empty_output() {
+            let resolved = resolve_bundle_mcps(&[], &tags(&["any"])).unwrap();
+            assert!(resolved.is_empty());
+        }
+
+        #[test]
+        fn stdio_missing_command_errors() {
+            let mut s = stdio_server("broken", &[], "x");
+            s.command = None;
+            let err = resolve_bundle_mcps(&[s], &tags(&[])).unwrap_err();
+            assert_eq!(
+                err,
+                ResolveError::StdioMissingCommand {
+                    name: "broken".into()
+                }
+            );
         }
     }
 }

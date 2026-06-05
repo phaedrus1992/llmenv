@@ -958,6 +958,10 @@ fn build_manifest(
         crate::merge::merge(&config.capabilities, &config.native, &refs)?;
     manifest.mcps =
         crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
+    manifest.mcps.extend(
+        crate::mcp::resolve::resolve_bundle_mcps(&manifest.capabilities.mcp, &active.tags)
+            .context("resolving bundle MCP servers")?,
+    );
 
     let cache_root = expand_tilde(&config.cache.cache_dir)?;
 
