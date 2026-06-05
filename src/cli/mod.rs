@@ -1130,10 +1130,12 @@ fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
 ///
 /// Always exits 0 (fail-soft). If paths cannot be resolved, skips silently.
 fn run_config_context() {
-    let config_path =
-        paths::config_path().unwrap_or_else(|_| PathBuf::from("~/.config/llmenv/config.yaml"));
+    // Fix B: use expand_tilde on fallback strings so the agent never sees a
+    // literal `~` that its shell won't further expand.
+    let config_path = paths::config_path()
+        .unwrap_or_else(|_| PathBuf::from(paths::expand_tilde("~/.config/llmenv/config.yaml")));
     let bundles_dir = paths::config_dir()
-        .unwrap_or_else(|_| PathBuf::from("~/.config/llmenv"))
+        .unwrap_or_else(|_| PathBuf::from(paths::expand_tilde("~/.config/llmenv")))
         .join("bundles");
 
     let text = format!(
@@ -1163,23 +1165,39 @@ fn run_config_guard() {
     use std::io::Read;
 
     let mut stdin_buf = String::new();
-    let _ = std::io::stdin().read_to_string(&mut stdin_buf);
+    // Fix C: surface stdin read failures via stderr instead of silently discarding
+    // them — the guard becomes a no-op on failure, but the operator can see why.
+    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
+        eprintln!("llmenv config-guard: failed to read stdin: {e}");
+        return;
+    }
 
-    // CLAUDE_CONFIG_DIR = <cache_root>/claude-code/<version>/<shape> — go up 3 levels.
+    // Fix A: locate the `claude-code` adapter dir in the CLAUDE_CONFIG_DIR path
+    // and take its parent as cache_root. This works for all hashing modes:
+    //   Normal  → <root>/claude-code/<version>/<shape>  (3 levels below root)
+    //   Loose   → <root>/claude-code/<shape>            (2 levels below root)
+    //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
+    // Walking up to find "claude-code" and taking its parent is invariant to depth.
     let cache_root = std::env::var("CLAUDE_CONFIG_DIR")
         .ok()
-        .and_then(|dir| PathBuf::from(&dir).ancestors().nth(3).map(PathBuf::from))
+        .and_then(|dir| {
+            let path = PathBuf::from(&dir);
+            path.ancestors()
+                .skip(1) // skip the leaf shape directory itself
+                .find(|p| p.file_name().map(|n| n == "claude-code").unwrap_or(false))
+                .and_then(|p| p.parent().map(PathBuf::from))
+        })
         .unwrap_or_else(|| PathBuf::from(paths::expand_tilde("~/.cache/llmenv")));
 
+    // Fix E: removed dead `.or_else(|| ti.get("path"))` — no Claude Code
+    // Write/Edit/MultiEdit tool sends a `path` field; the field is always `file_path`.
     let file_path = serde_json::from_str::<serde_json::Value>(&stdin_buf)
         .ok()
         .and_then(|v| {
-            v.get("tool_input").and_then(|ti| {
-                ti.get("file_path")
-                    .or_else(|| ti.get("path"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
+            v.get("tool_input")
+                .and_then(|ti| ti.get("file_path"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
         });
 
     let Some(path_str) = file_path else {
@@ -1190,7 +1208,7 @@ fn run_config_guard() {
     if expanded.starts_with(&cache_root) {
         let config_path = paths::config_path()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "~/.config/llmenv/config.yaml".to_string());
+            .unwrap_or_else(|_| paths::expand_tilde("~/.config/llmenv/config.yaml"));
         println!(
             "\u{26a0} llmenv: {path_str} is inside the managed cache and will be overwritten \
              on the next config regeneration.\n\

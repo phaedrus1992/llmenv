@@ -562,12 +562,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         }));
 
     // #289: warn the agent when it tries to write inside the managed cache dir.
-    // Matcher restricts to write-family tools; exits 0 (fail-soft, never blocks).
+    // Anchored regex so only exact tool names match, not substrings like BatchEdit.
+    // Exits 0 (fail-soft, never blocks the write).
     hooks_by_event
         .entry("PreToolUse".to_string())
         .or_default()
         .push(json!({
-            "matcher": "Write|Edit|MultiEdit",
+            "matcher": "^(Write|Edit|MultiEdit)$",
             "hooks": [{ "type": "command", "command": CONFIG_GUARD_COMMAND }],
         }));
 

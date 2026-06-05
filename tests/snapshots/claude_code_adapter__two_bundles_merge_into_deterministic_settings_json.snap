@@ -17,7 +17,7 @@ hooks:
     - hooks:
         - command: llmenv config-guard
           type: command
-      matcher: Write|Edit|MultiEdit
+      matcher: ^(Write|Edit|MultiEdit)$
   SessionStart:
     - hooks:
         - command: llmenv check-stale
