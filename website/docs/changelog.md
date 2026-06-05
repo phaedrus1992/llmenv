@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.6] - 2026-06-05
+
 ### Added
 
 - Add GitHub Actions workflow to auto-close issues when PRs merge to `release/*`
