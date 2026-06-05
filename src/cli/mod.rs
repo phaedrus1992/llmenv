@@ -1215,7 +1215,12 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
 
 fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::Result<()> {
     let config_dir = match path {
-        Some(p) => expand_tilde(p.to_string_lossy().as_ref())?,
+        Some(p) => {
+            let path_str = p
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("init path is not valid UTF-8: {}", p.display()))?;
+            expand_tilde(path_str)?
+        }
         None => paths::config_dir()?,
     };
     std::fs::create_dir_all(&config_dir)
@@ -1296,15 +1301,13 @@ bundle:
 # mcp:
 #   - name: playwright
 #     tags: [me]
-#     transport:
-#       type: stdio
-#       command: npx
-#       args: ["-y", "@playwright/mcp@latest"]
+#     type: stdio           # optional, default is stdio
+#     command: npx
+#     args: ["-y", "@playwright/mcp@latest"]
 #   # - name: office-internal
 #   #   tags: [office]
-#   #   transport:
-#   #     type: remote
-#   #     url: http://office-mcp.internal:3000
+#   #   type: remote
+#   #   url: http://office-mcp.internal:3000
 
 # Plugin marketplaces: git sources or local paths for agent plugins.
 # marketplace:
@@ -1358,7 +1361,12 @@ bundle:
         .with_context(|| format!("writing template to {}", config_path.display()))?;
     eprintln!("Created template config at {}", config_path.display());
 
-    Config::load(&config_path)?;
+    Config::load(&config_path).with_context(|| {
+        format!(
+            "validating newly-written config at {}",
+            config_path.display()
+        )
+    })?;
     eprintln!("✓ Config validated successfully");
 
     let readme_path = config_dir.join("README.md");
@@ -1421,9 +1429,11 @@ This directory contains your llmenv configuration.
 - [Concepts](https://phaedrus1992.github.io/llmenv/docs/concepts) — Scopes, tags, bundles, precedence
 - [Main Site](https://phaedrus1992.github.io/llmenv/) — All documentation
 "#;
-    std::fs::write(&readme_path, readme_content)
-        .with_context(|| format!("writing README to {}", readme_path.display()))?;
-    eprintln!("Created README at {}", readme_path.display());
+    if !readme_path.exists() {
+        std::fs::write(&readme_path, readme_content)
+            .with_context(|| format!("writing README to {}", readme_path.display()))?;
+        eprintln!("Created README at {}", readme_path.display());
+    }
 
     Ok(())
 }
