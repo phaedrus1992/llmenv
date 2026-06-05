@@ -177,6 +177,18 @@ enum Command {
     /// `CLAUDE_CONFIG_DIR` (the content hash the agent booted with) against the
     /// folder llmenv would materialize now. On drift it prints a restart hint.
     CheckStale,
+    /// Emit source config paths into agent context via SessionStart (#289).
+    ///
+    /// Invoked by the auto-registered SessionStart hook. Outputs a JSON
+    /// `hookSpecificOutput.additionalContext` payload so the agent always knows
+    /// where its source config lives and won't edit the managed cache directory.
+    ConfigContext,
+    /// Warn when the agent tries to write a managed cache path (#289).
+    ///
+    /// Invoked by the auto-registered PreToolUse hook (matcher: Write|Edit|MultiEdit).
+    /// Reads the tool call from stdin, checks whether the target path is inside
+    /// the llmenv cache, and prints a redirection hint. Always exits 0 (fail-soft).
+    ConfigGuard,
     /// Run an agent lifecycle hook (injects ICM memory context over MCP).
     ///
     /// Invoked by the agent runtime, not by users directly. `event` is an
@@ -255,6 +267,12 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::CheckStale) => {
             run_check_stale(use_color)?;
+        }
+        Some(Command::ConfigContext) => {
+            run_config_context();
+        }
+        Some(Command::ConfigGuard) => {
+            run_config_guard();
         }
         Some(Command::HookRun { event }) => {
             crate::hook_run::run(&event)?;
@@ -1106,6 +1124,98 @@ fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// `llmenv config-context`: emit source config paths into SessionStart context (#289).
+///
+/// Always exits 0 (fail-soft). If paths cannot be resolved, skips silently.
+fn run_config_context() {
+    // Fix B: use expand_tilde on fallback strings so the agent never sees a
+    // literal `~` that its shell won't further expand.
+    let config_path = paths::config_path()
+        .unwrap_or_else(|_| PathBuf::from(paths::expand_tilde("~/.config/llmenv/config.yaml")));
+    let bundles_dir = paths::config_dir()
+        .unwrap_or_else(|_| PathBuf::from(paths::expand_tilde("~/.config/llmenv")))
+        .join("bundles");
+
+    let text = format!(
+        "llmenv source config:\n\
+         \u{2022} Config: {config}\n\
+         \u{2022} Bundles: {bundles}\n\
+         \n\
+         To update llmenv config, edit the source files above and run `llmenv regenerate`.\n\
+         Do NOT edit files under ~/.cache/llmenv/ \u{2014} they are managed and will be overwritten.",
+        config = config_path.display(),
+        bundles = bundles_dir.display(),
+    );
+
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "additionalContext": text
+        }
+    });
+    println!("{output}");
+}
+
+/// `llmenv config-guard`: warn on PreToolUse Write/Edit to managed cache paths (#289).
+///
+/// Reads the Claude Code hook payload from stdin. If the target path is inside the
+/// llmenv cache directory, prints a redirection hint. Always exits 0 (fail-soft).
+fn run_config_guard() {
+    use std::io::Read;
+
+    let mut stdin_buf = String::new();
+    // Fix C: surface stdin read failures via stderr instead of silently discarding
+    // them — the guard becomes a no-op on failure, but the operator can see why.
+    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
+        eprintln!("llmenv config-guard: failed to read stdin: {e}");
+        return;
+    }
+
+    // Fix A: locate the `claude-code` adapter dir in the CLAUDE_CONFIG_DIR path
+    // and take its parent as cache_root. This works for all hashing modes:
+    //   Normal  → <root>/claude-code/<version>/<shape>  (3 levels below root)
+    //   Loose   → <root>/claude-code/<shape>            (2 levels below root)
+    //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
+    // Walking up to find "claude-code" and taking its parent is invariant to depth.
+    let cache_root = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .and_then(|dir| {
+            let path = PathBuf::from(&dir);
+            path.ancestors()
+                .skip(1) // skip the leaf shape directory itself
+                .find(|p| p.file_name().map(|n| n == "claude-code").unwrap_or(false))
+                .and_then(|p| p.parent().map(PathBuf::from))
+        })
+        .unwrap_or_else(|| PathBuf::from(paths::expand_tilde("~/.cache/llmenv")));
+
+    // Fix E: removed dead `.or_else(|| ti.get("path"))` — no Claude Code
+    // Write/Edit/MultiEdit tool sends a `path` field; the field is always `file_path`.
+    let file_path = serde_json::from_str::<serde_json::Value>(&stdin_buf)
+        .ok()
+        .and_then(|v| {
+            v.get("tool_input")
+                .and_then(|ti| ti.get("file_path"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+
+    let Some(path_str) = file_path else {
+        return;
+    };
+
+    let expanded = PathBuf::from(paths::expand_tilde(&path_str));
+    if expanded.starts_with(&cache_root) {
+        let config_path = paths::config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| paths::expand_tilde("~/.config/llmenv/config.yaml"));
+        println!(
+            "\u{26a0} llmenv: {path_str} is inside the managed cache and will be overwritten \
+             on the next config regeneration.\n\
+             Edit your source config instead: {config_path}\n\
+             Then run: llmenv regenerate"
+        );
+    }
 }
 
 /// Sync each resolved marketplace into the shared cache and fill in its

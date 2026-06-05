@@ -21,6 +21,17 @@ const ICM_MCP_NAME: &str = MEMORY_MCP_NAME;
 /// a bare command (resolved off `PATH`) so it works regardless of install dir.
 const STALE_CHECK_COMMAND: &str = "llmenv check-stale";
 
+/// Command the auto-emitted SessionStart hook runs to inject source config paths
+/// into agent context (#289). Outputs `hookSpecificOutput.additionalContext` JSON
+/// so the agent always knows where to edit config rather than touching the cache.
+const CONFIG_CONTEXT_COMMAND: &str = "llmenv config-context";
+
+/// Command the auto-emitted PreToolUse hook runs to guard against writes to the
+/// managed cache directory (#289). Reads the Write/Edit/MultiEdit tool call from
+/// stdin and prints a redirection hint if the target is a cache path. Exits 0
+/// (fail-soft) so the write still proceeds; the hint keeps agents oriented.
+const CONFIG_GUARD_COMMAND: &str = "llmenv config-guard";
+
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
 /// `out` as its config root.
@@ -539,6 +550,26 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .or_default()
         .push(json!({
             "hooks": [{ "type": "command", "command": STALE_CHECK_COMMAND }],
+        }));
+
+    // #289: inject source config paths at session start so the agent knows where
+    // to edit llmenv config rather than touching managed cache files.
+    hooks_by_event
+        .entry("SessionStart".to_string())
+        .or_default()
+        .push(json!({
+            "hooks": [{ "type": "command", "command": CONFIG_CONTEXT_COMMAND }],
+        }));
+
+    // #289: warn the agent when it tries to write inside the managed cache dir.
+    // Anchored regex so only exact tool names match, not substrings like BatchEdit.
+    // Exits 0 (fail-soft, never blocks the write).
+    hooks_by_event
+        .entry("PreToolUse".to_string())
+        .or_default()
+        .push(json!({
+            "matcher": "^(Write|Edit|MultiEdit)$",
+            "hooks": [{ "type": "command", "command": CONFIG_GUARD_COMMAND }],
         }));
 
     let mut hooks_obj = serde_json::Map::new();

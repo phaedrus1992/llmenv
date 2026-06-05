@@ -21,8 +21,9 @@ The root cause: agent config is *flat* and *global*, but developer context is *s
 
 llmenv introduces a layer of indirection between your intentions and the agent's config:
 
-```
-scopes → tags → bundles → materialize → adapter emit
+```mermaid
+flowchart LR
+    scopes --> tags --> bundles --> materialize --> adapter-emit["adapter emit"]
 ```
 
 **Scopes** describe where you are. Four kinds:
@@ -60,8 +61,9 @@ The materialized folder is named after your binary version and content shape (`n
 
 Scopes stack. More specific wins:
 
-```
-project > user > host > network
+```mermaid
+flowchart LR
+    network --> host --> user --> project
 ```
 
 A project marker overrides your user-level config overrides your host-level config. You can put your personal defaults at the user level and let each repo tighten or expand from there.

@@ -2,27 +2,14 @@
 
 llmenv resolves your environment through one fixed pipeline:
 
-```
-                 ┌─────────┐   tags   ┌──────────┐  fire   ┌────────────┐
- environment ──▶ │ scopes  │ ───────▶ │  active  │ ──────▶ │ contributors│
- (net/host/      │ match   │          │   tags   │         │ bundles,   │
-  user/cwd)      └─────────┘          └──────────┘         │ mcp, plugins│
-                                                           │ memory     │
-                                                           └─────┬──────┘
-                                                                 │ merge
-                                                                 ▼
-                                                          ┌────────────┐
-                                                          │ materialize│  content-hashed
-                                                          │  cache dir │  config directory
-                                                          └─────┬──────┘
-                                                                │ render
-                                                                ▼
-                                                          ┌────────────┐
-                                                          │  adapter   │  CLAUDE.md,
-                                                          │   emit     │  settings.json,
-                                                          └─────┬──────┘  .claude.json + env vars
-                                                                ▼
-                                                            the agent
+```mermaid
+flowchart TD
+    ENV["environment\n(net/host/user/cwd)"] -->|match| SCOPES[scopes]
+    SCOPES -->|tags| TAGS[active tags]
+    TAGS -->|fire| CONTRIBS["contributors\nbundles · mcp · plugins · memory"]
+    CONTRIBS -->|merge| MAT["materialize\ncontent-hashed cache dir"]
+    MAT -->|render| ADAPT["adapter emit\nCLAUDE.md · settings.json\n.claude.json · env vars"]
+    ADAPT --> AGENT([the agent])
 ```
 
 ## Scopes
@@ -139,8 +126,9 @@ When scopes of different kinds set conflicting **scalar** values (e.g. a
 permission `default_mode`), the more specific scope wins. The order, least to
 most specific:
 
-```
-network → host → user → project
+```mermaid
+flowchart LR
+    network --> host --> user --> project
 ```
 
 List-shaped values (permission allow/ask/deny lists, hooks, plugins) concatenate
