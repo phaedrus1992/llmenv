@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{Config, HostEntry, McpServer, McpTransport, Memory};
 
+use tracing::debug;
+
 /// A fully resolved MCP entry ready for an adapter to render. Transport-shaped:
 /// `Stdio` carries a launch command; `Remote` carries a URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +55,11 @@ pub enum ResolveError {
     RemoteMissingUrl { name: String, transport: String },
     #[error("bundle mcp '{0}': name is reserved for the memory backend")]
     BundleMcpReservedName(String),
+    #[error(
+        "bundle mcp '{0}': name contains invalid characters \
+         (only [a-zA-Z0-9_-] allowed)"
+    )]
+    BundleMcpInvalidName(String),
 }
 
 /// Select and resolve all MCP servers for the active host.
@@ -106,12 +113,25 @@ pub fn resolve_bundle_mcps(
         if m.name == MEMORY_MCP_NAME {
             return Err(ResolveError::BundleMcpReservedName(m.name.clone()));
         }
+        if !is_valid_mcp_name(&m.name) {
+            return Err(ResolveError::BundleMcpInvalidName(m.name.clone()));
+        }
         let active = m.tags.is_empty() || m.tags.iter().any(|t| active_tags.contains(t));
         if active {
+            if m.tags.is_empty() {
+                debug!(name = %m.name, "bundle mcp active (tagless — bundle scope gate)");
+            }
             out.push(resolve_static(m)?);
         }
     }
     Ok(out)
+}
+
+fn is_valid_mcp_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Render a plain server entry by its transport.
@@ -449,6 +469,24 @@ mod tests {
                 err,
                 ResolveError::BundleMcpReservedName(MEMORY_MCP_NAME.into())
             );
+        }
+
+        #[test]
+        fn invalid_name_errors() {
+            let s = stdio_server("bad name!", &[], "cmd");
+            let err = resolve_bundle_mcps(&[s], &tags(&[])).unwrap_err();
+            assert_eq!(err, ResolveError::BundleMcpInvalidName("bad name!".into()));
+        }
+
+        #[test]
+        fn valid_names_accepted() {
+            for name in ["ctx", "my-tool", "tool_v2", "A1Z9"] {
+                let s = stdio_server(name, &[], "cmd");
+                assert!(
+                    resolve_bundle_mcps(&[s], &tags(&[])).is_ok(),
+                    "name {name} must be accepted"
+                );
+            }
         }
 
         mod props {

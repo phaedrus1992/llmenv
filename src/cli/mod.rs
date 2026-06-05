@@ -960,8 +960,24 @@ fn build_manifest(
         crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
     manifest.mcps.extend(
         crate::mcp::resolve::resolve_bundle_mcps(&manifest.capabilities.mcp, &active.tags)
-            .context("resolving bundle MCP servers")?,
+            .context(
+                "resolving bundle MCP servers \
+                 (check mcp: entries in active bundle.yaml files)",
+            )?,
     );
+    // Detect cross-source name collisions (global vs bundle).
+    {
+        let mut seen = std::collections::HashSet::new();
+        for m in &manifest.mcps {
+            if !seen.insert(m.name.as_str()) {
+                anyhow::bail!(
+                    "mcp name '{}' declared in both config.mcp and a bundle mcp: — \
+                     rename one to avoid ambiguity",
+                    m.name
+                );
+            }
+        }
+    }
 
     let cache_root = expand_tilde(&config.cache.cache_dir)?;
 
@@ -1718,12 +1734,16 @@ fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
 
 /// List configured MCP servers, marking those selected by the active scope and
 /// annotating each with its resolved transport for this host. The memory
-/// backend is listed too (as `icm`). Orphans (no scope emits any of their tags)
-/// are flagged like bundles.
+/// backend is listed too (as `icm`). Bundle-declared MCPs are listed with a
+/// `bundle` source tag. Orphans (no scope emits any of their tags) are flagged
+/// like bundles.
 fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
-    use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, resolve_mcps};
+    use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, resolve_bundle_mcps, resolve_mcps};
 
     let config_path = paths::config_path()?;
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
     let config = Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
@@ -1731,14 +1751,44 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
 
     // Resolved entries (active host only) keyed by name, so we can annotate
     // each selected server with its concrete transport.
-    let resolved =
-        resolve_mcps(&config, &active.tags).context("resolving MCP servers for listing")?;
-    let resolved_by_name: std::collections::HashMap<&str, &ResolvedKind> = resolved
-        .iter()
-        .map(|m| (m.name.as_str(), &m.kind))
-        .collect();
+    let mut all_resolved: std::collections::HashMap<String, ResolvedKind> =
+        resolve_mcps(&config, &active.tags)
+            .context("resolving MCP servers for listing")?
+            .into_iter()
+            .map(|m| (m.name, m.kind))
+            .collect();
 
-    let detail_for = |name: &str, fallback: &str| match resolved_by_name.get(name) {
+    // Bundle MCPs: merge the active bundles to get their capabilities.mcp,
+    // then resolve bundle entries for the active scope.
+    let manually_enabled: std::collections::HashSet<&str> = active
+        .scopes
+        .iter()
+        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+        .collect();
+    let firing: Vec<&Bundle> = config
+        .bundle
+        .iter()
+        .filter(|b| {
+            b.tags.iter().any(|bt| active.tags.contains(bt))
+                || manually_enabled.contains(b.name.as_str())
+        })
+        .collect();
+    let bundle_refs = build_bundle_refs(config_dir, &active, &firing);
+    let bundle_mcp_entries = if !bundle_refs.is_empty() {
+        crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
+            .context("merging bundles for mcp-ls")?
+            .capabilities
+            .mcp
+    } else {
+        vec![]
+    };
+    let bundle_resolved = resolve_bundle_mcps(&bundle_mcp_entries, &active.tags)
+        .context("resolving bundle MCP servers for listing")?;
+    for m in bundle_resolved {
+        all_resolved.entry(m.name).or_insert(m.kind);
+    }
+
+    let detail_for = |name: &str, fallback: &str| match all_resolved.get(name) {
         Some(ResolvedKind::Stdio { .. }) => "stdio server".to_string(),
         Some(ResolvedKind::Remote { transport, .. }) => {
             format!("{} client", format!("{transport:?}").to_lowercase())
@@ -1756,6 +1806,16 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
             (m.name.clone(), is_active, is_orphan, detail)
         })
         .collect();
+
+    // Bundle MCPs: always active when tagless, tag-filtered when tagged.
+    for m in &bundle_mcp_entries {
+        let is_active = m.tags.is_empty() || m.tags.iter().any(|t| active.tags.contains(t));
+        // Tagless entries are never orphaned — the bundle itself gates them.
+        let is_orphan = !m.tags.is_empty() && !m.tags.iter().any(|t| emitted.contains(t));
+        let detail = format!("{} (bundle)", detail_for(&m.name, "stdio server"));
+        rows.push((m.name.clone(), is_active, is_orphan, detail));
+    }
+
     if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref()) {
         let is_active = mem.tags.iter().any(|t| active.tags.contains(t));
         let is_orphan = !mem.tags.iter().any(|t| emitted.contains(t));
