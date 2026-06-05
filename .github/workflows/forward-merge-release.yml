@@ -144,33 +144,28 @@ jobs:
 
             git merge --abort || true
 
-            if [[ "$TARGET" == "main" ]]; then
+            git checkout -q "origin/$TARGET"
+            git merge --no-edit "origin/$CURRENT"
+
+            # Land the merge directly so the fix propagates automatically — main
+            # is the final target and is forward-merged the same way as every
+            # release branch, with no manual step. If a target is branch-protected
+            # the push is rejected; fall back to opening a PR and halt so the
+            # remaining (now un-merged) targets aren't silently skipped.
+            if git push origin HEAD:"$TARGET" 2>/dev/null; then
+              echo "Pushed directly to $TARGET"
+            else
               git checkout -B "$MERGE_BRANCH" "origin/$TARGET"
-              git merge -m "Forward-merge $CURRENT into $TARGET" "origin/$CURRENT"
               git push origin "$MERGE_BRANCH" --force-with-lease
 
               gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
                 --title "Forward-merge $CURRENT into $TARGET" \
-                --body "Automatic forward-merge of $CURRENT into $TARGET" || true
-            else
-              git checkout -q "origin/$TARGET"
-              git merge --no-edit "origin/$CURRENT"
+                --body "Direct push to $TARGET blocked by branch protection; opening PR." || true
 
-              if git push origin HEAD:"$TARGET" 2>/dev/null; then
-                echo "Pushed directly to $TARGET"
-              else
-                git checkout -B "$MERGE_BRANCH" "origin/$TARGET"
-                git push origin "$MERGE_BRANCH" --force-with-lease
-
-                gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
-                  --title "Forward-merge $CURRENT into $TARGET" \
-                  --body "Direct push blocked by branch protection; opening PR." || true
-
-                echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
-                echo "::endgroup::"
-                HALTED="protected branch $TARGET"
-                break
-              fi
+              echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
+              echo "::endgroup::"
+              HALTED="protected branch $TARGET"
+              break
             fi
 
             echo "::endgroup::"
