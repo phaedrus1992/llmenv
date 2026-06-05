@@ -1,4 +1,5 @@
 mod schema;
+pub mod template;
 mod validate;
 
 pub use schema::*;
