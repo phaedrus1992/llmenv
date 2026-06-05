@@ -509,6 +509,7 @@ mod tests {
 
     mod props {
         use super::*;
+        use crate::config::{McpServer, McpTransport};
         use proptest::prelude::*;
         use std::collections::BTreeSet;
 
@@ -520,8 +521,22 @@ mod tests {
             })
         }
 
-        // Contributors carrying only list fields (allow rules + plugins) plus a
-        // small native: map, so the scalar default_mode never forces a
+        fn arb_mcp_server() -> impl Strategy<Value = McpServer> {
+            ("[a-z]{1,6}", prop::collection::vec("[a-z]{1,4}", 0..3)).prop_map(|(name, tags)| {
+                McpServer {
+                    name,
+                    tags,
+                    transport: McpTransport::Stdio,
+                    command: Some("cmd".into()),
+                    args: vec![],
+                    env: BTreeMap::new(),
+                    url: None,
+                }
+            })
+        }
+
+        // Contributors carrying only list fields (allow rules + plugins + mcp)
+        // plus a small native: map, so the scalar default_mode never forces a
         // same-precedence conflict.
         //
         // Varies engine names, precedence (1-10), and number of engines (0-3) to
@@ -542,9 +557,10 @@ mod tests {
                 1u8..=10,
                 prop::collection::vec(arb_rule(), 0..4),
                 prop::collection::vec("[a-z:]{1,6}", 0..4),
+                prop::collection::vec(arb_mcp_server(), 0..3),
                 prop::collection::vec(arb_engine_entry, 0..3),
             )
-                .prop_map(|(name, precedence, allow, plugins, engine_entries)| {
+                .prop_map(|(name, precedence, allow, plugins, mcp, engine_entries)| {
                     let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
                     CapabilityContributor {
                         name,
@@ -555,6 +571,7 @@ mod tests {
                                 ..Default::default()
                             },
                             plugins,
+                            mcp,
                             native,
                             ..Default::default()
                         },
@@ -568,6 +585,10 @@ mod tests {
 
         fn plugin_set(caps: &Capabilities) -> BTreeSet<String> {
             caps.plugins.iter().cloned().collect()
+        }
+
+        fn mcp_name_set(caps: &Capabilities) -> BTreeSet<String> {
+            caps.mcp.iter().map(|m| m.name.clone()).collect()
         }
 
         proptest! {
@@ -628,8 +649,8 @@ mod tests {
             }
 
             // List union is order-independent: permuting contributors yields the
-            // same *set* of allow rules and plugins (first-seen order may differ,
-            // but membership is invariant).
+            // same *set* of allow rules, plugins, and mcp names (first-seen order
+            // may differ, but membership is invariant).
             #[test]
             fn list_union_is_order_independent(
                 contribs in prop::collection::vec(arb_list_contributor(), 0..5)
@@ -640,6 +661,7 @@ mod tests {
                 let backward = merge_capabilities(&reversed).unwrap();
                 prop_assert_eq!(allow_set(&forward), allow_set(&backward));
                 prop_assert_eq!(plugin_set(&forward), plugin_set(&backward));
+                prop_assert_eq!(mcp_name_set(&forward), mcp_name_set(&backward));
             }
 
             // Output lists carry no duplicates.
@@ -652,6 +674,13 @@ mod tests {
                 prop_assert_eq!(allow_len, allow_set(&out).len());
                 let plugin_len = out.plugins.len();
                 prop_assert_eq!(plugin_len, plugin_set(&out).len());
+                // mcp dedup: no two equal entries survive
+                for (i, m) in out.mcp.iter().enumerate() {
+                    prop_assert!(
+                        !out.mcp[..i].contains(m),
+                        "duplicate mcp entry at index {i}: {m:?}"
+                    );
+                }
             }
 
             // The strictly-highest-precedence contributor's default_mode always
