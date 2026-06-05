@@ -15,12 +15,18 @@ This page takes you from zero to a working setup. For the conceptual model, read
 ```bash
 brew tap phaedrus1992/tap
 brew install llmenv
+llmenv --version        # verify
+brew upgrade llmenv     # upgrade later
 ```
+
+> The [phaedrus1992/tap](https://github.com/phaedrus1992/homebrew-tap) is a Homebrew
+> repository maintained alongside llmenv. If you're on Linux, `brew` is [Linuxbrew](https://docs.brew.sh/Homebrew-on-Linux).
 
 **Cargo:**
 
 ```bash
 cargo install llmenv
+llmenv --version        # verify
 ```
 
 **From source:**
@@ -29,7 +35,7 @@ cargo install llmenv
 git clone https://github.com/phaedrus1992/llmenv.git
 cd llmenv
 cargo build --release
-./target/release/llmenv --help
+./target/release/llmenv --version
 ```
 
 ## 2. Initialize configuration
