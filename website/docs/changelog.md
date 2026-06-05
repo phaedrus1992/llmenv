@@ -17,6 +17,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add `mcp:` support in `bundle.yaml`; declare MCP servers inside a bundle using
+  the same format as `config.yaml`; tagless entries are active whenever the bundle
+  is selected, tagged entries are further filtered by active scope tags (#329)
+- `llmenv init` now generates a `README.md` orientation file in the config
+  directory on first run; the write is skipped if a `README.md` already exists
+  (#325)
+
+### Fixed
+
+- Fix bundle `mcp:` entries accepting names with characters outside
+  `[a-zA-Z0-9_-]`; invalid names are now rejected with a clear error (#329)
+- Fix missing collision detection between `config.mcp` and bundle `mcp:` entries;
+  a name declared in both sources now errors at startup instead of silently
+  producing duplicate servers (#329)
+- Fix `mcp-ls` omitting bundle-declared MCP servers; bundle MCPs are now listed
+  with a `(bundle)` annotation and correct active/orphan status (#329)
+- Fix bundle `mcp:` entries accepting the reserved name `icm`; the guard now
+  matches the one already present for top-level `config.mcp` (#329)
+- Fix `llmenv init` emitting a config.yaml template with a nested `transport:`
+  block for MCP servers; the correct flat schema (`type`/`command`/`args` at the
+  top level) is now emitted (#325)
+- Fix `llmenv init` silently replacing non-UTF-8 path bytes with `?`; non-UTF-8
+  paths now fail with a clear error (#325)
+
 ## [1.0.6] - 2026-06-05
 
 ### Added
