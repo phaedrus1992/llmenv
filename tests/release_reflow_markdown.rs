@@ -34,9 +34,11 @@ fn reflow_prose_paragraphs() {
 
     // Find and run the reflow script
     let script_path = "/Users/ranger/git/llmenv/scripts/reflow-markdown.py";
-    if !std::path::Path::new(script_path).exists() {
-        panic!("reflow script not found at {}", script_path);
-    }
+    assert!(
+        std::path::Path::new(script_path).exists(),
+        "reflow script not found at {}",
+        script_path
+    );
 
     let mut child = Command::new("python3")
         .arg(script_path)
