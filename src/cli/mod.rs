@@ -1261,12 +1261,8 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
     }
 
     let config_path = config_dir.join("config.yaml");
-    if config_path.exists() {
-        eprintln!("Config already exists at {}", config_path.display());
-        return Ok(());
-    }
-
-    let template = r#"cache:
+    if !config_path.exists() {
+        let template = r#"cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 60
   # Cache-folder strictness dial (default: normal). One knob, three positions,
@@ -1341,12 +1337,15 @@ bundle:
 #     - env: CONTEXT_MODE_DATA_DIR   # tool reads this to find its state
 #       subdir: context-mode         # → $LLMENV_STATE_DIR/context-mode
 "#;
-    std::fs::write(&config_path, template)
-        .with_context(|| format!("writing template to {}", config_path.display()))?;
-    eprintln!("Created template config at {}", config_path.display());
+        std::fs::write(&config_path, template)
+            .with_context(|| format!("writing template to {}", config_path.display()))?;
+        eprintln!("Created template config at {}", config_path.display());
 
-    Config::load(&config_path)?;
-    eprintln!("✓ Config validated successfully");
+        Config::load(&config_path)?;
+        eprintln!("✓ Config validated successfully");
+    } else {
+        eprintln!("Config already exists at {}", config_path.display());
+    }
 
     let agents_path = config_dir.join("AGENTS.md");
     if !agents_path.exists() {

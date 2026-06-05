@@ -44,16 +44,13 @@ fn test_init_skips_existing_agents_md() {
     let temp = TempDir::new().expect("create temp dir");
     let config_dir = temp.path();
 
-    // Pre-create AGENTS.md with custom content
+    // Pre-create AGENTS.md with custom content (but NO config.yaml)
     let agents_path = config_dir.join("AGENTS.md");
     let original_content = "# My Custom Agent Guide\n";
     fs::write(&agents_path, original_content).expect("write custom agents file");
 
-    // Also create config.yaml to prevent init skipping
-    let config_path = config_dir.join("config.yaml");
-    fs::write(&config_path, "cache: { cache_dir: ~/.cache/llmenv }").expect("write config");
-
-    // Run init — should skip existing AGENTS.md
+    // Run init on fresh directory with pre-existing AGENTS.md
+    // init should create config.yaml but preserve the existing AGENTS.md
     let config_dir_str = config_dir.to_str().expect("path to string");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_llmenv"))
         .arg("init")
@@ -61,8 +58,17 @@ fn test_init_skips_existing_agents_md() {
         .output()
         .expect("run init command");
 
-    // init should succeed (it skips if config exists)
-    // The custom AGENTS.md should remain unchanged
+    assert!(
+        output.status.success(),
+        "init should succeed on fresh directory; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Config should be created
+    let config_path = config_dir.join("config.yaml");
+    assert!(config_path.exists(), "config.yaml should be created");
+
+    // Custom AGENTS.md should remain unchanged
     let content = fs::read_to_string(&agents_path).expect("read agents file");
     assert_eq!(
         content, original_content,
