@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.7] - 2026-06-05
+
 ### Added
 
 - Add `mcp:` support in `bundle.yaml`; declare MCP servers inside a bundle using
