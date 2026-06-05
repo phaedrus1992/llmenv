@@ -188,6 +188,34 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
+    // #329: a bundle.yaml with an mcp: block must contribute to MergedManifest capabilities.mcp.
+    #[test]
+    fn bundle_mcp_block_appears_in_merged_capabilities() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("mcp-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!("mcp:\n", "  - name: ctx\n", "    command: ctx-mcp\n",),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "mcp-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+
+        assert_eq!(
+            manifest.capabilities.mcp.len(),
+            1,
+            "bundle mcp: entry must appear in merged capabilities"
+        );
+        assert_eq!(manifest.capabilities.mcp[0].name, "ctx");
+    }
+
     // #291: a bundle.yaml with a native: block must contribute to MergedManifest.native.
     #[test]
     fn bundle_native_block_appears_in_merged_output() {

@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{Config, HostEntry, McpServer, McpTransport, Memory};
 
+use tracing::debug;
+
 /// A fully resolved MCP entry ready for an adapter to render. Transport-shaped:
 /// `Stdio` carries a launch command; `Remote` carries a URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,13 @@ pub enum ResolveError {
     StdioMissingCommand { name: String },
     #[error("mcp '{name}': {transport} transport requires a `url`")]
     RemoteMissingUrl { name: String, transport: String },
+    #[error("bundle mcp '{0}': name is reserved for the memory backend")]
+    BundleMcpReservedName(String),
+    #[error(
+        "bundle mcp '{0}': name contains invalid characters \
+         (only [a-zA-Z0-9_-] allowed)"
+    )]
+    BundleMcpInvalidName(String),
 }
 
 /// Select and resolve all MCP servers for the active host.
@@ -82,6 +91,47 @@ pub fn resolve_mcps(
         out.push(resolve_memory(mem, &config.host)?);
     }
     Ok(out)
+}
+
+/// Select and resolve MCP servers contributed by bundle `capabilities.mcp`
+/// entries.
+///
+/// Bundle-level MCP entries follow a relaxed tag rule compared to top-level
+/// servers: an entry with **no tags** is always active (the bundle's own scope
+/// selection already acted as the gate). An entry that *does* carry tags is
+/// further filtered against `active_tags` as usual.
+///
+/// # Errors
+/// Returns the first [`ResolveError`] encountered: a server using the
+/// reserved `"icm"` name, or a server missing its required `command`/`url`.
+pub fn resolve_bundle_mcps(
+    bundle_mcps: &[crate::config::McpServer],
+    active_tags: &BTreeSet<String>,
+) -> Result<Vec<ResolvedMcp>, ResolveError> {
+    let mut out = Vec::new();
+    for m in bundle_mcps {
+        if m.name == MEMORY_MCP_NAME {
+            return Err(ResolveError::BundleMcpReservedName(m.name.clone()));
+        }
+        if !is_valid_mcp_name(&m.name) {
+            return Err(ResolveError::BundleMcpInvalidName(m.name.clone()));
+        }
+        let active = m.tags.is_empty() || m.tags.iter().any(|t| active_tags.contains(t));
+        if active {
+            if m.tags.is_empty() {
+                debug!(name = %m.name, "bundle mcp active (tagless — bundle scope gate)");
+            }
+            out.push(resolve_static(m)?);
+        }
+    }
+    Ok(out)
+}
+
+fn is_valid_mcp_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Render a plain server entry by its transport.
@@ -348,6 +398,179 @@ mod tests {
                 let a = resolve_mcps(&cfg, &active).expect("resolve");
                 let b = resolve_mcps(&cfg, &active).expect("resolve");
                 prop_assert_eq!(a, b);
+            }
+        }
+    }
+
+    // #329: resolve_bundle_mcps — tagless entries always active; tagged entries
+    // filtered by active_tags.
+    mod bundle_mcps {
+        use super::*;
+
+        #[test]
+        fn tagless_entry_always_active() {
+            let server = stdio_server("ctx", &[], "ctx-mcp");
+            let resolved = resolve_bundle_mcps(&[server], &tags(&[])).unwrap();
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].name, "ctx");
+        }
+
+        #[test]
+        fn tagged_entry_active_when_tag_matches() {
+            let server = stdio_server("playwright", &["user-ranger"], "npx");
+            let resolved = resolve_bundle_mcps(&[server], &tags(&["user-ranger"])).unwrap();
+            assert_eq!(resolved.len(), 1);
+        }
+
+        #[test]
+        fn tagged_entry_inactive_when_no_tag_matches() {
+            let server = stdio_server("playwright", &["user-ranger"], "npx");
+            let resolved = resolve_bundle_mcps(&[server], &tags(&["network-office"])).unwrap();
+            assert!(resolved.is_empty());
+        }
+
+        #[test]
+        fn mix_of_tagless_and_tagged() {
+            let always = stdio_server("always", &[], "always-mcp");
+            let sometimes = stdio_server("sometimes", &["home"], "sometimes-mcp");
+            let never = stdio_server("never", &["work"], "never-mcp");
+
+            let resolved =
+                resolve_bundle_mcps(&[always, sometimes, never], &tags(&["home"])).unwrap();
+            assert_eq!(resolved.len(), 2);
+            assert!(resolved.iter().any(|m| m.name == "always"));
+            assert!(resolved.iter().any(|m| m.name == "sometimes"));
+        }
+
+        #[test]
+        fn empty_input_yields_empty_output() {
+            let resolved = resolve_bundle_mcps(&[], &tags(&["any"])).unwrap();
+            assert!(resolved.is_empty());
+        }
+
+        #[test]
+        fn stdio_missing_command_errors() {
+            let mut s = stdio_server("broken", &[], "x");
+            s.command = None;
+            let err = resolve_bundle_mcps(&[s], &tags(&[])).unwrap_err();
+            assert_eq!(
+                err,
+                ResolveError::StdioMissingCommand {
+                    name: "broken".into()
+                }
+            );
+        }
+
+        #[test]
+        fn reserved_icm_name_errors() {
+            let s = stdio_server(MEMORY_MCP_NAME, &[], "attacker-binary");
+            let err = resolve_bundle_mcps(&[s], &tags(&[])).unwrap_err();
+            assert_eq!(
+                err,
+                ResolveError::BundleMcpReservedName(MEMORY_MCP_NAME.into())
+            );
+        }
+
+        #[test]
+        fn invalid_name_errors() {
+            let s = stdio_server("bad name!", &[], "cmd");
+            let err = resolve_bundle_mcps(&[s], &tags(&[])).unwrap_err();
+            assert_eq!(err, ResolveError::BundleMcpInvalidName("bad name!".into()));
+        }
+
+        #[test]
+        fn valid_names_accepted() {
+            for name in ["ctx", "my-tool", "tool_v2", "A1Z9"] {
+                let s = stdio_server(name, &[], "cmd");
+                assert!(
+                    resolve_bundle_mcps(&[s], &tags(&[])).is_ok(),
+                    "name {name} must be accepted"
+                );
+            }
+        }
+
+        mod props {
+            use super::*;
+            use proptest::prelude::*;
+
+            // A resolvable stdio server at index idx, with arbitrary tags.
+            fn arb_bundle_server(idx: usize) -> impl Strategy<Value = McpServer> {
+                prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |ts| McpServer {
+                    name: format!("bsrv-{idx}"),
+                    tags: ts,
+                    transport: McpTransport::Stdio,
+                    command: Some("echo".into()),
+                    args: vec![],
+                    env: BTreeMap::new(),
+                    url: None,
+                })
+            }
+
+            fn arb_servers_and_tags() -> impl Strategy<Value = (Vec<McpServer>, BTreeSet<String>)> {
+                let servers = (0usize..5)
+                    .prop_flat_map(|n| (0..n).map(arb_bundle_server).collect::<Vec<_>>());
+                let active = prop::collection::btree_set("[a-z]{1,4}", 0..6);
+                (servers, active)
+            }
+
+            proptest! {
+                // Every tagless entry appears in the output.
+                #[test]
+                fn tagless_entries_always_resolved(
+                    (servers, active) in arb_servers_and_tags()
+                ) {
+                    let resolved = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    let tagless_count = servers.iter().filter(|s| s.tags.is_empty()).count();
+                    let tagless_in_output = resolved
+                        .iter()
+                        .filter(|r| servers.iter().any(|s| s.name == r.name && s.tags.is_empty()))
+                        .count();
+                    prop_assert_eq!(tagless_count, tagless_in_output);
+                }
+
+                // Tagged entries with no active-tag match are absent.
+                #[test]
+                fn tagged_entries_absent_when_no_match(
+                    (servers, active) in arb_servers_and_tags()
+                ) {
+                    let resolved = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    let resolved_names: BTreeSet<&str> =
+                        resolved.iter().map(|r| r.name.as_str()).collect();
+                    for s in &servers {
+                        if !s.tags.is_empty() && !s.tags.iter().any(|t| active.contains(t)) {
+                            prop_assert!(
+                                !resolved_names.contains(s.name.as_str()),
+                                "tagged server {} with no matching tag must be absent",
+                                s.name
+                            );
+                        }
+                    }
+                }
+
+                // Output count = tagless count + matched-tagged count.
+                #[test]
+                fn output_count_equals_tagless_plus_matched(
+                    (servers, active) in arb_servers_and_tags()
+                ) {
+                    let resolved = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    let expected = servers
+                        .iter()
+                        .filter(|s| {
+                            s.tags.is_empty() || s.tags.iter().any(|t| active.contains(t))
+                        })
+                        .count();
+                    prop_assert_eq!(resolved.len(), expected);
+                }
+
+                // Resolution is deterministic.
+                #[test]
+                fn resolve_bundle_mcps_is_deterministic(
+                    (servers, active) in arb_servers_and_tags()
+                ) {
+                    let a = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    let b = resolve_bundle_mcps(&servers, &active).expect("resolve");
+                    prop_assert_eq!(a, b);
+                }
             }
         }
     }
