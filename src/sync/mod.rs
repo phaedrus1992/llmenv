@@ -2,6 +2,7 @@ use crate::git;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing;
 
 /// True if the repo's working tree has staged or unstaged changes.
 fn working_tree_dirty(repo: &Path) -> bool {
@@ -40,26 +41,10 @@ fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
     if !output.status.success() {
         anyhow::bail!(
             "failed to {what}: {}",
-            git_failure_detail(&output.stderr, &output.stdout)
+            git::git_failure_detail(&output.stderr, &output.stdout, output.status)
         );
     }
     Ok(())
-}
-
-/// Human-readable failure detail from a git process's captured output.
-///
-/// Prefers stderr but falls back to stdout when stderr is empty (e.g. a
-/// `git add` index/permission error can print to stdout, which would otherwise
-/// leave the message as a bare `failed to …: `). Control and ANSI escape bytes
-/// are stripped so a hostile remote's error text cannot manipulate the user's
-/// terminal (#307).
-fn git_failure_detail(stderr: &[u8], stdout: &[u8]) -> String {
-    let raw = if stderr.is_empty() { stdout } else { stderr };
-    String::from_utf8_lossy(raw)
-        .trim()
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\n')
-        .collect()
 }
 
 /// Stage, commit, and push every change in `repo` to origin.
@@ -150,13 +135,17 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     }
 
     // Attempt fetch — silent on failure (network issues are transient and
-    // we don't want to spam every shell prompt while offline).
-    let _ = git::secure_git()
+    // we don't want to spam every shell prompt while offline). Log spawn errors
+    // at debug level in case git binary is missing or broken.
+    if let Err(e) = git::secure_git()
         .args(["fetch"])
         .current_dir(repo)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("git fetch spawn error in {}: {}", repo.display(), e);
+    }
 
     // Attempt fast-forward pull. Suppress git's stderr — we'll print our
     // own one-line warning on failure rather than git's two-line message.
@@ -177,9 +166,16 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
         );
         write_state(state_dir, now)?;
     } else {
-        // Some other pull failure (non-fast-forward, network, etc.). Don't
-        // update state so we retry on next tick.
-        tracing::debug!("git pull did not complete successfully; will retry on next pull interval");
+        // Some other pull failure (non-fast-forward, diverged, conflict, auth).
+        // Don't update state so we retry on next tick — but surface a one-line
+        // nudge so a persistently-broken sync isn't silently swallowed across
+        // every shell prompt (stderr was suppressed, so point at `llmenv sync`
+        // for the detail).
+        eprintln!(
+            "llmenv: config in {} could not fast-forward (diverged or network error) — \
+             run `llmenv sync` for details",
+            repo.display()
+        );
     }
 
     Ok(())
@@ -188,8 +184,6 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::git_failure_detail;
-
     #[test]
     fn git_config_flags_protect_against_hooks() {
         use crate::git::GIT_CONFIG_FLAGS;
@@ -202,24 +196,5 @@ mod tests {
                 "core.hooksPath=/dev/null"
             ]
         );
-    }
-
-    #[test]
-    fn git_failure_detail_prefers_stderr() {
-        assert_eq!(git_failure_detail(b"  boom  \n", b"ignored"), "boom");
-    }
-
-    #[test]
-    fn git_failure_detail_falls_back_to_stdout_when_stderr_empty() {
-        // `git add` index/permission errors can print to stdout, leaving stderr
-        // empty — without the fallback the message is just "failed to X: ".
-        assert_eq!(git_failure_detail(b"", b"index locked\n"), "index locked");
-    }
-
-    #[test]
-    fn git_failure_detail_strips_control_and_ansi_sequences() {
-        // A hostile remote's error text must not manipulate the terminal.
-        let hostile = b"\x1b[2Jcleared\x1b]0;title\x07";
-        assert_eq!(git_failure_detail(hostile, b""), "[2Jcleared]0;title");
     }
 }
