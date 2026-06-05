@@ -507,17 +507,19 @@ mod tests {
             arb_permissions(),
             prop::collection::vec(arb_hook(), 0..3),
             prop::collection::vec(arb_string(), 0..3),
+            prop::collection::vec(arb_mcp_server(), 0..3),
             prop::collection::btree_map(arb_string(), arb_native_rules(), 0..3),
         )
-            .prop_map(
-                |(permissions, hooks, plugins, native_permissions)| Capabilities {
+            .prop_map(|(permissions, hooks, plugins, mcp, native_permissions)| {
+                Capabilities {
                     permissions,
                     hooks,
                     plugins,
+                    mcp,
                     native_permissions,
                     ..Default::default()
-                },
-            )
+                }
+            })
     }
 
     fn arb_transport() -> impl Strategy<Value = McpTransport> {
