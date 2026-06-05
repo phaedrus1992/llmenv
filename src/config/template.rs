@@ -1,15 +1,9 @@
-use crate::config::Config;
-use schemars::JsonSchema;
-use serde_json::json;
-
-/// Generate a YAML config template with doc comments from schema.
+/// Generate a YAML config template.
 ///
-/// This pulls `description` from JsonSchema (derived from `///` doc comments)
-/// and formats it as YAML comments.
+/// Returns a static template with inline comments. When `Config` and nested
+/// types derive `JsonSchema`, this will walk the schema tree instead. Until
+/// then the template and schema must be kept in sync manually.
 pub fn generate_template() -> String {
-    // For now, return a static template that matches current structure.
-    // Once Config and all nested types derive JsonSchema, this will walk the
-    // schema tree and emit annotated YAML automatically.
     r#"# llmenv configuration
 # See https://phaedrus1992.github.io/llmenv/docs/configuration for the complete schema
 
@@ -38,20 +32,37 @@ cache:
 #       match: { gateway_mac: "aa:bb:cc:dd:ee:ff" }
 #       tags: [office]
 #     - id: home
-#       match: {}
+#       match: { ssid: "MyHomeWiFi" }
 #       tags: [home]
 #   host:
-#     - id: server
-#       match: { hostname: server.example.com }
-#       tags: [remote]
+#     - id: laptop
+#       match: { hostname: "my-laptop" }
+#       tags: [laptop]
 #   user:
-#     - id: personal
-#       match: { user: alice }
-#       tags: [personal]
-#   user_tag:
-#     - id: dev_alice
-#       match: { user: alice, tags: [work] }
-#       tags: [work-dev]
+#     - id: me
+#       match: { user: "alice" }
+#       tags: [me]
+#
+# Project scopes are NOT declared here. Drop a `.llmenv.yaml` marker file in a
+# project directory instead; llmenv discovers it by walking the current
+# directory upward to $HOME. Example `.llmenv.yaml`:
+#   id: myapp
+#   name: MyApp
+#   description: "Optional description"
+#   tags: [myapp, rust]
+#   enable_bundles: [base]   # optional: force-enable bundles regardless of tags
+
+# Bundles: named collections of config that fire on tag match.
+# Uncomment and edit as needed.
+bundle:
+  - name: base
+    tags: [me]
+    env:
+      AGENT: "claude"
+  # - name: office-only
+  #   tags: [office]
+  #   vars:
+  #     WORK_MCP: "office-server"
 
 # Capabilities: permissions, hooks, plugins. Merged per-scope.
 # capabilities:
@@ -60,43 +71,66 @@ cache:
 #       - command: /usr/bin/git
 #         args: [".*"]
 
-# MCP servers: selected by tag intersection (same model as bundles)
+# MCP servers: selected onto scopes by tag intersection, rendered into the agent's
+# MCP config. Each is either stdio (command) or remote (url).
 # mcp:
-#   - name: fetch
-#     transport: stdio
-#     command: uvx
-#     args: ["mcp-server-fetch"]
+#   - name: playwright
+#     tags: [me]
+#     type: stdio           # optional, default is stdio
+#     command: npx
+#     args: ["-y", "@playwright/mcp@latest"]
+#   # - name: office-internal
+#   #   tags: [office]
+#   #   type: remote
+#   #   url: http://office-mcp.internal:3000
 
-# Feature toggles (experimental)
+# Plugin marketplaces: git sources or local paths for agent plugins.
+# marketplace:
+#   - name: github-marketplace
+#     url: https://github.com/you/llmenv-plugins.git
+#   - name: local-plugins
+#     path: ~/.config/llmenv/local-plugins
+
+# Plugin collections: named bags of plugins selected by tag, like bundles.
+# plugin-collection:
+#   - name: base-plugins
+#     tags: [me]
+#     plugins:
+#       - github-marketplace:useful-plugin
+#       - github-marketplace:another-plugin
+
+# Per-engine native config (passthrough). Keys match engine names (e.g. claude_code).
+# llmenv does not interpret these — adapters merge them verbatim into the engine's
+# native settings. Escape hatch for non-portable keys.
+# native:
+#   claude_code:
+#     customSetting: value
+
+# llmenv's memory backend (ICM). Optional. One host runs the daemon,
+# others connect as network clients.
 # features:
 #   memory:
-#     daemon_host: localhost
-#     daemon_port: 5000
-#     client_hosts:
-#       - host1.example.com
-#       - host2.example.com
+#     server_host: my-laptop  # must exist in the host: table below
+#     port: 7878
+#     tags: [me]
 
-# Agent plugin marketplaces
-# marketplace:
-#   - name: official
-#     url: "https://github.com/anthropics/claude-plugins"
-
-# Plugin collections
-# plugin-collection:
-#   - name: default
-#     plugins: []
-#     tags: [default]
-
-# State relocation: per-tool env vars pointing to stable, hash-independent dirs
-# state:
-#   llmenv_state_dir: LLMENV_STATE_DIR
-
-# Host directory mapping (for memory topology)
+# Host directory: maps logical host names to reachable addresses.
+# Used by the memory backend topology to build client connection URLs.
 # host:
-#   localhost:
-#     address: "127.0.0.1:5000"
-#   server:
-#     address: "server.example.com:5000"
+#   my-laptop:
+#     addr: "my-laptop.local"
+#   office-server:
+#     addr: "office-server.internal"
+
+# Durable state relocation: tools that persist state to CLAUDE_CONFIG_DIR
+# lose it when llmenv re-materializes (on config edits or version bumps).
+# Declare tools here to point them at a stable, hash-independent state directory.
+# state:
+#   tools:
+#     - env: CONTEXT_MODE_DATA_DIR   # tool reads this to find its state
+#       subdir: context-mode         # → $LLMENV_STATE_DIR/context-mode
+#     - env: MY_TOOL_STATE
+#       subdir: my-tool
 "#
     .to_string()
 }
@@ -104,14 +138,6 @@ cache:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_template_generation_basic() {
-        let template = generate_template();
-        assert!(template.contains("cache:"));
-        assert!(template.contains("cache_dir:"));
-        assert!(template.contains("sync_interval_minutes:"));
-    }
 
     #[test]
     fn test_template_is_valid_yaml() {
@@ -125,11 +151,24 @@ mod tests {
     }
 
     #[test]
-    fn test_template_includes_sections() {
+    fn test_template_roundtrips_as_config() {
+        use crate::config::Config;
+        let template = generate_template();
+        let cfg: Config =
+            serde_yaml::from_str(&template).expect("template must deserialize as Config");
+        let re_serialized = serde_yaml::to_string(&cfg).expect("re-serialize");
+        let cfg2: Config =
+            serde_yaml::from_str(&re_serialized).expect("roundtrip must deserialize");
+        assert_eq!(cfg, cfg2, "Config must roundtrip through YAML");
+    }
+
+    #[test]
+    fn test_template_has_expected_sections() {
         let template = generate_template();
         assert!(template.contains("# llmenv configuration"));
         assert!(template.contains("cache:"));
         assert!(template.contains("# Scopes:"));
         assert!(template.contains("# Capabilities:"));
+        assert!(template.contains("bundle:"));
     }
 }
