@@ -955,10 +955,8 @@ fn prune_empty_dirs(root: &Path) -> anyhow::Result<()> {
                 continue;
             }
         };
-        if is_empty {
-            if let Err(e) = std::fs::remove_dir(&dir) {
-                tracing::warn!("prune_empty_dirs: could not remove {}: {e}", dir.display());
-            }
+        if is_empty && let Err(e) = std::fs::remove_dir(&dir) {
+            tracing::warn!("prune_empty_dirs: could not remove {}: {e}", dir.display());
         }
     }
     Ok(())
