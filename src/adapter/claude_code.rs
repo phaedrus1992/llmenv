@@ -973,13 +973,15 @@ fn collect_subdirs(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     };
     for entry in rd {
         let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
-        // Use symlink_metadata so we never follow a symlink into a foreign tree.
+        // DirEntry::metadata() uses lstat on Unix — does not follow symlinks,
+        // so symlinks to directories outside the render root are not traversed.
+        let path = entry.path();
         let meta = entry
             .metadata()
-            .with_context(|| format!("stat {}", entry.path().display()))?;
+            .with_context(|| format!("stat {}", path.display()))?;
         if meta.is_dir() {
-            out.push(entry.path());
-            collect_subdirs(&entry.path(), out)?;
+            out.push(path.clone());
+            collect_subdirs(&path, out)?;
         }
     }
     Ok(())

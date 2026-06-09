@@ -213,12 +213,11 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Production spawner: launches `mcp-proxy --port <port> -- icm serve` (or
+/// Production spawner: launches `mcp-proxy --host <host> --port <port> -- icm serve` (or
 /// `uvx mcp-proxy ...` when `mcp-proxy` isn't on `PATH`) and returns its pid.
-/// `bind` is `host:port`; only the port is forwarded to `mcp-proxy` (the proxy
-/// binds to all interfaces by default — we trust the network scope to gate
-/// access). `icm serve` is the stdio-only memory daemon it bridges onto the
-/// network.
+/// `bind` is `host:port` where `host` must be a valid IP address literal;
+/// both are forwarded to `mcp-proxy`. `icm serve` is the stdio-only memory
+/// daemon it bridges onto the network.
 ///
 /// # Errors
 /// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor

@@ -1183,16 +1183,20 @@ fn build_bundle_refs(
     refs
 }
 
+fn emit_hook_guards() {
+    // Guard 1: skip in non-interactive shells (no 'i' in $-) — e.g. subshells
+    // spawned by Claude Code's Bash tool have no prompt and should never render.
+    println!("  [[ $- != *i* ]] && return");
+    // Guard 2: skip if environment is already active — avoids redundant re-renders
+    // when a child interactive shell inherits the already-active environment.
+    println!("  [[ -n \"$LLMENV_STATE_DIR\" ]] && return");
+}
+
 fn run_hook(shell: &str) -> anyhow::Result<()> {
     match shell {
         "zsh" => {
             println!("__llmenv_precmd() {{");
-            // Guard 1: skip in non-interactive shells (no 'i' in $-) — e.g. subshells
-            // spawned by Claude Code's Bash tool have no prompt and should never render.
-            println!("  [[ $- != *i* ]] && return");
-            // Guard 2: skip if environment is already active — avoids redundant re-renders
-            // when a child interactive shell inherits the already-active environment.
-            println!("  [[ -n \"$LLMENV_STATE_DIR\" ]] && return");
+            emit_hook_guards();
             println!("  source <(llmenv export)");
             println!("}}");
             println!();
@@ -1203,12 +1207,7 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
         }
         "bash" => {
             println!("__llmenv_prompt() {{");
-            // Guard 1: skip in non-interactive shells (no 'i' in $-) — e.g. subshells
-            // spawned by Claude Code's Bash tool have no prompt and should never render.
-            println!("  [[ $- != *i* ]] && return");
-            // Guard 2: skip if environment is already active — avoids redundant re-renders
-            // when a child interactive shell inherits the already-active environment.
-            println!("  [[ -n \"$LLMENV_STATE_DIR\" ]] && return");
+            emit_hook_guards();
             println!("  source <(llmenv export)");
             println!("}}");
             println!();
