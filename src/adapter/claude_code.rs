@@ -110,6 +110,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
             merge_mcp_into_claude_json(out, &manifest.mcps, native_mcp)?;
         }
 
+        crate::materialize::prune_empty_dirs(out)?;
+
         Ok(owned)
     }
 

@@ -43,6 +43,10 @@ pub enum ValidateError {
     MemoryUnknownServerHost(String),
     #[error("memory has no tags")]
     MemoryNoTags,
+    #[error(
+        "memory: listen_host '{0}' is not a valid IP address literal (hostnames not supported)"
+    )]
+    MemoryInvalidListenHost(String),
     #[error("duplicate marketplace name: {0}")]
     DuplicateMarketplaceName(String),
     #[error(
@@ -384,6 +388,11 @@ impl Config {
                     mem.server_host.clone(),
                 ));
             }
+            if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
+                return Err(ValidateError::MemoryInvalidListenHost(
+                    mem.listen_host.clone(),
+                ));
+            }
         }
         Ok(())
     }
@@ -577,15 +586,23 @@ mod tests {
         (
             arb_string(),
             any::<u16>(),
+            prop_oneof![
+                Just("127.0.0.1".to_string()),
+                Just("0.0.0.0".to_string()),
+                Just("::1".to_string()),
+            ],
             prop::collection::vec(arb_string(), 0..3),
             prop::collection::vec(arb_string(), 0..3),
         )
-            .prop_map(|(server_host, port, tags, default_topics)| Memory {
-                server_host,
-                port,
-                tags,
-                default_topics,
-            })
+            .prop_map(
+                |(server_host, port, listen_host, tags, default_topics)| Memory {
+                    server_host,
+                    port,
+                    listen_host,
+                    tags,
+                    default_topics,
+                },
+            )
     }
 
     fn arb_config() -> impl Strategy<Value = Config> {

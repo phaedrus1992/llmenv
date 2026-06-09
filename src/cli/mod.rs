@@ -1183,10 +1183,20 @@ fn build_bundle_refs(
     refs
 }
 
+fn emit_hook_guards() {
+    // Guard 1: skip in non-interactive shells (no 'i' in $-) — e.g. subshells
+    // spawned by Claude Code's Bash tool have no prompt and should never render.
+    println!("  [[ $- != *i* ]] && return");
+    // Guard 2: skip if environment is already active — avoids redundant re-renders
+    // when a child interactive shell inherits the already-active environment.
+    println!("  [[ -n \"$LLMENV_STATE_DIR\" ]] && return");
+}
+
 fn run_hook(shell: &str) -> anyhow::Result<()> {
     match shell {
         "zsh" => {
             println!("__llmenv_precmd() {{");
+            emit_hook_guards();
             println!("  source <(llmenv export)");
             println!("}}");
             println!();
@@ -1197,6 +1207,7 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
         }
         "bash" => {
             println!("__llmenv_prompt() {{");
+            emit_hook_guards();
             println!("  source <(llmenv export)");
             println!("}}");
             println!();
@@ -1338,6 +1349,7 @@ bundle:
 #     server_host: my-laptop  # must exist in the host: table below
 #     port: 7878
 #     tags: [me]
+#     # listen_host: "127.0.0.1"  # default: loopback only. Use "0.0.0.0" for all interfaces.
 
 # Host directory: maps logical host names to reachable addresses.
 # Used by the memory backend topology to build client connection URLs.
@@ -1668,8 +1680,12 @@ fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
 }
 
 /// If the memory backend is selected and designates *this* host as its server,
-/// return the bind address (`0.0.0.0:<port>`) the `mcp-proxy` should listen on.
-/// `None` when this host is a memory client (or memory is unconfigured).
+/// return the bind address (`<listen_host>:<port>`) the `mcp-proxy` should
+/// listen on. `None` when this host is a memory client (or memory is
+/// unconfigured).
+///
+/// The host portion comes from `memory.listen_host` (default `"127.0.0.1"`).
+/// Set `listen_host: "0.0.0.0"` to accept connections on all interfaces.
 ///
 /// This host is the server when its `server_host` matches a matched host-scope
 /// id. Host scopes can match on hostname (auto-detected) but a host can also be
@@ -1679,7 +1695,17 @@ fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
 fn local_memory_server_bind(config: &Config, active: &ActiveScopes) -> Option<String> {
     let mem = config.features.as_ref().and_then(|f| f.memory.as_ref())?;
     if is_memory_backend_active(config, active) {
-        Some(format!("0.0.0.0:{}", mem.port))
+        // Warn when binding to all interfaces — the ICM daemon is unauthenticated.
+        if let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
+            && addr.is_unspecified()
+        {
+            eprintln!(
+                "warning: memory.listen_host is '{}' — the ICM proxy will accept \
+                 connections on ALL network interfaces. Set a specific IP to restrict access.",
+                mem.listen_host
+            );
+        }
+        Some(format!("{}:{}", mem.listen_host, mem.port))
     } else {
         None
     }
@@ -2454,6 +2480,115 @@ mod tests {
             true,
         );
         assert!(result.is_err(), "refresh=true sync failure must propagate");
+    }
+
+    // ===== Tests for local_memory_server_bind (#337) =====
+
+    /// Build a minimal Config with a memory backend whose server_host is "srv".
+    /// The caller controls `listen_host` and `port`.
+    fn memory_config(listen_host: &str, port: u16) -> Config {
+        use crate::config::{Features, HostEntry, Memory};
+        use std::collections::BTreeMap;
+        let mut host = BTreeMap::new();
+        host.insert(
+            "srv".to_string(),
+            HostEntry {
+                addr: "srv.local".to_string(),
+            },
+        );
+        Config {
+            features: Some(Features {
+                memory: Some(Memory {
+                    server_host: "srv".to_string(),
+                    port,
+                    listen_host: listen_host.to_string(),
+                    tags: vec!["mem".to_string()],
+                    default_topics: vec![],
+                }),
+            }),
+            host,
+            ..Config::default()
+        }
+    }
+
+    /// Build an ActiveScopes with the host-scope "srv" matched and tag "mem" active.
+    fn active_as_server() -> ActiveScopes {
+        use crate::scope::ActiveScope;
+        ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "srv".to_string(),
+                kind: "host",
+                tags: vec!["mem".to_string()],
+                project_root: None,
+                enable_bundles: vec![],
+                name: None,
+                description: None,
+                unknown_fields: vec![],
+            }],
+            tags: {
+                let mut t = std::collections::BTreeSet::new();
+                t.insert("mem".to_string());
+                t
+            },
+        }
+    }
+
+    /// Active scopes with no matched host scope — this host is a client, not
+    /// the server.
+    fn active_as_client() -> ActiveScopes {
+        use crate::scope::ActiveScope;
+        ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "client".to_string(),
+                kind: "host",
+                tags: vec!["mem".to_string()],
+                project_root: None,
+                enable_bundles: vec![],
+                name: None,
+                description: None,
+                unknown_fields: vec![],
+            }],
+            tags: {
+                let mut t = std::collections::BTreeSet::new();
+                t.insert("mem".to_string());
+                t
+            },
+        }
+    }
+
+    #[test]
+    fn local_memory_server_bind_defaults_to_loopback() {
+        // Default listen_host must be 127.0.0.1 — backward-compatible loopback.
+        let config = memory_config("127.0.0.1", 7878);
+        let active = active_as_server();
+        let bind = local_memory_server_bind(&config, &active);
+        assert_eq!(bind, Some("127.0.0.1:7878".to_string()));
+    }
+
+    #[test]
+    fn local_memory_server_bind_honours_custom_host() {
+        // A configured listen_host is forwarded into the bind address.
+        let config = memory_config("0.0.0.0", 9000);
+        let active = active_as_server();
+        let bind = local_memory_server_bind(&config, &active);
+        assert_eq!(bind, Some("0.0.0.0:9000".to_string()));
+    }
+
+    #[test]
+    fn local_memory_server_bind_returns_none_for_client_host() {
+        // When this host is not the designated server, no bind address is returned.
+        let config = memory_config("127.0.0.1", 7878);
+        let active = active_as_client();
+        let bind = local_memory_server_bind(&config, &active);
+        assert_eq!(bind, None);
+    }
+
+    #[test]
+    fn local_memory_server_bind_returns_none_when_memory_unconfigured() {
+        let config = Config::default();
+        let active = active_as_server();
+        let bind = local_memory_server_bind(&config, &active);
+        assert_eq!(bind, None);
     }
 
     #[test]
