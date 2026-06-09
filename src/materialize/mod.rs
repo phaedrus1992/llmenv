@@ -247,7 +247,7 @@ mod tests {
         );
     }
 
-    /// #341: prune_empty_dirs — root is never removed regardless of tree shape.
+    // #341: prune_empty_dirs — root is never removed regardless of tree shape.
     proptest! {
         #[test]
         fn prune_empty_dirs_never_removes_root(
@@ -264,7 +264,7 @@ mod tests {
         }
     }
 
-    /// #341: prune_empty_dirs — files in subdirs are preserved.
+    // #341: prune_empty_dirs — files in subdirs are preserved.
     proptest! {
         #[test]
         fn prune_empty_dirs_preserves_files(
@@ -283,7 +283,7 @@ mod tests {
         }
     }
 
-    /// #341: prune_empty_dirs — idempotent: second run produces same result.
+    // #341: prune_empty_dirs — idempotent: second run produces same result.
     proptest! {
         #[test]
         fn prune_empty_dirs_is_idempotent(

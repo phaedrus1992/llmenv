@@ -1696,14 +1696,14 @@ fn local_memory_server_bind(config: &Config, active: &ActiveScopes) -> Option<St
     let mem = config.features.as_ref().and_then(|f| f.memory.as_ref())?;
     if is_memory_backend_active(config, active) {
         // Warn when binding to all interfaces — the ICM daemon is unauthenticated.
-        if let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>() {
-            if addr.is_unspecified() {
-                eprintln!(
-                    "warning: memory.listen_host is '{}' — the ICM proxy will accept \
-                     connections on ALL network interfaces. Set a specific IP to restrict access.",
-                    mem.listen_host
-                );
-            }
+        if let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
+            && addr.is_unspecified()
+        {
+            eprintln!(
+                "warning: memory.listen_host is '{}' — the ICM proxy will accept \
+                 connections on ALL network interfaces. Set a specific IP to restrict access.",
+                mem.listen_host
+            );
         }
         Some(format!("{}:{}", mem.listen_host, mem.port))
     } else {
