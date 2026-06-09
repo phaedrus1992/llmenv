@@ -1172,7 +1172,108 @@ fn two_bundles_merge_into_deterministic_settings_json() {
     insta::assert_yaml_snapshot!(parsed);
 }
 
-// Issue #34: Reversing bundle input order must not change the merged hook set
+// Issue #336: Empty directories from bundles that contributed no files must be
+// pruned from the rendered output. A directory pre-created via create_dir_all
+// for a file path that was never actually written must not remain.
+#[test]
+fn empty_dirs_are_pruned_after_render() {
+    // Build a manifest whose `files` map contains a file under `subdir/`, but
+    // we craft the manifest directly so we can simulate the case where the
+    // directory was "set up" but nothing lands in a sibling subdirectory.
+    // We do this by writing a file into `subdir/kept/`, then manually creating
+    // `subdir/empty/` in the output before calling materialize — verifying that
+    // the post-render prune removes `subdir/empty/`.
+    let tmp = tempdir().expect("tempdir");
+    let out = tmp.path();
+
+    // Pre-create an empty directory to simulate a leftover from rendering.
+    let empty_dir = out.join("subdir").join("empty");
+    std::fs::create_dir_all(&empty_dir).expect("create empty dir");
+
+    // A manifest that writes nothing into `subdir/empty/`.
+    let m = llmenv::merge::MergedManifest {
+        agents_md: String::new(),
+        files: Default::default(),
+        ..Default::default()
+    };
+    ClaudeCodeAdapter.materialize(&m, out).expect("materialize");
+
+    assert!(
+        !empty_dir.exists(),
+        "empty directory should be pruned after render: {}",
+        empty_dir.display()
+    );
+    assert!(
+        !out.join("subdir").exists(),
+        "empty parent directory should also be pruned: {}",
+        out.join("subdir").display()
+    );
+    // The output root itself is never removed.
+    assert!(out.exists(), "output root must not be removed");
+}
+
+// Issue #336: Directories that contain files must NOT be pruned.
+#[test]
+fn non_empty_dirs_are_preserved_after_render() {
+    let tmp = tempdir().expect("tempdir");
+    let source_file = tmp.path().join("src_file.md");
+    std::fs::write(&source_file, "content").expect("write source file");
+
+    // A manifest that writes one file into `kept/`.
+    let mut files = std::collections::BTreeMap::new();
+    files.insert(PathBuf::from("kept/file.md"), source_file.clone());
+    let m = llmenv::merge::MergedManifest {
+        agents_md: String::new(),
+        files,
+        ..Default::default()
+    };
+
+    let out_tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, out_tmp.path())
+        .expect("materialize");
+
+    let kept_dir = out_tmp.path().join("kept");
+    assert!(kept_dir.exists(), "non-empty directory must be preserved");
+    assert!(
+        kept_dir.join("file.md").exists(),
+        "file inside directory must be preserved"
+    );
+}
+
+// Issue #336: A bundle that contributes 0 files must not leave any empty dirs.
+// This tests the scenario where create_dir_all is called for a path whose
+// parent directory was prepared but the file never ended up being written
+// (e.g. all of bundle's files were filtered out).
+#[test]
+fn bundle_with_no_files_leaves_no_dirs() {
+    // Empty manifest — no files, no rules. Only CLAUDE.md and settings.json
+    // are written; no subdirectories should exist.
+    let m = llmenv::merge::MergedManifest {
+        agents_md: String::new(),
+        files: Default::default(),
+        ..Default::default()
+    };
+    let out_tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, out_tmp.path())
+        .expect("materialize");
+
+    let subdirs: Vec<_> = walkdir::WalkDir::new(out_tmp.path())
+        .min_depth(1)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_dir())
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    assert!(
+        subdirs.is_empty(),
+        "no subdirectories should remain when no bundle contributes files: {subdirs:?}"
+    );
+}
+
+// Issue #336: Reversing bundle input order must not change the merged hook set
 // or permission set — only first-seen list order may shift. Locks the
 // order-independence guarantee at the adapter (end-to-end) layer, complementing
 // the unit-level property tests in merge::capabilities.

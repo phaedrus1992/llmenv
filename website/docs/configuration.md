@@ -252,6 +252,7 @@ features:
 |-------|----------|-------|
 | `server_host` | yes | Key into `host:` for the daemon host |
 | `port` | yes | Port the proxy listens on / clients connect to |
+| `listen_host` | no | IP address to listen on (`127.0.0.1` for loopback, `0.0.0.0` for all interfaces); default `127.0.0.1` |
 | `tags` | no | Activation tags |
 | `default_topics` | no | Documentation only; preserved across round-trips |
 

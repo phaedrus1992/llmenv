@@ -113,6 +113,7 @@ bundle:
 #     server_host: my-laptop  # must exist in the host: table below
 #     port: 7878
 #     tags: [me]
+#     # listen_host: "127.0.0.1"  # default: loopback only. Use "0.0.0.0" for all interfaces.
 
 # Host directory: maps logical host names to reachable addresses.
 # Used by the memory backend topology to build client connection URLs.

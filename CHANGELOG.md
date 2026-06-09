@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `config::template::generate_template()` function; `llmenv init` now derives the
   config template from a single source rather than a hardcoded string, making it easier
   to keep the template in sync as the schema evolves
+- Add `llmenv config-context` subcommand, auto-registered as a `SessionStart` hook
+  by the Claude Code adapter; emits source config file and bundles directory paths
+  as `hookSpecificOutput.additionalContext` so the agent always knows where to edit
+  llmenv config rather than touching managed cache files
+- Add `llmenv config-guard` subcommand, auto-registered as a `PreToolUse` hook
+  (matcher: `Write`, `Edit`, `MultiEdit`) by the Claude Code adapter; warns when the
+  agent writes to a path inside the managed cache directory and redirects to the
+  source config; always exits 0 (fail-soft, never blocks the write)
+
+### Changed
+
+- Replace ASCII pipeline and precedence diagrams in the concepts and philosophy
+  documentation pages with Mermaid flowcharts; the diagrams now render as proper
+  graphs on the Docusaurus docs site
 
 ### Fixed
 
@@ -36,21 +50,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   when a configured bundle name has no corresponding directory, making typos and
   deleted directories detectable
 
-- Add `llmenv config-context` subcommand, auto-registered as a `SessionStart` hook
-  by the Claude Code adapter; emits source config file and bundles directory paths
-  as `hookSpecificOutput.additionalContext` so the agent always knows where to edit
-  llmenv config rather than touching managed cache files
-- Add `llmenv config-guard` subcommand, auto-registered as a `PreToolUse` hook
-  (matcher: `Write`, `Edit`, `MultiEdit`) by the Claude Code adapter; warns when the
-  agent writes to a path inside the managed cache directory and redirects to the
-  source config; always exits 0 (fail-soft, never blocks the write)
+## [1.0.8] - 2026-06-09
 
-### Changed
+### Added
 
-- Replace ASCII pipeline and precedence diagrams in the concepts and philosophy
-  documentation pages with Mermaid flowcharts; the diagrams now render as proper
-  graphs on the Docusaurus docs site
+- Memory server now supports a `listen_host` option under `features.memory`
+  (default `"127.0.0.1"`). Set to `"0.0.0.0"` to accept connections on all
+  interfaces, or to a specific IP to bind to one interface. Fixes #337.
 
+### Fixed
+
+- Fix shell hook functions (`__llmenv_precmd`, `__llmenv_prompt`) triggering a
+  full environment render inside non-interactive subshells (e.g. Claude Code's
+  Bash tool); add early-return guards for both `$-` interactivity and
+  `$LLMENV_STATE_DIR` already-active checks (#338)
+- Fix empty directories left in rendered output when a bundle contributes no
+  files to a subdirectory; `create_dir_all` is now followed by a bottom-up
+  prune pass that removes empty dirs without touching the output root (#336)
+
+## [1.0.7] - 2026-06-05
+
+### Added
+
+- Add `mcp:` support in `bundle.yaml`; declare MCP servers inside a bundle using
+  the same format as `config.yaml`; tagless entries are active whenever the bundle
+  is selected, tagged entries are further filtered by active scope tags (#329)
+- `llmenv init` now generates a `README.md` orientation file in the config
+  directory on first run; the write is skipped if a `README.md` already exists
+  (#325)
+
+### Fixed
+
+- Fix bundle `mcp:` entries accepting names with characters outside
+  `[a-zA-Z0-9_-]`; invalid names are now rejected with a clear error (#329)
+- Fix missing collision detection between `config.mcp` and bundle `mcp:` entries;
+  a name declared in both sources now errors at startup instead of silently
+  producing duplicate servers (#329)
+- Fix `mcp-ls` omitting bundle-declared MCP servers; bundle MCPs are now listed
+  with a `(bundle)` annotation and correct active/orphan status (#329)
+- Fix bundle `mcp:` entries accepting the reserved name `icm`; the guard now
+  matches the one already present for top-level `config.mcp` (#329)
+- Fix `llmenv init` emitting a config.yaml template with a nested `transport:`
+  block for MCP servers; the correct flat schema (`type`/`command`/`args` at the
+  top level) is now emitted (#325)
+- Fix `llmenv init` silently replacing non-UTF-8 path bytes with `?`; non-UTF-8
+  paths now fail with a clear error (#325)
 ## [1.0.6] - 2026-06-05
 
 ### Added
@@ -247,7 +291,9 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...HEAD
+[1.0.8]: https://github.com/phaedrus1992/llmenv/compare/v1.0.7...v1.0.8
+[1.0.7]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/phaedrus1992/llmenv/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/phaedrus1992/llmenv/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/phaedrus1992/llmenv/compare/v1.0.3...v1.0.4
