@@ -362,6 +362,11 @@ pub enum McpTransport {
     Sse,
 }
 
+/// Default bind host for the memory server proxy.
+fn default_listen_host() -> String {
+    "127.0.0.1".to_string()
+}
+
 /// llmenv's memory backend topology. One host (`server_host`) runs the daemon
 /// locally over stdio (wrapped in `mcp-proxy` to expose it on the network);
 /// every other selected host connects to it as an HTTP client at
@@ -374,6 +379,12 @@ pub struct Memory {
     pub server_host: String,
     /// Port the proxy listens on and clients connect to.
     pub port: u16,
+    /// Host address the proxy binds to on the server. Defaults to `"127.0.0.1"`
+    /// (loopback only). Set to `"0.0.0.0"` to accept connections on all
+    /// interfaces, or to a specific IP to bind to one interface. Must be a valid
+    /// IP address literal; hostnames are not supported.
+    #[serde(default = "default_listen_host")]
+    pub listen_host: String,
     /// Tags that activate the memory server, intersected with active scope
     /// tags (same selection model as bundles and MCP servers).
     #[serde(default)]

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Memory server now supports a `listen_host` option under `features.memory`
+  (default `"127.0.0.1"`). Set to `"0.0.0.0"` to accept connections on all
+  interfaces, or to a specific IP to bind to one interface. Fixes #337.
+
 ## [1.0.6] - 2026-06-05
 
 ### Added

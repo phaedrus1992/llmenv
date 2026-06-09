@@ -229,6 +229,7 @@ mod tests {
         Memory {
             server_host: "still".into(),
             port: 7878,
+            listen_host: "127.0.0.1".into(),
             tags: vec!["network-home".into()],
             default_topics: vec![],
         }

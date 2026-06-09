@@ -224,20 +224,24 @@ fn is_executable(path: &Path) -> bool {
 /// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor
 /// `uvx` is on `PATH`, or if the child cannot be spawned.
 pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
-    let port = bind
+    let (host, port) = bind
         .rsplit_once(':')
-        .map(|(_, p)| p)
         .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
-    // Parse-don't-validate: the port is forwarded verbatim into the child's
-    // argv (`--port <port>`), so a non-numeric suffix like `--config /tmp/x`
-    // would be read by mcp-proxy as extra flags. Reject anything that isn't a
-    // real u16 before it reaches the (stderr-silenced) daemon.
+    // Parse-don't-validate: both host and port are forwarded verbatim into the
+    // child's argv (`--host <host> --port <port>`), so a value with embedded
+    // spaces or flag-like content would be misread by mcp-proxy. Reject a
+    // non-numeric port before it reaches the (stderr-silenced) daemon; validate
+    // the host is a valid IP address so hostnames or injected flags are rejected.
     let port: u16 = port
         .parse()
         .map_err(|e| anyhow::anyhow!("bind port {port:?} is not a valid u16: {e}"))?;
+    host.parse::<std::net::IpAddr>()
+        .map_err(|e| anyhow::anyhow!("bind host {host:?} is not a valid IP address: {e}"))?;
     let (program, leading) = mcp_proxy_command()?;
     let mut cmd = Command::new(program);
     cmd.args(leading)
+        .arg("--host")
+        .arg(host)
         .arg("--port")
         .arg(port.to_string())
         .arg("--")
@@ -589,6 +593,45 @@ mod tests {
         assert!(
             msg.contains("did not bind"),
             "error message should mention bind failure, got: {msg}"
+        );
+    }
+
+    /// spawn_mcp_proxy rejects bind strings that have no `:port` suffix (#337).
+    #[test]
+    fn spawn_mcp_proxy_rejects_missing_port() {
+        use super::spawn_mcp_proxy;
+        let result = spawn_mcp_proxy("127.0.0.1");
+        assert!(result.is_err(), "must fail without a port");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("missing :port suffix"),
+            "error should mention missing port, got: {msg}"
+        );
+    }
+
+    /// spawn_mcp_proxy rejects a non-numeric port so it never reaches mcp-proxy (#337).
+    #[test]
+    fn spawn_mcp_proxy_rejects_non_numeric_port() {
+        use super::spawn_mcp_proxy;
+        let result = spawn_mcp_proxy("127.0.0.1:notaport");
+        assert!(result.is_err(), "must fail with a non-numeric port");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not a valid u16"),
+            "error should mention invalid port, got: {msg}"
+        );
+    }
+
+    /// spawn_mcp_proxy rejects a hostname host (only IP literals allowed) (#337).
+    #[test]
+    fn spawn_mcp_proxy_rejects_hostname_host() {
+        use super::spawn_mcp_proxy;
+        let result = spawn_mcp_proxy("localhost:7878");
+        assert!(result.is_err(), "must reject a hostname");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not a valid IP address"),
+            "error should mention invalid host, got: {msg}"
         );
     }
 }

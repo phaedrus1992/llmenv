@@ -577,15 +577,23 @@ mod tests {
         (
             arb_string(),
             any::<u16>(),
+            prop_oneof![
+                Just("127.0.0.1".to_string()),
+                Just("0.0.0.0".to_string()),
+                Just("::1".to_string()),
+            ],
             prop::collection::vec(arb_string(), 0..3),
             prop::collection::vec(arb_string(), 0..3),
         )
-            .prop_map(|(server_host, port, tags, default_topics)| Memory {
-                server_host,
-                port,
-                tags,
-                default_topics,
-            })
+            .prop_map(
+                |(server_host, port, listen_host, tags, default_topics)| Memory {
+                    server_host,
+                    port,
+                    listen_host,
+                    tags,
+                    default_topics,
+                },
+            )
     }
 
     fn arb_config() -> impl Strategy<Value = Config> {
