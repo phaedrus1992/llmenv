@@ -43,6 +43,10 @@ pub enum ValidateError {
     MemoryUnknownServerHost(String),
     #[error("memory has no tags")]
     MemoryNoTags,
+    #[error(
+        "memory: listen_host '{0}' is not a valid IP address literal (hostnames not supported)"
+    )]
+    MemoryInvalidListenHost(String),
     #[error("duplicate marketplace name: {0}")]
     DuplicateMarketplaceName(String),
     #[error(
@@ -382,6 +386,11 @@ impl Config {
             if !self.host.contains_key(&mem.server_host) {
                 return Err(ValidateError::MemoryUnknownServerHost(
                     mem.server_host.clone(),
+                ));
+            }
+            if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
+                return Err(ValidateError::MemoryInvalidListenHost(
+                    mem.listen_host.clone(),
                 ));
             }
         }
