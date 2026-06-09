@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.8] - 2026-06-09
+
 ### Added
 
 - Memory server now supports a `listen_host` option under `features.memory`

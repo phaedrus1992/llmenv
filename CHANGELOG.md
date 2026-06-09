@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.8] - 2026-06-09
+
 ### Added
 
 - Memory server now supports a `listen_host` option under `features.memory`
@@ -237,7 +239,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.7...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...HEAD
+[1.0.8]: https://github.com/phaedrus1992/llmenv/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/phaedrus1992/llmenv/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/phaedrus1992/llmenv/compare/v1.0.4...v1.0.5
