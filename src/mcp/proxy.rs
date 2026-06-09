@@ -633,4 +633,51 @@ mod tests {
             "error should mention invalid host, got: {msg}"
         );
     }
+
+    /// #341: property tests for spawn_mcp_proxy bind-string parsing.
+    mod bind_string_props {
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Any valid IPv4/IPv6 + u16 port pair must not fail at the parse stage.
+            /// The function may still fail at spawn time (binary not on PATH), but
+            /// must not return a parse error.
+            #[test]
+            fn valid_ip_port_does_not_fail_at_parse(
+                a in 0u8..=255,
+                b in 0u8..=255,
+                c in 0u8..=255,
+                d in 0u8..=255,
+                port in 1u16..=65535,
+            ) {
+                use super::super::spawn_mcp_proxy;
+                let bind = format!("{a}.{b}.{c}.{d}:{port}");
+                match spawn_mcp_proxy(&bind) {
+                    Ok(_) => {} // spawned (unlikely in test env, but fine)
+                    Err(e) => {
+                        let msg = e.to_string();
+                        // Parse-stage errors are rejected here; spawn/PATH errors are ok
+                        prop_assert!(
+                            !msg.contains("missing :port") &&
+                            !msg.contains("not a valid u16") &&
+                            !msg.contains("not a valid IP address"),
+                            "parse-stage error for valid bind {bind}: {msg}"
+                        );
+                    }
+                }
+            }
+
+            /// Arbitrary strings without a colon must always produce a parse error.
+            #[test]
+            fn no_colon_always_errors(s in "[a-zA-Z0-9]{1,20}") {
+                use super::super::spawn_mcp_proxy;
+                let result = spawn_mcp_proxy(&s);
+                prop_assert!(result.is_err(), "must reject bind without colon: {s}");
+                prop_assert!(
+                    result.unwrap_err().to_string().contains("missing :port"),
+                    "error should mention missing port"
+                );
+            }
+        }
+    }
 }

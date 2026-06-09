@@ -110,13 +110,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             merge_mcp_into_claude_json(out, &manifest.mcps, native_mcp)?;
         }
 
-        // #336: prune empty directories left by bundles that contributed no
-        // files. `create_dir_all` is called optimistically for every file path;
-        // if a bundle ends up writing nothing into a subdirectory (e.g. all its
-        // files were filtered, or none matched), the empty directory persists.
-        // Walk bottom-up so children are visited before parents, then remove any
-        // directory that is now empty. The output root itself is never removed.
-        prune_empty_dirs(out)?;
+        crate::materialize::prune_empty_dirs(out)?;
 
         Ok(owned)
     }
@@ -922,69 +916,6 @@ fn permission_mode_str(mode: crate::config::PermissionMode) -> &'static str {
         PermissionMode::Default => "default",
         PermissionMode::BypassPermissions => "bypassPermissions",
     }
-}
-
-/// Remove empty directories under `root` (bottom-up), leaving `root` itself.
-///
-/// After all bundle files are written, some subdirectories may contain no
-/// files — either because `create_dir_all` was called optimistically for a path
-/// whose file was never actually written, or because a bundle contributed zero
-/// files to a given subdirectory. Walking bottom-up ensures children are removed
-/// before their parents, so a directory tree of entirely empty dirs collapses
-/// fully (#336).
-///
-/// Non-fatal per-entry errors (permission denied on a single dir, race with
-/// concurrent write) are logged and skipped rather than aborting the render —
-/// a leftover empty directory is cosmetically bad but not a correctness failure.
-fn prune_empty_dirs(root: &Path) -> anyhow::Result<()> {
-    // Collect all directories under root (excluding root itself), deepest first.
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    collect_subdirs(root, &mut dirs)?;
-    // Reverse so deepest (children) come first — that way parent dirs are empty
-    // by the time we try to remove them.
-    dirs.reverse();
-
-    for dir in dirs {
-        // read_dir on a non-existent path (already removed in this loop) is
-        // silently skipped — the directory is gone, which is the desired state.
-        let is_empty = match std::fs::read_dir(&dir) {
-            Ok(mut rd) => rd.next().is_none(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                tracing::warn!("prune_empty_dirs: could not read {}: {e}", dir.display());
-                continue;
-            }
-        };
-        if is_empty && let Err(e) = std::fs::remove_dir(&dir) {
-            tracing::warn!("prune_empty_dirs: could not remove {}: {e}", dir.display());
-        }
-    }
-    Ok(())
-}
-
-/// Recursively append every subdirectory under `dir` to `out`, in
-/// depth-first pre-order (parents before children). The caller reverses the
-/// list to get a bottom-up traversal for pruning.
-fn collect_subdirs(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    let rd = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(anyhow::anyhow!("reading directory {}: {e}", dir.display())),
-    };
-    for entry in rd {
-        let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
-        // DirEntry::metadata() uses lstat on Unix — does not follow symlinks,
-        // so symlinks to directories outside the render root are not traversed.
-        let path = entry.path();
-        let meta = entry
-            .metadata()
-            .with_context(|| format!("stat {}", path.display()))?;
-        if meta.is_dir() {
-            out.push(path.clone());
-            collect_subdirs(&path, out)?;
-        }
-    }
-    Ok(())
 }
 
 /// Which permission action a neutral rule belongs to. Authority for native-wins
