@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (default `"127.0.0.1"`). Set to `"0.0.0.0"` to accept connections on all
   interfaces, or to a specific IP to bind to one interface. Fixes #337.
 
+### Fixed
+
+- Fix shell hook functions (`__llmenv_precmd`, `__llmenv_prompt`) triggering a
+  full environment render inside non-interactive subshells (e.g. Claude Code's
+  Bash tool); add early-return guards for both `$-` interactivity and
+  `$LLMENV_STATE_DIR` already-active checks (#338)
+- Fix empty directories left in rendered output when a bundle contributes no
+  files to a subdirectory; `create_dir_all` is now followed by a bottom-up
+  prune pass that removes empty dirs without touching the output root (#336)
+
 ## [1.0.6] - 2026-06-05
 
 ### Added
