@@ -1002,7 +1002,7 @@ fn build_manifest(
 
     let resolved = crate::plugins::resolve::resolve_plugins(config, &active.tags)
         .context("resolving plugins")?;
-    manifest.plugins = resolved.plugins;
+    manifest.plugins = sync_plugin_payloads(&cache_root, resolved.plugins);
     manifest.marketplaces = sync_marketplaces(
         config,
         &cache_root,
@@ -1136,6 +1136,53 @@ fn sync_marketplaces(
         }
     }
     Ok(out)
+}
+
+/// Look up stable external plugin payload paths for resolved plugins. Non-refreshing
+/// (export path): silently skips plugins whose payload hasn't been synced yet, so a
+/// missing payload doesn't abort materialization — users run `llmenv plugin-sync` first.
+fn sync_plugin_payloads(
+    cache_root: &Path,
+    plugins: Vec<crate::plugins::resolve::ResolvedPlugin>,
+) -> Vec<crate::plugins::resolve::ResolvedPlugin> {
+    plugins
+        .into_iter()
+        .map(|mut p| {
+            let mkt_path = crate::plugins::cache::marketplace_path(cache_root, &p.marketplace);
+            let Ok(entries) = crate::plugins::cache::read_marketplace_plugins(&mkt_path) else {
+                return p;
+            };
+            let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
+                return p;
+            };
+            if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
+                return p;
+            }
+            match crate::plugins::cache::sync_external_plugin(
+                cache_root,
+                &p.marketplace,
+                &p.plugin,
+                &entry.source,
+                false,
+            ) {
+                Ok(state) => {
+                    p.install_path = Some(state.install_location.to_string_lossy().into_owned());
+                    p.git_commit_sha = state.head;
+                }
+                Err(crate::plugins::cache::SyncError::NotCloned { .. }) => {
+                    eprintln!(
+                        "warning: external plugin '{}@{}' not yet fetched\n  \
+                         → run `llmenv plugin-sync` to download it",
+                        p.plugin, p.marketplace
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!("external plugin payload lookup failed (non-fatal): {e}");
+                }
+            }
+            p
+        })
+        .collect()
 }
 
 /// Resolve firing bundles to on-disk `BundleRef`s in scope precedence order
@@ -2123,6 +2170,44 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         println!(
             "✓ {} → {} [{}]",
             m.name,
+            state.install_location.display(),
+            head
+        );
+    }
+
+    // Sync external plugin payloads: plugins whose source in marketplace.json is
+    // an external git URL (not a relative path within the marketplace clone).
+    let all_plugin_refs: std::collections::HashSet<(String, String)> = config
+        .plugin_collection
+        .iter()
+        .flat_map(|c| c.plugins.iter())
+        .filter_map(|p| crate::config::split_plugin_ref(p))
+        .map(|(mkt, plugin)| (mkt.to_string(), plugin.to_string()))
+        .collect();
+
+    for (mkt_name, plugin_name) in &all_plugin_refs {
+        let mkt_path = crate::plugins::cache::marketplace_path(&cache_root, mkt_name);
+        let plugins = crate::plugins::cache::read_marketplace_plugins(&mkt_path)
+            .with_context(|| format!("reading marketplace manifest for '{mkt_name}'"))?;
+        let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
+            continue;
+        };
+        if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
+            continue;
+        }
+        let state = crate::plugins::cache::sync_external_plugin(
+            &cache_root,
+            mkt_name,
+            plugin_name,
+            &entry.source,
+            true,
+        )
+        .with_context(|| format!("syncing external plugin '{plugin_name}@{mkt_name}'"))?;
+        let head = state.head.as_deref().unwrap_or("(unknown)");
+        println!(
+            "✓ {}@{} (external) → {} [{}]",
+            plugin_name,
+            mkt_name,
             state.install_location.display(),
             head
         );

@@ -916,6 +916,8 @@ mod tests {
                         marketplace: "mk".into(),
                         plugin: name,
                         collection: "c".into(),
+                        install_path: None,
+                        git_commit_sha: None,
                     }],
                     vec![],
                 );

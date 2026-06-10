@@ -34,6 +34,8 @@ fn plugin(marketplace: &str, name: &str, collection: &str) -> ResolvedPlugin {
         marketplace: marketplace.into(),
         plugin: name.into(),
         collection: collection.into(),
+        install_path: None,
+        git_commit_sha: None,
     }
 }
 
