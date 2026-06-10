@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `llmenv plugin-sync` now fetches externally-sourced plugins — those whose
+  `source` in `marketplace.json` is a git URL rather than a relative path
+  within the marketplace clone. Payloads are cloned to a stable path outside
+  the hash-keyed config dir so they survive config changes without requiring
+  a manual `/plugin install` or re-authentication (#353)
+
+### Fixed
+
+- Fix `env:` declared in a bundle's `bundle.yaml` being silently dropped;
+  bundle-level env vars are now merged and exported alongside `Bundle.vars`
+  (#351)
+
 ## [1.0.9] - 2026-06-10
 
 ### Fixed
