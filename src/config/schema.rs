@@ -137,6 +137,11 @@ pub struct Capabilities {
     /// further filtered by scope tag intersection. Neutral counterpart to `native_mcp`.
     #[serde(default)]
     pub mcp: Vec<McpServer>,
+    /// Environment variables declared inside a bundle. Merged into the agent's env.
+    /// A map — later contributors override earlier ones (same precedence model as
+    /// the top-level config merging).
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
     /// Whether the agent's built-in automatic memory is enabled. Optional scalar
     /// — resolves by scope precedence (highest scope wins). When llmenv's ICM
     /// memory backend is active, this defaults to `false` to prevent competition
@@ -177,6 +182,7 @@ impl Capabilities {
             && self.hooks.is_empty()
             && self.plugins.is_empty()
             && self.mcp.is_empty()
+            && self.env.is_empty()
             && self.auto_memory_enabled.is_none()
             && self.native_permissions.is_empty()
             && self.native_hooks.is_empty()

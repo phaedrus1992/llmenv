@@ -9,7 +9,7 @@ use crate::config::Capabilities;
 use crate::mcp::resolve::ResolvedMcp;
 use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
 use crate::util::{merge_yaml, normalize_yaml};
-use capabilities::{CapabilityContributor, merge_capabilities};
+pub use capabilities::{CapabilityContributor, merge_capabilities};
 use rules::RuleFile;
 
 #[derive(Debug, Clone)]
