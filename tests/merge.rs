@@ -156,3 +156,64 @@ fn later_bundle_overwrites_on_path_collision() {
     let contents = std::fs::read_to_string(abs).expect("read");
     assert_eq!(contents, "from b", "later bundle should win");
 }
+
+#[test]
+fn bundle_yaml_env_vars_are_merged_into_capabilities() {
+    use std::collections::BTreeMap;
+    let caps_a = Capabilities {
+        env: BTreeMap::from([("A_VAR".into(), "a_value".into())]),
+        ..Default::default()
+    };
+
+    let caps_b = Capabilities {
+        env: BTreeMap::from([("B_VAR".into(), "b_value".into())]),
+        ..Default::default()
+    };
+
+    let contrib_a = llmenv::merge::CapabilityContributor {
+        name: "a".into(),
+        precedence: 1,
+        capabilities: caps_a,
+    };
+    let contrib_b = llmenv::merge::CapabilityContributor {
+        name: "b".into(),
+        precedence: 2,
+        capabilities: caps_b,
+    };
+
+    let merged = llmenv::merge::merge_capabilities(&[contrib_a, contrib_b]).unwrap();
+    assert_eq!(merged.env.get("A_VAR").map(|s| s.as_str()), Some("a_value"));
+    assert_eq!(merged.env.get("B_VAR").map(|s| s.as_str()), Some("b_value"));
+}
+
+#[test]
+fn bundle_env_vars_higher_precedence_wins() {
+    use std::collections::BTreeMap;
+    let caps_a = Capabilities {
+        env: BTreeMap::from([("SHARED_VAR".into(), "a_value".into())]),
+        ..Default::default()
+    };
+
+    let caps_b = Capabilities {
+        env: BTreeMap::from([("SHARED_VAR".into(), "b_value".into())]),
+        ..Default::default()
+    };
+
+    let contrib_a = llmenv::merge::CapabilityContributor {
+        name: "a".into(),
+        precedence: 1,
+        capabilities: caps_a,
+    };
+    let contrib_b = llmenv::merge::CapabilityContributor {
+        name: "b".into(),
+        precedence: 2,
+        capabilities: caps_b,
+    };
+
+    let merged = llmenv::merge::merge_capabilities(&[contrib_a, contrib_b]).unwrap();
+    assert_eq!(
+        merged.env.get("SHARED_VAR").map(|s| s.as_str()),
+        Some("b_value"),
+        "higher precedence (b) should win"
+    );
+}

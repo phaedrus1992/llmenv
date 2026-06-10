@@ -42,8 +42,13 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let mut ask = Vec::new();
     let mut deny = Vec::new();
     let mut native_permissions: BTreeMap<String, NativePermissionRules> = BTreeMap::new();
+    let mut env = BTreeMap::new();
 
-    for c in contributors {
+    // Sort contributors by precedence to ensure higher precedence wins.
+    let mut ordered: Vec<&CapabilityContributor> = contributors.iter().collect();
+    ordered.sort_by_key(|c| c.precedence);
+
+    for c in ordered {
         let caps = &c.capabilities;
         hooks.extend(caps.hooks.iter().cloned());
         plugins.extend(caps.plugins.iter().cloned());
@@ -51,6 +56,9 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         allow.extend(caps.permissions.allow.iter().cloned());
         ask.extend(caps.permissions.ask.iter().cloned());
         deny.extend(caps.permissions.deny.iter().cloned());
+        for (key, value) in &caps.env {
+            env.insert(key.clone(), value.clone());
+        }
         for (engine, rules) in &caps.native_permissions {
             let slot = native_permissions.entry(engine.clone()).or_default();
             slot.allow.extend(rules.allow.iter().cloned());
@@ -99,6 +107,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         hooks,
         plugins,
         mcp,
+        env,
         auto_memory_enabled,
         native_permissions,
         native_hooks,

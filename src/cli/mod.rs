@@ -888,6 +888,12 @@ fn build_and_materialize(
 
     let mut env_vars = adapter.env_vars(&cache_path)?;
 
+    // Collect env vars from merged bundle Capabilities. Later contributors override
+    // earlier ones (enforced by the merge_capabilities function via precedence).
+    for (key, value) in &manifest.capabilities.env {
+        env_vars.push((key.clone(), value.clone()));
+    }
+
     // Durable state (#175): the state dir is a stable sibling of the hashed
     // config folders (`<adapter_root>/state`), so it survives every hash change.
     // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and

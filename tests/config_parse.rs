@@ -86,3 +86,19 @@ fn fixture_passes_validation() {
     let cfg: Config = serde_yaml::from_str(&s).unwrap();
     cfg.validate().expect("fixture should validate");
 }
+
+#[test]
+fn capabilities_deserializes_env_vars_from_bundle() {
+    use llmenv::config::Capabilities;
+    let yaml = r#"
+env:
+  MY_VAR: "my_value"
+  ANOTHER_VAR: "another_value"
+"#;
+    let caps: Capabilities = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(caps.env.get("MY_VAR").map(|s| s.as_str()), Some("my_value"));
+    assert_eq!(
+        caps.env.get("ANOTHER_VAR").map(|s| s.as_str()),
+        Some("another_value")
+    );
+}
