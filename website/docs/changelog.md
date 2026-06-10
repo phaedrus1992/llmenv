@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Add token-efficiency checks to `llmenv doctor`: warns when
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`,
+  or `ENABLE_PROMPT_CACHING_1H` are not set (or misconfigured); informs when
+  `CLAUDE_CODE_SUBAGENT_MODEL` is unset; warns when no `context-mode` MCP server is
+  configured
+- Add `config::template::generate_template()` function; `llmenv init` now derives the
+  config template from a single source rather than a hardcoded string, making it easier
+  to keep the template in sync as the schema evolves
 - Add `llmenv config-context` subcommand, auto-registered as a `SessionStart` hook
   by the Claude Code adapter; emits source config file and bundles directory paths
   as `hookSpecificOutput.additionalContext` so the agent always knows where to edit
@@ -33,6 +41,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Replace ASCII pipeline and precedence diagrams in the concepts and philosophy
   documentation pages with Mermaid flowcharts; the diagrams now render as proper
   graphs on the Docusaurus docs site
+
+### Fixed
+
+- Fix `config-guard` path-prefix check accepting `..`-based traversal paths (e.g.
+  `~/.cache/llmenv/../../../etc/shadow` matched as inside the cache); paths are now
+  normalized lexically before the prefix check
+- Fix `config-guard` silently swallowing JSON parse failures when the hook payload was
+  malformed; non-empty non-JSON stdin now logs a warning to stderr
+- Fix `config-guard` not logging when `CLAUDE_CONFIG_DIR` is set but has no recognizable
+  `claude-code` ancestor directory; the fallback is now visible to operators
+- Fix `config-context` silently substituting a wrong default path when config path
+  resolution fails; it now emits a warning to stderr and returns a degraded-state context
+  message rather than feeding the agent incorrect file paths
+- Fix missing bundle directories being silently ignored; `llmenv` now logs a warning
+  when a configured bundle name has no corresponding directory, making typos and
+  deleted directories detectable
 
 ## [1.0.8] - 2026-06-09
 
