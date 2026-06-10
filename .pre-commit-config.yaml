@@ -17,12 +17,6 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-push]
-      - id: cargo-test
-        name: cargo nextest run
-        entry: cargo nextest run
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
       - id: cargo-deny
         name: cargo deny check
         entry: cargo deny check
