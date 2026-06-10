@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix `memory.listen_host` unspecified-address warning emitting on every shell
+  prompt; the warning now only appears when the ICM proxy actually starts or
+  restarts (#347)
+
 ## [1.0.8] - 2026-06-09
 
 ### Added
