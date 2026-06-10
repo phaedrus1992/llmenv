@@ -18,8 +18,8 @@ repos:
         pass_filenames: false
         stages: [pre-push]
       - id: cargo-test
-        name: cargo test
-        entry: cargo test --all-features
+        name: cargo nextest run
+        entry: cargo nextest run --all-features
         language: system
         pass_filenames: false
         stages: [pre-push]
