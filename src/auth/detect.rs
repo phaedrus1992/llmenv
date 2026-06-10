@@ -14,7 +14,10 @@ use crate::materialize::manifest::{AuthSource, AuthStatus, CacheManifest};
 /// never fails because of auth sync.
 pub fn sync_auth_on_export(config_dir: &Path, adapter_root: &Path, manifest: &mut CacheManifest) {
     if let Err(e) = try_sync(config_dir, adapter_root, manifest) {
-        tracing::debug!("auth sync (non-fatal): {e}");
+        // Write failures are warn (not debug) — a read/parse failure is benign
+        // (file may have been deleted), but a failed cache or manifest write
+        // means the user sees "session login detected" but creds never persist.
+        tracing::warn!("auth sync failed (non-fatal): {e}");
     }
 }
 

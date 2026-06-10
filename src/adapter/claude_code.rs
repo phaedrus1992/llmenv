@@ -757,7 +757,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 /// dropped from config must actually disappear, and `permissions` must never be
 /// weakened by a stale union. The one shared key, `hooks`, is handled specially
 /// (see [`reconcile_settings`]) so a plugin's self-registered hook survives.
-pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 7] = [
+pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 9] = [
     "permissions",
     "enabledPlugins",
     "extraKnownMarketplaces",
@@ -765,38 +765,64 @@ pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 7] = [
     "effortLevel",
     "advisorSize",
     "hooks",
+    // Security: never allow these to be seeded from ~/.claude/settings.json —
+    // they bypass all tool-call confirmations across every environment.
+    "bypassPermissions",
+    "dangerouslySkipPermissions",
 ];
 
-/// Write `seeded` keys into `out/settings.json` as the initial document when
-/// the file does not yet exist (#172). The keys land as foreign (non-owned)
-/// entries that `reconcile_settings` preserves on every subsequent re-render.
+/// Merge user-elected seeded keys into `out/settings.json` after the adapter
+/// has already written the file (#172). Runs on every render, not just new
+/// folders: `reconcile_settings` already preserves existing foreign keys, so
+/// for re-renders this is nearly always a no-op (all seeded keys already
+/// present). For a fresh folder, this adds user defaults that would otherwise
+/// be absent from the first-rendered `settings.json`.
 ///
-/// No-op when `settings.json` already exists — in-place re-renders must not
-/// overwrite in-session state with stale seeded values.
+/// **Must be called after `adapter.materialize()`** so that if materialize
+/// fails, settings.json is left either absent (new folder, no partial state)
+/// or in its prior good state (re-render, reconcile is atomic). Calling before
+/// materialize can leave a seeded-only settings.json (no llmenv-owned keys)
+/// if materialize subsequently errors.
 ///
 /// # Errors
 /// Returns an error if serialization or the atomic write fails.
-pub(crate) fn seed_settings_if_new(
+pub(crate) fn apply_seeded_settings(
     out: &Path,
     seeded: &serde_json::Map<String, serde_json::Value>,
 ) -> anyhow::Result<()> {
-    if seeded.is_empty() || out.join("settings.json").exists() {
+    if seeded.is_empty() {
         return Ok(());
     }
-    // Defensive: strip any llmenv-owned keys (init validation already does
-    // this, but reconcile_settings would overwrite them anyway).
-    let clean: serde_json::Map<String, serde_json::Value> = seeded
-        .iter()
-        .filter(|(k, _)| !LLMENV_OWNED_SETTINGS_KEYS.contains(&k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    if clean.is_empty() {
+    let path = out.join("settings.json");
+    // Read whatever materialize wrote; no-op if file absent (materialize
+    // failed or skipped — don't create a seeded-only file in that case).
+    let existing: serde_json::Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "reading {} for seeding: {e}",
+                path.display()
+            ));
+        }
+    };
+    let serde_json::Value::Object(mut obj) = existing else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for (k, v) in seeded {
+        // Never add llmenv-owned keys — reconcile_settings owns those.
+        if !LLMENV_OWNED_SETTINGS_KEYS.contains(&k.as_str()) && !obj.contains_key(k) {
+            obj.insert(k.clone(), v.clone());
+            changed = true;
+        }
+    }
+    if !changed {
         return Ok(());
     }
-    let json = serde_json::to_string_pretty(&serde_json::Value::Object(clean))?;
-    std::fs::create_dir_all(out)?;
-    crate::paths::write_owner_only_atomic(&out.join("settings.json"), json.as_bytes())
-        .map_err(|e| anyhow::anyhow!("writing seeded settings {}: {e}", out.display()))
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(obj))?;
+    crate::paths::write_owner_only_atomic(&path, json.as_bytes())
+        .map_err(|e| anyhow::anyhow!("writing seeded settings {}: {e}", path.display()))
 }
 
 /// Merge llmenv's freshly-rendered settings (`fresh`) onto whatever already
