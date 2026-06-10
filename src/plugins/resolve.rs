@@ -24,6 +24,13 @@ pub struct ResolvedPlugin {
     /// Name of the collection that first selected this plugin, for provenance
     /// in `plugin ls`.
     pub collection: String,
+    /// Absolute on-disk path to the plugin payload for externally-sourced plugins
+    /// (those whose `source` in marketplace.json is a git URL, not a relative path).
+    /// `None` for first-party plugins (payload lives inside the marketplace clone).
+    /// Filled in after `sync_plugin_payloads` runs; resolution leaves it empty.
+    pub install_path: Option<String>,
+    /// Full git commit SHA of the installed payload. `None` for first-party plugins.
+    pub git_commit_sha: Option<String>,
 }
 
 /// A marketplace referenced by at least one selected plugin, ready to render
@@ -127,6 +134,8 @@ pub fn resolve_plugins(
                 marketplace: marketplace.to_string(),
                 plugin: name.to_string(),
                 collection: collection.name.clone(),
+                install_path: None,
+                git_commit_sha: None,
             });
         }
     }

@@ -151,6 +151,10 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
     for p in &m.plugins {
         update_len_prefixed(&mut h, p.marketplace.as_bytes());
         update_len_prefixed(&mut h, p.plugin.as_bytes());
+        // External plugins carry a git commit SHA as their content token — mix it
+        // in so a plugin update (new SHA) re-renders the scope, matching how
+        // marketplace HEAD tokens work in the loop below.
+        update_len_prefixed(&mut h, p.git_commit_sha.as_deref().unwrap_or("").as_bytes());
     }
     // Mix in referenced marketplaces by name + source + content token (git HEAD,
     // or install location for path sources). A marketplace update (new HEAD)
@@ -916,6 +920,8 @@ mod tests {
                         marketplace: "mk".into(),
                         plugin: name,
                         collection: "c".into(),
+                        install_path: None,
+                        git_commit_sha: None,
                     }],
                     vec![],
                 );

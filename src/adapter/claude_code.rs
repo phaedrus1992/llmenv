@@ -98,6 +98,19 @@ impl AgentAdapter for ClaudeCodeAdapter {
         generate_settings_json(out, manifest)?;
         owned.push(PathBuf::from("settings.json"));
 
+        // Write installed_plugins.json for external-sourced plugins so Claude Code
+        // treats them as pre-installed and loads them from the stable cache path.
+        // First-party plugins (install_path is None) are served directly from the
+        // marketplace directory and don't need an installed_plugins.json entry.
+        let external_plugins: Vec<_> = manifest
+            .plugins
+            .iter()
+            .filter(|p| p.install_path.is_some())
+            .collect();
+        if !external_plugins.is_empty() {
+            generate_installed_plugins_json(out, &external_plugins)?;
+        }
+
         // #244: merge resolved MCP servers (and any per-engine `native_mcp`
         // fragment, #97) into the top-level `mcpServers` of `.claude.json` — the
         // only surface Claude Code actually reads for user-scoped servers. The
@@ -462,6 +475,71 @@ fn validate_skills(out: &Path) -> anyhow::Result<()> {
 /// Cross-bundle merge (concat + dedup, scope-ordered) already happened in
 /// [`crate::merge`]; this function only renders.
 ///
+/// Write `plugins/installed_plugins.json` for external-sourced plugins so Claude
+/// Code treats them as pre-installed and loads from the stable cache path.
+///
+/// Only called when at least one plugin has a non-None `install_path`; first-party
+/// plugins (served from the marketplace clone via `directory` source) are excluded.
+/// The file follows Claude Code's v2 schema exactly.
+fn generate_installed_plugins_json(
+    out: &Path,
+    plugins: &[&crate::plugins::resolve::ResolvedPlugin],
+) -> anyhow::Result<()> {
+    let plugins_dir = out.join("plugins");
+    std::fs::create_dir_all(&plugins_dir)?;
+    let path = plugins_dir.join("installed_plugins.json");
+
+    // A fixed epoch timestamp is acceptable: CC uses installedAt/lastUpdated
+    // for display only, not for any functional decision.
+    let now = "1970-01-01T00:00:00.000Z";
+
+    let mut existing: serde_json::Map<String, serde_json::Value> = if path.exists() {
+        let raw = std::fs::read(&path)?;
+        match serde_json::from_slice(&raw) {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!(
+                    "installed_plugins.json at {} is not valid JSON ({e}); overwriting",
+                    path.display()
+                );
+                serde_json::Map::new()
+            }
+        }
+    } else {
+        serde_json::Map::new()
+    };
+
+    let entries = existing.entry("plugins").or_insert_with(|| json!({}));
+    let map = entries
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("installed_plugins.json: `plugins` is not an object"))?;
+
+    for p in plugins {
+        let Some(install_path) = &p.install_path else {
+            continue;
+        };
+        let sha = p.git_commit_sha.as_deref().unwrap_or_default();
+        let version = if sha.len() >= 12 { &sha[..12] } else { sha };
+        let key = format!("{}@{}", p.plugin, p.marketplace);
+        map.insert(
+            key,
+            json!([{
+                "scope": "user",
+                "installPath": install_path,
+                "version": version,
+                "installedAt": now,
+                "lastUpdated": now,
+                "gitCommitSha": sha,
+            }]),
+        );
+    }
+
+    existing.insert("version".into(), json!(2));
+    let json_str = serde_json::to_string_pretty(&serde_json::Value::Object(existing))?;
+    crate::paths::write_owner_only_atomic(&path, json_str.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
+}
+
 /// Resolve bundle-relative paths in a hook command string.
 /// Scans whitespace-separated tokens and resolves those containing '/' (but not
 /// starting with '/', '~', '$', or '-') to absolute paths relative to bundle_dir.

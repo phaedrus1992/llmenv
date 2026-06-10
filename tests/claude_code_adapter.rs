@@ -1442,3 +1442,62 @@ fn emit_hook_context_handles_unicode() {
     assert!(context.contains("🚀"));
     assert!(context.contains("日本語"));
 }
+
+#[test]
+fn materialize_writes_installed_plugins_json_for_external_plugins() {
+    use llmenv::plugins::resolve::ResolvedPlugin;
+    let tmp = tempdir().unwrap();
+    let payload_dir = tmp.path().join("payload");
+    std::fs::create_dir_all(&payload_dir).unwrap();
+
+    let mut manifest = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &[],
+    )
+    .unwrap();
+    manifest.plugins = vec![
+        ResolvedPlugin {
+            marketplace: "my-market".into(),
+            plugin: "ext-plugin".into(),
+            collection: "col".into(),
+            install_path: Some(payload_dir.to_string_lossy().into_owned()),
+            git_commit_sha: Some("deadbeef1234567890abcdef".into()),
+        },
+        ResolvedPlugin {
+            marketplace: "my-market".into(),
+            plugin: "first-party-plugin".into(),
+            collection: "col".into(),
+            install_path: None,
+            git_commit_sha: None,
+        },
+    ];
+
+    let out = tmp.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    ClaudeCodeAdapter.materialize(&manifest, &out).unwrap();
+
+    let installed_path = out.join("plugins").join("installed_plugins.json");
+    assert!(
+        installed_path.exists(),
+        "installed_plugins.json should be written"
+    );
+
+    let content = std::fs::read_to_string(&installed_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(json["version"], 2);
+    let plugins = json["plugins"].as_object().unwrap();
+    assert!(
+        plugins.contains_key("ext-plugin@my-market"),
+        "external plugin should be in installed_plugins"
+    );
+    assert!(
+        !plugins.contains_key("first-party-plugin@my-market"),
+        "first-party plugin should not be in installed_plugins"
+    );
+    let entry = &plugins["ext-plugin@my-market"][0];
+    assert_eq!(entry["installPath"], payload_dir.to_string_lossy().as_ref());
+    assert_eq!(entry["gitCommitSha"], "deadbeef1234567890abcdef");
+    assert_eq!(entry["scope"], "user");
+}
