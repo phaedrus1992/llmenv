@@ -775,12 +775,31 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     if let Some(bind) = local_memory_server_bind(&config, &active) {
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
-                if let Err(e) = crate::mcp::proxy::ensure_running(
+                match crate::mcp::proxy::ensure_running(
                     &bind,
                     &pid_path,
                     crate::mcp::proxy::spawn_mcp_proxy,
                 ) {
-                    eprintln!("warning: failed to ensure mcp-proxy running: {e}");
+                    Ok(outcome) => {
+                        // Warn when binding to all interfaces only on startup — the ICM
+                        // daemon is unauthenticated.
+                        if outcome == crate::mcp::proxy::EnsureOutcome::Spawned
+                            && let Some(memory) =
+                                config.features.as_ref().and_then(|f| f.memory.as_ref())
+                            && let Ok(addr) = memory.listen_host.parse::<std::net::IpAddr>()
+                            && addr.is_unspecified()
+                        {
+                            eprintln!(
+                                "warning: memory.listen_host is '{}' — the ICM proxy will \
+                                 accept connections on ALL network interfaces. Set a specific \
+                                 IP to restrict access.",
+                                memory.listen_host
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warning: failed to ensure mcp-proxy running: {e}");
+                    }
                 }
             }
             Err(e) => {
@@ -2216,16 +2235,6 @@ fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
 fn local_memory_server_bind(config: &Config, active: &ActiveScopes) -> Option<String> {
     let mem = config.features.as_ref().and_then(|f| f.memory.as_ref())?;
     if is_memory_backend_active(config, active) {
-        // Warn when binding to all interfaces — the ICM daemon is unauthenticated.
-        if let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
-            && addr.is_unspecified()
-        {
-            eprintln!(
-                "warning: memory.listen_host is '{}' — the ICM proxy will accept \
-                 connections on ALL network interfaces. Set a specific IP to restrict access.",
-                mem.listen_host
-            );
-        }
         Some(format!("{}:{}", mem.listen_host, mem.port))
     } else {
         None
