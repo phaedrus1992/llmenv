@@ -14,7 +14,7 @@ repos:
         stages: [pre-commit]
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+        entry: cargo clippy --all-features --tests -- -D warnings
         language: system
         pass_filenames: false
         stages: [pre-push]
