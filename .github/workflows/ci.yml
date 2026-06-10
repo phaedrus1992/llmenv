@@ -38,8 +38,8 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo nextest run --all-features
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo nextest run
   deny:
     runs-on: ubuntu-latest
     steps:

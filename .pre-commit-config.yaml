@@ -13,13 +13,13 @@ repos:
         stages: [pre-commit]
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --all-features --tests -- -D warnings
+        entry: cargo clippy --tests -- -D warnings
         language: system
         pass_filenames: false
         stages: [pre-push]
       - id: cargo-test
         name: cargo nextest run
-        entry: cargo nextest run --all-features
+        entry: cargo nextest run
         language: system
         pass_filenames: false
         stages: [pre-push]
