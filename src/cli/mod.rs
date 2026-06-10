@@ -1150,9 +1150,21 @@ fn sync_plugin_payloads(
         .map(|mut p| {
             let mkt_path = crate::plugins::cache::marketplace_path(cache_root, &p.marketplace);
             let Ok(entries) = crate::plugins::cache::read_marketplace_plugins(&mkt_path) else {
+                tracing::warn!(
+                    "cannot read marketplace manifest for '{}' — skipping external plugin '{}', \
+                     run `llmenv sync` to repair",
+                    p.marketplace,
+                    p.plugin
+                );
                 return p;
             };
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
+                tracing::warn!(
+                    "plugin '{}' not found in marketplace '{}' manifest — \
+                     verify plugin name or run `llmenv sync`",
+                    p.plugin,
+                    p.marketplace
+                );
                 return p;
             };
             if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
@@ -1177,7 +1189,10 @@ fn sync_plugin_payloads(
                     );
                 }
                 Err(e) => {
-                    tracing::debug!("external plugin payload lookup failed (non-fatal): {e}");
+                    eprintln!(
+                        "warning: external plugin '{}@{}' payload lookup failed: {e}",
+                        p.plugin, p.marketplace
+                    );
                 }
             }
             p
@@ -2190,6 +2205,10 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         let plugins = crate::plugins::cache::read_marketplace_plugins(&mkt_path)
             .with_context(|| format!("reading marketplace manifest for '{mkt_name}'"))?;
         let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
+            eprintln!(
+                "warning: plugin '{plugin_name}@{mkt_name}' not found in marketplace manifest \
+                 — verify the plugin name or run `llmenv sync` to refresh the clone"
+            );
             continue;
         };
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {

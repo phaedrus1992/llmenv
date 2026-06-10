@@ -255,7 +255,11 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
 /// paths are served directly from the marketplace directory.
 #[must_use]
 pub fn is_external_plugin_source(source: &str) -> bool {
-    !source.starts_with("./") && source != "." && source != "./"
+    !source.starts_with("./")
+        && !source.starts_with("../")
+        && source != "."
+        && source != "./"
+        && source != ".."
 }
 
 /// Sync an external-sourced plugin payload to the stable llmenv cache.
@@ -287,6 +291,14 @@ pub fn sync_external_plugin_with(
     git: &dyn GitBackend,
 ) -> Result<MarketplaceState, SyncError> {
     reject_unsafe_source(source).map_err(SyncError::Other)?;
+    // plugin name comes from marketplace.json (network-sourced); guard against
+    // path traversal before joining into the cache path.
+    if crate::paths::is_unsafe_join_target(plugin) {
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "plugin name '{plugin}' in marketplace '{marketplace}' \
+             contains an unsafe path component"
+        )));
+    }
     let dest = plugin_payload_path(cache_dir, marketplace, plugin);
     if dest.join(".git").exists() {
         if refresh {
@@ -297,7 +309,13 @@ pub fn sync_external_plugin_with(
             name: format!("{plugin}@{marketplace}"),
         });
     } else {
-        std::fs::create_dir_all(&dest)
+        // Create the parent dir so git can create `dest` itself. Creating `dest`
+        // directly would block re-clone after a partial failure (git clone rejects
+        // non-empty directories).
+        let parent = dest.parent().ok_or_else(|| {
+            SyncError::Other(anyhow::anyhow!("plugin payload path has no parent"))
+        })?;
+        std::fs::create_dir_all(parent)
             .map_err(|e| SyncError::Other(anyhow::anyhow!("creating plugin payload dir: {e}")))?;
         git.clone(source, &dest)
             .map_err(|e| SyncError::CloneFailed {
@@ -529,6 +547,8 @@ mod tests {
         assert!(!is_external_plugin_source("./claude-plugins/nbl-dev"));
         assert!(!is_external_plugin_source("./"));
         assert!(!is_external_plugin_source("."));
+        assert!(!is_external_plugin_source("../traversal"));
+        assert!(!is_external_plugin_source(".."));
     }
 
     #[test]

@@ -495,7 +495,16 @@ fn generate_installed_plugins_json(
 
     let mut existing: serde_json::Map<String, serde_json::Value> = if path.exists() {
         let raw = std::fs::read(&path)?;
-        serde_json::from_slice(&raw).unwrap_or_default()
+        match serde_json::from_slice(&raw) {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!(
+                    "installed_plugins.json at {} is not valid JSON ({e}); overwriting",
+                    path.display()
+                );
+                serde_json::Map::new()
+            }
+        }
     } else {
         serde_json::Map::new()
     };
