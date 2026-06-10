@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+/// Settings pre-seeded during `llmenv init` for newly-materialized folders.
+///
+/// Keys are written into `settings.json` as foreign (non-llmenv-owned) keys
+/// before the adapter's render pass, so they survive every re-render via the
+/// existing foreign-key preservation in `reconcile_settings`. Values preserve
+/// their original JSON type (bool, number, string, etc.).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct InitConfig {
+    /// Non-owned `settings.json` keys the user elected to carry into every new
+    /// materialized folder. Never contains keys from the adapter's owned-key
+    /// set — validated at write time by `llmenv init`.
+    #[serde(default)]
+    pub seeded_settings: serde_json::Map<String, serde_json::Value>,
+}
+
 /// llmenv feature toggles and experimental configuration. Nested under
 /// `features:` in `config.yaml`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
@@ -12,7 +27,7 @@ pub struct Features {
     pub memory: Option<Memory>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub cache: Cache,
@@ -63,6 +78,10 @@ pub struct Config {
     /// `id`s by convention, though any name the config references works).
     #[serde(default)]
     pub host: std::collections::BTreeMap<String, HostEntry>,
+    /// Settings pre-seeded during `llmenv init`. Written as foreign keys into
+    /// new materialized folders' `settings.json`, surviving every re-render.
+    #[serde(default)]
+    pub init: InitConfig,
 }
 
 /// llmenv's own cache/sync behavior. Distinct from engine `capabilities` — this

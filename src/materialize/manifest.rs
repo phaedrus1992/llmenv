@@ -20,6 +20,32 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// How the auth state in a materialized folder was established.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthSource {
+    /// Copied from the stable auth cache during `build_and_materialize`.
+    Inherited,
+    /// Set explicitly by `llmenv login` in this folder.
+    Explicit,
+    /// No auth info has been observed or injected.
+    #[default]
+    None,
+}
+
+/// Auth state recorded in the manifest dotfile.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthStatus {
+    /// How auth arrived in this folder.
+    pub source: AuthSource,
+    /// `oauthAccount` UUID active in this folder, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Email for display; not used as an identity key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
 /// The dotfile name written into every materialized folder.
 pub const MANIFEST_FILE: &str = ".llmenv-manifest.json";
 
@@ -43,6 +69,9 @@ pub struct CacheManifest {
     /// [`Self::active_tags`].
     #[serde(default)]
     pub enabled_bundles: BTreeSet<String>,
+    /// Auth state for this materialized folder.
+    #[serde(default)]
+    pub auth_status: AuthStatus,
 }
 
 impl CacheManifest {
@@ -69,7 +98,17 @@ impl CacheManifest {
             owned,
             active_tags: BTreeSet::new(),
             enabled_bundles: BTreeSet::new(),
+            auth_status: AuthStatus::default(),
         }
+    }
+
+    /// Attach the auth status observed during this render, for change-detection
+    /// on the next `export` cycle. Kept separate from [`Self::new`] so callers
+    /// that don't inject auth (tests, internal renders) skip it cleanly.
+    #[must_use]
+    pub fn with_auth_status(mut self, auth_status: AuthStatus) -> Self {
+        self.auth_status = auth_status;
+        self
     }
 
     /// Attach the plaintext selection (active tags + directly-enabled bundles)
@@ -235,6 +274,36 @@ mod tests {
         assert_eq!(back.content_hash, "abc");
         assert!(back.active_tags.is_empty());
         assert!(back.enabled_bundles.is_empty());
+    }
+
+    #[test]
+    fn manifest_without_auth_status_deserializes() {
+        // Pre-#172 manifests have no auth_status; must default to None/empty.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(MANIFEST_FILE),
+            br#"{"content_hash":"abc","owned":["CLAUDE.md"]}"#,
+        )
+        .unwrap();
+        let back = CacheManifest::read(tmp.path()).unwrap().unwrap();
+        assert_eq!(back.auth_status.source, AuthSource::None);
+        assert!(back.auth_status.id.is_none());
+        assert!(back.auth_status.email.is_none());
+    }
+
+    #[test]
+    fn with_auth_status_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status = AuthStatus {
+            source: AuthSource::Inherited,
+            id: Some("some-uuid-1234".to_string()),
+            email: Some("user@example.com".to_string()),
+        };
+        let m = CacheManifest::new("deadbeef", vec![PathBuf::from("CLAUDE.md")])
+            .with_auth_status(status.clone());
+        m.write(tmp.path()).unwrap();
+        let back = CacheManifest::read(tmp.path()).unwrap().unwrap();
+        assert_eq!(back.auth_status, status);
     }
 
     #[test]

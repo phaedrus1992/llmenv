@@ -197,6 +197,13 @@ enum Command {
         /// Lifecycle event: session_start, turn_start, or session_end
         event: String,
     },
+    /// Manage auth credentials for materialized folders (#172)
+    Login {
+        /// Apply to the global auth cache (all future materializations) rather
+        /// than only the current materialized folder
+        #[arg(long)]
+        global: bool,
+    },
     /// Clean stale cache folders
     Prune {
         /// Remove ALL cache folders unconditionally (next export re-materializes all environments)
@@ -276,6 +283,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::HookRun { event }) => {
             crate::hook_run::run(&event)?;
+        }
+        Some(Command::Login { global }) => {
+            run_login(global)?;
         }
         Some(Command::Prune {
             all,
@@ -834,10 +844,30 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     // so callers (shell hooks, CI) can detect it — silently continuing
     // without CLAUDE_CONFIG_DIR violates the export contract. (#281)
     match build_and_materialize(&config, &config_dir, &active, &firing) {
-        Ok(Some((cache_path, extra_vars))) => {
+        Ok(Some((ref cache_path, ref extra_vars))) => {
             tracing::debug!("materialized agent config at {}", cache_path.display());
             for (k, v) in extra_vars {
-                vars.insert(k, v);
+                vars.insert(k.clone(), v.clone());
+            }
+            // Auth sync: detect in-session login changes and refresh the
+            // stable cache. Non-fatal — export must not fail on auth errors.
+            let adapter_root =
+                expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
+            match crate::materialize::manifest::CacheManifest::read(cache_path) {
+                Ok(Some(mut manifest)) => {
+                    crate::auth::detect::sync_auth_on_export(
+                        cache_path,
+                        &adapter_root,
+                        &mut manifest,
+                    );
+                }
+                Ok(None) => {} // absent/corrupt: already logged inside CacheManifest::read
+                Err(e) => {
+                    tracing::warn!(
+                        "auth sync skipped: could not read cache manifest at {}: {e}",
+                        cache_path.display()
+                    );
+                }
             }
         }
         Ok(None) => {
@@ -992,17 +1022,27 @@ fn build_and_materialize(
     )?;
     let cache_path = rendered.path;
 
-    // Run the adapter writer too — materialize copies raw bundle files, but
-    // only the adapter writes the agent-native rules file (CLAUDE.md), the
-    // MCP config, and settings.json. It returns the paths it owns; we union
-    // them with the generic bundle files to form llmenv's complete owned set
-    // for this folder (#196). Idempotent per the adapter contract.
+    // Run the adapter writer — materialize writes CLAUDE.md, rules, MCP config,
+    // and settings.json. Returns the paths it owns; we union them with the
+    // generic bundle files to form llmenv's complete owned set (#196). Idempotent.
     let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
+
+    // Merge user-elected seeded settings after materialize succeeds (#172).
+    // Must run post-materialize so a materialize failure leaves settings.json
+    // either absent (new folder) or in its prior good state (re-render).
+    crate::adapter::claude_code::apply_seeded_settings(&cache_path, &config.init.seeded_settings)?;
+
+    // Auth inheritance (#172): inject cached credentials after the adapter has
+    // finished its own .claude.json writes (mcpServers upsert). Only fires
+    // when the stable cache has an entry.
+    let auth_status = inject_cached_auth_if_available(&adapter_root, &cache_path);
+
     let owned = adapter_owned
         .into_iter()
         .chain(manifest.files.keys().cloned());
     let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
-        .with_selection(tags.clone(), bundles);
+        .with_selection(tags.clone(), bundles)
+        .with_auth_status(auth_status);
     write_cache_manifest(&cache_path, &current, config.cache.hashing)?;
 
     let mut env_vars = adapter.env_vars(&cache_path)?;
@@ -1025,6 +1065,38 @@ fn build_and_materialize(
     // `export NAME=...` shell contract.
     reject_invalid_var_names(&env_vars)?;
     Ok(Some((cache_path, env_vars)))
+}
+
+/// Inject the most-recently-cached auth entry into a materialized folder (#172).
+///
+/// Non-fatal: if the cache is empty or the inject fails the folder simply has
+/// no pre-seeded auth. Errors are traced at debug so `run_export` stays clean.
+fn inject_cached_auth_if_available(
+    adapter_root: &std::path::Path,
+    cache_path: &std::path::Path,
+) -> crate::materialize::manifest::AuthStatus {
+    use crate::materialize::manifest::{AuthSource, AuthStatus};
+    match crate::auth::choose_auth_for_inheritance(adapter_root) {
+        Err(e) => {
+            tracing::debug!("auth cache lookup failed (non-fatal): {e}");
+            AuthStatus::default()
+        }
+        Ok(None) => AuthStatus::default(),
+        Ok(Some(entry)) => match crate::auth::inject_auth_into_claude_json(cache_path, &entry) {
+            Ok(()) => {
+                eprintln!("[llmenv] auth: {} (inherited)", entry.email);
+                AuthStatus {
+                    source: AuthSource::Inherited,
+                    id: Some(entry.uuid),
+                    email: Some(entry.email),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("auth inject failed for {} (non-fatal): {e}", entry.email);
+                AuthStatus::default()
+            }
+        },
+    }
 }
 
 /// Write the owned-set manifest dotfile `current` for a freshly materialized
@@ -1525,7 +1597,7 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
         .with_context(|| format!("writing template to {}", config_path.display()))?;
     eprintln!("Created template config at {}", config_path.display());
 
-    Config::load(&config_path).with_context(|| {
+    let config = Config::load(&config_path).with_context(|| {
         format!(
             "validating newly-written config at {}",
             config_path.display()
@@ -1668,6 +1740,234 @@ This directory contains your llmenv configuration.
         eprintln!("Created README at {}", readme_path.display());
     }
 
+    // Interactive first-run prompts (only when stdin is a TTY).
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        let adapter_root = expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
+        run_init_auth_prompt(&adapter_root)?;
+        run_init_settings_prompt(&config_path)?;
+    }
+
+    Ok(())
+}
+
+/// Interactive auth setup for `llmenv init` (#172).
+///
+/// Prompts the user to (a) login via `claude auth login`, (b) import from the
+/// default `~/.claude/.claude.json`, or (c) skip. Only runs when stdin is a TTY.
+fn run_init_auth_prompt(adapter_root: &Path) -> anyhow::Result<()> {
+    use dialoguer::Select;
+    let selection = Select::new()
+        .with_prompt("Configure authentication for new Claude Code sessions?")
+        .items([
+            "Login fresh via `claude auth login`",
+            "Import from ~/.claude (copy existing login)",
+            "Skip (configure later with `llmenv login`)",
+        ])
+        .default(2)
+        .interact_opt()
+        .map_err(|e| anyhow::anyhow!("auth prompt failed: {e}"))?;
+
+    match selection {
+        Some(0) => {
+            // Launch claude auth login in a temp dir, capture the result.
+            eprintln!("Launching Claude Code login...");
+            run_login_capture(adapter_root, None)?;
+        }
+        Some(1) => {
+            let default_claude =
+                PathBuf::from(paths::expand_tilde("~/.claude")).join(".claude.json");
+            if default_claude.exists() {
+                import_auth_from_file(&default_claude, adapter_root)?;
+            } else {
+                eprintln!(
+                    "~/.claude/.claude.json not found — skipping. \
+                     Run `llmenv login` after authenticating."
+                );
+            }
+        }
+        _ => {
+            eprintln!("Skipping auth setup. Run `llmenv login` when ready.");
+        }
+    }
+    Ok(())
+}
+
+/// Interactive settings import for `llmenv init` (#172).
+///
+/// Reads `~/.claude/settings.json`, presents the non-owned keys as a checkbox
+/// list, and stores selected keys in `config.yaml` under `init.seeded_settings`.
+fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
+    use crate::adapter::claude_code::LLMENV_OWNED_SETTINGS_KEYS;
+    use dialoguer::MultiSelect;
+
+    let global_settings = PathBuf::from(paths::expand_tilde("~/.claude")).join("settings.json");
+    if !global_settings.exists() {
+        return Ok(());
+    }
+    let bytes = match std::fs::read(&global_settings) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "warning: could not read {} — skipping settings import: {e}",
+                global_settings.display()
+            );
+            return Ok(());
+        }
+    };
+    let doc: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "warning: {} is not valid JSON — skipping settings import: {e}",
+                global_settings.display()
+            );
+            return Ok(());
+        }
+    };
+    let Some(obj) = doc.as_object() else {
+        return Ok(());
+    };
+    let candidates: Vec<(&String, &serde_json::Value)> = obj
+        .iter()
+        .filter(|(k, _)| !LLMENV_OWNED_SETTINGS_KEYS.contains(&k.as_str()))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let labels: Vec<String> = candidates
+        .iter()
+        .map(|(k, v)| format!("{k} = {v}"))
+        .collect();
+    let chosen = MultiSelect::new()
+        .with_prompt(
+            "Select settings from ~/.claude/settings.json to seed into new folders \
+             (space to toggle, enter to confirm)",
+        )
+        .items(&labels)
+        .interact_opt()
+        .map_err(|e| anyhow::anyhow!("settings prompt failed: {e}"))?;
+
+    let Some(indices) = chosen else {
+        return Ok(());
+    };
+    if indices.is_empty() {
+        return Ok(());
+    }
+    let count = indices.len();
+
+    // Load the current config, merge selected keys, write back.
+    let mut config = Config::load(config_path)?;
+    for idx in indices {
+        let (key, val) = candidates[idx];
+        config.init.seeded_settings.insert(key.clone(), val.clone());
+    }
+    let yaml =
+        serde_yaml::to_string(&config).map_err(|e| anyhow::anyhow!("serializing config: {e}"))?;
+    paths::write_owner_only_atomic(config_path, yaml.as_bytes())
+        .with_context(|| format!("writing config {}", config_path.display()))?;
+    eprintln!("✓ {count} setting(s) added to init.seeded_settings in config.yaml");
+    Ok(())
+}
+
+/// `llmenv login [--global]` (#172): capture credentials via `claude auth login`
+/// and store them in the stable auth cache.
+///
+/// Without `--global`: updates only the current materialized folder's auth.
+/// With `--global`: updates the stable cache (inherited by all future folders).
+fn run_login(global: bool) -> anyhow::Result<()> {
+    let config = Config::load(&paths::config_path()?)?;
+    let adapter_root = expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
+
+    if global {
+        eprintln!("Capturing global auth (will be inherited by all new folders)...");
+        run_login_capture(&adapter_root, None)?;
+    } else {
+        // Only inject into a folder that llmenv manages (i.e. under adapter_root).
+        // Reject CLAUDE_CONFIG_DIR pointing at an arbitrary directory — that would
+        // write auth tokens + a manifest dotfile somewhere unexpected.
+        let current_folder = std::env::var("CLAUDE_CONFIG_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.starts_with(&adapter_root));
+        if current_folder.is_none() {
+            eprintln!(
+                "note: CLAUDE_CONFIG_DIR is not set or not under the llmenv adapter root — \
+                 capturing global auth only. Run `llmenv export` then re-run without \
+                 --global to apply to the current folder."
+            );
+        }
+        run_login_capture(&adapter_root, current_folder.as_deref())?;
+    }
+    Ok(())
+}
+
+/// Launch `claude auth login` in a temp dir, capture the resulting auth, and
+/// save it to the stable cache. Optionally also writes to `current_folder`.
+fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyhow::Result<()> {
+    let tmp = tempfile::TempDir::new()
+        .map_err(|e| anyhow::anyhow!("creating temp dir for login: {e}"))?;
+
+    let status = std::process::Command::new("claude")
+        .args(["auth", "login"])
+        .env("CLAUDE_CONFIG_DIR", tmp.path())
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "running `claude auth login` failed: {e}. \
+             Is the Claude Code CLI installed and on PATH?"
+            )
+        })?;
+
+    if !status.success() {
+        anyhow::bail!("`claude auth login` exited with status {status}");
+    }
+
+    let entry = crate::auth::read_auth_from_dir(tmp.path())?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "`claude auth login` completed but no oauthAccount found in the result. \
+             Try running `claude auth login` directly."
+        )
+    })?;
+
+    crate::auth::save_auth_entry(adapter_root, &entry)?;
+    eprintln!("[llmenv] login: saved auth for {}", entry.email);
+
+    if let Some(folder) = current_folder
+        && folder.is_dir()
+    {
+        crate::auth::inject_auth_into_claude_json(folder, &entry)?;
+        // Update manifest auth_status to Explicit.
+        if let Ok(Some(mut manifest)) = crate::materialize::manifest::CacheManifest::read(folder) {
+            manifest.auth_status = crate::materialize::manifest::AuthStatus {
+                source: crate::materialize::manifest::AuthSource::Explicit,
+                id: Some(entry.uuid),
+                email: Some(entry.email),
+            };
+            manifest.write(folder)?;
+        }
+    }
+    Ok(())
+}
+
+/// Import auth from an existing `.claude.json` file into the stable cache (#172).
+fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyhow::Result<()> {
+    let bytes = std::fs::read(source).with_context(|| format!("reading {}", source.display()))?;
+    let doc: serde_json::Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", source.display()))?;
+    let entry = crate::auth::extract_auth_entry(&doc).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no oauthAccount block — not logged in. \
+             Try `llmenv login` to authenticate.",
+            source.display()
+        )
+    })?;
+    crate::auth::save_auth_entry(adapter_root, &entry)?;
+    eprintln!("[llmenv] login: imported auth for {}", entry.email);
     Ok(())
 }
 
