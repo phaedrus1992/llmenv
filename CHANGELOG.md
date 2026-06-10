@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.9] - 2026-06-10
+
 ### Fixed
 
 - Fix `memory.listen_host` unspecified-address warning emitting on every shell
@@ -245,7 +247,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.9...HEAD
+[1.0.9]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/phaedrus1992/llmenv/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/phaedrus1992/llmenv/compare/v1.0.5...v1.0.6

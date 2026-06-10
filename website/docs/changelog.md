@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.9] - 2026-06-10
+
 ### Fixed
 
 - Fix `memory.listen_host` unspecified-address warning emitting on every shell
