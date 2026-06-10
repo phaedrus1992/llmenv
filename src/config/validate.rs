@@ -753,6 +753,7 @@ mod tests {
                         plugin_collection,
                         state: Default::default(),
                         host,
+                        init: Default::default(),
                     }
                 },
             )
@@ -797,6 +798,7 @@ mod tests {
                     plugin_collection: vec![],
                     state: Default::default(),
                     host: Default::default(),
+                    init: Default::default(),
                 };
                 prop_assert!(
                     config.validate().is_err(),
@@ -826,6 +828,7 @@ mod tests {
                     plugin_collection: vec![],
                     state: Default::default(),
                     host: Default::default(),
+                    init: Default::default(),
                 };
                 prop_assert!(
                     config.validate().is_err(),
@@ -852,6 +855,7 @@ mod tests {
                     plugin_collection: vec![],
                     state: Default::default(),
                     host: Default::default(),
+                    init: Default::default(),
                 };
                 prop_assert!(
                     config.validate().is_err(),
@@ -891,6 +895,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -922,6 +927,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -953,6 +959,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -981,6 +988,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(matches!(
             config.validate(),
@@ -1015,6 +1023,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1046,6 +1055,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1075,6 +1085,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1104,6 +1115,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1133,6 +1145,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1164,6 +1177,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1196,6 +1210,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1225,6 +1240,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1254,6 +1270,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1278,6 +1295,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1302,6 +1320,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1328,6 +1347,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -1351,6 +1371,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1376,6 +1397,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1399,6 +1421,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1417,6 +1440,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -1440,6 +1464,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1463,6 +1488,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -1486,6 +1512,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -1506,6 +1533,7 @@ mod tests {
             plugin_collection: vec![],
             state: Default::default(),
             host: Default::default(),
+            init: Default::default(),
         }
     }
 

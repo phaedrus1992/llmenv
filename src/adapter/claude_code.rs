@@ -757,7 +757,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 /// dropped from config must actually disappear, and `permissions` must never be
 /// weakened by a stale union. The one shared key, `hooks`, is handled specially
 /// (see [`reconcile_settings`]) so a plugin's self-registered hook survives.
-const LLMENV_OWNED_SETTINGS_KEYS: [&str; 7] = [
+pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 7] = [
     "permissions",
     "enabledPlugins",
     "extraKnownMarketplaces",
@@ -766,6 +766,38 @@ const LLMENV_OWNED_SETTINGS_KEYS: [&str; 7] = [
     "advisorSize",
     "hooks",
 ];
+
+/// Write `seeded` keys into `out/settings.json` as the initial document when
+/// the file does not yet exist (#172). The keys land as foreign (non-owned)
+/// entries that `reconcile_settings` preserves on every subsequent re-render.
+///
+/// No-op when `settings.json` already exists — in-place re-renders must not
+/// overwrite in-session state with stale seeded values.
+///
+/// # Errors
+/// Returns an error if serialization or the atomic write fails.
+pub(crate) fn seed_settings_if_new(
+    out: &Path,
+    seeded: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    if seeded.is_empty() || out.join("settings.json").exists() {
+        return Ok(());
+    }
+    // Defensive: strip any llmenv-owned keys (init validation already does
+    // this, but reconcile_settings would overwrite them anyway).
+    let clean: serde_json::Map<String, serde_json::Value> = seeded
+        .iter()
+        .filter(|(k, _)| !LLMENV_OWNED_SETTINGS_KEYS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if clean.is_empty() {
+        return Ok(());
+    }
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(clean))?;
+    std::fs::create_dir_all(out)?;
+    crate::paths::write_owner_only_atomic(&out.join("settings.json"), json.as_bytes())
+        .map_err(|e| anyhow::anyhow!("writing seeded settings {}: {e}", out.display()))
+}
 
 /// Merge llmenv's freshly-rendered settings (`fresh`) onto whatever already
 /// exists at `path`, preserving foreign in-session state (#175, #196).
