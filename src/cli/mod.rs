@@ -1735,7 +1735,7 @@ This directory contains your llmenv configuration.
     if std::io::stdin().is_terminal() {
         let adapter_root = expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
         run_init_auth_prompt(&adapter_root)?;
-        run_init_settings_prompt(&config_dir, &config_path)?;
+        run_init_settings_prompt(&config_path)?;
     }
 
     Ok(())
@@ -1749,7 +1749,7 @@ fn run_init_auth_prompt(adapter_root: &Path) -> anyhow::Result<()> {
     use dialoguer::Select;
     let selection = Select::new()
         .with_prompt("Configure authentication for new Claude Code sessions?")
-        .items(&[
+        .items([
             "Login fresh via `claude auth login`",
             "Import from ~/.claude (copy existing login)",
             "Skip (configure later with `llmenv login`)",
@@ -1787,7 +1787,7 @@ fn run_init_auth_prompt(adapter_root: &Path) -> anyhow::Result<()> {
 ///
 /// Reads `~/.claude/settings.json`, presents the non-owned keys as a checkbox
 /// list, and stores selected keys in `config.yaml` under `init.seeded_settings`.
-fn run_init_settings_prompt(config_dir: &Path, config_path: &Path) -> anyhow::Result<()> {
+fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
     use crate::adapter::claude_code::LLMENV_OWNED_SETTINGS_KEYS;
     use dialoguer::MultiSelect;
 
@@ -1903,20 +1903,18 @@ fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyh
     crate::auth::save_auth_entry(adapter_root, &entry)?;
     eprintln!("[llmenv] login: saved auth for {}", entry.email);
 
-    if let Some(folder) = current_folder {
-        if folder.is_dir() {
-            crate::auth::inject_auth_into_claude_json(folder, &entry)?;
-            // Update manifest auth_status to Explicit.
-            if let Ok(Some(mut manifest)) =
-                crate::materialize::manifest::CacheManifest::read(folder)
-            {
-                manifest.auth_status = crate::materialize::manifest::AuthStatus {
-                    source: crate::materialize::manifest::AuthSource::Explicit,
-                    id: Some(entry.uuid),
-                    email: Some(entry.email),
-                };
-                manifest.write(folder)?;
-            }
+    if let Some(folder) = current_folder
+        && folder.is_dir()
+    {
+        crate::auth::inject_auth_into_claude_json(folder, &entry)?;
+        // Update manifest auth_status to Explicit.
+        if let Ok(Some(mut manifest)) = crate::materialize::manifest::CacheManifest::read(folder) {
+            manifest.auth_status = crate::materialize::manifest::AuthStatus {
+                source: crate::materialize::manifest::AuthSource::Explicit,
+                id: Some(entry.uuid),
+                email: Some(entry.email),
+            };
+            manifest.write(folder)?;
         }
     }
     Ok(())

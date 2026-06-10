@@ -44,11 +44,9 @@ fn try_sync(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use super::*;
-    use crate::auth::AuthEntry;
     use crate::materialize::manifest::CacheManifest;
 
     fn make_manifest(uuid: Option<&str>) -> CacheManifest {
