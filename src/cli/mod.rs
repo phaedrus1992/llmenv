@@ -1631,7 +1631,7 @@ fn sync_plugin_payloads(
 /// Resolve firing bundles to on-disk `BundleRef`s in scope precedence order
 /// (network → host → user → project), then unscoped tags in declaration
 /// order. Bundles with no content directory under `<config_dir>/bundles/<name>/`
-/// are dropped silently — vars-only bundles are valid.
+/// are dropped silently — tag-only bundles (no content directory) are valid.
 fn build_bundle_refs(
     config_dir: &Path,
     active: &ActiveScopes,
