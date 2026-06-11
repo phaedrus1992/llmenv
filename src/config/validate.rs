@@ -1992,7 +1992,7 @@ mod tests {
             bundle: vec![Bundle {
                 name: "b".into(),
                 tags: vec!["t".into()],
-                vars: Default::default(),
+                env: Default::default(),
             }],
             ..Default::default()
         }
