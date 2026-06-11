@@ -97,6 +97,17 @@ pub enum ValidateError {
         plugin: String,
         marketplace: String,
     },
+    #[error(
+        "{context}: capabilities.env key '{key}' is reserved — it is emitted by the \
+         adapter or state system and must not be overridden here. \
+         Fix: remove this key from env:, or use bundle.vars for template variables."
+    )]
+    CapabilitiesReservedEnvKey { context: String, key: String },
+    #[error(
+        "{context}: capabilities.env key '{key}' uses the 'LLMENV_' prefix, which is \
+         reserved for llmenv-internal variables. Fix: rename the key."
+    )]
+    CapabilitiesLlmenvPrefixEnvKey { context: String, key: String },
 }
 
 /// A marketplace name is safe to use as a single filesystem path component and
@@ -169,6 +180,25 @@ fn is_valid_hostname(hostname: &str) -> bool {
             && !label.ends_with('-')
             && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     })
+}
+
+/// Validate a single `capabilities.env` key: not a reserved adapter/state var,
+/// not in the LLMENV_* namespace. Returns an error with the given `context`
+/// label (e.g. `"config.yaml: capabilities"` or `"bundle 'foo'"`) on failure.
+fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), ValidateError> {
+    if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key) {
+        return Err(ValidateError::CapabilitiesReservedEnvKey {
+            context: context.to_string(),
+            key: key.to_string(),
+        });
+    }
+    if key.starts_with("LLMENV_") {
+        return Err(ValidateError::CapabilitiesLlmenvPrefixEnvKey {
+            context: context.to_string(),
+            key: key.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn is_valid_var_name(name: &str) -> bool {
@@ -252,6 +282,9 @@ impl Config {
                     ));
                 }
             }
+        }
+        for key in self.capabilities.env.keys() {
+            validate_capabilities_env_key("config.yaml: capabilities", key)?;
         }
         self.validate_mcps()?;
         self.validate_plugins()?;
@@ -1862,6 +1895,142 @@ mod tests {
         #[test]
         fn prop_safe_subdir_never_panics(subdir in ".{0,40}") {
             let _ = is_safe_state_subdir(&subdir);
+        }
+
+        // #354: any key that starts with LLMENV_ is rejected.
+        #[test]
+        fn prop_llmenv_prefix_env_key_rejected(suffix in "[A-Z0-9_]{1,16}") {
+            let key = format!("LLMENV_{suffix}");
+            prop_assert!(
+                validate_capabilities_env_key("test", &key).is_err(),
+                "LLMENV_-prefixed key should be rejected: {key}"
+            );
+        }
+
+        // #354: keys that are not reserved and not LLMENV_-prefixed are accepted.
+        #[test]
+        fn prop_normal_env_key_accepted(key in "[A-Za-z_][A-Za-z0-9_]{0,15}") {
+            let reserved: &[&str] = crate::materialize::state::RESERVED_STATE_ENV_VARS;
+            prop_assume!(!reserved.contains(&key.as_str()));
+            prop_assume!(!key.starts_with("LLMENV_"));
+            prop_assert!(
+                validate_capabilities_env_key("test", &key).is_ok(),
+                "valid env key should be accepted: {key}"
+            );
+        }
+    }
+
+    // ===== #354: capabilities.env reserved key validation =====
+
+    fn config_with_capabilities_env(key: &str, value: &str) -> crate::config::Config {
+        use std::collections::BTreeMap;
+        crate::config::Config {
+            capabilities: Capabilities {
+                env: BTreeMap::from([(key.to_string(), value.to_string())]),
+                ..Default::default()
+            },
+            ..minimal_config()
+        }
+    }
+
+    fn minimal_config() -> crate::config::Config {
+        crate::config::Config {
+            bundle: vec![Bundle {
+                name: "b".into(),
+                tags: vec!["t".into()],
+                vars: Default::default(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn capabilities_env_claude_config_dir_rejected() {
+        let cfg = config_with_capabilities_env("CLAUDE_CONFIG_DIR", "/some/path");
+        assert!(
+            matches!(
+                cfg.validate(),
+                Err(ValidateError::CapabilitiesReservedEnvKey { .. })
+            ),
+            "CLAUDE_CONFIG_DIR must be rejected in capabilities.env"
+        );
+    }
+
+    #[test]
+    fn capabilities_env_llmenv_state_dir_rejected() {
+        let cfg = config_with_capabilities_env("LLMENV_STATE_DIR", "/some/path");
+        assert!(
+            matches!(
+                cfg.validate(),
+                Err(ValidateError::CapabilitiesReservedEnvKey { .. })
+            ),
+            "LLMENV_STATE_DIR must be rejected in capabilities.env"
+        );
+    }
+
+    #[test]
+    fn capabilities_env_llmenv_prefix_rejected() {
+        let cfg = config_with_capabilities_env("LLMENV_CUSTOM", "value");
+        assert!(
+            matches!(
+                cfg.validate(),
+                Err(ValidateError::CapabilitiesLlmenvPrefixEnvKey { .. })
+            ),
+            "LLMENV_* prefix must be rejected in capabilities.env"
+        );
+    }
+
+    #[test]
+    fn capabilities_env_llmenv_prefix_variant_rejected() {
+        let cfg = config_with_capabilities_env("LLMENV_ANYTHING_AT_ALL", "x");
+        assert!(
+            matches!(
+                cfg.validate(),
+                Err(ValidateError::CapabilitiesLlmenvPrefixEnvKey { .. })
+            ),
+            "any LLMENV_* key must be rejected"
+        );
+    }
+
+    #[test]
+    fn capabilities_env_valid_key_accepted() {
+        let cfg = config_with_capabilities_env("MY_APP_TOKEN", "secret");
+        assert!(
+            cfg.validate().is_ok(),
+            "valid capabilities.env key must be accepted"
+        );
+    }
+
+    #[test]
+    fn capabilities_env_underscore_prefixed_valid_key_accepted() {
+        let cfg = config_with_capabilities_env("_MY_VAR", "val");
+        assert!(
+            cfg.validate().is_ok(),
+            "_-prefixed non-reserved key must be accepted"
+        );
+    }
+
+    #[test]
+    fn capabilities_env_error_message_contains_key_name() {
+        let cfg = config_with_capabilities_env("CLAUDE_CONFIG_DIR", "/x");
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("CLAUDE_CONFIG_DIR"),
+            "error message must name the offending key; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn capabilities_env_all_reserved_state_vars_rejected() {
+        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+            let cfg = config_with_capabilities_env(reserved, "x");
+            assert!(
+                matches!(
+                    cfg.validate(),
+                    Err(ValidateError::CapabilitiesReservedEnvKey { .. })
+                ),
+                "reserved env var '{reserved}' must be rejected in capabilities.env"
+            );
         }
     }
 }
