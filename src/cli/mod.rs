@@ -1656,7 +1656,7 @@ fn build_bundle_refs(
             if !path.exists() {
                 tracing::warn!(
                     "bundle '{}' has no content directory at {}; \
-                     skipping (vars-only bundle, or missing/deleted directory)",
+                     skipping (tag-only bundle, or missing/deleted directory)",
                     name,
                     path.display()
                 );
