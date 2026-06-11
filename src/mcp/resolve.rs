@@ -4,11 +4,13 @@
 //! Two sources feed the resolver:
 //! - `config.mcp` — plain user-declared servers, selected when any of their
 //!   `tags` intersect the active scope tag set (same model as bundles).
-//! - `config.features.memory` — llmenv's own memory backend (ICM). One host runs the
-//!   daemon (`icm serve`, stdio-only) wrapped in `mcp-proxy` to expose it on
-//!   the network; the CLI launches that proxy on the designated `server_host`.
-//!   Every agent — including the one on the server host — connects to the
-//!   *network* endpoint, so the resolved entry is always a remote HTTP client.
+//! - `config.features.memory` — llmenv's own memory backend (ICM). A list of
+//!   tag-scoped entries; each declares one host that runs the daemon and the tag
+//!   set that activates it. At most one entry may be active per scope — the
+//!   resolver errors when tags select more than one simultaneously. The
+//!   designated `server_host` runs `icm serve` (stdio-only) wrapped in
+//!   `mcp-proxy`; every agent connects to the *network* endpoint so the resolved
+//!   entry is always a remote HTTP client.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -364,14 +366,16 @@ mod tests {
         let resolved =
             resolve_mcps(&[], &[home.clone(), work.clone()], &host, &tags(&["home"])).unwrap();
         assert_eq!(resolved.len(), 1);
-        if let ResolvedKind::Remote { url, .. } = &resolved[0].kind {
-            assert!(url.contains("still.local"));
+        match &resolved[0].kind {
+            ResolvedKind::Remote { url, .. } => assert!(url.contains("still.local")),
+            other => panic!("expected remote client, got {other:?}"),
         }
         // work scope: resolves to hesitation-marks
         let resolved = resolve_mcps(&[], &[home, work], &host, &tags(&["work"])).unwrap();
         assert_eq!(resolved.len(), 1);
-        if let ResolvedKind::Remote { url, .. } = &resolved[0].kind {
-            assert!(url.contains("marks.local"));
+        match &resolved[0].kind {
+            ResolvedKind::Remote { url, .. } => assert!(url.contains("marks.local")),
+            other => panic!("expected remote client, got {other:?}"),
         }
     }
 

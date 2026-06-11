@@ -549,6 +549,38 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
             orphan_count += 1;
         }
     }
+    // Build merged host table (top-level + bundle-contributed) for server_host checks.
+    let doctor_firing: Vec<&Bundle> = {
+        let manually: BTreeSet<&str> = active
+            .scopes
+            .iter()
+            .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+            .collect();
+        config
+            .bundle
+            .iter()
+            .filter(|b| {
+                b.tags.iter().any(|bt| active.tags.contains(bt))
+                    || manually.contains(b.name.as_str())
+            })
+            .collect()
+    };
+    let doctor_bundle_caps = {
+        let refs = build_bundle_refs(&config_dir, &active, &doctor_firing);
+        if refs.is_empty() {
+            crate::config::Capabilities::default()
+        } else {
+            crate::merge::merge(&config.capabilities, &config.native, &refs)
+                .unwrap_or_default()
+                .capabilities
+        }
+    };
+    let mut merged_host_for_doctor = doctor_bundle_caps.host.clone();
+    for (k, v) in &config.host {
+        merged_host_for_doctor.insert(k.clone(), v.clone());
+    }
+
+    // Check top-level memory entries.
     if let Some(features) = &config.features {
         for mem in &features.memory {
             let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
@@ -559,11 +591,29 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
                 );
                 orphan_count += 1;
             }
-            // The memory client URL is built from the server host's `host:` entry;
-            // a missing entry can never resolve — flag it early.
-            if !config.host.contains_key(&mem.server_host) {
+            if !merged_host_for_doctor.contains_key(&mem.server_host) {
                 eprintln!(
                     "{warn} memory: server_host '{}' has no entry in the host: table",
+                    mem.server_host
+                );
+                orphan_count += 1;
+            }
+        }
+    }
+    // Check bundle-contributed memory entries.
+    if let Some(features) = &doctor_bundle_caps.features {
+        for mem in &features.memory {
+            let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
+            if !has_emitted_tag {
+                eprintln!(
+                    "{warn} orphan bundle memory (server_host '{}'): no scope emits its tags",
+                    mem.server_host
+                );
+                orphan_count += 1;
+            }
+            if !merged_host_for_doctor.contains_key(&mem.server_host) {
+                eprintln!(
+                    "{warn} bundle memory: server_host '{}' has no entry in host: table",
                     mem.server_host
                 );
                 orphan_count += 1;
@@ -2534,22 +2584,7 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
     let active = crate::scope::evaluate(&config, &env);
     let emitted = all_emitted_tags(&config);
 
-    // Resolved entries (active host only) keyed by name, so we can annotate
-    // each selected server with its concrete transport.
-    let top_memory_ls = config
-        .features
-        .as_ref()
-        .map(|f| f.memory.as_slice())
-        .unwrap_or_default();
-    let mut all_resolved: std::collections::HashMap<String, ResolvedKind> =
-        resolve_mcps(&config.mcp, top_memory_ls, &config.host, &active.tags)
-            .context("resolving MCP servers for listing")?
-            .into_iter()
-            .map(|m| (m.name, m.kind))
-            .collect();
-
-    // Bundle MCPs: merge the active bundles to get their capabilities.mcp,
-    // then resolve bundle entries for the active scope.
+    // Bundle MCPs: merge the active bundles to get their capabilities.
     let manually_enabled: std::collections::HashSet<&str> = active
         .scopes
         .iter()
@@ -2564,14 +2599,46 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         })
         .collect();
     let bundle_refs = build_bundle_refs(config_dir, &active, &firing);
-    let bundle_mcp_entries = if !bundle_refs.is_empty() {
+    let bundle_caps = if !bundle_refs.is_empty() {
         crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
             .context("merging bundles for mcp-ls")?
             .capabilities
-            .mcp
     } else {
-        vec![]
+        crate::config::Capabilities::default()
     };
+
+    // Combined memory + host: top-level + bundle-contributed (top-level wins on host collision).
+    let top_memory_ls = config
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    let bundle_memory_ls = bundle_caps
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    let mut all_memory_ls: Vec<crate::config::Memory> = top_memory_ls
+        .iter()
+        .chain(bundle_memory_ls.iter())
+        .cloned()
+        .collect();
+    crate::util::dedup(&mut all_memory_ls);
+    let mut all_host_ls = bundle_caps.host.clone();
+    for (k, v) in &config.host {
+        all_host_ls.insert(k.clone(), v.clone());
+    }
+
+    // Resolved entries (active host only) keyed by name, so we can annotate
+    // each selected server with its concrete transport.
+    let mut all_resolved: std::collections::HashMap<String, ResolvedKind> =
+        resolve_mcps(&config.mcp, &all_memory_ls, &all_host_ls, &active.tags)
+            .context("resolving MCP servers for listing")?
+            .into_iter()
+            .map(|m| (m.name, m.kind))
+            .collect();
+
+    let bundle_mcp_entries = bundle_caps.mcp;
     let bundle_resolved = resolve_bundle_mcps(&bundle_mcp_entries, &active.tags)
         .context("resolving bundle MCP servers for listing")?;
     for m in bundle_resolved {
@@ -2606,14 +2673,12 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         rows.push((m.name.clone(), is_active, is_orphan, detail));
     }
 
-    if let Some(features) = &config.features {
-        for mem in &features.memory {
-            let is_active = mem.tags.iter().any(|t| active.tags.contains(t));
-            let is_orphan = !mem.tags.iter().any(|t| emitted.contains(t));
-            let detail = detail_for(MEMORY_MCP_NAME, "memory");
-            let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);
-            rows.push((name, is_active, is_orphan, detail));
-        }
+    for mem in &all_memory_ls {
+        let is_active = mem.tags.iter().any(|t| active.tags.contains(t));
+        let is_orphan = !mem.tags.iter().any(|t| emitted.contains(t));
+        let detail = detail_for(MEMORY_MCP_NAME, "memory");
+        let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);
+        rows.push((name, is_active, is_orphan, detail));
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
 

@@ -203,6 +203,27 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
         }
     }
 
+    // Validate bundle-contributed memory entries with the same checks that
+    // Config::validate() applies to top-level features.memory entries.
+    if let Some(features) = &caps.features {
+        for mem in &features.memory {
+            if mem.tags.is_empty() {
+                anyhow::bail!(
+                    "{context}: features.memory entry for '{}'  has no tags — every memory entry must declare at least one activation tag",
+                    mem.server_host
+                );
+            }
+            if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
+                anyhow::bail!(
+                    "{context}: features.memory entry for '{}': listen_host '{}' is not a valid \
+                     IP address literal (hostnames not supported)",
+                    mem.server_host,
+                    mem.listen_host
+                );
+            }
+        }
+    }
+
     Ok(Some(caps))
 }
 

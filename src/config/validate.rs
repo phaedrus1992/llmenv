@@ -39,6 +39,8 @@ pub enum ValidateError {
     McpStdioMissingCommand(String),
     #[error("mcp {0}: {1} transport requires a `url`")]
     McpRemoteMissingUrl(String, String),
+    #[error("host '{0}': addr '{1}' is not a valid hostname or IP address literal")]
+    InvalidHostAddr(String, String),
     #[error("memory: server_host '{0}' has no entry in the `host:` table")]
     MemoryUnknownServerHost(String),
     #[error("memory has no tags")]
@@ -419,6 +421,17 @@ impl Config {
                         ));
                     }
                 }
+            }
+        }
+        // Validate the host address table: each addr must be a valid hostname or IP literal.
+        for (name, entry) in &self.host {
+            let is_valid =
+                entry.addr.parse::<std::net::IpAddr>().is_ok() || is_valid_hostname(&entry.addr);
+            if !is_valid {
+                return Err(ValidateError::InvalidHostAddr(
+                    name.clone(),
+                    entry.addr.clone(),
+                ));
             }
         }
         if let Some(features) = &self.features {

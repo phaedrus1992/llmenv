@@ -986,6 +986,81 @@ mod tests {
                     Some(PermissionMode::BypassPermissions)
                 );
             }
+
+            // resolve_host_map: disjoint keys from N contributors all survive.
+            #[test]
+            fn host_disjoint_keys_all_survive(
+                entries in prop::collection::vec(
+                    ("[a-z][a-z0-9-]{1,8}", "[a-z0-9.]{1,12}", 1u8..=10u8),
+                    0..8,
+                )
+            ) {
+                use crate::config::HostEntry;
+                // Index-suffix forces unique keys per contributor.
+                let contribs: Vec<CapabilityContributor> = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, addr, prec))| CapabilityContributor {
+                        name: format!("c{i}"),
+                        precedence: *prec,
+                        capabilities: Capabilities {
+                            host: [(
+                                format!("{name}_{i}"),
+                                HostEntry { addr: addr.clone() },
+                            )]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(out.host.len(), contribs.len());
+            }
+
+            // resolve_host_map: highest precedence wins per key, regardless of input order.
+            #[test]
+            fn host_highest_precedence_wins(
+                low_count in 0usize..5,
+                winner_bump in 1u8..50,
+            ) {
+                use crate::config::HostEntry;
+                let winner_prec = 50u8 + winner_bump;
+                let mut contribs: Vec<CapabilityContributor> = (0..low_count)
+                    .map(|i| CapabilityContributor {
+                        name: format!("low{i}"),
+                        precedence: (i + 1) as u8,
+                        capabilities: Capabilities {
+                            host: [(
+                                "server".to_string(),
+                                HostEntry { addr: format!("low{i}.local") },
+                            )]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                contribs.push(CapabilityContributor {
+                    name: "winner".into(),
+                    precedence: winner_prec,
+                    capabilities: Capabilities {
+                        host: [(
+                            "server".to_string(),
+                            HostEntry { addr: "winner.local".to_string() },
+                        )]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
+                });
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(
+                    out.host.get("server").map(|e| e.addr.as_str()),
+                    Some("winner.local"),
+                    "highest-precedence contributor must win"
+                );
+            }
         }
     }
 

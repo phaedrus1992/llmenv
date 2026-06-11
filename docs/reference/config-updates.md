@@ -121,9 +121,12 @@ If Claude Code is running, the new config is NOT picked up until you restart the
    ```yaml
    features:
      memory:
-       server:
-         host: localhost
-         port: 9999
+       - server_host: my-server
+         port: 9092
+         tags: [home]
+   host:
+     my-server:
+       addr: my-server.local
    ```
 2. Auto-disables Claude's auto-memory (set `capabilities.auto_memory_enabled: true` to override)
 3. Run `llmenv materialize`

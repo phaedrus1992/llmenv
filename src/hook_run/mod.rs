@@ -170,7 +170,10 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
 
-    let url = memory_url(&config, &active)?
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
+    let url = memory_url(&config, config_dir, &active)?
         .ok_or_else(|| anyhow::anyhow!("no memory backend active for this scope"))?;
 
     // Recall query: the sorted active tags. Store content: the llmenv context
@@ -219,8 +222,13 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, if any.
+///
+/// Mirrors the `build_manifest` merge strategy: top-level config memory is
+/// combined with bundle-contributed memory entries so a daemon declared only
+/// in a `bundle.yaml` is reachable from lifecycle hooks.
 fn memory_url(
     config: &crate::config::Config,
+    config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
 ) -> anyhow::Result<Option<String>> {
     let top_memory = config
@@ -228,12 +236,76 @@ fn memory_url(
         .as_ref()
         .map(|f| f.memory.as_slice())
         .unwrap_or_default();
-    let resolved = resolve_mcps(&config.mcp, top_memory, &config.host, &active.tags)
+
+    // Collect bundle-contributed memory and host entries.
+    let manually_enabled: std::collections::BTreeSet<&str> = active
+        .scopes
+        .iter()
+        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+        .collect();
+    let firing: Vec<&crate::config::Bundle> = config
+        .bundle
+        .iter()
+        .filter(|b| {
+            b.tags.iter().any(|bt| active.tags.contains(bt))
+                || manually_enabled.contains(b.name.as_str())
+        })
+        .collect();
+
+    let bundle_refs = build_hook_bundle_refs(config_dir, &firing);
+    let (bundle_memory, bundle_host) = if bundle_refs.is_empty() {
+        (Vec::new(), std::collections::BTreeMap::new())
+    } else {
+        let merged = crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
+            .unwrap_or_default();
+        let mem = merged
+            .capabilities
+            .features
+            .map(|f| f.memory)
+            .unwrap_or_default();
+        (mem, merged.capabilities.host)
+    };
+
+    let mut all_memory: Vec<crate::config::Memory> = top_memory
+        .iter()
+        .chain(bundle_memory.iter())
+        .cloned()
+        .collect();
+    crate::util::dedup(&mut all_memory);
+
+    // Merged host: bundle contributions first, top-level overwrites (same as build_manifest).
+    let mut all_host = bundle_host;
+    for (k, v) in &config.host {
+        all_host.insert(k.clone(), v.clone());
+    }
+
+    let resolved = resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
         .map_err(|e| anyhow::anyhow!("failed to resolve MCP servers: {e}"))?;
     Ok(resolved.into_iter().find_map(|m| match m.kind {
         ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some(url),
         _ => None,
     }))
+}
+
+/// Build lightweight `BundleRef`s for the bundles firing in hook context.
+/// All refs get precedence 1 (approximate) — sufficient for memory concat+dedup;
+/// callers that need exact scalar precedence use the full `build_bundle_refs` in cli.
+fn build_hook_bundle_refs(
+    config_dir: &std::path::Path,
+    firing: &[&crate::config::Bundle],
+) -> Vec<crate::merge::BundleRef> {
+    let bundles_dir = config_dir.join("bundles");
+    firing
+        .iter()
+        .filter_map(|b| {
+            let path = bundles_dir.join(&b.name);
+            path.exists().then_some(crate::merge::BundleRef {
+                name: b.name.clone(),
+                path,
+                precedence: 1,
+            })
+        })
+        .collect()
 }
 
 /// Validate a tag to prevent query injection. Tags must be alphanumeric with
