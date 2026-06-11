@@ -9,7 +9,7 @@ use crate::config::Capabilities;
 use crate::mcp::resolve::ResolvedMcp;
 use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
 use crate::util::{merge_yaml, normalize_yaml};
-use capabilities::{CapabilityContributor, merge_capabilities};
+pub use capabilities::{CapabilityContributor, merge_capabilities};
 use rules::RuleFile;
 
 #[derive(Debug, Clone)]
@@ -149,6 +149,23 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
     // must dedup correctly before being adapted into settings.json.
     for hook in &mut caps.hooks {
         hook.bundle_origin = Some(bundle_root.to_path_buf());
+    }
+
+    let context = format!("bundle '{name}'");
+    for key in caps.env.keys() {
+        if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key.as_str()) {
+            anyhow::bail!(
+                "{context}: capabilities.env key '{key}' is reserved — it is emitted by the \
+                 adapter or state system and must not be overridden here. \
+                 Fix: remove this key from env:, or use bundle.vars for template variables."
+            );
+        }
+        if key.starts_with("LLMENV_") {
+            anyhow::bail!(
+                "{context}: capabilities.env key '{key}' uses the 'LLMENV_' prefix, which is \
+                 reserved for llmenv-internal variables. Fix: rename the key."
+            );
+        }
     }
 
     Ok(Some(caps))

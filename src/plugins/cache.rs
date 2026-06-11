@@ -201,6 +201,135 @@ fn sync_git(
     })
 }
 
+/// Stable path where an external plugin payload is cached, independent of any
+/// hash-keyed config dir so it survives config changes.
+#[must_use]
+pub fn plugin_payload_path(cache_dir: &Path, marketplace: &str, plugin: &str) -> PathBuf {
+    cache_dir
+        .join("plugin-payloads")
+        .join(marketplace)
+        .join(plugin)
+}
+
+/// A plugin entry parsed from a marketplace's `.claude-plugin/marketplace.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketplacePluginEntry {
+    pub name: String,
+    pub source: String,
+}
+
+/// Parse plugin entries from a marketplace clone's `.claude-plugin/marketplace.json`.
+/// Returns an empty vec when the file is absent (bundles without a manifest are valid).
+///
+/// # Errors
+/// Returns an error when the file exists but cannot be read or parsed.
+pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<MarketplacePluginEntry>> {
+    let manifest_path = marketplace_dir
+        .join(".claude-plugin")
+        .join("marketplace.json");
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    let plugins = json
+        .get("plugins")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let name = entry.get("name")?.as_str()?.to_string();
+                    let source = entry.get("source")?.as_str()?.to_string();
+                    Some(MarketplacePluginEntry { name, source })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(plugins)
+}
+
+/// True if a plugin source is an external git URL (not a relative path within
+/// the marketplace clone). External sources require a separate clone; relative
+/// paths are served directly from the marketplace directory.
+#[must_use]
+pub fn is_external_plugin_source(source: &str) -> bool {
+    !source.starts_with("./")
+        && !source.starts_with("../")
+        && source != "."
+        && source != "./"
+        && source != ".."
+}
+
+/// Sync an external-sourced plugin payload to the stable llmenv cache.
+///
+/// # Errors
+/// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
+/// is false. Returns `SyncError::CloneFailed` on clone failure.
+pub fn sync_external_plugin(
+    cache_dir: &Path,
+    marketplace: &str,
+    plugin: &str,
+    source: &str,
+    refresh: bool,
+) -> Result<MarketplaceState, SyncError> {
+    sync_external_plugin_with(cache_dir, marketplace, plugin, source, refresh, &SystemGit)
+}
+
+/// `sync_external_plugin` with an injectable git backend for testing.
+///
+/// # Errors
+/// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
+/// is false. Returns `SyncError::CloneFailed` on clone failure.
+pub fn sync_external_plugin_with(
+    cache_dir: &Path,
+    marketplace: &str,
+    plugin: &str,
+    source: &str,
+    refresh: bool,
+    git: &dyn GitBackend,
+) -> Result<MarketplaceState, SyncError> {
+    reject_unsafe_source(source).map_err(SyncError::Other)?;
+    // plugin name comes from marketplace.json (network-sourced); guard against
+    // path traversal before joining into the cache path.
+    if crate::paths::is_unsafe_join_target(plugin) {
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "plugin name '{plugin}' in marketplace '{marketplace}' \
+             contains an unsafe path component"
+        )));
+    }
+    let dest = plugin_payload_path(cache_dir, marketplace, plugin);
+    if dest.join(".git").exists() {
+        if refresh {
+            git.pull(&dest).map_err(SyncError::Other)?;
+        }
+    } else if !refresh {
+        return Err(SyncError::NotCloned {
+            name: format!("{plugin}@{marketplace}"),
+        });
+    } else {
+        // Create the parent dir so git can create `dest` itself. Creating `dest`
+        // directly would block re-clone after a partial failure (git clone rejects
+        // non-empty directories).
+        let parent = dest.parent().ok_or_else(|| {
+            SyncError::Other(anyhow::anyhow!("plugin payload path has no parent"))
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| SyncError::Other(anyhow::anyhow!("creating plugin payload dir: {e}")))?;
+        git.clone(source, &dest)
+            .map_err(|e| SyncError::CloneFailed {
+                name: format!("{plugin}@{marketplace}"),
+                source: e,
+            })?;
+    }
+    let head = git.head(&dest);
+    Ok(MarketplaceState {
+        install_location: dest,
+        head,
+    })
+}
+
 /// Reject marketplace sources git would mishandle: leading-dash (parsed as an
 /// option) and the `ext::`/`fd::` transports (run arbitrary commands on clone).
 fn reject_unsafe_source(source: &str) -> Result<()> {
@@ -404,6 +533,120 @@ mod tests {
         assert_eq!(
             marketplace_path(root, "superpowers"),
             PathBuf::from("/cache/marketplaces/superpowers")
+        );
+    }
+
+    #[test]
+    fn external_source_detection_accepts_git_urls() {
+        assert!(is_external_plugin_source("https://github.com/foo/bar.git"));
+        assert!(is_external_plugin_source("git@github.com:foo/bar.git"));
+        assert!(is_external_plugin_source(
+            "https://github.com/slackapi/slack-mcp-plugin.git"
+        ));
+        assert!(!is_external_plugin_source("./plugins/foo"));
+        assert!(!is_external_plugin_source("./claude-plugins/nbl-dev"));
+        assert!(!is_external_plugin_source("./"));
+        assert!(!is_external_plugin_source("."));
+        assert!(!is_external_plugin_source("../traversal"));
+        assert!(!is_external_plugin_source(".."));
+    }
+
+    #[test]
+    fn read_marketplace_plugins_parses_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(".claude-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest = r#"{"plugins": [
+            {"name": "first-party", "source": "./plugins/first-party"},
+            {"name": "external", "source": "https://github.com/example/external.git"}
+        ]}"#;
+        std::fs::write(plugin_dir.join("marketplace.json"), manifest).unwrap();
+        let plugins = read_marketplace_plugins(tmp.path()).unwrap();
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0].name, "first-party");
+        assert!(!is_external_plugin_source(&plugins[0].source));
+        assert_eq!(plugins[1].name, "external");
+        assert!(is_external_plugin_source(&plugins[1].source));
+    }
+
+    #[test]
+    fn read_marketplace_plugins_returns_empty_when_no_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = read_marketplace_plugins(tmp.path()).unwrap();
+        assert!(plugins.is_empty());
+    }
+
+    #[test]
+    fn external_plugin_sync_clones_on_refresh() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let cloned = Rc::new(Cell::new(false));
+        let cloned2 = cloned.clone();
+        struct FakeGit(Rc<Cell<bool>>);
+        impl GitBackend for FakeGit {
+            fn clone(&self, _source: &str, dest: &Path) -> Result<()> {
+                self.0.set(true);
+                std::fs::create_dir_all(dest.join(".git")).unwrap();
+                Ok(())
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                Some("abc123".to_string())
+            }
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let result = sync_external_plugin_with(
+            cache.path(),
+            "my-market",
+            "my-plugin",
+            "https://github.com/example/plugin.git",
+            true,
+            &FakeGit(cloned2),
+        );
+        assert!(result.is_ok());
+        assert!(cloned.get(), "clone should have been called");
+        let state = result.unwrap();
+        assert_eq!(state.head, Some("abc123".to_string()));
+        assert_eq!(
+            state.install_location,
+            plugin_payload_path(cache.path(), "my-market", "my-plugin"),
+        );
+    }
+
+    #[test]
+    fn external_plugin_sync_not_cloned_on_export() {
+        struct NoGit;
+        impl GitBackend for NoGit {
+            fn clone(&self, _: &str, _: &Path) -> Result<()> {
+                unreachable!()
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                unreachable!()
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                None
+            }
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let result = sync_external_plugin_with(
+            cache.path(),
+            "my-market",
+            "my-plugin",
+            "https://github.com/example/plugin.git",
+            false,
+            &NoGit,
+        );
+        assert!(matches!(result, Err(SyncError::NotCloned { .. })));
+    }
+
+    #[test]
+    fn plugin_payload_path_is_under_cache() {
+        let root = Path::new("/cache");
+        assert_eq!(
+            plugin_payload_path(root, "my-market", "my-plugin"),
+            PathBuf::from("/cache/plugin-payloads/my-market/my-plugin"),
         );
     }
 

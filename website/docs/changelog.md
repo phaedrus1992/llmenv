@@ -58,6 +58,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   when a configured bundle name has no corresponding directory, making typos and
   deleted directories detectable
 
+## [1.0.10] - 2026-06-11
+
+### Added
+
+- `llmenv plugin-sync` now fetches externally-sourced plugins — those whose
+  `source` in `marketplace.json` is a git URL rather than a relative path
+  within the marketplace clone. Payloads are cloned to a stable path outside
+  the hash-keyed config dir so they survive config changes without requiring
+  a manual `/plugin install` or re-authentication (#353)
+
+### Fixed
+
+- Fix `env:` declared in a bundle's `bundle.yaml` being silently dropped;
+  bundle-level env vars are now merged and exported alongside `Bundle.vars`
+  (#351)
+- Reject reserved env var names (`CLAUDE_CONFIG_DIR`, `LLMENV_STATE_DIR`) and
+  the `LLMENV_*` prefix in `capabilities.env` at validation time; silently
+  setting these would shadow adapter-emitted vars and produce conflicts that
+  are impossible to diagnose at runtime (#354)
+- Detect same-precedence conflicts in `capabilities.env` key merging and error
+  with the contributor names and values, matching the existing `default_mode`
+  conflict behaviour; previously one of the conflicting values would silently
+  win (#355)
+
+## [1.0.9] - 2026-06-10
+
+### Fixed
+
+- Fix `memory.listen_host` unspecified-address warning emitting on every shell
+  prompt; the warning now only appears when the ICM proxy actually starts or
+  restarts (#347)
+
 ## [1.0.8] - 2026-06-09
 
 ### Added

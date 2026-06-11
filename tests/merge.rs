@@ -248,3 +248,156 @@ fn different_scope_precedence_higher_wins_no_error() {
         "higher-precedence bundle should win"
     );
 }
+
+#[test]
+fn bundle_yaml_env_vars_are_merged_into_capabilities() {
+    use std::collections::BTreeMap;
+    let caps_a = Capabilities {
+        env: BTreeMap::from([("A_VAR".into(), "a_value".into())]),
+        ..Default::default()
+    };
+
+    let caps_b = Capabilities {
+        env: BTreeMap::from([("B_VAR".into(), "b_value".into())]),
+        ..Default::default()
+    };
+
+    let contrib_a = llmenv::merge::CapabilityContributor {
+        name: "a".into(),
+        precedence: 1,
+        capabilities: caps_a,
+    };
+    let contrib_b = llmenv::merge::CapabilityContributor {
+        name: "b".into(),
+        precedence: 2,
+        capabilities: caps_b,
+    };
+
+    let merged = llmenv::merge::merge_capabilities(&[contrib_a, contrib_b]).unwrap();
+    assert_eq!(merged.env.get("A_VAR").map(|s| s.as_str()), Some("a_value"));
+    assert_eq!(merged.env.get("B_VAR").map(|s| s.as_str()), Some("b_value"));
+}
+
+#[test]
+fn bundle_env_vars_higher_precedence_wins() {
+    use std::collections::BTreeMap;
+    let caps_a = Capabilities {
+        env: BTreeMap::from([("SHARED_VAR".into(), "a_value".into())]),
+        ..Default::default()
+    };
+
+    let caps_b = Capabilities {
+        env: BTreeMap::from([("SHARED_VAR".into(), "b_value".into())]),
+        ..Default::default()
+    };
+
+    let contrib_a = llmenv::merge::CapabilityContributor {
+        name: "a".into(),
+        precedence: 1,
+        capabilities: caps_a,
+    };
+    let contrib_b = llmenv::merge::CapabilityContributor {
+        name: "b".into(),
+        precedence: 2,
+        capabilities: caps_b,
+    };
+
+    let merged = llmenv::merge::merge_capabilities(&[contrib_a, contrib_b]).unwrap();
+    assert_eq!(
+        merged.env.get("SHARED_VAR").map(|s| s.as_str()),
+        Some("b_value"),
+        "higher precedence (b) should win"
+    );
+}
+
+// #355: same-precedence, same-value agreement is not an error.
+#[test]
+fn env_same_precedence_same_value_is_ok() {
+    let caps_a = Capabilities {
+        env: BTreeMap::from([("KEY".into(), "shared_value".into())]),
+        ..Default::default()
+    };
+    let caps_b = Capabilities {
+        env: BTreeMap::from([("KEY".into(), "shared_value".into())]),
+        ..Default::default()
+    };
+    let contrib_a = llmenv::merge::CapabilityContributor {
+        name: "a".into(),
+        precedence: 3,
+        capabilities: caps_a,
+    };
+    let contrib_b = llmenv::merge::CapabilityContributor {
+        name: "b".into(),
+        precedence: 3,
+        capabilities: caps_b,
+    };
+    let merged = llmenv::merge::merge_capabilities(&[contrib_a, contrib_b]).unwrap();
+    assert_eq!(
+        merged.env.get("KEY").map(|s| s.as_str()),
+        Some("shared_value"),
+        "same-precedence same-value agreement must not error"
+    );
+}
+
+// #355: same-precedence, different-value conflict is a hard error.
+#[test]
+fn env_same_precedence_conflict_is_an_error() {
+    let caps_a = Capabilities {
+        env: BTreeMap::from([("MY_VAR".into(), "value_a".into())]),
+        ..Default::default()
+    };
+    let caps_b = Capabilities {
+        env: BTreeMap::from([("MY_VAR".into(), "value_b".into())]),
+        ..Default::default()
+    };
+    let contrib_a = llmenv::merge::CapabilityContributor {
+        name: "bundle-a".into(),
+        precedence: 2,
+        capabilities: caps_a,
+    };
+    let contrib_b = llmenv::merge::CapabilityContributor {
+        name: "bundle-b".into(),
+        precedence: 2,
+        capabilities: caps_b,
+    };
+    let err = llmenv::merge::merge_capabilities(&[contrib_a, contrib_b])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("conflicting env key"), "got: {err}");
+    assert!(err.contains("MY_VAR"), "got: {err}");
+    assert!(
+        err.contains("bundle-a") && err.contains("bundle-b"),
+        "got: {err}"
+    );
+}
+
+// #355: conflict must mention the hint about resolving via higher-precedence scope.
+#[test]
+fn env_conflict_error_contains_resolution_hint() {
+    let caps_a = Capabilities {
+        env: BTreeMap::from([("CONFLICT_KEY".into(), "v1".into())]),
+        ..Default::default()
+    };
+    let caps_b = Capabilities {
+        env: BTreeMap::from([("CONFLICT_KEY".into(), "v2".into())]),
+        ..Default::default()
+    };
+    let err = llmenv::merge::merge_capabilities(&[
+        llmenv::merge::CapabilityContributor {
+            name: "x".into(),
+            precedence: 1,
+            capabilities: caps_a,
+        },
+        llmenv::merge::CapabilityContributor {
+            name: "y".into(),
+            precedence: 1,
+            capabilities: caps_b,
+        },
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("higher-precedence scope"),
+        "error should hint at resolution; got: {err}"
+    );
+}
