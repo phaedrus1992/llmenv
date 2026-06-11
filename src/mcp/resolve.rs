@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{Config, HostEntry, McpServer, McpTransport, Memory};
+use crate::config::{HostEntry, McpServer, McpTransport, Memory};
 
 use tracing::debug;
 
@@ -53,6 +53,11 @@ pub enum ResolveError {
     StdioMissingCommand { name: String },
     #[error("mcp '{name}': {transport} transport requires a `url`")]
     RemoteMissingUrl { name: String, transport: String },
+    #[error(
+        "memory: multiple entries active simultaneously — conflicting hosts: {}",
+        .0.join(", ")
+    )]
+    AmbiguousMemory(Vec<String>),
     #[error("bundle mcp '{0}': name is reserved for the memory backend")]
     BundleMcpReservedName(String),
     #[error(
@@ -72,23 +77,33 @@ pub enum ResolveError {
 /// the proxy locally (see [`crate::cli`]).
 ///
 /// # Errors
-/// Returns the first [`ResolveError`] encountered: a plain server missing its
-/// required `command`/`url`, or a memory backend referencing an unknown host.
+/// Returns a [`ResolveError`] when: a plain server is missing its required
+/// `command`/`url`; a memory backend references an unknown host; or more than
+/// one `memory` entry is active simultaneously ([`ResolveError::AmbiguousMemory`]).
 pub fn resolve_mcps(
-    config: &Config,
+    mcp: &[McpServer],
+    memory: &[Memory],
+    host: &BTreeMap<String, HostEntry>,
     active_tags: &BTreeSet<String>,
 ) -> Result<Vec<ResolvedMcp>, ResolveError> {
     let mut out = Vec::new();
-    for m in &config.mcp {
+    for m in mcp {
         if !m.tags.iter().any(|t| active_tags.contains(t)) {
             continue;
         }
         out.push(resolve_static(m)?);
     }
-    if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref())
-        && mem.tags.iter().any(|t| active_tags.contains(t))
-    {
-        out.push(resolve_memory(mem, &config.host)?);
+    let active_mem: Vec<&Memory> = memory
+        .iter()
+        .filter(|m| m.tags.iter().any(|t| active_tags.contains(t)))
+        .collect();
+    match active_mem.len() {
+        0 => {}
+        1 => out.push(resolve_memory(active_mem[0], host)?),
+        _ => {
+            let hosts: Vec<String> = active_mem.iter().map(|m| m.server_host.clone()).collect();
+            return Err(ResolveError::AmbiguousMemory(hosts));
+        }
     }
     Ok(out)
 }
@@ -195,22 +210,19 @@ fn remote_kind(m: &McpServer, transport: McpTransport) -> Result<ResolvedKind, R
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::{Features, McpServer, Memory};
+    use crate::config::{McpServer, Memory};
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {
         ts.iter().map(|s| (*s).to_string()).collect()
     }
 
-    fn base_config() -> Config {
-        Config {
-            host: BTreeMap::from([(
-                "still".to_string(),
-                HostEntry {
-                    addr: "still.local".to_string(),
-                },
-            )]),
-            ..Config::default()
-        }
+    fn base_host() -> BTreeMap<String, HostEntry> {
+        BTreeMap::from([(
+            "still".to_string(),
+            HostEntry {
+                addr: "still.local".to_string(),
+            },
+        )])
     }
 
     fn stdio_server(name: &str, tags: &[&str], command: &str) -> McpServer {
@@ -237,24 +249,21 @@ mod tests {
 
     #[test]
     fn selects_only_servers_with_intersecting_tags() {
-        let mut cfg = base_config();
-        cfg.mcp = vec![
+        let servers = vec![
             stdio_server("playwright", &["user-ranger"], "npx"),
             stdio_server("tolaria", &["host-still"], "tolaria-mcp"),
         ];
-        let resolved = resolve_mcps(&cfg, &tags(&["user-ranger"])).unwrap();
+        let resolved = resolve_mcps(&servers, &[], &base_host(), &tags(&["user-ranger"])).unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name, "playwright");
     }
 
     #[test]
     fn stdio_server_resolves_to_command() {
-        let mut cfg = base_config();
         let mut s = stdio_server("playwright", &["t"], "npx");
         s.args = vec!["-y".into(), "@playwright/mcp@latest".into()];
         s.env = BTreeMap::from([("HEADLESS".to_string(), "1".to_string())]);
-        cfg.mcp = vec![s];
-        let resolved = resolve_mcps(&cfg, &tags(&["t"])).unwrap();
+        let resolved = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
         match &resolved[0].kind {
             ResolvedKind::Stdio { command, args, env } => {
                 assert_eq!(command, "npx");
@@ -267,14 +276,11 @@ mod tests {
 
     #[test]
     fn memory_always_resolves_to_network_client() {
-        let mut cfg = base_config();
-        cfg.features = Some(Features {
-            memory: Some(memory()),
-        });
+        let mem = vec![memory()];
         // Same result whether or not this host is the server host: the agent
         // always talks to the network proxy.
         for active_tags in [tags(&["network-home"]), tags(&["network-home"])] {
-            let resolved = resolve_mcps(&cfg, &active_tags).unwrap();
+            let resolved = resolve_mcps(&[], &mem, &base_host(), &active_tags).unwrap();
             assert_eq!(resolved[0].name, MEMORY_MCP_NAME);
             match &resolved[0].kind {
                 ResolvedKind::Remote { url, transport } => {
@@ -288,32 +294,92 @@ mod tests {
 
     #[test]
     fn memory_not_selected_when_tags_inactive() {
-        let mut cfg = base_config();
-        cfg.features = Some(Features {
-            memory: Some(memory()),
-        });
-        let resolved = resolve_mcps(&cfg, &tags(&["unrelated"])).unwrap();
+        let mem = vec![memory()];
+        let resolved = resolve_mcps(&[], &mem, &base_host(), &tags(&["unrelated"])).unwrap();
         assert!(resolved.is_empty());
     }
 
     #[test]
     fn memory_with_unknown_host_errors() {
-        let mut cfg = base_config();
-        cfg.host.clear();
-        cfg.features = Some(Features {
-            memory: Some(memory()),
-        });
-        let err = resolve_mcps(&cfg, &tags(&["network-home"])).unwrap_err();
+        let mem = vec![memory()];
+        let err = resolve_mcps(&[], &mem, &BTreeMap::new(), &tags(&["network-home"])).unwrap_err();
         assert_eq!(err, ResolveError::MemoryUnknownServerHost("still".into()));
     }
 
     #[test]
+    fn memory_ambiguous_errors() {
+        let home = Memory {
+            server_host: "still".into(),
+            port: 9092,
+            listen_host: "127.0.0.1".into(),
+            tags: vec!["home".into()],
+            default_topics: vec![],
+        };
+        let work = Memory {
+            server_host: "hesitation-marks".into(),
+            port: 9092,
+            listen_host: "127.0.0.1".into(),
+            tags: vec!["home".into()], // same tag — ambiguous when both active
+            default_topics: vec![],
+        };
+        let mut host = base_host();
+        host.insert(
+            "hesitation-marks".into(),
+            HostEntry {
+                addr: "marks.local".into(),
+            },
+        );
+        let err = resolve_mcps(&[], &[home, work], &host, &tags(&["home"])).unwrap_err();
+        assert!(matches!(err, ResolveError::AmbiguousMemory(_)));
+        if let ResolveError::AmbiguousMemory(hosts) = err {
+            assert_eq!(hosts.len(), 2);
+        }
+    }
+
+    #[test]
+    fn memory_scoped_selects_matching_entry() {
+        // Two daemons with different tags: only the one matching active tags resolves.
+        let home = Memory {
+            server_host: "still".into(),
+            port: 9092,
+            listen_host: "127.0.0.1".into(),
+            tags: vec!["home".into()],
+            default_topics: vec![],
+        };
+        let work = Memory {
+            server_host: "hesitation-marks".into(),
+            port: 9092,
+            listen_host: "127.0.0.1".into(),
+            tags: vec!["work".into()],
+            default_topics: vec![],
+        };
+        let mut host = base_host();
+        host.insert(
+            "hesitation-marks".into(),
+            HostEntry {
+                addr: "marks.local".into(),
+            },
+        );
+        // home scope: resolves to still
+        let resolved =
+            resolve_mcps(&[], &[home.clone(), work.clone()], &host, &tags(&["home"])).unwrap();
+        assert_eq!(resolved.len(), 1);
+        if let ResolvedKind::Remote { url, .. } = &resolved[0].kind {
+            assert!(url.contains("still.local"));
+        }
+        // work scope: resolves to hesitation-marks
+        let resolved = resolve_mcps(&[], &[home, work], &host, &tags(&["work"])).unwrap();
+        assert_eq!(resolved.len(), 1);
+        if let ResolvedKind::Remote { url, .. } = &resolved[0].kind {
+            assert!(url.contains("marks.local"));
+        }
+    }
+
+    #[test]
     fn stdio_without_command_errors() {
-        let mut cfg = base_config();
         let mut s = stdio_server("broken", &["t"], "x");
         s.command = None;
-        cfg.mcp = vec![s];
-        let err = resolve_mcps(&cfg, &tags(&["t"])).unwrap_err();
+        let err = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap_err();
         assert_eq!(
             err,
             ResolveError::StdioMissingCommand {
@@ -324,13 +390,11 @@ mod tests {
 
     #[test]
     fn http_server_resolves_to_remote() {
-        let mut cfg = base_config();
         let mut s = stdio_server("ctx7", &["t"], "x");
         s.transport = McpTransport::Http;
         s.command = None;
         s.url = Some("https://ctx7.example/mcp".into());
-        cfg.mcp = vec![s];
-        let resolved = resolve_mcps(&cfg, &tags(&["t"])).unwrap();
+        let resolved = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
         match &resolved[0].kind {
             ResolvedKind::Remote { url, transport } => {
                 assert_eq!(url, "https://ctx7.example/mcp");
@@ -359,33 +423,30 @@ mod tests {
             })
         }
 
-        fn arb_config_and_tags() -> impl Strategy<Value = (Config, BTreeSet<String>)> {
+        fn arb_mcp_and_tags() -> impl Strategy<Value = (Vec<McpServer>, BTreeSet<String>)> {
             let servers = (0usize..5).prop_flat_map(|n| (0..n).map(arb_server).collect::<Vec<_>>());
             let active = prop::collection::btree_set("[a-z]{1,4}", 0..6);
-            (servers, active).prop_map(|(mcp, active)| {
-                let mut cfg = base_config();
-                cfg.mcp = mcp;
-                (cfg, active)
-            })
+            (servers, active)
         }
 
         proptest! {
             // resolve_mcps never invents entries: the output never exceeds the
             // declared servers plus the (here unconfigured) memory backend.
             #[test]
-            fn output_count_bounded_by_inputs((cfg, active) in arb_config_and_tags()) {
-                let resolved = resolve_mcps(&cfg, &active).expect("valid servers resolve");
-                prop_assert!(resolved.len() <= cfg.mcp.len());
+            fn output_count_bounded_by_inputs((mcp, active) in arb_mcp_and_tags()) {
+                let resolved =
+                    resolve_mcps(&mcp, &[], &base_host(), &active).expect("valid servers resolve");
+                prop_assert!(resolved.len() <= mcp.len());
             }
 
             // Every resolved static server corresponds to a declared server
             // whose tag set intersects the active tags.
             #[test]
-            fn every_selected_server_has_active_tag((cfg, active) in arb_config_and_tags()) {
-                let resolved = resolve_mcps(&cfg, &active).expect("valid servers resolve");
+            fn every_selected_server_has_active_tag((mcp, active) in arb_mcp_and_tags()) {
+                let resolved =
+                    resolve_mcps(&mcp, &[], &base_host(), &active).expect("valid servers resolve");
                 for r in &resolved {
-                    let src = cfg
-                        .mcp
+                    let src = mcp
                         .iter()
                         .find(|m| m.name == r.name)
                         .expect("resolved name maps to a declared server");
@@ -393,11 +454,11 @@ mod tests {
                 }
             }
 
-            // Resolution is a pure function of (config, tags).
+            // Resolution is a pure function of (mcp, memory, host, tags).
             #[test]
-            fn resolution_is_deterministic((cfg, active) in arb_config_and_tags()) {
-                let a = resolve_mcps(&cfg, &active).expect("resolve");
-                let b = resolve_mcps(&cfg, &active).expect("resolve");
+            fn resolution_is_deterministic((mcp, active) in arb_mcp_and_tags()) {
+                let a = resolve_mcps(&mcp, &[], &base_host(), &active).expect("resolve");
+                let b = resolve_mcps(&mcp, &[], &base_host(), &active).expect("resolve");
                 prop_assert_eq!(a, b);
             }
         }

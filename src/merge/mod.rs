@@ -131,6 +131,26 @@ pub fn merge(
     })
 }
 
+/// Keys that a `bundle.yaml` fragment is allowed to declare. Any other top-level
+/// key is rejected with a hard error rather than silently dropped.
+const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
+    "permissions",
+    "hooks",
+    "plugins",
+    "mcp",
+    "env",
+    "auto_memory_enabled",
+    "effort_level",
+    "advisor_size",
+    "native_permissions",
+    "native_hooks",
+    "native_plugins",
+    "native_mcp",
+    "native",
+    "features",
+    "host",
+];
+
 /// Read an optional `bundle.yaml` capability fragment from a bundle directory.
 /// Returns `None` when the file is absent — bundles carry capabilities only if
 /// they choose to.
@@ -141,7 +161,22 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
     }
     let s = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("bundle '{name}': reading {}: {e}", path.display()))?;
-    let mut caps: Capabilities = serde_yaml::from_str(&s)
+    let raw: serde_yaml::Value = serde_yaml::from_str(&s)
+        .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
+    if let Some(mapping) = raw.as_mapping() {
+        for key in mapping.keys() {
+            if let Some(k) = key.as_str()
+                && !BUNDLE_YAML_KNOWN_KEYS.contains(&k)
+            {
+                anyhow::bail!(
+                    "bundle '{name}': unknown key '{k}' in bundle.yaml — \
+                     known keys: {}",
+                    BUNDLE_YAML_KNOWN_KEYS.join(", ")
+                );
+            }
+        }
+    }
+    let mut caps: Capabilities = serde_yaml::from_value(raw)
         .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
 
     // Track which bundle each hook came from, so the adapter can resolve relative paths later.
@@ -319,6 +354,97 @@ mod tests {
         assert!(
             !re_serialized.contains("!!"),
             "normalized value must not contain YAML tags: {re_serialized}"
+        );
+    }
+
+    // #335: a bundle.yaml with a features: block contributes memory entries to merged capabilities.
+    #[test]
+    fn bundle_features_memory_appears_in_merged_capabilities() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("mem-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 9092\n",
+                "      tags: [home]\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "mem-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+        let features = manifest
+            .capabilities
+            .features
+            .as_ref()
+            .expect("features must be present");
+        assert_eq!(features.memory.len(), 1);
+        assert_eq!(features.memory[0].server_host, "still");
+    }
+
+    // #335: a bundle.yaml with a host: block contributes host entries to merged capabilities.
+    #[test]
+    fn bundle_host_block_appears_in_merged_capabilities() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("host-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!("host:\n", "  still:\n", "    addr: still.local\n",),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "host-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+        assert!(
+            manifest.capabilities.host.contains_key("still"),
+            "bundle host: entry must appear in merged capabilities"
+        );
+        assert_eq!(manifest.capabilities.host["still"].addr, "still.local");
+    }
+
+    // #335: unknown keys in bundle.yaml must error instead of being silently dropped.
+    #[test]
+    fn bundle_yaml_unknown_key_errors() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("bad-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            // `features:` is valid; `native:` is a known typo of what used to be `vars:`.
+            // `typo_key` is unknown and must produce an error.
+            "typo_key:\n  value: oops\n",
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "bad-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown key"),
+            "must report unknown key, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("typo_key"),
+            "error must name the unknown key, got: {err}"
         );
     }
 }

@@ -223,7 +223,12 @@ fn memory_url(
     config: &crate::config::Config,
     active: &crate::scope::ActiveScopes,
 ) -> anyhow::Result<Option<String>> {
-    let resolved = resolve_mcps(config, &active.tags)
+    let top_memory = config
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    let resolved = resolve_mcps(&config.mcp, top_memory, &config.host, &active.tags)
         .map_err(|e| anyhow::anyhow!("failed to resolve MCP servers: {e}"))?;
     Ok(resolved.into_iter().find_map(|m| match m.kind {
         ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some(url),

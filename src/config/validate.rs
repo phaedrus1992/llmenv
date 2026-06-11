@@ -421,19 +421,21 @@ impl Config {
                 }
             }
         }
-        if let Some(mem) = self.features.as_ref().and_then(|f| f.memory.as_ref()) {
-            if mem.tags.is_empty() {
-                return Err(ValidateError::MemoryNoTags);
-            }
-            if !self.host.contains_key(&mem.server_host) {
-                return Err(ValidateError::MemoryUnknownServerHost(
-                    mem.server_host.clone(),
-                ));
-            }
-            if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
-                return Err(ValidateError::MemoryInvalidListenHost(
-                    mem.listen_host.clone(),
-                ));
+        if let Some(features) = &self.features {
+            for mem in &features.memory {
+                if mem.tags.is_empty() {
+                    return Err(ValidateError::MemoryNoTags);
+                }
+                if !self.host.contains_key(&mem.server_host) {
+                    return Err(ValidateError::MemoryUnknownServerHost(
+                        mem.server_host.clone(),
+                    ));
+                }
+                if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
+                    return Err(ValidateError::MemoryInvalidListenHost(
+                        mem.listen_host.clone(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -728,7 +730,7 @@ mod tests {
                     })
                     .collect()
             }),
-            prop::option::of(arb_memory()),
+            prop::collection::vec(arb_memory(), 0..3),
             prop::collection::btree_map(
                 arb_string(),
                 arb_string().prop_map(|addr| HostEntry { addr }),
@@ -781,7 +783,11 @@ mod tests {
                         native: Default::default(),
                         bundle,
                         mcp,
-                        features: memory.map(|mem| Features { memory: Some(mem) }),
+                        features: if memory.is_empty() {
+                            None
+                        } else {
+                            Some(Features { memory })
+                        },
                         marketplace,
                         plugin_collection,
                         state: Default::default(),
