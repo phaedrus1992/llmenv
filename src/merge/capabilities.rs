@@ -10,6 +10,9 @@
 //! - **Scalars** (`default_mode`) → the highest-precedence contributor wins.
 //!   Two contributors at the **same** precedence setting different values is an
 //!   unresolvable ambiguity → hard-error naming both. Loud beats silent.
+//! - **Maps** (`env`) → per-key scalar merge: highest-precedence contributor
+//!   wins per key. Same-precedence disagreement on a single key is a hard error,
+//!   matching the `default_mode` scalar policy.
 
 use std::collections::BTreeMap;
 
@@ -31,9 +34,9 @@ pub struct CapabilityContributor {
 /// `precedence` field, not from position.
 ///
 /// # Errors
-/// Returns an error when two contributors at the same (highest) precedence set
-/// a scalar (`default_mode`) to different values, since there is no rank to
-/// break the tie.
+/// Returns an error when two contributors at the same precedence set a scalar
+/// field (`default_mode`, or a single `env` key) to different values, since
+/// there is no rank to break the tie.
 pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Result<Capabilities> {
     let mut hooks = Vec::new();
     let mut plugins = Vec::new();
@@ -42,9 +45,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let mut ask = Vec::new();
     let mut deny = Vec::new();
     let mut native_permissions: BTreeMap<String, NativePermissionRules> = BTreeMap::new();
-    let mut env = BTreeMap::new();
 
-    // Sort contributors by precedence to ensure higher precedence wins.
+    // Sort contributors by precedence to ensure higher precedence wins for lists.
     let mut ordered: Vec<&CapabilityContributor> = contributors.iter().collect();
     ordered.sort_by_key(|c| c.precedence);
 
@@ -56,9 +58,6 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         allow.extend(caps.permissions.allow.iter().cloned());
         ask.extend(caps.permissions.ask.iter().cloned());
         deny.extend(caps.permissions.deny.iter().cloned());
-        for (key, value) in &caps.env {
-            env.insert(key.clone(), value.clone());
-        }
         for (engine, rules) in &caps.native_permissions {
             let slot = native_permissions.entry(engine.clone()).or_default();
             slot.allow.extend(rules.allow.iter().cloned());
@@ -66,6 +65,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             slot.deny.extend(rules.deny.iter().cloned());
         }
     }
+
+    let env = resolve_env(contributors)?;
 
     dedup(&mut hooks);
     dedup(&mut plugins);
@@ -160,6 +161,48 @@ fn merge_native_flat(
     contributors: &[CapabilityContributor],
 ) -> BTreeMap<String, serde_yaml::Value> {
     merge_native_feature(contributors, |c| &c.native)
+}
+
+/// Resolve the `env` map across contributors: per key, highest-precedence
+/// contributor wins. Same-precedence disagreement on any key is a hard error,
+/// matching the `default_mode` scalar policy.
+fn resolve_env(contributors: &[CapabilityContributor]) -> anyhow::Result<BTreeMap<String, String>> {
+    // Track the winning (contributor, value) per key. Order-independent: all
+    // four precedence cases (higher wins, lower loses, same+agree, same+conflict)
+    // are handled by comparing stored vs incoming precedence.
+    let mut env: BTreeMap<String, (&CapabilityContributor, &str)> = BTreeMap::new();
+
+    for c in contributors {
+        for (key, value) in &c.capabilities.env {
+            match env.get(key) {
+                None => {
+                    env.insert(key.clone(), (c, value.as_str()));
+                }
+                Some((prev_c, prev_value)) => {
+                    if c.precedence > prev_c.precedence {
+                        env.insert(key.clone(), (c, value.as_str()));
+                    } else if c.precedence == prev_c.precedence && value.as_str() != *prev_value {
+                        anyhow::bail!(
+                            "conflicting env key '{key}' at the same precedence: \
+                             '{}' sets {:?} but '{}' sets {:?} — no scope can break \
+                             the tie; resolve by giving one a higher-precedence scope",
+                            prev_c.name,
+                            prev_value,
+                            c.name,
+                            value,
+                        );
+                    }
+                    // c.precedence < prev: prev keeps winning.
+                    // c.precedence == prev, same value: agreement, no-op.
+                }
+            }
+        }
+    }
+
+    Ok(env
+        .into_iter()
+        .map(|(k, (_, v))| (k, v.to_string()))
+        .collect())
 }
 
 /// Resolve the `default_mode` scalar across contributors: highest precedence
@@ -411,6 +454,95 @@ mod tests {
         let a = contributor("a", 0, with_allow(vec![rule("Bash", "x")]));
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.permissions.default_mode, None);
+    }
+
+    fn with_env(pairs: &[(&str, &str)]) -> Capabilities {
+        Capabilities {
+            env: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    // #355: env key merge — disjoint keys from two contributors both survive.
+    #[test]
+    fn env_disjoint_keys_merge() {
+        let a = contributor("a", 1, with_env(&[("A_VAR", "a")]));
+        let b = contributor("b", 2, with_env(&[("B_VAR", "b")]));
+        let out = merge_capabilities(&[a, b]).unwrap();
+        assert_eq!(out.env.get("A_VAR").map(String::as_str), Some("a"));
+        assert_eq!(out.env.get("B_VAR").map(String::as_str), Some("b"));
+    }
+
+    // #355: env key merge — higher-precedence contributor wins on key collision.
+    #[test]
+    fn env_higher_precedence_wins() {
+        let low = contributor("low", 1, with_env(&[("KEY", "low_val")]));
+        let high = contributor("high", 5, with_env(&[("KEY", "high_val")]));
+        let out = merge_capabilities(&[low, high]).unwrap();
+        assert_eq!(out.env.get("KEY").map(String::as_str), Some("high_val"));
+    }
+
+    // #355: higher-precedence wins regardless of input order.
+    #[test]
+    fn env_higher_precedence_wins_reversed_order() {
+        let high = contributor("high", 5, with_env(&[("KEY", "high_val")]));
+        let low = contributor("low", 1, with_env(&[("KEY", "low_val")]));
+        let out = merge_capabilities(&[high, low]).unwrap();
+        assert_eq!(out.env.get("KEY").map(String::as_str), Some("high_val"));
+    }
+
+    // #355: same-precedence, same-value agreement must not error.
+    #[test]
+    fn env_same_precedence_same_value_is_ok() {
+        let a = contributor("a", 3, with_env(&[("KEY", "shared")]));
+        let b = contributor("b", 3, with_env(&[("KEY", "shared")]));
+        let out = merge_capabilities(&[a, b]).unwrap();
+        assert_eq!(out.env.get("KEY").map(String::as_str), Some("shared"));
+    }
+
+    // #355: same-precedence, different-value conflict is a hard error.
+    #[test]
+    fn env_same_precedence_different_value_errors() {
+        let a = contributor("bundle-a", 3, with_env(&[("MY_VAR", "alpha")]));
+        let b = contributor("bundle-b", 3, with_env(&[("MY_VAR", "beta")]));
+        let err = merge_capabilities(&[a, b]).unwrap_err().to_string();
+        assert!(err.contains("conflicting env key"), "got: {err}");
+        assert!(err.contains("MY_VAR"), "got: {err}");
+        assert!(
+            err.contains("bundle-a") && err.contains("bundle-b"),
+            "got: {err}"
+        );
+    }
+
+    // #355: conflict is detected even when higher-prec contributor is first in input.
+    #[test]
+    fn env_conflict_detected_regardless_of_order() {
+        let b = contributor("b", 3, with_env(&[("VAR", "b_val")]));
+        let a = contributor("a", 3, with_env(&[("VAR", "a_val")]));
+        let err = merge_capabilities(&[b, a]).unwrap_err().to_string();
+        assert!(err.contains("conflicting env key"), "got: {err}");
+    }
+
+    // #355: non-conflicting keys from same-precedence contributors both survive.
+    #[test]
+    fn env_same_precedence_disjoint_keys_ok() {
+        let a = contributor("a", 3, with_env(&[("A", "1")]));
+        let b = contributor("b", 3, with_env(&[("B", "2")]));
+        let out = merge_capabilities(&[a, b]).unwrap();
+        assert_eq!(out.env.get("A").map(String::as_str), Some("1"));
+        assert_eq!(out.env.get("B").map(String::as_str), Some("2"));
+    }
+
+    // #355: only the conflicting key errors; other keys do not matter.
+    #[test]
+    fn env_conflict_message_names_the_key() {
+        let a = contributor("src-a", 2, with_env(&[("CONFLICT", "val1"), ("SAFE", "x")]));
+        let b = contributor("src-b", 2, with_env(&[("CONFLICT", "val2")]));
+        let err = merge_capabilities(&[a, b]).unwrap_err().to_string();
+        assert!(err.contains("CONFLICT"), "got: {err}");
     }
 
     // #329: mcp entries from bundle.yaml must concatenate and dedup.
@@ -690,6 +822,69 @@ mod tests {
                         "duplicate mcp entry at index {i}: {m:?}"
                     );
                 }
+            }
+
+            // #355: env merge uses unique keys across contributors — no collisions
+            // possible — so the result contains every key exactly once.
+            #[test]
+            fn env_unique_keys_all_survive(
+                entries in prop::collection::vec(
+                    ("[A-Z][A-Z0-9_]{1,6}", "[a-z]{1,8}", 1u8..=10u8),
+                    0..10,
+                )
+            ) {
+                // Build contributors with disjoint keys (index suffix forces uniqueness).
+                let contribs: Vec<CapabilityContributor> = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (key, val, prec))| CapabilityContributor {
+                        name: format!("c{i}"),
+                        precedence: *prec,
+                        capabilities: Capabilities {
+                            env: std::iter::once((format!("{key}_{i}"), val.clone())).collect(),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(out.env.len(), contribs.len());
+            }
+
+            // #355: highest-precedence contributor wins per env key; any lower
+            // contributor's value for the same key is superseded.
+            // Each low contributor gets a distinct precedence (i+1) to avoid
+            // same-precedence conflicts among them, which are legitimate errors.
+            #[test]
+            fn env_highest_precedence_wins_per_key(
+                low_count in 0usize..5,
+                winner_bump in 1u8..50,
+            ) {
+                let winner_prec = 50u8 + winner_bump;
+                let mut contribs: Vec<CapabilityContributor> = (0..low_count)
+                    .map(|i| CapabilityContributor {
+                        name: format!("low{i}"),
+                        // Distinct precedences (1-based) all below winner.
+                        precedence: (i + 1) as u8,
+                        capabilities: Capabilities {
+                            env: std::iter::once(("KEY".to_string(), format!("low{i}"))).collect(),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                contribs.push(CapabilityContributor {
+                    name: "winner".into(),
+                    precedence: winner_prec,
+                    capabilities: Capabilities {
+                        env: std::iter::once(("KEY".to_string(), "winner_val".to_string())).collect(),
+                        ..Default::default()
+                    },
+                });
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(
+                    out.env.get("KEY").map(String::as_str),
+                    Some("winner_val"),
+                    "highest-precedence contributor must win for env key KEY"
+                );
             }
 
             // The strictly-highest-precedence contributor's default_mode always
