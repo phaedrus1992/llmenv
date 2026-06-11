@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix `env:` declared in a bundle's `bundle.yaml` being silently dropped;
   bundle-level env vars are now merged and exported alongside `Bundle.vars`
   (#351)
+- Reject reserved env var names (`CLAUDE_CONFIG_DIR`, `LLMENV_STATE_DIR`) and
+  the `LLMENV_*` prefix in `capabilities.env` at validation time; silently
+  setting these would shadow adapter-emitted vars and produce conflicts that
+  are impossible to diagnose at runtime (#354)
+- Detect same-precedence conflicts in `capabilities.env` key merging and error
+  with the contributor names and values, matching the existing `default_mode`
+  conflict behaviour; previously one of the conflicting values would silently
+  win (#355)
 
 ## [1.0.9] - 2026-06-10
 
