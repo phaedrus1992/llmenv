@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.10] - 2026-06-11
+
 ### Added
 
 - `llmenv plugin-sync` now fetches externally-sourced plugins — those whose
@@ -269,7 +271,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.9...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.10...HEAD
+[1.0.10]: https://github.com/phaedrus1992/llmenv/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/phaedrus1992/llmenv/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...v1.0.7

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.10] - 2026-06-11
+
 ### Added
 
 - `llmenv plugin-sync` now fetches externally-sourced plugins — those whose
