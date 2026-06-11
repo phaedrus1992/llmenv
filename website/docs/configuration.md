@@ -185,6 +185,10 @@ bundle:
     tags: [office]
 ```
 
+A bundle entry with only `name` and `tags` (no content directory) is valid and
+participates in tag matching. To inject environment variables, declare them in the
+bundle's `bundle.yaml` under `capabilities.env`.
+
 ## `mcp:`
 
 MCP servers selected by tag, rendered into the agent's MCP config. Each is
