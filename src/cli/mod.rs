@@ -905,13 +905,7 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         })
         .collect();
 
-    // Collect env vars from firing bundles only.
     let mut vars = std::collections::BTreeMap::new();
-    for bundle in &firing {
-        for (key, value) in &bundle.env {
-            vars.insert(key.clone(), value.clone());
-        }
-    }
 
     // TODO: Scope filtering would require evaluating scope match conditions
     // (network gateway/ssid/cidr, host hostname, user user, project path/marker)
@@ -1637,7 +1631,7 @@ fn sync_plugin_payloads(
 /// Resolve firing bundles to on-disk `BundleRef`s in scope precedence order
 /// (network → host → user → project), then unscoped tags in declaration
 /// order. Bundles with no content directory under `<config_dir>/bundles/<name>/`
-/// are dropped silently — vars-only bundles are valid.
+/// are dropped silently — tag-only bundles (no content directory) are valid.
 fn build_bundle_refs(
     config_dir: &Path,
     active: &ActiveScopes,
@@ -1662,7 +1656,7 @@ fn build_bundle_refs(
             if !path.exists() {
                 tracing::warn!(
                     "bundle '{}' has no content directory at {}; \
-                     skipping (vars-only bundle, or missing/deleted directory)",
+                     skipping (tag-only bundle, or missing/deleted directory)",
                     name,
                     path.display()
                 );

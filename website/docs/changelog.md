@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   documentation pages with Mermaid flowcharts; the diagrams now render as proper
   graphs on the Docusaurus docs site
 
+### Removed
+
+- **Breaking:** Remove `env` (and its deprecated alias `vars`) from the top-level
+  `bundle:` config field. Bundle-level environment variables must now be declared
+  in `bundle.yaml` under `capabilities.env`. (#352)
+
 ### Fixed
 
 - Fix `config-guard` path-prefix check accepting `..`-based traversal paths (e.g.

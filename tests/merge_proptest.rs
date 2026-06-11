@@ -32,13 +32,11 @@ fn prop_merge_is_deterministic() {
         let bundle1 = Bundle {
             name: name1.clone(),
             tags: vec!["tag1".into()],
-            env: Default::default(),
         };
 
         let bundle2 = Bundle {
             name: name2.clone(),
             tags: vec!["tag2".into()],
-            env: Default::default(),
         };
 
         let cfg1 = Config {
@@ -75,7 +73,6 @@ fn prop_bundle_order_preserved_through_serialization() {
             .map(|name| Bundle {
                 name: name.clone(),
                 tags: vec!["tag".into()],
-                env: Default::default(),
             })
             .collect();
 
@@ -106,7 +103,6 @@ fn prop_bundle_tags_preserved_through_roundtrip() {
         let bundle = Bundle {
             name: name.clone(),
             tags: unique_tags.clone(),
-            env: Default::default(),
         };
 
         let cfg = Config {
@@ -144,13 +140,11 @@ fn prop_bundle_merge_preserves_all_data() {
         let bundle1 = Bundle {
             name: name1.clone(),
             tags: vec!["t1".into()],
-            env: Default::default(),
         };
 
         let bundle2 = Bundle {
             name: name2.clone(),
             tags: vec!["t2".into()],
-            env: Default::default(),
         };
 
         let cfg = Config {
@@ -183,7 +177,6 @@ fn prop_bundle_concat_is_stable() {
             .map(|(i, name)| Bundle {
                 name: name.clone(),
                 tags: vec![format!("tag{}", i)],
-                env: Default::default(),
             })
             .collect();
 

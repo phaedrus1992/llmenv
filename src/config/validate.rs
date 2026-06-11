@@ -23,8 +23,6 @@ pub enum ValidateError {
     InvalidMACAddress(String),
     #[error("invalid hostname: {0}")]
     InvalidHostname(String),
-    #[error("bundle {0}: invalid variable name '{1}' (must match [A-Za-z_][A-Za-z0-9_]*)")]
-    InvalidVarName(String, String),
     #[error("cache_dir contains path traversal components: {0}")]
     CacheDirTraversal(String),
     #[error("cache_retention_hours must be > 0")]
@@ -111,7 +109,7 @@ pub enum ValidateError {
     #[error(
         "{context}: capabilities.env key '{key}' is reserved — it is emitted by the \
          adapter or state system and must not be overridden here. \
-         Fix: remove this key from env:, or use bundle.vars for template variables."
+         Fix: remove this key from env:, or declare env vars in bundle.yaml under capabilities.env."
     )]
     CapabilitiesReservedEnvKey { context: String, key: String },
     #[error(
@@ -284,14 +282,6 @@ impl Config {
             }
             if !seen_bundle_names.insert(&b.name) {
                 return Err(ValidateError::DuplicateBundleName(b.name.clone()));
-            }
-            for var_name in b.env.keys() {
-                if !is_valid_var_name(var_name) {
-                    return Err(ValidateError::InvalidVarName(
-                        b.name.clone(),
-                        var_name.clone(),
-                    ));
-                }
             }
         }
         for key in self.capabilities.env.keys() {
@@ -726,7 +716,6 @@ mod tests {
                     .map(|(i, (name, tags))| Bundle {
                         name: format!("bundle-{}-{}", i, name),
                         tags,
-                        env: Default::default(),
                     })
                     .collect()
             }),
@@ -863,7 +852,7 @@ mod tests {
                 names in prop::collection::vec(arb_string(), 1..3)
             ) {
                 let mut bundles = names.iter()
-                    .map(|name| Bundle { name: name.clone(), tags: vec!["tag1".to_string()], env: Default::default() })
+                    .map(|name| Bundle { name: name.clone(), tags: vec!["tag1".to_string()] })
                     .collect::<Vec<_>>();
                 if !bundles.is_empty() {
                     bundles[0].tags.clear();
@@ -898,8 +887,8 @@ mod tests {
                     native: Default::default(),
                     scope: Scopes::default(),
                     bundle: vec![
-                        Bundle { name: name.clone(), tags: vec!["tag1".to_string()], env: Default::default() },
-                        Bundle { name, tags: vec!["tag2".to_string()], env: Default::default() },
+                        Bundle { name: name.clone(), tags: vec!["tag1".to_string()] },
+                        Bundle { name, tags: vec!["tag2".to_string()] },
                     ],
                     mcp: vec![],
                     features: None,
@@ -939,7 +928,6 @@ mod tests {
             bundle: vec![Bundle {
                 name: "test-bundle".to_string(),
                 tags: vec!["prod".to_string()],
-                env: Default::default(),
             }],
             mcp: vec![],
             features: None,
@@ -1325,83 +1313,6 @@ mod tests {
             init: Default::default(),
         };
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_invalid_var_name_starts_with_digit() {
-        let mut env = std::collections::BTreeMap::new();
-        env.insert("123var".to_string(), "value".to_string());
-        let config = Config {
-            cache: Cache::default(),
-            capabilities: Default::default(),
-            native: Default::default(),
-            scope: Scopes::default(),
-            bundle: vec![Bundle {
-                name: "test".to_string(),
-                tags: vec!["tag1".to_string()],
-                env,
-            }],
-            mcp: vec![],
-            features: None,
-            marketplace: vec![],
-            plugin_collection: vec![],
-            state: Default::default(),
-            host: Default::default(),
-            init: Default::default(),
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_invalid_var_name_contains_hyphen() {
-        let mut env = std::collections::BTreeMap::new();
-        env.insert("my-var".to_string(), "value".to_string());
-        let config = Config {
-            cache: Cache::default(),
-            capabilities: Default::default(),
-            native: Default::default(),
-            scope: Scopes::default(),
-            bundle: vec![Bundle {
-                name: "test".to_string(),
-                tags: vec!["tag1".to_string()],
-                env,
-            }],
-            mcp: vec![],
-            features: None,
-            marketplace: vec![],
-            plugin_collection: vec![],
-            state: Default::default(),
-            host: Default::default(),
-            init: Default::default(),
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_valid_var_names() {
-        let mut env = std::collections::BTreeMap::new();
-        env.insert("MY_VAR".to_string(), "value1".to_string());
-        env.insert("_private".to_string(), "value2".to_string());
-        env.insert("var123".to_string(), "value3".to_string());
-        let config = Config {
-            cache: Cache::default(),
-            capabilities: Default::default(),
-            native: Default::default(),
-            scope: Scopes::default(),
-            bundle: vec![Bundle {
-                name: "test".to_string(),
-                tags: vec!["tag1".to_string()],
-                env,
-            }],
-            mcp: vec![],
-            features: None,
-            marketplace: vec![],
-            plugin_collection: vec![],
-            state: Default::default(),
-            host: Default::default(),
-            init: Default::default(),
-        };
-        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -2011,7 +1922,6 @@ mod tests {
             bundle: vec![Bundle {
                 name: "b".into(),
                 tags: vec!["t".into()],
-                env: Default::default(),
             }],
             ..Default::default()
         }

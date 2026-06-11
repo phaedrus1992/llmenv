@@ -82,12 +82,8 @@ scope:
 bundle:
   - name: base
     tags: [me]
-    vars:
-      EDITOR: "code"
   - name: office-config
     tags: [office]
-    vars:
-      OFFICE_PROXY: "proxy.internal"
 ```
 
 A project marker, `~/code/myapp/.llmenv.yaml`:

@@ -359,7 +359,7 @@ pub struct NetworkScope {
     pub r#match: NetworkMatch,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    /// Environment variables to inject when this scope matches.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
 }
@@ -377,7 +377,7 @@ pub struct HostScope {
     pub r#match: HostMatch,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    /// Environment variables to inject when this scope matches.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
 }
@@ -393,7 +393,7 @@ pub struct UserScope {
     pub r#match: UserMatch,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Environment variables to inject when this scope matches. Same semantics as Bundle.vars.
+    /// Environment variables to inject when this scope matches.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
 }
@@ -408,10 +408,6 @@ pub struct Bundle {
     pub name: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Environment variables to inject when this bundle is selected.
-    /// Deprecated name `vars` accepted for backward compat.
-    #[serde(default, alias = "vars")]
-    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// A reachable address for a named host, used by the `memory` backend to
