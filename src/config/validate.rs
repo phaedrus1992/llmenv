@@ -109,7 +109,7 @@ pub enum ValidateError {
     #[error(
         "{context}: capabilities.env key '{key}' is reserved — it is emitted by the \
          adapter or state system and must not be overridden here. \
-         Fix: remove this key from env:, or use bundle.vars for template variables."
+         Fix: remove this key from env:, or declare env vars in bundle.yaml under capabilities.env."
     )]
     CapabilitiesReservedEnvKey { context: String, key: String },
     #[error(
