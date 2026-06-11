@@ -16,7 +16,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::{Capabilities, NativePermissionRules, PermissionMode, Permissions};
+use crate::config::{
+    Capabilities, Features, HostEntry, Memory, NativePermissionRules, PermissionMode, Permissions,
+};
 use crate::util::{dedup, merge_yaml, normalize_yaml};
 
 /// A single source of capability fragments. `precedence` encodes scope rank
@@ -50,7 +52,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let mut ordered: Vec<&CapabilityContributor> = contributors.iter().collect();
     ordered.sort_by_key(|c| c.precedence);
 
-    for c in ordered {
+    for c in &ordered {
         let caps = &c.capabilities;
         hooks.extend(caps.hooks.iter().cloned());
         plugins.extend(caps.plugins.iter().cloned());
@@ -85,6 +87,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let native_plugins = merge_native_feature(contributors, |c| &c.native_plugins);
     let native_mcp = merge_native_feature(contributors, |c| &c.native_mcp);
     let native = merge_native_flat(contributors);
+    let host = resolve_host_map(contributors)?;
 
     // Scalar resolution: highest precedence wins (not positional order).
     // #227: resolve by explicit precedence comparison, matching resolve_default_mode.
@@ -97,6 +100,21 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         })
         .max_by_key(|(p, _)| *p)
         .map(|(_, v)| v);
+
+    // Collect memory entries from all contributors: concat + dedup (same list model
+    // as hooks, plugins, mcp). Ambiguity at resolve-time, not merge-time.
+    let mut memory: Vec<Memory> = Vec::new();
+    for c in &ordered {
+        if let Some(features) = &c.capabilities.features {
+            memory.extend(features.memory.iter().cloned());
+        }
+    }
+    dedup(&mut memory);
+    let features = if memory.is_empty() {
+        None
+    } else {
+        Some(Features { memory })
+    };
 
     Ok(Capabilities {
         permissions: Permissions {
@@ -117,6 +135,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         native_plugins,
         native_mcp,
         native,
+        features,
+        host,
     })
 }
 
@@ -163,6 +183,42 @@ fn merge_native_flat(
     contributors: &[CapabilityContributor],
 ) -> BTreeMap<String, serde_yaml::Value> {
     merge_native_feature(contributors, |c| &c.native)
+}
+
+/// Merge the `host` address table across contributors: per key, highest-precedence
+/// contributor wins. Same-precedence disagreement on a single key is a hard error,
+/// matching the `default_mode` and `env` scalar policy.
+fn resolve_host_map(
+    contributors: &[CapabilityContributor],
+) -> anyhow::Result<BTreeMap<String, HostEntry>> {
+    let mut result: BTreeMap<String, (&CapabilityContributor, &HostEntry)> = BTreeMap::new();
+    for c in contributors {
+        for (name, entry) in &c.capabilities.host {
+            match result.get(name) {
+                None => {
+                    result.insert(name.clone(), (c, entry));
+                }
+                Some((prev_c, prev_entry)) => {
+                    if c.precedence > prev_c.precedence {
+                        result.insert(name.clone(), (c, entry));
+                    } else if c.precedence == prev_c.precedence && entry != *prev_entry {
+                        anyhow::bail!(
+                            "conflicting host entry '{name}' at the same precedence: \
+                             '{}' and '{}' — resolve by giving one a higher-precedence scope",
+                            prev_c.name,
+                            c.name,
+                        );
+                    }
+                    // c.precedence < prev: prev keeps winning.
+                    // c.precedence == prev, same value: agreement, no-op.
+                }
+            }
+        }
+    }
+    Ok(result
+        .into_iter()
+        .map(|(k, (_, v))| (k, v.clone()))
+        .collect())
 }
 
 /// Resolve the `env` map across contributors: per key, highest-precedence
@@ -930,6 +986,238 @@ mod tests {
                     Some(PermissionMode::BypassPermissions)
                 );
             }
+
+            // resolve_host_map: disjoint keys from N contributors all survive.
+            #[test]
+            fn host_disjoint_keys_all_survive(
+                entries in prop::collection::vec(
+                    ("[a-z][a-z0-9-]{1,8}", "[a-z0-9.]{1,12}", 1u8..=10u8),
+                    0..8,
+                )
+            ) {
+                use crate::config::HostEntry;
+                // Index-suffix forces unique keys per contributor.
+                let contribs: Vec<CapabilityContributor> = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, addr, prec))| CapabilityContributor {
+                        name: format!("c{i}"),
+                        precedence: *prec,
+                        capabilities: Capabilities {
+                            host: [(
+                                format!("{name}_{i}"),
+                                HostEntry { addr: addr.clone() },
+                            )]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(out.host.len(), contribs.len());
+            }
+
+            // resolve_host_map: highest precedence wins per key, regardless of input order.
+            #[test]
+            fn host_highest_precedence_wins(
+                low_count in 0usize..5,
+                winner_bump in 1u8..50,
+            ) {
+                use crate::config::HostEntry;
+                let winner_prec = 50u8 + winner_bump;
+                let mut contribs: Vec<CapabilityContributor> = (0..low_count)
+                    .map(|i| CapabilityContributor {
+                        name: format!("low{i}"),
+                        precedence: (i + 1) as u8,
+                        capabilities: Capabilities {
+                            host: [(
+                                "server".to_string(),
+                                HostEntry { addr: format!("low{i}.local") },
+                            )]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                contribs.push(CapabilityContributor {
+                    name: "winner".into(),
+                    precedence: winner_prec,
+                    capabilities: Capabilities {
+                        host: [(
+                            "server".to_string(),
+                            HostEntry { addr: "winner.local".to_string() },
+                        )]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
+                });
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(
+                    out.host.get("server").map(|e| e.addr.as_str()),
+                    Some("winner.local"),
+                    "highest-precedence contributor must win"
+                );
+            }
         }
+    }
+
+    // #335: host entries from contributors concat by key; higher precedence wins on collision.
+    #[test]
+    fn host_entries_merge_by_key_precedence() {
+        use crate::config::HostEntry;
+        let caps_low = Capabilities {
+            host: [(
+                "still".to_string(),
+                HostEntry {
+                    addr: "still.low".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let caps_high = Capabilities {
+            host: [(
+                "still".to_string(),
+                HostEntry {
+                    addr: "still.high".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[
+            contributor("low", 1, caps_low),
+            contributor("high", 5, caps_high),
+        ])
+        .unwrap();
+        assert_eq!(
+            out.host["still"].addr, "still.high",
+            "higher precedence must win"
+        );
+    }
+
+    #[test]
+    fn host_entries_disjoint_keys_union() {
+        use crate::config::HostEntry;
+        let caps_a = Capabilities {
+            host: [(
+                "server-a".to_string(),
+                HostEntry {
+                    addr: "a.local".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            host: [(
+                "server-b".to_string(),
+                HostEntry {
+                    addr: "b.local".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 1, caps_a), contributor("b", 2, caps_b)])
+            .unwrap();
+        assert!(
+            out.host.contains_key("server-a"),
+            "disjoint key server-a must survive"
+        );
+        assert!(
+            out.host.contains_key("server-b"),
+            "disjoint key server-b must survive"
+        );
+    }
+
+    #[test]
+    fn host_same_precedence_conflict_errors() {
+        use crate::config::HostEntry;
+        let caps_a = Capabilities {
+            host: [(
+                "still".to_string(),
+                HostEntry {
+                    addr: "addr-a".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            host: [(
+                "still".to_string(),
+                HostEntry {
+                    addr: "addr-b".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let err = merge_capabilities(&[contributor("a", 3, caps_a), contributor("b", 3, caps_b)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("conflicting host entry"), "got: {err}");
+        assert!(err.contains("still"), "got: {err}");
+    }
+
+    // #335: features.memory entries concat across contributors and dedup.
+    #[test]
+    fn features_memory_entries_concat_across_contributors() {
+        fn mem_caps(server_host: &str, tag: &str) -> Capabilities {
+            Capabilities {
+                features: Some(Features {
+                    memory: vec![Memory {
+                        server_host: server_host.into(),
+                        port: 9092,
+                        listen_host: "127.0.0.1".into(),
+                        tags: vec![tag.into()],
+                        default_topics: vec![],
+                    }],
+                }),
+                ..Default::default()
+            }
+        }
+        let out = merge_capabilities(&[
+            contributor("a", 1, mem_caps("still", "home")),
+            contributor("b", 2, mem_caps("marks", "work")),
+        ])
+        .unwrap();
+        let features = out.features.as_ref().expect("features must be present");
+        assert_eq!(features.memory.len(), 2, "both entries must survive");
+    }
+
+    #[test]
+    fn features_memory_entries_deduped() {
+        fn mem_caps(server_host: &str) -> Capabilities {
+            Capabilities {
+                features: Some(Features {
+                    memory: vec![Memory {
+                        server_host: server_host.into(),
+                        port: 9092,
+                        listen_host: "127.0.0.1".into(),
+                        tags: vec!["home".into()],
+                        default_topics: vec![],
+                    }],
+                }),
+                ..Default::default()
+            }
+        }
+        let out = merge_capabilities(&[
+            contributor("a", 1, mem_caps("still")),
+            contributor("b", 2, mem_caps("still")), // identical — must dedup
+        ])
+        .unwrap();
+        let features = out.features.as_ref().expect("features must be present");
+        assert_eq!(features.memory.len(), 1, "duplicate entry must be deduped");
     }
 }

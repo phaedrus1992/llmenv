@@ -549,20 +549,75 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
             orphan_count += 1;
         }
     }
-    if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref()) {
-        let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
-        if !has_emitted_tag {
-            eprintln!("{warn} orphan memory: no scope emits its tags");
-            orphan_count += 1;
+    // Build merged host table (top-level + bundle-contributed) for server_host checks.
+    let doctor_firing: Vec<&Bundle> = {
+        let manually: BTreeSet<&str> = active
+            .scopes
+            .iter()
+            .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+            .collect();
+        config
+            .bundle
+            .iter()
+            .filter(|b| {
+                b.tags.iter().any(|bt| active.tags.contains(bt))
+                    || manually.contains(b.name.as_str())
+            })
+            .collect()
+    };
+    let doctor_bundle_caps = {
+        let refs = build_bundle_refs(&config_dir, &active, &doctor_firing);
+        if refs.is_empty() {
+            crate::config::Capabilities::default()
+        } else {
+            crate::merge::merge(&config.capabilities, &config.native, &refs)
+                .unwrap_or_default()
+                .capabilities
         }
-        // The memory client URL is built from the server host's `host:` entry;
-        // a missing entry can never resolve — flag it early.
-        if !config.host.contains_key(&mem.server_host) {
-            eprintln!(
-                "{warn} memory: server_host '{}' has no entry in the host: table",
-                mem.server_host
-            );
-            orphan_count += 1;
+    };
+    let mut merged_host_for_doctor = doctor_bundle_caps.host.clone();
+    for (k, v) in &config.host {
+        merged_host_for_doctor.insert(k.clone(), v.clone());
+    }
+
+    // Check top-level memory entries.
+    if let Some(features) = &config.features {
+        for mem in &features.memory {
+            let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
+            if !has_emitted_tag {
+                eprintln!(
+                    "{warn} orphan memory (server_host '{}'): no scope emits its tags",
+                    mem.server_host
+                );
+                orphan_count += 1;
+            }
+            if !merged_host_for_doctor.contains_key(&mem.server_host) {
+                eprintln!(
+                    "{warn} memory: server_host '{}' has no entry in the host: table",
+                    mem.server_host
+                );
+                orphan_count += 1;
+            }
+        }
+    }
+    // Check bundle-contributed memory entries.
+    if let Some(features) = &doctor_bundle_caps.features {
+        for mem in &features.memory {
+            let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
+            if !has_emitted_tag {
+                eprintln!(
+                    "{warn} orphan bundle memory (server_host '{}'): no scope emits its tags",
+                    mem.server_host
+                );
+                orphan_count += 1;
+            }
+            if !merged_host_for_doctor.contains_key(&mem.server_host) {
+                eprintln!(
+                    "{warn} bundle memory: server_host '{}' has no entry in host: table",
+                    mem.server_host
+                );
+                orphan_count += 1;
+            }
         }
     }
     // Plugin orphans: a collection no scope can select, and a marketplace no
@@ -772,7 +827,15 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     // local `mcp-proxy` is alive before agents try to reach it. Failures here
     // are logged but non-fatal — the export must still emit env vars so the
     // shell hook stays usable.
-    if let Some(bind) = local_memory_server_bind(&config, &active) {
+    // NOTE: only top-level config.features.memory is used here; bundle-contributed
+    // memory entries are merged later in build_manifest and affect resolve_mcps but
+    // not the proxy startup check (#335).
+    let top_memory: &[_] = config
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    if let Some(bind) = local_memory_server_bind(top_memory, &active) {
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
                 match crate::mcp::proxy::ensure_running(
@@ -784,16 +847,15 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
                         // Warn when binding to all interfaces only on startup — the ICM
                         // daemon is unauthenticated.
                         if outcome == crate::mcp::proxy::EnsureOutcome::Spawned
-                            && let Some(memory) =
-                                config.features.as_ref().and_then(|f| f.memory.as_ref())
-                            && let Ok(addr) = memory.listen_host.parse::<std::net::IpAddr>()
+                            && let Some(mem) = find_local_memory_entry(top_memory, &active)
+                            && let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
                             && addr.is_unspecified()
                         {
                             eprintln!(
-                                "warning: memory.listen_host is '{}' — the ICM proxy will \
-                                 accept connections on ALL network interfaces. Set a specific \
-                                 IP to restrict access.",
-                                memory.listen_host
+                                "warning: memory.listen_host is '{}' — the ICM proxy \
+                                 will accept connections on ALL network interfaces. \
+                                 Set a specific IP to restrict access.",
+                                mem.listen_host
                             );
                         }
                     }
@@ -1191,8 +1253,35 @@ fn build_manifest(
 
     let mut manifest: MergedManifest =
         crate::merge::merge(&config.capabilities, &config.native, &refs)?;
+
+    // Combine top-level memory + bundle-contributed memory for resolution.
+    let top_memory = config
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    let bundle_memory = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    let mut all_memory: Vec<crate::config::Memory> = top_memory
+        .iter()
+        .chain(bundle_memory.iter())
+        .cloned()
+        .collect();
+    crate::util::dedup(&mut all_memory);
+
+    // Combine host tables: bundle contributions first, top-level wins on collision.
+    let mut all_host = manifest.capabilities.host.clone();
+    for (k, v) in &config.host {
+        all_host.insert(k.clone(), v.clone());
+    }
+
     manifest.mcps =
-        crate::mcp::resolve::resolve_mcps(config, &active.tags).context("resolving MCP servers")?;
+        crate::mcp::resolve::resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
+            .context("resolving MCP servers")?;
     manifest.mcps.extend(
         crate::mcp::resolve::resolve_bundle_mcps(&manifest.capabilities.mcp, &active.tags)
             .context(
@@ -2225,8 +2314,8 @@ fn all_consumed_tags(config: &Config) -> HashSet<String> {
             config
                 .features
                 .as_ref()
-                .and_then(|f| f.memory.as_ref())
                 .iter()
+                .flat_map(|f| f.memory.iter())
                 .flat_map(|m| m.tags.iter().cloned()),
         )
         .collect()
@@ -2275,16 +2364,17 @@ fn active_host_ids(active: &ActiveScopes) -> BTreeSet<String> {
         .collect()
 }
 
-/// True if the ICM memory backend is active: configured, selected by tags, and
-/// this host is the designated server.
-fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
-    if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref()) {
-        let selected = mem.tags.iter().any(|t| active.tags.contains(t));
-        let is_server = active_host_ids(active).contains(&mem.server_host);
-        selected && is_server
-    } else {
-        false
-    }
+/// Find the memory entry that is both tag-active and designates *this* host as
+/// its server. Returns `None` when this host is a memory client, the memory
+/// list is empty, or no active entry names this host.
+fn find_local_memory_entry<'a>(
+    memory: &'a [crate::config::Memory],
+    active: &ActiveScopes,
+) -> Option<&'a crate::config::Memory> {
+    let host_ids = active_host_ids(active);
+    memory.iter().find(|m| {
+        m.tags.iter().any(|t| active.tags.contains(t)) && host_ids.contains(&m.server_host)
+    })
 }
 
 /// If the memory backend is selected and designates *this* host as its server,
@@ -2300,13 +2390,12 @@ fn is_memory_backend_active(config: &Config, active: &ActiveScopes) -> bool {
 /// placed into the topology manually by emitting the relevant tag from any
 /// scope — so a host whose network can't be auto-detected can still be made the
 /// server by tagging it explicitly.
-fn local_memory_server_bind(config: &Config, active: &ActiveScopes) -> Option<String> {
-    let mem = config.features.as_ref().and_then(|f| f.memory.as_ref())?;
-    if is_memory_backend_active(config, active) {
-        Some(format!("{}:{}", mem.listen_host, mem.port))
-    } else {
-        None
-    }
+fn local_memory_server_bind(
+    memory: &[crate::config::Memory],
+    active: &ActiveScopes,
+) -> Option<String> {
+    let mem = find_local_memory_entry(memory, active)?;
+    Some(format!("{}:{}", mem.listen_host, mem.port))
 }
 
 /// Annotation suffix for a listing row, colored when `use_color` is set.
@@ -2495,17 +2584,7 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
     let active = crate::scope::evaluate(&config, &env);
     let emitted = all_emitted_tags(&config);
 
-    // Resolved entries (active host only) keyed by name, so we can annotate
-    // each selected server with its concrete transport.
-    let mut all_resolved: std::collections::HashMap<String, ResolvedKind> =
-        resolve_mcps(&config, &active.tags)
-            .context("resolving MCP servers for listing")?
-            .into_iter()
-            .map(|m| (m.name, m.kind))
-            .collect();
-
-    // Bundle MCPs: merge the active bundles to get their capabilities.mcp,
-    // then resolve bundle entries for the active scope.
+    // Bundle MCPs: merge the active bundles to get their capabilities.
     let manually_enabled: std::collections::HashSet<&str> = active
         .scopes
         .iter()
@@ -2520,14 +2599,46 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         })
         .collect();
     let bundle_refs = build_bundle_refs(config_dir, &active, &firing);
-    let bundle_mcp_entries = if !bundle_refs.is_empty() {
+    let bundle_caps = if !bundle_refs.is_empty() {
         crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
             .context("merging bundles for mcp-ls")?
             .capabilities
-            .mcp
     } else {
-        vec![]
+        crate::config::Capabilities::default()
     };
+
+    // Combined memory + host: top-level + bundle-contributed (top-level wins on host collision).
+    let top_memory_ls = config
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    let bundle_memory_ls = bundle_caps
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    let mut all_memory_ls: Vec<crate::config::Memory> = top_memory_ls
+        .iter()
+        .chain(bundle_memory_ls.iter())
+        .cloned()
+        .collect();
+    crate::util::dedup(&mut all_memory_ls);
+    let mut all_host_ls = bundle_caps.host.clone();
+    for (k, v) in &config.host {
+        all_host_ls.insert(k.clone(), v.clone());
+    }
+
+    // Resolved entries (active host only) keyed by name, so we can annotate
+    // each selected server with its concrete transport.
+    let mut all_resolved: std::collections::HashMap<String, ResolvedKind> =
+        resolve_mcps(&config.mcp, &all_memory_ls, &all_host_ls, &active.tags)
+            .context("resolving MCP servers for listing")?
+            .into_iter()
+            .map(|m| (m.name, m.kind))
+            .collect();
+
+    let bundle_mcp_entries = bundle_caps.mcp;
     let bundle_resolved = resolve_bundle_mcps(&bundle_mcp_entries, &active.tags)
         .context("resolving bundle MCP servers for listing")?;
     for m in bundle_resolved {
@@ -2562,11 +2673,12 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         rows.push((m.name.clone(), is_active, is_orphan, detail));
     }
 
-    if let Some(mem) = config.features.as_ref().and_then(|f| f.memory.as_ref()) {
+    for mem in &all_memory_ls {
         let is_active = mem.tags.iter().any(|t| active.tags.contains(t));
         let is_orphan = !mem.tags.iter().any(|t| emitted.contains(t));
         let detail = detail_for(MEMORY_MCP_NAME, "memory");
-        rows.push((MEMORY_MCP_NAME.to_string(), is_active, is_orphan, detail));
+        let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);
+        rows.push((name, is_active, is_orphan, detail));
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -3138,13 +3250,13 @@ mod tests {
         );
         Config {
             features: Some(Features {
-                memory: Some(Memory {
+                memory: vec![Memory {
                     server_host: "srv".to_string(),
                     port,
                     listen_host: listen_host.to_string(),
                     tags: vec!["mem".to_string()],
                     default_topics: vec![],
-                }),
+                }],
             }),
             host,
             ..Config::default()
@@ -3196,12 +3308,20 @@ mod tests {
         }
     }
 
+    fn config_memory(config: &Config) -> &[crate::config::Memory] {
+        config
+            .features
+            .as_ref()
+            .map(|f| f.memory.as_slice())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn local_memory_server_bind_defaults_to_loopback() {
         // Default listen_host must be 127.0.0.1 — backward-compatible loopback.
         let config = memory_config("127.0.0.1", 7878);
         let active = active_as_server();
-        let bind = local_memory_server_bind(&config, &active);
+        let bind = local_memory_server_bind(config_memory(&config), &active);
         assert_eq!(bind, Some("127.0.0.1:7878".to_string()));
     }
 
@@ -3210,7 +3330,7 @@ mod tests {
         // A configured listen_host is forwarded into the bind address.
         let config = memory_config("0.0.0.0", 9000);
         let active = active_as_server();
-        let bind = local_memory_server_bind(&config, &active);
+        let bind = local_memory_server_bind(config_memory(&config), &active);
         assert_eq!(bind, Some("0.0.0.0:9000".to_string()));
     }
 
@@ -3219,7 +3339,7 @@ mod tests {
         // When this host is not the designated server, no bind address is returned.
         let config = memory_config("127.0.0.1", 7878);
         let active = active_as_client();
-        let bind = local_memory_server_bind(&config, &active);
+        let bind = local_memory_server_bind(config_memory(&config), &active);
         assert_eq!(bind, None);
     }
 
@@ -3227,7 +3347,7 @@ mod tests {
     fn local_memory_server_bind_returns_none_when_memory_unconfigured() {
         let config = Config::default();
         let active = active_as_server();
-        let bind = local_memory_server_bind(&config, &active);
+        let bind = local_memory_server_bind(config_memory(&config), &active);
         assert_eq!(bind, None);
     }
 

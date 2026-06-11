@@ -19,12 +19,15 @@ pub struct InitConfig {
 /// `features:` in `config.yaml`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct Features {
-    /// llmenv's memory backend (ICM). A single optional topology: one host runs
-    /// the daemon, every other selected host connects to it as a network
-    /// client. Desugars into a resolved MCP server so it lands in the agent's
-    /// MCP config alongside the `mcp` entries.
+    /// llmenv's memory backend (ICM). A list of tag-scoped topology entries:
+    /// each declares one host that runs the daemon and the tag set that
+    /// activates it. The resolver selects by tag intersection (same model as
+    /// bundles and MCP servers) and errors when more than one entry is active
+    /// simultaneously — the `icm` name is reserved and singular at
+    /// connect-time. Zero active entries is valid (memory disabled for this
+    /// scope).
     #[serde(default)]
-    pub memory: Option<Memory>,
+    pub memory: Vec<Memory>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
@@ -200,6 +203,18 @@ pub struct Capabilities {
     /// block in `config.yaml`; bundle contributions deep-merge with it.
     #[serde(default)]
     pub native: std::collections::BTreeMap<String, serde_yaml::Value>,
+    /// Memory backend entries contributed by this capability source (bundle or
+    /// top-level). Merged with all other contributors' entries at resolve time
+    /// by concat + dedup; the resolver then selects by tag intersection and
+    /// errors on ambiguity (>1 active). Uses the same YAML shape as the
+    /// top-level `features.memory` list.
+    #[serde(default)]
+    pub features: Option<Features>,
+    /// Host address table entries contributed by this capability source. Merged
+    /// per-key across contributors: higher-precedence contributor wins on
+    /// collision (same scalar rule as `env`).
+    #[serde(default)]
+    pub host: std::collections::BTreeMap<String, HostEntry>,
 }
 
 impl Capabilities {
@@ -218,6 +233,8 @@ impl Capabilities {
             && self.native_plugins.is_empty()
             && self.native_mcp.is_empty()
             && self.native.is_empty()
+            && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
+            && self.host.is_empty()
     }
 }
 

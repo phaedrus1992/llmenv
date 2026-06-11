@@ -93,9 +93,9 @@ host:
 
 features:
   memory:
-    server_host: memhost
-    port: {port}
-    tags: [test]
+    - server_host: memhost
+      port: {port}
+      tags: [test]
 
 cache:
   sync_interval_minutes: 60
@@ -157,9 +157,10 @@ fn no_memory_backend_active_exits_zero_with_warning() {
 
 #[test]
 fn malformed_backend_url_exits_zero_with_warning() {
-    // A host addr that yields an unparseable URL (`http://bad addr:9`) must
-    // fail-soft at client construction, not panic.
-    let (dir, config_path) = setup_config(&config_with_memory_addr("bad addr", 9));
+    // A host addr that can't be DNS-resolved (`http://no-such-host.invalid:9`)
+    // must fail-soft at client construction, not panic. The `.invalid` TLD is
+    // reserved by RFC 2606 and guaranteed to never resolve.
+    let (dir, config_path) = setup_config(&config_with_memory_addr("no-such-host.invalid", 9));
 
     assert_fail_soft(
         hook_cmd(dir.path(), &config_path, "session_start"),

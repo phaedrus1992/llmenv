@@ -231,21 +231,28 @@ ICM memory backend. Additional feature flags may be nested here in future versio
 
 ### `features.memory:`
 
-llmenv's own memory backend (ICM), modeled as a single networked service. One
-host runs the daemon; every host connects to it over HTTP. The server host's
-address comes from the `host:` table.
+llmenv's own memory backend (ICM). A list of tag-scoped topology entries: each
+declares one host that runs the daemon and the tag set that activates it (same
+model as bundles and MCP servers). At most one entry may be active per scope —
+the resolver errors if two entries' tags match simultaneously. Zero active
+entries means memory is disabled for that scope.
 
 ```yaml
 host:
-  fixed:
-    addr: "fixed.local"        # IP or resolvable hostname
+  home-server:
+    addr: "home-server.local"  # IP or resolvable hostname
+  work-server:
+    addr: "work-server.local"
 
 features:
   memory:
-    server_host: fixed         # key into the host: table
-    port: 7878
-    tags: [me]                 # activates the backend (same model as bundles)
-    default_topics: ["context-{project}", preferences]
+    - server_host: home-server   # key into the host: table
+      port: 9092
+      tags: [home]               # activates the backend (same model as bundles)
+      default_topics: ["context-{project}", preferences]
+    - server_host: work-server
+      port: 9092
+      tags: [work]
 ```
 
 | Field | Required | Notes |

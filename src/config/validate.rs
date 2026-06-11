@@ -39,6 +39,8 @@ pub enum ValidateError {
     McpStdioMissingCommand(String),
     #[error("mcp {0}: {1} transport requires a `url`")]
     McpRemoteMissingUrl(String, String),
+    #[error("host '{0}': addr '{1}' is not a valid hostname or IP address literal")]
+    InvalidHostAddr(String, String),
     #[error("memory: server_host '{0}' has no entry in the `host:` table")]
     MemoryUnknownServerHost(String),
     #[error("memory has no tags")]
@@ -421,19 +423,32 @@ impl Config {
                 }
             }
         }
-        if let Some(mem) = self.features.as_ref().and_then(|f| f.memory.as_ref()) {
-            if mem.tags.is_empty() {
-                return Err(ValidateError::MemoryNoTags);
-            }
-            if !self.host.contains_key(&mem.server_host) {
-                return Err(ValidateError::MemoryUnknownServerHost(
-                    mem.server_host.clone(),
+        // Validate the host address table: each addr must be a valid hostname or IP literal.
+        for (name, entry) in &self.host {
+            let is_valid =
+                entry.addr.parse::<std::net::IpAddr>().is_ok() || is_valid_hostname(&entry.addr);
+            if !is_valid {
+                return Err(ValidateError::InvalidHostAddr(
+                    name.clone(),
+                    entry.addr.clone(),
                 ));
             }
-            if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
-                return Err(ValidateError::MemoryInvalidListenHost(
-                    mem.listen_host.clone(),
-                ));
+        }
+        if let Some(features) = &self.features {
+            for mem in &features.memory {
+                if mem.tags.is_empty() {
+                    return Err(ValidateError::MemoryNoTags);
+                }
+                if !self.host.contains_key(&mem.server_host) {
+                    return Err(ValidateError::MemoryUnknownServerHost(
+                        mem.server_host.clone(),
+                    ));
+                }
+                if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
+                    return Err(ValidateError::MemoryInvalidListenHost(
+                        mem.listen_host.clone(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -728,7 +743,7 @@ mod tests {
                     })
                     .collect()
             }),
-            prop::option::of(arb_memory()),
+            prop::collection::vec(arb_memory(), 0..3),
             prop::collection::btree_map(
                 arb_string(),
                 arb_string().prop_map(|addr| HostEntry { addr }),
@@ -781,7 +796,11 @@ mod tests {
                         native: Default::default(),
                         bundle,
                         mcp,
-                        features: memory.map(|mem| Features { memory: Some(mem) }),
+                        features: if memory.is_empty() {
+                            None
+                        } else {
+                            Some(Features { memory })
+                        },
                         marketplace,
                         plugin_collection,
                         state: Default::default(),
