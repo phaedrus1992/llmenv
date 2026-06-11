@@ -408,10 +408,6 @@ pub struct Bundle {
     pub name: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Environment variables to inject when this bundle is selected.
-    /// Deprecated name `vars` accepted for backward compat.
-    #[serde(default, alias = "vars")]
-    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// A reachable address for a named host, used by the `memory` backend to

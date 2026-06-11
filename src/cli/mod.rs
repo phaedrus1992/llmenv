@@ -905,13 +905,7 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         })
         .collect();
 
-    // Collect env vars from firing bundles only.
     let mut vars = std::collections::BTreeMap::new();
-    for bundle in &firing {
-        for (key, value) in &bundle.env {
-            vars.insert(key.clone(), value.clone());
-        }
-    }
 
     // TODO: Scope filtering would require evaluating scope match conditions
     // (network gateway/ssid/cidr, host hostname, user user, project path/marker)

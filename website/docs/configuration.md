@@ -171,26 +171,19 @@ the `native_<feature>` siblings under `capabilities:` instead.
 
 ## `bundle:`
 
-A bundle is a named set of environment variables, plus (optionally) a content
-directory at `<config_dir>/bundles/<name>/` whose files are merged into the agent
-config. A bundle fires when one of its tags is active, or when a project marker
-force-enables it via `enable_bundles`.
+A bundle is a named content set that fires when one of its tags is active, or
+when a project marker force-enables it via `enable_bundles`. Its content directory
+lives at `<config_dir>/bundles/<name>/` and its files are merged into the agent
+config. A bundle's `bundle.yaml` inside its content directory may declare
+`env:` and other `capabilities:` fields.
 
 ```yaml
 bundle:
   - name: base
     tags: [me]
-    vars:
-      EDITOR: "code"
   - name: office-tools
     tags: [office]
-    vars:
-      OFFICE_CI_URL: "https://ci.internal"
 ```
-
-A vars-only bundle (no content directory) is valid. A bundle's `bundle.yaml`
-inside its content directory may declare the same `capabilities:` shape as the
-top level.
 
 ## `mcp:`
 

@@ -57,12 +57,8 @@ cache:
 bundle:
   - name: base
     tags: [me]
-    env:
-      AGENT: "claude"
   # - name: office-only
   #   tags: [office]
-  #   vars:
-  #     WORK_MCP: "office-server"
 
 # Capabilities: permissions, hooks, plugins. Merged per-scope.
 # capabilities:
