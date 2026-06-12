@@ -204,7 +204,7 @@ fn is_valid_hostname(hostname: &str) -> bool {
 /// Validate a single `capabilities.env` key: not a reserved adapter/state var,
 /// not in the LLMENV_* namespace. Returns an error with the given `context`
 /// label (e.g. `"config.yaml: capabilities"` or `"bundle 'foo'"`) on failure.
-fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), ValidateError> {
+pub(crate) fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), ValidateError> {
     if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key) {
         return Err(ValidateError::CapabilitiesReservedEnvKey {
             context: context.to_string(),

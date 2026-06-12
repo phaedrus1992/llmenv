@@ -4,7 +4,7 @@ mod validate;
 
 pub use schema::*;
 pub use validate::ValidateError;
-pub(crate) use validate::is_valid_var_name;
+pub(crate) use validate::validate_capabilities_env_key;
 
 use anyhow::Context;
 use std::path::Path;
