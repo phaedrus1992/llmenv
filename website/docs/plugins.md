@@ -37,7 +37,7 @@ A `plugin-collection` is a named bag of plugins that activates by tag:
 ```yaml
 plugin-collection:
   - name: dev
-    tags: [me]
+    when: [me]
     plugins:
       - "superpowers:caveman"      # <marketplace>:<plugin>
       - "superpowers:brainstorm"

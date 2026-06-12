@@ -25,7 +25,7 @@ user/project) emit the tags; the intersection decides what is active.
 ```yaml
 mcp:
   - name: playwright
-    tags: [base]            # active whenever the `base` tag is
+    when: [base]            # active whenever the `base` tag is
     command: npx
     args: ["-y", "@playwright/mcp@latest"]
 ```
@@ -38,7 +38,7 @@ A static server is either **stdio** (a local launch command) or **remote**
 ```yaml
 mcp:
   - name: playwright
-    tags: [base]
+    when: [base]
     type: stdio             # default
     command: npx
     args: ["-y", "@playwright/mcp@latest"]
@@ -46,7 +46,7 @@ mcp:
       DISPLAY: ":0"
 
   - name: weather
-    tags: [base]
+    when: [base]
     type: http              # http | sse
     url: "https://weather.example.com/mcp"
 ```
@@ -88,7 +88,7 @@ features:
   memory:
     server_host: fixed       # key into the `host:` table
     port: 7878
-    tags: [base]             # activates the backend (same model as bundles)
+    when: [base]             # activates the backend (same model as bundles)
     default_topics: ["context-{project}", preferences]
 ```
 
@@ -96,7 +96,7 @@ features:
 
 1. Scopes are evaluated against the current environment; the active host-scope
    ids and the active tag set are computed.
-2. If any of `memory.tags` is active, the backend is selected: every agent gets
+2. If any of `memory.when` is active, the backend is selected: every agent gets
    a remote client at `http://<addr>:<port>` built from the host-table address.
 3. If this host matches `server_host` (its id is among the matched host scopes),
    the CLI also launches the local `mcp-proxy` bound to `0.0.0.0:<port>`.
@@ -127,7 +127,7 @@ features:
   memory:
     server_host: fixed
     port: 7878
-    tags: [home]             # active via either route
+    when: [home]             # active via either route
 ```
 
 With this, `laptop` always emits `home`, so its agents always get the memory

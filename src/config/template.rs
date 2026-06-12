@@ -56,9 +56,9 @@ cache:
 # Uncomment and edit as needed.
 bundle:
   - name: base
-    tags: [me]
+    when: [me]
   # - name: office-only
-  #   tags: [office]
+  #   when: [office]
 
 # Capabilities: permissions, hooks, plugins. Merged per-scope.
 # capabilities:
@@ -71,12 +71,12 @@ bundle:
 # MCP config. Each is either stdio (command) or remote (url).
 # mcp:
 #   - name: playwright
-#     tags: [me]
+#     when: [me]
 #     type: stdio           # optional, default is stdio
 #     command: npx
 #     args: ["-y", "@playwright/mcp@latest"]
 #   # - name: office-internal
-#   #   tags: [office]
+#   #   when: [office]
 #   #   type: remote
 #   #   url: http://office-mcp.internal:3000
 
@@ -90,7 +90,7 @@ bundle:
 # Plugin collections: named bags of plugins selected by tag, like bundles.
 # plugin-collection:
 #   - name: base-plugins
-#     tags: [me]
+#     when: [me]
 #     plugins:
 #       - github-marketplace:useful-plugin
 #       - github-marketplace:another-plugin
@@ -108,7 +108,7 @@ bundle:
 #   memory:
 #     server_host: my-laptop  # must exist in the host: table below
 #     port: 7878
-#     tags: [me]
+#     when: [me]
 #     # listen_host: "127.0.0.1"  # default: loopback only. Use "0.0.0.0" for all interfaces.
 
 # Host directory: maps logical host names to reachable addresses.

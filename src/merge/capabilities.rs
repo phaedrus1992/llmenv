@@ -609,7 +609,7 @@ mod tests {
         use crate::config::{McpServer, McpTransport};
         let server = |name: &str| McpServer {
             name: name.into(),
-            tags: vec![],
+            when: vec![],
             transport: McpTransport::Stdio,
             command: Some("cmd".into()),
             args: vec![],
@@ -634,7 +634,7 @@ mod tests {
         use crate::config::{McpServer, McpTransport};
         let server = McpServer {
             name: "ctx".into(),
-            tags: vec![],
+            when: vec![],
             transport: McpTransport::Stdio,
             command: Some("cmd".into()),
             args: vec![],
@@ -724,7 +724,7 @@ mod tests {
             ("[a-z]{1,6}", prop::collection::vec("[a-z]{1,4}", 0..3)).prop_map(|(name, tags)| {
                 McpServer {
                     name,
-                    tags,
+                    when: tags,
                     transport: McpTransport::Stdio,
                     command: Some("cmd".into()),
                     args: vec![],
@@ -1180,7 +1180,7 @@ mod tests {
                         server_host: server_host.into(),
                         port: 9092,
                         listen_host: "127.0.0.1".into(),
-                        tags: vec![tag.into()],
+                        when: vec![tag.into()],
                         default_topics: vec![],
                     }],
                 }),
@@ -1205,7 +1205,7 @@ mod tests {
                         server_host: server_host.into(),
                         port: 9092,
                         listen_host: "127.0.0.1".into(),
-                        tags: vec!["home".into()],
+                        when: vec!["home".into()],
                         default_topics: vec![],
                     }],
                 }),

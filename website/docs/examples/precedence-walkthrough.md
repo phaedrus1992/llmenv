@@ -19,7 +19,7 @@ capabilities:
 
 bundle:
   - name: default-mcp
-    tags: [me]
+    when: [me]
     mcp:
       - name: filesystem
         transport: stdio

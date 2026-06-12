@@ -21,9 +21,9 @@ scope:
 
 bundle:
   - name: base
-    tags: [base]
+    when: [base]
   - name: rust-defaults
-    tags: [rust]
+    when: [rust]
 
 host:
   fixed:
@@ -31,7 +31,7 @@ host:
 
 mcp:
   - name: playwright
-    tags: [base]
+    when: [base]
     command: npx
     args: ["-y", "@playwright/mcp@latest"]
 
@@ -43,15 +43,15 @@ marketplace:
 
 plugin-collection:
   - name: core
-    tags: [base]
+    when: [base]
     plugins: ["superpowers:caveman"]
   - name: rust-tools
-    tags: [rust]
+    when: [rust]
     plugins: ["dev-commons:rust-tooling", "superpowers:tdd"]
 
 features:
   memory:
     - server_host: fixed
       port: 7878
-      tags: [base]
+      when: [base]
       default_topics: ["context-{project}", preferences]

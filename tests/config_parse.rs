@@ -40,11 +40,25 @@ scope:
 }
 
 #[test]
+fn bundle_tags_field_rejected_by_deny_unknown_fields() {
+    let s = r#"
+bundle:
+  - name: x
+    tags: [me]
+"#;
+    let result: Result<Config, _> = serde_yaml::from_str(s);
+    assert!(
+        result.is_err(),
+        "bundle with deprecated 'tags:' key must fail deserialization (deny_unknown_fields)"
+    );
+}
+
+#[test]
 fn rejects_bundle_with_no_tags() {
     let s = r#"
 bundle:
   - name: x
-    tags: []
+    when: []
 "#;
     let cfg: Config = serde_yaml::from_str(s).unwrap();
     assert!(cfg.validate().is_err());
@@ -70,9 +84,9 @@ fn rejects_duplicate_bundle_names() {
     let s = r#"
 bundle:
   - name: dup
-    tags: [a]
+    when: [a]
   - name: dup
-    tags: [b]
+    when: [b]
 "#;
     let cfg: Config = serde_yaml::from_str(s).unwrap();
     assert!(cfg.validate().is_err());

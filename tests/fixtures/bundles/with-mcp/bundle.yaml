@@ -4,7 +4,7 @@ mcp:
   - name: playwright
     command: npx
     args: ["-y", "@playwright/mcp@latest"]
-    tags: ["feature-playwright"]
+    when: ["feature-playwright"]
 permissions:
   allow:
     - { tool: Bash, pattern: "cargo *" }

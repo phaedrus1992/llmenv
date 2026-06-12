@@ -65,11 +65,11 @@ marketplace:
 
 plugin-collection:
   - name: rust-tools
-    tags: [rust]
+    when: [rust]
     plugins: ["superpowers:tdd", "dev-commons:rust-tooling"]  # marketplace:plugin
 ```
 
-A collection fires when any of its `tags` intersect the active scope tags. The
+A collection fires when any of its `when` tags intersect the active scope tags. The
 union of fired collections' plugins (deduplicated) is materialized.
 
 **Marketplace caching.** Git sources are cloned once into

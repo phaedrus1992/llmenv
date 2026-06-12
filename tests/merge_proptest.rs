@@ -31,12 +31,12 @@ fn prop_merge_is_deterministic() {
 
         let bundle1 = Bundle {
             name: name1.clone(),
-            tags: vec!["tag1".into()],
+            when: vec!["tag1".into()],
         };
 
         let bundle2 = Bundle {
             name: name2.clone(),
-            tags: vec!["tag2".into()],
+            when: vec!["tag2".into()],
         };
 
         let cfg1 = Config {
@@ -72,7 +72,7 @@ fn prop_bundle_order_preserved_through_serialization() {
             .iter()
             .map(|name| Bundle {
                 name: name.clone(),
-                tags: vec!["tag".into()],
+                when: vec!["tag".into()],
             })
             .collect();
 
@@ -102,7 +102,7 @@ fn prop_bundle_tags_preserved_through_roundtrip() {
 
         let bundle = Bundle {
             name: name.clone(),
-            tags: unique_tags.clone(),
+            when: unique_tags.clone(),
         };
 
         let cfg = Config {
@@ -116,11 +116,11 @@ fn prop_bundle_tags_preserved_through_roundtrip() {
         let parsed_bundle = &cfg_parsed.bundle[0];
 
         assert_eq!(parsed_bundle.name, bundle.name);
-        let tags_match = parsed_bundle.tags.len() == bundle.tags.len()
+        let tags_match = parsed_bundle.when.len() == bundle.when.len()
             && parsed_bundle
-                .tags
+                .when
                 .iter()
-                .all(|t| bundle.tags.contains(t));
+                .all(|t| bundle.when.contains(t));
         assert!(tags_match, "Tags should match after round-trip");
     });
 }
@@ -139,12 +139,12 @@ fn prop_bundle_merge_preserves_all_data() {
 
         let bundle1 = Bundle {
             name: name1.clone(),
-            tags: vec!["t1".into()],
+            when: vec!["t1".into()],
         };
 
         let bundle2 = Bundle {
             name: name2.clone(),
-            tags: vec!["t2".into()],
+            when: vec!["t2".into()],
         };
 
         let cfg = Config {
@@ -176,7 +176,7 @@ fn prop_bundle_concat_is_stable() {
             .enumerate()
             .map(|(i, name)| Bundle {
                 name: name.clone(),
-                tags: vec![format!("tag{}", i)],
+                when: vec![format!("tag{}", i)],
             })
             .collect();
 

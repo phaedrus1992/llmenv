@@ -201,15 +201,21 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
                  reserved for llmenv-internal variables. Fix: rename the key."
             );
         }
+        if !crate::config::is_valid_var_name(key) {
+            anyhow::bail!(
+                "{context}: capabilities.env key '{key}' is not a valid shell identifier \
+                 (must match [A-Za-z_][A-Za-z0-9_]*). Fix: rename the key."
+            );
+        }
     }
 
     // Validate bundle-contributed memory entries with the same checks that
     // Config::validate() applies to top-level features.memory entries.
     if let Some(features) = &caps.features {
         for mem in &features.memory {
-            if mem.tags.is_empty() {
+            if mem.when.is_empty() {
                 anyhow::bail!(
-                    "{context}: features.memory entry for '{}'  has no tags — every memory entry must declare at least one activation tag",
+                    "{context}: features.memory entry for '{}' has no 'when' tags — every memory entry must declare at least one activation tag",
                     mem.server_host
                 );
             }
@@ -391,7 +397,7 @@ mod tests {
                 "  memory:\n",
                 "    - server_host: still\n",
                 "      port: 9092\n",
-                "      tags: [home]\n",
+                "      when: [home]\n",
             ),
         )
         .unwrap();

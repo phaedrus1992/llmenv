@@ -55,7 +55,7 @@ tag:
 
 bundle:
   - name: test-bundle
-    tags: [test]
+    when: [test]
 
 cache:
   sync_interval_minutes: 60
@@ -95,7 +95,7 @@ features:
   memory:
     - server_host: memhost
       port: {port}
-      tags: [test]
+      when: [test]
 
 cache:
   sync_interval_minutes: 60

@@ -4,6 +4,7 @@ mod validate;
 
 pub use schema::*;
 pub use validate::ValidateError;
+pub(crate) use validate::is_valid_var_name;
 
 use anyhow::Context;
 use std::path::Path;

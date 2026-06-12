@@ -10,7 +10,7 @@ all your Rust repos a shared long-term memory context.
 
 memory:
   backend: networked
-  tags: [rust]
+  when: [rust]
   host: memory-server
   port: 7700
 

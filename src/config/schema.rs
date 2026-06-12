@@ -359,9 +359,6 @@ pub struct NetworkScope {
     pub r#match: NetworkMatch,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Environment variables to inject when this scope matches.
-    #[serde(default)]
-    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -377,9 +374,6 @@ pub struct HostScope {
     pub r#match: HostMatch,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Environment variables to inject when this scope matches.
-    #[serde(default)]
-    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -393,9 +387,6 @@ pub struct UserScope {
     pub r#match: UserMatch,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Environment variables to inject when this scope matches.
-    #[serde(default)]
-    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -404,10 +395,11 @@ pub struct UserMatch {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Bundle {
     pub name: String,
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub when: Vec<String>,
 }
 
 /// A reachable address for a named host, used by the `memory` backend to
@@ -455,7 +447,7 @@ pub struct Memory {
     /// Tags that activate the memory server, intersected with active scope
     /// tags (same selection model as bundles and MCP servers).
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub when: Vec<String>,
     /// Default memory topics, surfaced for documentation/tooling. Not consumed
     /// by rendering today but preserved so config round-trips.
     #[serde(default)]
@@ -470,7 +462,7 @@ pub struct McpServer {
     pub name: String,
     /// Tags that activate this server, intersected with active scope tags.
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub when: Vec<String>,
     #[serde(default, rename = "type")]
     pub transport: McpTransport,
     /// Command to launch for `stdio` transport.
@@ -635,7 +627,7 @@ pub struct PluginCollection {
     pub name: String,
     /// Tags that activate this collection, intersected with active scope tags.
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub when: Vec<String>,
     /// Plugins in this collection, each `<marketplace>:<plugin>`.
     #[serde(default)]
     pub plugins: Vec<String>,

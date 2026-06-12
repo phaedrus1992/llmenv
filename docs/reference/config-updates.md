@@ -123,7 +123,7 @@ If Claude Code is running, the new config is NOT picked up until you restart the
      memory:
        - server_host: my-server
          port: 9092
-         tags: [home]
+         when: [home]
    host:
      my-server:
        addr: my-server.local

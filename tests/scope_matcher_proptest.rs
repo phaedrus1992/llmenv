@@ -17,7 +17,6 @@ fn prop_scope_evaluation_is_deterministic() {
                                 hostname: Some(hostname.clone()),
                             },
                             tags: vec!["tag1".into()],
-                        env: Default::default(),
     },
                         llmenv::config::HostScope {
                             id: "h2".into(),
@@ -25,7 +24,6 @@ fn prop_scope_evaluation_is_deterministic() {
                                 hostname: None,
                             },
                             tags: vec!["tag2".into()],
-                        env: Default::default(),
     },
                     ],
                     ..Default::default()
@@ -69,7 +67,6 @@ fn prop_multiple_scopes_accumulate_tags() {
                             hostname: Some(hostname.clone()),
                         },
                         tags: vec!["host_tag".into()],
-                    env: Default::default(),
     }],
                     user: vec![llmenv::config::UserScope {
                         id: "u".into(),
@@ -77,7 +74,6 @@ fn prop_multiple_scopes_accumulate_tags() {
                             user: Some(user.clone()),
                         },
                         tags: vec!["user_tag".into()],
-                    env: Default::default(),
     }],
                     ..Default::default()
                 },
@@ -110,7 +106,6 @@ fn prop_scope_matching_order_independent() {
                     hostname: Some(hostname.clone()),
                 },
                 tags: vec!["tag1".into()],
-            env: Default::default(),
     };
 
             let scope2 = llmenv::config::HostScope {
@@ -119,7 +114,6 @@ fn prop_scope_matching_order_independent() {
                     hostname: None,
                 },
                 tags: vec!["tag2".into()],
-            env: Default::default(),
     };
 
             let cfg1 = Config {
