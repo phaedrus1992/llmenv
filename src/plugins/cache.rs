@@ -325,11 +325,11 @@ pub fn sync_external_plugin_with(
     }
     let head = git.head(&dest);
 
-    // Validate that plugin.json exists after sync
-    if !dest.join("plugin.json").exists() {
+    let manifest = dest.join("plugin.json");
+    if !manifest.exists() {
         tracing::warn!(
             "plugin manifest missing at {}; plugin may not load correctly",
-            dest.join("plugin.json").display()
+            manifest.display()
         );
     }
 

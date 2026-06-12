@@ -106,16 +106,17 @@ pub fn write_state(state_dir: &Path, t: SystemTime) -> Result<()> {
 pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<()> {
     let now = SystemTime::now();
 
-    // Check if we should pull
     if let Some(last) = read_state(state_dir)? {
         match now.duration_since(last) {
             Ok(elapsed) if elapsed < interval => return Ok(()),
-            Err(_) => {
+            Err(e) => {
                 tracing::warn!(
-                    "system clock skew detected (state timestamp is in future); proceeding with pull"
+                    skew_secs = e.duration().as_secs(),
+                    "system clock skew detected (state timestamp {}s in future); proceeding with pull",
+                    e.duration().as_secs()
                 );
             }
-            _ => {}
+            Ok(_) => {}
         }
     }
 
