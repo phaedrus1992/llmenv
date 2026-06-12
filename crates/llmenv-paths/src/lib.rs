@@ -419,6 +419,31 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        #[test]
+        fn has_parent_component_no_panic(s in ".*") {
+            let _ = has_parent_component(&s);
+        }
+
+        #[test]
+        fn is_unsafe_join_target_no_panic(s in ".*") {
+            let _ = is_unsafe_join_target(&s);
+        }
+
+        #[test]
+        fn has_parent_implies_unsafe_join(s in ".*") {
+            // is_unsafe_join_target is a strict superset of has_parent_component
+            if has_parent_component(&s) {
+                prop_assert!(is_unsafe_join_target(&s),
+                    "has_parent_component=true but is_unsafe_join_target=false for: {s:?}");
+            }
+        }
+
+        #[test]
+        fn absolute_path_always_unsafe_join(s in "/.*") {
+            prop_assert!(is_unsafe_join_target(&s),
+                "absolute path not flagged: {s:?}");
+        }
+
         // Arbitrary byte payloads written through write_owner_only_atomic must
         // round-trip exactly via fs::read. Catches truncation, encoding, or
         // mid-write corruption regressions across the full u8 range including

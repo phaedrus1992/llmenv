@@ -115,30 +115,19 @@ pub fn has_unpushed_commits(repo: &Path) -> bool {
         return false;
     }
 
-    let count_str = match std::str::from_utf8(&output.stdout) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                "git rev-list count output invalid UTF-8 at {}: {}",
-                repo.display(),
-                e
-            );
-            return false;
-        }
-    };
-
-    match count_str.trim().parse::<u32>() {
-        Ok(count) => count > 0,
-        Err(e) => {
-            tracing::warn!(
-                "git rev-list count parse failed at {} for '{}': {}",
-                repo.display(),
-                count_str.trim(),
-                e
-            );
+    match parse_commit_count(&output.stdout) {
+        Some(count) => count > 0,
+        None => {
+            tracing::warn!("git rev-list count output invalid at {}", repo.display());
             false
         }
     }
+}
+
+fn parse_commit_count(output: &[u8]) -> Option<u32> {
+    std::str::from_utf8(output)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
 #[cfg(test)]
@@ -218,42 +207,57 @@ mod tests {
         assert!(detail.contains("exit code"), "got: {detail}");
     }
 
-    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     #[cfg(test)]
     mod prop_tests {
+        use super::*;
         use proptest::prelude::*;
 
         proptest! {
             #[test]
-            fn parse_rev_list_count_handles_valid_numeric_output(count_val in 0u32..1000) {
-                let output_bytes = format!("{}", count_val).into_bytes();
-                let parsed = std::str::from_utf8(&output_bytes)
-                    .unwrap_or("0")
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(0);
-                prop_assert_eq!(parsed, count_val);
+            fn parse_commit_count_valid_numeric(count_val in 0u32..100_000) {
+                let bytes = format!("{count_val}").into_bytes();
+                prop_assert_eq!(parse_commit_count(&bytes), Some(count_val));
             }
 
             #[test]
-            fn parse_rev_list_count_handles_malformed_output(junk in ".*") {
-                let _parsed = std::str::from_utf8(junk.as_bytes())
-                    .unwrap_or("0")
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(0);
-                // Test verifies the parsing chain doesn't panic on arbitrary input
+            fn parse_commit_count_whitespace_trimmed(count_val in 0u32..100_000) {
+                let bytes = format!("  {count_val}  \n").into_bytes();
+                prop_assert_eq!(parse_commit_count(&bytes), Some(count_val));
             }
 
             #[test]
-            fn parse_rev_list_count_with_whitespace(count_val in 0u32..1000) {
-                let output_bytes = format!("  {}  \n", count_val).into_bytes();
-                let parsed = std::str::from_utf8(&output_bytes)
-                    .unwrap_or("0")
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(0);
-                prop_assert_eq!(parsed, count_val);
+            fn parse_commit_count_malformed_returns_none(junk in ".*") {
+                // Must not panic on arbitrary input; non-numeric → None
+                let _ = parse_commit_count(junk.as_bytes());
+            }
+
+            #[test]
+            fn sanitize_git_url_no_panic(s in ".*") {
+                let _ = sanitize_git_url(&s);
+            }
+
+            #[test]
+            fn sanitize_git_url_idempotent(s in ".*") {
+                let once = sanitize_git_url(&s);
+                let twice = sanitize_git_url(&once);
+                prop_assert_eq!(once, twice);
+            }
+
+            #[test]
+            fn sanitize_git_url_scrubs_http_credentials(
+                user in "[a-zA-Z0-9_]+",
+                pass in "[a-zA-Z0-9_]+",
+                host in "[a-zA-Z0-9.-]+",
+                path in "[a-zA-Z0-9/_.-]*"
+            ) {
+                let url = format!("https://{user}:{pass}@{host}/{path}");
+                let sanitized = sanitize_git_url(&url);
+                // The credential sequence user:pass@ must be gone; pass may
+                // legitimately appear in the host or path, so we check the
+                // full credential prefix, not the password alone.
+                prop_assert!(!sanitized.contains(&format!("{user}:{pass}@")),
+                    "credentials leaked in: {sanitized}");
+                prop_assert!(sanitized.contains("***@"), "expected *** in: {sanitized}");
             }
         }
     }

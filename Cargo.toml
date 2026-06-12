@@ -8,6 +8,16 @@ members = [
 ]
 resolver = "2"
 
+[workspace.dependencies]
+anyhow = "1.0.102"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+thiserror = "2.0.18"
+tracing = "0.1.44"
+proptest = "1.11.0"
+tempfile = "3.27"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
@@ -32,7 +42,7 @@ categories = ["command-line-utilities", "development-tools", "config"]
 # Keep the published crate lean: the docs site, design docs, CI config, and dev
 # scripts are not needed to build or use llmenv. Tests and benches ship so the
 # crate stays verifiable from a crates.io checkout.
-exclude = ["/website", "/docs", "/.github", "/scripts", "/proptest-regressions"]
+exclude = ["/website", "/docs", "/.github", "/scripts", "/proptest-regressions", "/crates"]
 
 [lints]
 workspace = true

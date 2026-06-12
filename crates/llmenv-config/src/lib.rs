@@ -1,5 +1,5 @@
 mod schema;
-pub mod template;
+mod template;
 mod validate;
 
 pub const STATE_DIR_ENV: &str = "LLMENV_STATE_DIR";
@@ -48,8 +48,6 @@ impl Config {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
-#[expect(clippy::expect_used, reason = "tests")]
-#[expect(clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
 
