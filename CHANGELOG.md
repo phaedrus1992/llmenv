@@ -61,6 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix git fetch spawn errors logged at `debug` level in the background sync path;
   a spawn error (git binary missing or misconfigured) is unexpected and is now logged
   at `warn` so operators can see it
+- Fix git reset errors during explicit plugin sync silently logged at `debug` level;
+  errors are now logged at `warn` so sync failures surface in production logs (#376)
+- Fix clock skew silently bypassing the pull throttle check; when the stored sync
+  timestamp is in the future, `llmenv` now logs a `warn` with the skew magnitude
+  (`skew_secs`) and proceeds with the pull rather than silently skipping it (#377)
+- Fix missing `plugin.json` after a plugin sync being silently ignored; `llmenv` now
+  logs a `warn` when the plugin manifest is absent after materializing the plugin,
+  making broken plugin installs diagnosable (#379)
 
 ## [1.0.10] - 2026-06-11
 
