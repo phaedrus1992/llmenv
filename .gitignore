@@ -6,3 +6,4 @@
 
 .claude/*.local.json
 .claude/worktrees
+.yaks/
