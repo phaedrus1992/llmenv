@@ -1,4 +1,5 @@
 use super::Config;
+use llmenv_paths::has_parent_component;
 use thiserror::Error;
 
 #[cfg(test)]
@@ -214,8 +215,8 @@ fn is_valid_hostname(hostname: &str) -> bool {
 /// Validate a single `capabilities.env` key: not a reserved adapter/state var,
 /// not in the LLMENV_* namespace. Returns an error with the given `context`
 /// label (e.g. `"config.yaml: capabilities"` or `"bundle 'foo'"`) on failure.
-pub(crate) fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), ValidateError> {
-    if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key) {
+pub fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), ValidateError> {
+    if crate::RESERVED_STATE_ENV_VARS.contains(&key) {
         return Err(ValidateError::CapabilitiesReservedEnvKey {
             context: context.to_string(),
             key: key.to_string(),
@@ -254,7 +255,7 @@ fn is_safe_cache_dir(dir: &str) -> bool {
     }
     // Parse components rather than substring-match so traversal can't slip
     // through as `foo/..` (no trailing slash) or via host-OS separators.
-    !dir.contains('\0') && !crate::paths::has_parent_component(dir)
+    !dir.contains('\0') && !has_parent_component(dir)
 }
 
 impl Config {
@@ -392,7 +393,7 @@ impl Config {
         let mut seen_env = std::collections::HashSet::new();
         // Reserve llmenv/adapter-emitted vars so a tool can't shadow them and
         // produce a conflicting binding in the emitted env_vars set.
-        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+        for reserved in crate::RESERVED_STATE_ENV_VARS {
             seen_env.insert((*reserved).to_string());
         }
         for tool in &self.state.tools {
@@ -417,7 +418,7 @@ impl Config {
             if m.when.is_empty() {
                 return Err(ValidateError::McpNoTags(m.name.clone()));
             }
-            if m.name == crate::mcp::resolve::MEMORY_MCP_NAME {
+            if m.name == crate::MEMORY_MCP_NAME {
                 return Err(ValidateError::McpReservedName(m.name.clone()));
             }
             if !seen_mcp_names.insert(&m.name) {
@@ -439,7 +440,7 @@ impl Config {
                 }
             }
             for key in m.env.keys() {
-                if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key.as_str()) {
+                if crate::RESERVED_STATE_ENV_VARS.contains(&key.as_str()) {
                     return Err(ValidateError::McpReservedEnvKey {
                         mcp: m.name.clone(),
                         key: key.clone(),
@@ -495,7 +496,7 @@ impl Config {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::HashingMode;
+    use crate::HashingMode;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
@@ -1053,10 +1054,10 @@ mod tests {
             native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
-            mcp: vec![crate::config::McpServer {
-                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+            mcp: vec![crate::McpServer {
+                name: crate::MEMORY_MCP_NAME.to_string(),
                 when: vec!["tag1".to_string()],
-                transport: crate::config::McpTransport::Stdio,
+                transport: crate::McpTransport::Stdio,
                 command: Some("echo".to_string()),
                 args: vec![],
                 env: Default::default(),
@@ -1085,10 +1086,10 @@ mod tests {
             native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
-            mcp: vec![crate::config::McpServer {
+            mcp: vec![crate::McpServer {
                 name: "mymcp".to_string(),
                 when: vec!["tag1".to_string()],
-                transport: crate::config::McpTransport::Stdio,
+                transport: crate::McpTransport::Stdio,
                 command: Some("echo".to_string()),
                 args: vec![],
                 env,
@@ -1118,10 +1119,10 @@ mod tests {
             native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
-            mcp: vec![crate::config::McpServer {
+            mcp: vec![crate::McpServer {
                 name: "mymcp".to_string(),
                 when: vec!["tag1".to_string()],
-                transport: crate::config::McpTransport::Stdio,
+                transport: crate::McpTransport::Stdio,
                 command: Some("echo".to_string()),
                 args: vec![],
                 env,
@@ -1151,10 +1152,10 @@ mod tests {
             native: Default::default(),
             scope: Scopes::default(),
             bundle: vec![],
-            mcp: vec![crate::config::McpServer {
+            mcp: vec![crate::McpServer {
                 name: "mymcp".to_string(),
                 when: vec!["tag1".to_string()],
-                transport: crate::config::McpTransport::Stdio,
+                transport: crate::McpTransport::Stdio,
                 command: Some("echo".to_string()),
                 args: vec![],
                 env,
@@ -1629,15 +1630,15 @@ mod tests {
         }
     }
 
-    fn config_with_state(tools: Vec<crate::config::StateTool>) -> Config {
+    fn config_with_state(tools: Vec<crate::StateTool>) -> Config {
         Config {
-            state: crate::config::StateConfig { tools },
+            state: crate::StateConfig { tools },
             ..Config::default()
         }
     }
 
-    fn state_tool(env: &str, subdir: &str) -> crate::config::StateTool {
-        crate::config::StateTool {
+    fn state_tool(env: &str, subdir: &str) -> crate::StateTool {
+        crate::StateTool {
             env: env.into(),
             subdir: subdir.into(),
         }
@@ -1705,7 +1706,7 @@ mod tests {
         // set a tool's relocation var lands in; claiming one would emit a
         // conflicting binding (e.g. redirecting CLAUDE_CONFIG_DIR), so each is
         // rejected up front (#175).
-        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+        for reserved in crate::RESERVED_STATE_ENV_VARS {
             let cfg = config_with_state(vec![state_tool(reserved, "x")]);
             assert!(
                 matches!(cfg.validate(), Err(ValidateError::StateDuplicateEnv(_))),
@@ -2041,7 +2042,7 @@ mod tests {
         // #354: keys that are not reserved and not LLMENV_-prefixed are accepted.
         #[test]
         fn prop_normal_env_key_accepted(key in "[A-Za-z_][A-Za-z0-9_]{0,15}") {
-            let reserved: &[&str] = crate::materialize::state::RESERVED_STATE_ENV_VARS;
+            let reserved: &[&str] = crate::RESERVED_STATE_ENV_VARS;
             prop_assume!(!reserved.contains(&key.as_str()));
             prop_assume!(!key.starts_with("LLMENV_"));
             prop_assert!(
@@ -2053,9 +2054,9 @@ mod tests {
 
     // ===== #354: capabilities.env reserved key validation =====
 
-    fn config_with_capabilities_env(key: &str, value: &str) -> crate::config::Config {
+    fn config_with_capabilities_env(key: &str, value: &str) -> crate::Config {
         use std::collections::BTreeMap;
-        crate::config::Config {
+        crate::Config {
             capabilities: Capabilities {
                 env: BTreeMap::from([(key.to_string(), value.to_string())]),
                 ..Default::default()
@@ -2064,8 +2065,8 @@ mod tests {
         }
     }
 
-    fn minimal_config() -> crate::config::Config {
-        crate::config::Config {
+    fn minimal_config() -> crate::Config {
+        crate::Config {
             bundle: vec![Bundle {
                 name: "b".into(),
                 when: vec!["t".into()],
@@ -2152,7 +2153,7 @@ mod tests {
 
     #[test]
     fn capabilities_env_all_reserved_state_vars_rejected() {
-        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+        for reserved in crate::RESERVED_STATE_ENV_VARS {
             let cfg = config_with_capabilities_env(reserved, "x");
             assert!(
                 matches!(

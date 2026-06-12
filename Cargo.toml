@@ -1,3 +1,21 @@
+[workspace]
+members = [
+    ".",
+    "crates/llmenv-paths",
+    "crates/llmenv-git",
+    "crates/llmenv-config",
+    "crates/llmenv-util",
+]
+resolver = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
 [package]
 name = "llmenv"
 version = "1.0.10"
@@ -16,15 +34,14 @@ categories = ["command-line-utilities", "development-tools", "config"]
 # crate stays verifiable from a crates.io checkout.
 exclude = ["/website", "/docs", "/.github", "/scripts", "/proptest-regressions"]
 
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+[lints]
+workspace = true
 
 [dependencies]
+llmenv-paths = { path = "crates/llmenv-paths" }
+llmenv-git = { path = "crates/llmenv-git" }
+llmenv-config = { path = "crates/llmenv-config" }
+llmenv-util = { path = "crates/llmenv-util" }
 clap = { version = "4.6.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

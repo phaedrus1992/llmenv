@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_template_roundtrips_as_config() {
-        use crate::config::Config;
+        use crate::Config;
         let template = generate_template();
         let cfg: Config =
             serde_yaml::from_str(&template).expect("template must deserialize as Config");
