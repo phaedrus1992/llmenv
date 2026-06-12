@@ -444,14 +444,16 @@ mod tests {
             precedence: 1,
         };
         let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
-        let expected = crate::config::ValidateError::CapabilitiesReservedEnvKey {
-            context: "bundle 'b'".to_string(),
-            key: "CLAUDE_CONFIG_DIR".to_string(),
-        };
-        assert_eq!(
-            err.to_string(),
-            expected.to_string(),
-            "error must match ValidateError message"
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(
+                ve,
+                crate::config::ValidateError::CapabilitiesReservedEnvKey { key, .. }
+                    if key == "CLAUDE_CONFIG_DIR"
+            ),
+            "unexpected variant: {ve}"
         );
     }
 
@@ -474,14 +476,16 @@ mod tests {
             precedence: 1,
         };
         let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
-        let expected = crate::config::ValidateError::CapabilitiesLlmenvPrefixEnvKey {
-            context: "bundle 'b'".to_string(),
-            key: "LLMENV_CUSTOM".to_string(),
-        };
-        assert_eq!(
-            err.to_string(),
-            expected.to_string(),
-            "error must match ValidateError message"
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(
+                ve,
+                crate::config::ValidateError::CapabilitiesLlmenvPrefixEnvKey { key, .. }
+                    if key == "LLMENV_CUSTOM"
+            ),
+            "unexpected variant: {ve}"
         );
     }
 
@@ -500,14 +504,16 @@ mod tests {
             precedence: 1,
         };
         let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
-        let expected = crate::config::ValidateError::CapabilitiesInvalidVarName {
-            context: "bundle 'b'".to_string(),
-            key: "1INVALID".to_string(),
-        };
-        assert_eq!(
-            err.to_string(),
-            expected.to_string(),
-            "error must match ValidateError message"
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(
+                ve,
+                crate::config::ValidateError::CapabilitiesInvalidVarName { key, .. }
+                    if key == "1INVALID"
+            ),
+            "unexpected variant: {ve}"
         );
     }
 
