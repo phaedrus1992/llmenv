@@ -168,6 +168,14 @@ fn sync_git(
     // transports run arbitrary commands on clone. Validating here keeps the
     // check independent of the backend and runnable in tests.
     reject_unsafe_source(&m.source).map_err(SyncError::Other)?;
+    // Marketplace name comes from user config; guard against path traversal
+    // before joining into the cache path. Fixes #384.
+    if crate::paths::is_unsafe_join_target(&m.name) {
+        let name = &m.name;
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "marketplace name '{name}' contains an unsafe path component"
+        )));
+    }
 
     let dest = marketplace_path(cache_dir, &m.name);
 
@@ -291,8 +299,13 @@ pub fn sync_external_plugin_with(
     git: &dyn GitBackend,
 ) -> Result<MarketplaceState, SyncError> {
     reject_unsafe_source(source).map_err(SyncError::Other)?;
-    // plugin name comes from marketplace.json (network-sourced); guard against
-    // path traversal before joining into the cache path.
+    // Both marketplace and plugin names are joined into the cache path; guard
+    // both against path traversal. Fixes #384.
+    if crate::paths::is_unsafe_join_target(marketplace) {
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "marketplace name '{marketplace}' contains an unsafe path component"
+        )));
+    }
     if crate::paths::is_unsafe_join_target(plugin) {
         return Err(SyncError::Other(anyhow::anyhow!(
             "plugin name '{plugin}' in marketplace '{marketplace}' \
@@ -672,6 +685,121 @@ mod tests {
                 "core.hooksPath=/dev/null"
             ]
         );
+    }
+
+    /// Marketplace names come from user config and must be validated before being
+    /// joined into cache paths. Unsafe names (path traversal, absolute paths) must
+    /// be rejected by `sync_git` so they cannot escape the cache directory. (#384)
+    #[test]
+    fn sync_git_rejects_unsafe_marketplace_names() {
+        struct NoGit;
+        impl GitBackend for NoGit {
+            fn clone(&self, _: &str, _: &std::path::Path) -> Result<()> {
+                unreachable!("should not reach git backend with unsafe name")
+            }
+            fn pull(&self, _: &std::path::Path) -> Result<()> {
+                unreachable!()
+            }
+            fn head(&self, _: &std::path::Path) -> Option<String> {
+                None
+            }
+        }
+
+        let cache = tempfile::tempdir().unwrap();
+        for bad_name in &["../escape", "/etc/passwd", "a/../../b"] {
+            let m = Marketplace {
+                name: (*bad_name).to_string(),
+                source: "https://github.com/example/plugins".into(),
+            };
+            let result = sync_marketplace_with(cache.path(), &m, true, &NoGit);
+            assert!(
+                result.is_err(),
+                "expected error for unsafe marketplace name '{bad_name}', got Ok"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("unsafe path component"),
+                "error message should mention unsafe path component, got: {msg}"
+            );
+        }
+    }
+
+    /// Marketplace name used as a path component in `plugin_payload_path` must
+    /// also be validated in `sync_external_plugin_with`. (#384)
+    #[test]
+    fn sync_external_plugin_rejects_unsafe_marketplace_names() {
+        struct NoGit;
+        impl GitBackend for NoGit {
+            fn clone(&self, _: &str, _: &std::path::Path) -> Result<()> {
+                unreachable!()
+            }
+            fn pull(&self, _: &std::path::Path) -> Result<()> {
+                unreachable!()
+            }
+            fn head(&self, _: &std::path::Path) -> Option<String> {
+                None
+            }
+        }
+
+        let cache = tempfile::tempdir().unwrap();
+        for bad_name in &["../escape", "/abs", "a/../b"] {
+            let result = sync_external_plugin_with(
+                cache.path(),
+                bad_name,
+                "some-plugin",
+                "https://github.com/example/plugin.git",
+                true,
+                &NoGit,
+            );
+            assert!(
+                result.is_err(),
+                "expected error for unsafe marketplace name '{bad_name}', got Ok"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("unsafe path component"),
+                "error message should mention unsafe path component, got: {msg}"
+            );
+        }
+    }
+
+    /// Plugin name used as a path component in `plugin_payload_path` must be
+    /// validated in `sync_external_plugin_with`. (#384)
+    #[test]
+    fn sync_external_plugin_rejects_unsafe_plugin_names() {
+        struct NoGit;
+        impl GitBackend for NoGit {
+            fn clone(&self, _: &str, _: &std::path::Path) -> Result<()> {
+                unreachable!()
+            }
+            fn pull(&self, _: &std::path::Path) -> Result<()> {
+                unreachable!()
+            }
+            fn head(&self, _: &std::path::Path) -> Option<String> {
+                None
+            }
+        }
+
+        let cache = tempfile::tempdir().unwrap();
+        for bad_name in &["../escape", "/abs", "a/../b"] {
+            let result = sync_external_plugin_with(
+                cache.path(),
+                "valid-market",
+                bad_name,
+                "https://github.com/example/plugin.git",
+                true,
+                &NoGit,
+            );
+            assert!(
+                result.is_err(),
+                "expected error for unsafe plugin name '{bad_name}', got Ok"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("unsafe path component"),
+                "error message should mention unsafe path component, got: {msg}"
+            );
+        }
     }
 
     /// git_head, git_clone, and git_pull must never block waiting for credential
