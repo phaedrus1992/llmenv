@@ -99,14 +99,14 @@ pub fn has_unpushed_commits(repo: &Path) -> bool {
     {
         Ok(out) => out,
         Err(e) => {
-            tracing::debug!("git rev-list count failed at {}: {}", repo.display(), e);
+            tracing::warn!("git rev-list count failed at {}: {}", repo.display(), e);
             return false;
         }
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        tracing::debug!(
+        tracing::warn!(
             "git rev-list count failed at {} with exit {}: {}",
             repo.display(),
             output.status,
@@ -118,7 +118,7 @@ pub fn has_unpushed_commits(repo: &Path) -> bool {
     let count_str = match std::str::from_utf8(&output.stdout) {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 "git rev-list count output invalid UTF-8 at {}: {}",
                 repo.display(),
                 e
@@ -130,7 +130,7 @@ pub fn has_unpushed_commits(repo: &Path) -> bool {
     match count_str.trim().parse::<u32>() {
         Ok(count) => count > 0,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 "git rev-list count parse failed at {} for '{}': {}",
                 repo.display(),
                 count_str.trim(),

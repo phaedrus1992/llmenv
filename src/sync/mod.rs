@@ -173,10 +173,10 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
         write_state(state_dir, now)?;
     } else {
         // Some other pull failure (non-fast-forward, diverged, conflict, auth).
-        // Don't update state so we retry on next tick — but surface a one-line
-        // nudge so a persistently-broken sync isn't silently swallowed across
-        // every shell prompt (stderr was suppressed, so point at `llmenv sync`
-        // for the detail).
+        // Update state so a clock-skew event followed by a pull failure doesn't
+        // leave the timestamp stuck and trigger a pull attempt on every shell
+        // prompt forever — the nudge below is the user's cue to intervene (#386).
+        write_state(state_dir, now)?;
         eprintln!(
             "llmenv: config in {} could not fast-forward (diverged or network error) — \
              run `llmenv sync` for details",
@@ -201,6 +201,23 @@ mod tests {
                 "-c",
                 "core.hooksPath=/dev/null"
             ]
+        );
+    }
+
+    #[test]
+    fn write_state_then_read_state_roundtrips() {
+        use super::{read_state, write_state};
+        use std::time::{Duration, SystemTime};
+        let tmp = tempfile::tempdir().unwrap();
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        write_state(tmp.path(), t).unwrap();
+        let got = read_state(tmp.path()).unwrap().unwrap();
+        // Round-trip through seconds; sub-second precision is not preserved.
+        assert_eq!(
+            got.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
         );
     }
 }

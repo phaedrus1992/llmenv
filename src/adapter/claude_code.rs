@@ -369,17 +369,32 @@ fn read_claude_json(path: &Path) -> anyhow::Result<serde_json::Value> {
     }
 }
 
+const IGNORE_INLINE: &str = "# llmenv-ignore: hardcoded-path";
+const IGNORE_FILE: &str = "# llmenv-ignore-file: hardcoded-path";
+
 /// Reject materialized content carrying a hardcoded `~/.claude` / `$HOME/.claude`
 /// path (#311). Such paths resolve against the *default* config dir, so they
 /// break whenever `CLAUDE_CONFIG_DIR` points at a materialized llmenv folder
 /// (the normal case). `label` names the offending file in the error.
+///
+/// Suppression:
+/// - `# llmenv-ignore-file: hardcoded-path` anywhere in the file skips the entire file.
+/// - `# llmenv-ignore: hardcoded-path` at the end of a line skips that line only.
 fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()> {
-    if content.contains("~/.claude") || content.contains("$HOME/.claude") {
-        anyhow::bail!(
-            "{label} contains hardcoded ~/.claude or $HOME/.claude paths. \
-             Use ${{CLAUDE_PLUGIN_ROOT}} or relative paths instead so it \
-             works when CLAUDE_CONFIG_DIR is set to a materialized llmenv folder."
-        );
+    if content.contains(IGNORE_FILE) {
+        return Ok(());
+    }
+    for line in content.lines() {
+        if line.contains(IGNORE_INLINE) {
+            continue;
+        }
+        if line.contains("~/.claude") || line.contains("$HOME/.claude") {
+            anyhow::bail!(
+                "{label} contains hardcoded ~/.claude or $HOME/.claude paths. \
+                 Use ${{CLAUDE_PLUGIN_ROOT}} or relative paths instead so it \
+                 works when CLAUDE_CONFIG_DIR is set to a materialized llmenv folder."
+            );
+        }
     }
     Ok(())
 }
@@ -1860,6 +1875,25 @@ mod tests {
     fn reject_hardcoded_config_path_allows_plugin_root() {
         let ok = reject_hardcoded_config_path("${CLAUDE_PLUGIN_ROOT}/scripts/s.sh", "SKILL.md");
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn reject_hardcoded_config_path_inline_suppress_skips_line() {
+        let content = "run ~/.claude/skills/x/s.sh  # llmenv-ignore: hardcoded-path\nclean line";
+        assert!(reject_hardcoded_config_path(content, "SKILL.md").is_ok());
+    }
+
+    #[test]
+    fn reject_hardcoded_config_path_inline_suppress_only_skips_that_line() {
+        let content =
+            "run ~/.claude/skills/x/s.sh  # llmenv-ignore: hardcoded-path\nrun ~/.claude/other";
+        assert!(reject_hardcoded_config_path(content, "SKILL.md").is_err());
+    }
+
+    #[test]
+    fn reject_hardcoded_config_path_file_suppress_skips_entire_file() {
+        let content = "# llmenv-ignore-file: hardcoded-path\nrun ~/.claude/skills/x/s.sh\nmore ~/.claude/stuff";
+        assert!(reject_hardcoded_config_path(content, "SKILL.md").is_ok());
     }
 
     fn write_skill(skills_dir: &std::path::Path, name: &str, files: &[(&str, &str)]) {
