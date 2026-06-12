@@ -90,14 +90,14 @@ pub fn resolve_mcps(
 ) -> Result<Vec<ResolvedMcp>, ResolveError> {
     let mut out = Vec::new();
     for m in mcp {
-        if !m.tags.iter().any(|t| active_tags.contains(t)) {
+        if !m.when.iter().any(|t| active_tags.contains(t)) {
             continue;
         }
         out.push(resolve_static(m)?);
     }
     let active_mem: Vec<&Memory> = memory
         .iter()
-        .filter(|m| m.tags.iter().any(|t| active_tags.contains(t)))
+        .filter(|m| m.when.iter().any(|t| active_tags.contains(t)))
         .collect();
     match active_mem.len() {
         0 => {}
@@ -133,9 +133,9 @@ pub fn resolve_bundle_mcps(
         if !is_valid_mcp_name(&m.name) {
             return Err(ResolveError::BundleMcpInvalidName(m.name.clone()));
         }
-        let active = m.tags.is_empty() || m.tags.iter().any(|t| active_tags.contains(t));
+        let active = m.when.is_empty() || m.when.iter().any(|t| active_tags.contains(t));
         if active {
-            if m.tags.is_empty() {
+            if m.when.is_empty() {
                 debug!(name = %m.name, "bundle mcp active (tagless — bundle scope gate)");
             }
             out.push(resolve_static(m)?);
@@ -230,7 +230,7 @@ mod tests {
     fn stdio_server(name: &str, tags: &[&str], command: &str) -> McpServer {
         McpServer {
             name: name.into(),
-            tags: tags.iter().map(|s| (*s).into()).collect(),
+            when: tags.iter().map(|s| (*s).into()).collect(),
             transport: McpTransport::Stdio,
             command: Some(command.into()),
             args: vec![],
@@ -244,7 +244,7 @@ mod tests {
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(), // mirrors schema::default_listen_host()
-            tags: vec!["network-home".into()],
+            when: vec!["network-home".into()],
             default_topics: vec![],
         }
     }
@@ -314,14 +314,14 @@ mod tests {
             server_host: "still".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
-            tags: vec!["home".into()],
+            when: vec!["home".into()],
             default_topics: vec![],
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
-            tags: vec!["home".into()], // same tag — ambiguous when both active
+            when: vec!["home".into()], // same tag — ambiguous when both active
             default_topics: vec![],
         };
         let mut host = base_host();
@@ -345,14 +345,14 @@ mod tests {
             server_host: "still".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
-            tags: vec!["home".into()],
+            when: vec!["home".into()],
             default_topics: vec![],
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
-            tags: vec!["work".into()],
+            when: vec!["work".into()],
             default_topics: vec![],
         };
         let mut host = base_host();
@@ -418,7 +418,7 @@ mod tests {
         fn arb_server(idx: usize) -> impl Strategy<Value = McpServer> {
             prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |ts| McpServer {
                 name: format!("srv-{idx}"),
-                tags: ts,
+                when: ts,
                 transport: McpTransport::Stdio,
                 command: Some("echo".into()),
                 args: vec![],
@@ -454,7 +454,7 @@ mod tests {
                         .iter()
                         .find(|m| m.name == r.name)
                         .expect("resolved name maps to a declared server");
-                    prop_assert!(src.tags.iter().any(|t| active.contains(t)));
+                    prop_assert!(src.when.iter().any(|t| active.contains(t)));
                 }
             }
 
@@ -563,7 +563,7 @@ mod tests {
             fn arb_bundle_server(idx: usize) -> impl Strategy<Value = McpServer> {
                 prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |ts| McpServer {
                     name: format!("bsrv-{idx}"),
-                    tags: ts,
+                    when: ts,
                     transport: McpTransport::Stdio,
                     command: Some("echo".into()),
                     args: vec![],
@@ -586,10 +586,10 @@ mod tests {
                     (servers, active) in arb_servers_and_tags()
                 ) {
                     let resolved = resolve_bundle_mcps(&servers, &active).expect("resolve");
-                    let tagless_count = servers.iter().filter(|s| s.tags.is_empty()).count();
+                    let tagless_count = servers.iter().filter(|s| s.when.is_empty()).count();
                     let tagless_in_output = resolved
                         .iter()
-                        .filter(|r| servers.iter().any(|s| s.name == r.name && s.tags.is_empty()))
+                        .filter(|r| servers.iter().any(|s| s.name == r.name && s.when.is_empty()))
                         .count();
                     prop_assert_eq!(tagless_count, tagless_in_output);
                 }
@@ -603,7 +603,7 @@ mod tests {
                     let resolved_names: BTreeSet<&str> =
                         resolved.iter().map(|r| r.name.as_str()).collect();
                     for s in &servers {
-                        if !s.tags.is_empty() && !s.tags.iter().any(|t| active.contains(t)) {
+                        if !s.when.is_empty() && !s.when.iter().any(|t| active.contains(t)) {
                             prop_assert!(
                                 !resolved_names.contains(s.name.as_str()),
                                 "tagged server {} with no matching tag must be absent",
@@ -622,7 +622,7 @@ mod tests {
                     let expected = servers
                         .iter()
                         .filter(|s| {
-                            s.tags.is_empty() || s.tags.iter().any(|t| active.contains(t))
+                            s.when.is_empty() || s.when.iter().any(|t| active.contains(t))
                         })
                         .count();
                     prop_assert_eq!(resolved.len(), expected);

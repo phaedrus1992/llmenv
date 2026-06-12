@@ -13,13 +13,13 @@ marketplace:
 
 plugin-collection:
   - name: rust-tools
-    tags: [rust]
+    when: [rust]
     plugins:
       - dev-commons:rust-analyzer-hints
       - dev-commons:cargo-explain
 
   - name: web-tools
-    tags: [web]
+    when: [web]
     plugins:
       - dev-commons:css-intellisense
       - dev-commons:ts-strict-helpers

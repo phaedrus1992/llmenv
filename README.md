@@ -81,9 +81,9 @@ scope:
 
 bundle:
   - name: base
-    tags: [me]
+    when: [me]
   - name: office-config
-    tags: [office]
+    when: [office]
 ```
 
 A project marker, `~/code/myapp/.llmenv.yaml`:

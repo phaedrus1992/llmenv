@@ -534,7 +534,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
         }
     }
     for b in &config.bundle {
-        let has_emitted_tag = b.tags.iter().any(|t| emitted.contains(t));
+        let has_emitted_tag = b.when.iter().any(|t| emitted.contains(t));
         let looks_marker = looks_marker_driven(&b.name, b);
         if !has_emitted_tag && !marker_enabled.contains(&b.name) && !looks_marker {
             eprintln!("{warn} orphan bundle {}: no scope emits its tags", b.name);
@@ -542,8 +542,8 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
         }
     }
     for m in &config.mcp {
-        let has_emitted_tag = m.tags.iter().any(|t| emitted.contains(t));
-        let looks_marker = m.tags.iter().any(|t| tag_looks_marker_sourced(t));
+        let has_emitted_tag = m.when.iter().any(|t| emitted.contains(t));
+        let looks_marker = m.when.iter().any(|t| tag_looks_marker_sourced(t));
         if !has_emitted_tag && !looks_marker {
             eprintln!("{warn} orphan mcp {}: no scope emits its tags", m.name);
             orphan_count += 1;
@@ -560,7 +560,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
             .bundle
             .iter()
             .filter(|b| {
-                b.tags.iter().any(|bt| active.tags.contains(bt))
+                b.when.iter().any(|bt| active.tags.contains(bt))
                     || manually.contains(b.name.as_str())
             })
             .collect()
@@ -583,7 +583,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     // Check top-level memory entries.
     if let Some(features) = &config.features {
         for mem in &features.memory {
-            let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
+            let has_emitted_tag = mem.when.iter().any(|t| emitted.contains(t));
             if !has_emitted_tag {
                 eprintln!(
                     "{warn} orphan memory (server_host '{}'): no scope emits its tags",
@@ -603,7 +603,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     // Check bundle-contributed memory entries.
     if let Some(features) = &doctor_bundle_caps.features {
         for mem in &features.memory {
-            let has_emitted_tag = mem.tags.iter().any(|t| emitted.contains(t));
+            let has_emitted_tag = mem.when.iter().any(|t| emitted.contains(t));
             if !has_emitted_tag {
                 eprintln!(
                     "{warn} orphan bundle memory (server_host '{}'): no scope emits its tags",
@@ -629,7 +629,7 @@ fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
         // somewhere — anything outside this set can never be pulled in.
         let mut referenceable: HashSet<&str> = HashSet::new();
         for c in &config.plugin_collection {
-            let selectable = c.tags.iter().any(|t| emitted.contains(t));
+            let selectable = c.when.iter().any(|t| emitted.contains(t));
             if !selectable {
                 eprintln!(
                     "{warn} orphan plugin-collection {}: no scope emits its tags",
@@ -878,7 +878,8 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         &state_dir,
         std::time::Duration::from_secs(interval_secs),
     ) {
-        tracing::debug!("throttled pull failed (non-fatal): {e}");
+        tracing::warn!("throttled pull failed (non-fatal): {e}");
+        eprintln!("[llmenv] sync: throttled pull failed (non-fatal): {e}");
     }
 
     // A bundle fires when either:
@@ -896,11 +897,11 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         .iter()
         .filter(|b| {
             if let Some(t) = &tag
-                && !b.tags.contains(t)
+                && !b.when.contains(t)
             {
                 return false;
             }
-            b.tags.iter().any(|bt| active.tags.contains(bt))
+            b.when.iter().any(|bt| active.tags.contains(bt))
                 || manually_enabled.contains(b.name.as_str())
         })
         .collect();
@@ -1026,7 +1027,7 @@ fn run_regenerate() -> anyhow::Result<()> {
         .bundle
         .iter()
         .filter(|b| {
-            b.tags.iter().any(|bt| active.tags.contains(bt))
+            b.when.iter().any(|bt| active.tags.contains(bt))
                 || manually_enabled.contains(b.name.as_str())
         })
         .collect();
@@ -1353,7 +1354,7 @@ fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
         .bundle
         .iter()
         .filter(|b| {
-            b.tags.iter().any(|bt| active.tags.contains(bt))
+            b.when.iter().any(|bt| active.tags.contains(bt))
                 || manually_enabled.contains(b.name.as_str())
         })
         .collect();
@@ -1685,7 +1686,7 @@ fn build_bundle_refs(
             .flat_map(|s| s.tags.iter().map(String::as_str))
             .collect();
         for bundle in firing {
-            if bundle.tags.iter().any(|t| kind_tags.contains(t.as_str())) {
+            if bundle.when.iter().any(|t| kind_tags.contains(t.as_str())) {
                 push_ref(&bundle.name, precedence, &mut refs, &mut seen);
             }
         }
@@ -2248,7 +2249,7 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
     let firing: Vec<&Bundle> = config
         .bundle
         .iter()
-        .filter(|b| b.tags.iter().any(|tag| active.tags.contains(tag)))
+        .filter(|b| b.when.iter().any(|tag| active.tags.contains(tag)))
         .collect();
     let bundle_refs = build_bundle_refs(config_dir, &active, &firing);
     let manifest = crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)?;
@@ -2302,15 +2303,15 @@ fn all_consumed_tags(config: &Config) -> HashSet<String> {
     config
         .bundle
         .iter()
-        .flat_map(|b| b.tags.iter().cloned())
-        .chain(config.mcp.iter().flat_map(|m| m.tags.iter().cloned()))
+        .flat_map(|b| b.when.iter().cloned())
+        .chain(config.mcp.iter().flat_map(|m| m.when.iter().cloned()))
         .chain(
             config
                 .features
                 .as_ref()
                 .iter()
                 .flat_map(|f| f.memory.iter())
-                .flat_map(|m| m.tags.iter().cloned()),
+                .flat_map(|m| m.when.iter().cloned()),
         )
         .collect()
 }
@@ -2343,7 +2344,7 @@ fn looks_marker_driven(bundle_name: &str, bundle: &Bundle) -> bool {
         "rust", "python", "node", "go", "java", "csharp", "c++", "ruby", "php", "swift", "kotlin",
     ];
     let name_matches = marker_patterns.iter().any(|p| bundle_name.contains(p));
-    let tag_matches = bundle.tags.iter().any(|t| tag_looks_marker_sourced(t));
+    let tag_matches = bundle.when.iter().any(|t| tag_looks_marker_sourced(t));
     name_matches || tag_matches
 }
 
@@ -2367,7 +2368,7 @@ fn find_local_memory_entry<'a>(
 ) -> Option<&'a crate::config::Memory> {
     let host_ids = active_host_ids(active);
     memory.iter().find(|m| {
-        m.tags.iter().any(|t| active.tags.contains(t)) && host_ids.contains(&m.server_host)
+        m.when.iter().any(|t| active.tags.contains(t)) && host_ids.contains(&m.server_host)
     })
 }
 
@@ -2524,7 +2525,7 @@ fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
         .bundle
         .iter()
         .filter(|b| {
-            b.tags.iter().any(|t| active.tags.contains(t))
+            b.when.iter().any(|t| active.tags.contains(t))
                 || marker_enabled.contains(b.name.as_str())
         })
         .map(|b| b.name.as_str())
@@ -2538,7 +2539,7 @@ fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
             // Orphan: no scope emits any of its tags AND it isn't marker-enabled
             // by any currently active marker. Bundles with no tags at all are
             // also orphans unless marker-enabled.
-            let has_emitted_tag = b.tags.iter().any(|t| emitted.contains(t));
+            let has_emitted_tag = b.when.iter().any(|t| emitted.contains(t));
             let is_orphan = !has_emitted_tag && !marker_enabled.contains(&b.name);
             (b.name.clone(), is_active, is_orphan)
         })
@@ -2588,7 +2589,7 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         .bundle
         .iter()
         .filter(|b| {
-            b.tags.iter().any(|bt| active.tags.contains(bt))
+            b.when.iter().any(|bt| active.tags.contains(bt))
                 || manually_enabled.contains(b.name.as_str())
         })
         .collect();
@@ -2651,8 +2652,8 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         .mcp
         .iter()
         .map(|m| {
-            let is_active = m.tags.iter().any(|t| active.tags.contains(t));
-            let is_orphan = !m.tags.iter().any(|t| emitted.contains(t));
+            let is_active = m.when.iter().any(|t| active.tags.contains(t));
+            let is_orphan = !m.when.iter().any(|t| emitted.contains(t));
             let detail = detail_for(&m.name, &format!("{:?}", m.transport).to_lowercase());
             (m.name.clone(), is_active, is_orphan, detail)
         })
@@ -2660,16 +2661,16 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
 
     // Bundle MCPs: always active when tagless, tag-filtered when tagged.
     for m in &bundle_mcp_entries {
-        let is_active = m.tags.is_empty() || m.tags.iter().any(|t| active.tags.contains(t));
+        let is_active = m.when.is_empty() || m.when.iter().any(|t| active.tags.contains(t));
         // Tagless entries are never orphaned — the bundle itself gates them.
-        let is_orphan = !m.tags.is_empty() && !m.tags.iter().any(|t| emitted.contains(t));
+        let is_orphan = !m.when.is_empty() && !m.when.iter().any(|t| emitted.contains(t));
         let detail = format!("{} (bundle)", detail_for(&m.name, "stdio server"));
         rows.push((m.name.clone(), is_active, is_orphan, detail));
     }
 
     for mem in &all_memory_ls {
-        let is_active = mem.tags.iter().any(|t| active.tags.contains(t));
-        let is_orphan = !mem.tags.iter().any(|t| emitted.contains(t));
+        let is_active = mem.when.iter().any(|t| active.tags.contains(t));
+        let is_orphan = !mem.when.iter().any(|t| emitted.contains(t));
         let detail = detail_for(MEMORY_MCP_NAME, "memory");
         let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);
         rows.push((name, is_active, is_orphan, detail));
@@ -2709,7 +2710,7 @@ fn run_marketplace_ls(use_color: bool) -> anyhow::Result<()> {
     let active_refs: std::collections::HashSet<&str> = config
         .plugin_collection
         .iter()
-        .filter(|c| c.tags.iter().any(|t| active.tags.contains(t)))
+        .filter(|c| c.when.iter().any(|t| active.tags.contains(t)))
         .flat_map(|c| c.plugins.iter())
         .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m))
         .collect();
@@ -2718,7 +2719,7 @@ fn run_marketplace_ls(use_color: bool) -> anyhow::Result<()> {
     let referenceable: std::collections::HashSet<&str> = config
         .plugin_collection
         .iter()
-        .filter(|c| c.tags.iter().any(|t| emitted.contains(t)))
+        .filter(|c| c.when.iter().any(|t| emitted.contains(t)))
         .flat_map(|c| c.plugins.iter())
         .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m))
         .collect();
@@ -2771,8 +2772,8 @@ fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
     // plugin in two collections shows twice, mirroring the config as authored.
     let mut rows: Vec<(String, bool, bool, String)> = Vec::new();
     for collection in &config.plugin_collection {
-        let is_active = collection.tags.iter().any(|t| active.tags.contains(t));
-        let is_orphan = !collection.tags.iter().any(|t| emitted.contains(t));
+        let is_active = collection.when.iter().any(|t| active.tags.contains(t));
+        let is_orphan = !collection.when.iter().any(|t| emitted.contains(t));
         for plugin in &collection.plugins {
             let display = split_plugin_ref(plugin)
                 .map_or_else(|| plugin.clone(), |(m, p)| format!("{p}@{m}"));
@@ -3248,7 +3249,7 @@ mod tests {
                     server_host: "srv".to_string(),
                     port,
                     listen_host: listen_host.to_string(),
-                    tags: vec!["mem".to_string()],
+                    when: vec!["mem".to_string()],
                     default_topics: vec![],
                 }],
             }),

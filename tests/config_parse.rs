@@ -44,7 +44,7 @@ fn rejects_bundle_with_no_tags() {
     let s = r#"
 bundle:
   - name: x
-    tags: []
+    when: []
 "#;
     let cfg: Config = serde_yaml::from_str(s).unwrap();
     assert!(cfg.validate().is_err());
@@ -70,9 +70,9 @@ fn rejects_duplicate_bundle_names() {
     let s = r#"
 bundle:
   - name: dup
-    tags: [a]
+    when: [a]
   - name: dup
-    tags: [b]
+    when: [b]
 "#;
     let cfg: Config = serde_yaml::from_str(s).unwrap();
     assert!(cfg.validate().is_err());

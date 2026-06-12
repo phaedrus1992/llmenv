@@ -18,13 +18,13 @@ scope:
 
 mcp:
   - name: internal-docs
-    tags: [office]
+    when: [office]
     transport: stdio
     command: npx
     args: ["-y", "my-company-docs-mcp"]
 
   - name: home-assistant
-    tags: [home]
+    when: [home]
     transport: stdio
     command: uvx
     args: ["home-assistant-mcp"]

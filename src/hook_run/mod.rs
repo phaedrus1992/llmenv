@@ -247,7 +247,7 @@ fn memory_url(
         .bundle
         .iter()
         .filter(|b| {
-            b.tags.iter().any(|bt| active.tags.contains(bt))
+            b.when.iter().any(|bt| active.tags.contains(bt))
                 || manually_enabled.contains(b.name.as_str())
         })
         .collect();

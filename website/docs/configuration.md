@@ -180,12 +180,12 @@ config. A bundle's `bundle.yaml` inside its content directory may declare
 ```yaml
 bundle:
   - name: base
-    tags: [me]
+    when: [me]
   - name: office-tools
-    tags: [office]
+    when: [office]
 ```
 
-A bundle entry with only `name` and `tags` (no content directory) is valid and
+A bundle entry with only `name` and `when` (no content directory) is valid and
 participates in tag matching. To inject environment variables, declare them in the
 bundle's `bundle.yaml` under `capabilities.env`.
 
@@ -197,14 +197,14 @@ MCP servers selected by tag, rendered into the agent's MCP config. Each is
 ```yaml
 mcp:
   - name: playwright
-    tags: [me]
+    when: [me]
     type: stdio                          # stdio (default) | http | sse
     command: npx
     args: ["-y", "@playwright/mcp@latest"]
     env:
       DISPLAY: ":0"
   - name: weather
-    tags: [me]
+    when: [me]
     type: http
     url: "https://weather.example.com/mcp"
 ```
@@ -212,7 +212,7 @@ mcp:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `name` | yes | Registration name in the agent's MCP config |
-| `tags` | no | Activation tags |
+| `when` | no | Activation tags |
 | `type` | no | `stdio` (default), `http`, or `sse` |
 | `command` | for stdio | Executable to launch |
 | `args` | no | Arguments for `command` |
@@ -245,11 +245,11 @@ features:
   memory:
     - server_host: home-server   # key into the host: table
       port: 9092
-      tags: [home]               # activates the backend (same model as bundles)
+      when: [home]               # activates the backend (same model as bundles)
       default_topics: ["context-{project}", preferences]
     - server_host: work-server
       port: 9092
-      tags: [work]
+      when: [work]
 ```
 
 | Field | Required | Notes |
@@ -257,7 +257,7 @@ features:
 | `server_host` | yes | Key into `host:` for the daemon host |
 | `port` | yes | Port the proxy listens on / clients connect to |
 | `listen_host` | no | IP address to listen on (`127.0.0.1` for loopback, `0.0.0.0` for all interfaces); default `127.0.0.1` |
-| `tags` | no | Activation tags |
+| `when` | no | Activation tags |
 | `default_topics` | no | Documentation only; preserved across round-trips |
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
@@ -296,7 +296,7 @@ marketplace:
 
 plugin-collection:
   - name: dev
-    tags: [me]
+    when: [me]
     plugins:
       - "superpowers:caveman"
 ```

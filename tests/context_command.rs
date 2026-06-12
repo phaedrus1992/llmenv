@@ -39,7 +39,7 @@ tag:
 
 bundle:
   - name: test-bundle
-    tags: [test]
+    when: [test]
 
 cache:
   sync_interval_minutes: 60
@@ -88,9 +88,9 @@ tag:
 
 bundle:
   - name: active-bundle
-    tags: [active]
+    when: [active]
   - name: inactive-bundle
-    tags: [inactive]
+    when: [inactive]
 
 cache:
   sync_interval_minutes: 60
@@ -135,7 +135,7 @@ tag:
 
 bundle:
   - name: test-bundle
-    tags: [test]
+    when: [test]
 
 # Top-level hooks that will appear in merged manifest
 capabilities:

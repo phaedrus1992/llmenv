@@ -108,7 +108,7 @@ pub fn resolve_plugins(
     let mut referenced: HashSet<String> = HashSet::new();
 
     for collection in &config.plugin_collection {
-        if !collection.tags.iter().any(|t| active_tags.contains(t)) {
+        if !collection.when.iter().any(|t| active_tags.contains(t)) {
             continue;
         }
         for plugin in &collection.plugins {
@@ -180,7 +180,7 @@ mod tests {
     fn collection(name: &str, tags: &[&str], plugins: &[&str]) -> PluginCollection {
         PluginCollection {
             name: name.into(),
-            tags: tags.iter().map(|s| (*s).into()).collect(),
+            when: tags.iter().map(|s| (*s).into()).collect(),
             plugins: plugins.iter().map(|s| (*s).into()).collect(),
         }
     }
@@ -308,7 +308,7 @@ mod tests {
             )
                 .prop_map(move |(ts, names)| PluginCollection {
                     name: format!("col-{idx}"),
-                    tags: ts,
+                    when: ts,
                     // All plugins reference the single marketplace "m" so
                     // resolution never errors and we reason purely about
                     // selection + dedup.
@@ -338,7 +338,7 @@ mod tests {
                         .iter()
                         .find(|c| c.name == p.collection)
                         .expect("provenance maps to a declared collection");
-                    prop_assert!(col.tags.iter().any(|t| active.contains(t)));
+                    prop_assert!(col.when.iter().any(|t| active.contains(t)));
                 }
             }
 

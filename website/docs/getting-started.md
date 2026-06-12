@@ -133,7 +133,7 @@ scope:
 
 bundle:
   - name: base
-    tags: [me]
+    when: [me]
     vars:
       EDITOR: "code"
 ```
