@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use tracing;
 
 use sha2::{Digest, Sha256};
 
@@ -320,7 +321,17 @@ pub fn prune(
                 // left to a StaleOnly/All pass so the two axes stay orthogonal.
                 if is_current {
                     let m = newest_mtime(&p)?;
-                    now.duration_since(m).unwrap_or_default() > older_than
+                    match now.duration_since(m) {
+                        Ok(elapsed) => elapsed > older_than,
+                        Err(e) => {
+                            tracing::warn!(
+                                skew_secs = e.duration().as_secs(),
+                                "clock skew: mtime {}s in future; treating as expired for GC",
+                                e.duration().as_secs()
+                            );
+                            true
+                        }
+                    }
                 } else {
                     false
                 }
@@ -409,7 +420,18 @@ pub fn gc(cache_root: &Path, older_than: Duration) -> anyhow::Result<GcReport> {
             continue;
         }
         let m = newest_mtime(&p)?;
-        if now.duration_since(m).unwrap_or_default() > older_than {
+        let expired = match now.duration_since(m) {
+            Ok(elapsed) => elapsed > older_than,
+            Err(e) => {
+                tracing::warn!(
+                    skew_secs = e.duration().as_secs(),
+                    "clock skew: mtime {}s in future; treating as expired for GC",
+                    e.duration().as_secs()
+                );
+                true
+            }
+        };
+        if expired {
             std::fs::remove_dir_all(&p)?;
             report.removed.push(p);
         } else {
@@ -838,6 +860,24 @@ mod tests {
         remove_link(missing, true, &mut report);
         assert_eq!(report.removed, vec![missing.to_path_buf()]);
         assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn gc_clock_skew_treats_future_mtime_as_expired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = touch_dir(tmp.path(), &format!("{VERSION_TAG}-skewtest"));
+        // Set mtime 1 hour in the future to simulate clock skew.
+        std::process::Command::new("touch")
+            .args(["-t", "209901010000", dir.to_str().unwrap()])
+            .status()
+            .unwrap();
+        // gc with older_than=0 — normal path would keep it (mtime in future means
+        // elapsed=0), but clock skew handling must prune it anyway.
+        let report = gc(tmp.path(), Duration::ZERO).unwrap();
+        assert!(
+            report.removed.contains(&dir),
+            "future-mtime dir must be pruned on clock skew"
+        );
     }
 
     /// Check if a string is exactly a 64-char lowercase hex SHA-256 hash.

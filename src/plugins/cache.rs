@@ -428,13 +428,13 @@ fn git_head(repo: &Path) -> Option<String> {
     {
         Ok(out) => out,
         Err(e) => {
-            tracing::debug!("git rev-parse HEAD failed at {}: {}", repo.display(), e);
+            tracing::warn!("git rev-parse HEAD failed at {}: {}", repo.display(), e);
             return None;
         }
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        tracing::debug!(
+        tracing::warn!(
             "git rev-parse HEAD failed at {} with exit {}: {}",
             repo.display(),
             output.status,
@@ -448,7 +448,7 @@ fn git_head(repo: &Path) -> Option<String> {
             if sha.is_empty() { None } else { Some(sha) }
         }
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 "git rev-parse HEAD output invalid UTF-8 at {}: {}",
                 repo.display(),
                 e
