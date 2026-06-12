@@ -140,7 +140,6 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     if let Err(e) = git::secure_git()
         .args(["fetch"])
         .current_dir(repo)
-        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
     {
