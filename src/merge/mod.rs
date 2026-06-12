@@ -215,7 +215,7 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
         for mem in &features.memory {
             if mem.when.is_empty() {
                 anyhow::bail!(
-                    "{context}: features.memory entry for '{}'  has no tags — every memory entry must declare at least one activation tag",
+                    "{context}: features.memory entry for '{}' has no 'when' tags — every memory entry must declare at least one activation tag",
                     mem.server_host
                 );
             }

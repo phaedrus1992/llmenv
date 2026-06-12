@@ -879,7 +879,6 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         std::time::Duration::from_secs(interval_secs),
     ) {
         tracing::warn!("throttled pull failed (non-fatal): {e}");
-        eprintln!("[llmenv] sync: throttled pull failed (non-fatal): {e}");
     }
 
     // A bundle fires when either:

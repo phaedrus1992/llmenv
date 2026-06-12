@@ -40,6 +40,20 @@ scope:
 }
 
 #[test]
+fn bundle_tags_field_rejected_by_deny_unknown_fields() {
+    let s = r#"
+bundle:
+  - name: x
+    tags: [me]
+"#;
+    let result: Result<Config, _> = serde_yaml::from_str(s);
+    assert!(
+        result.is_err(),
+        "bundle with deprecated 'tags:' key must fail deserialization (deny_unknown_fields)"
+    );
+}
+
+#[test]
 fn rejects_bundle_with_no_tags() {
     let s = r#"
 bundle:

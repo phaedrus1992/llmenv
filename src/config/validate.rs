@@ -122,6 +122,11 @@ pub enum ValidateError {
          (must match [A-Za-z_][A-Za-z0-9_]*). Fix: rename the key."
     )]
     CapabilitiesInvalidVarName { context: String, key: String },
+    #[error(
+        "mcp '{mcp}': env key '{key}' is not a valid shell identifier \
+         (must match [A-Za-z_][A-Za-z0-9_]*). Fix: rename the key."
+    )]
+    McpInvalidEnvKey { mcp: String, key: String },
 }
 
 /// A marketplace name is safe to use as a single filesystem path component and
@@ -421,6 +426,14 @@ impl Config {
                             format!("{:?}", m.transport).to_lowercase(),
                         ));
                     }
+                }
+            }
+            for key in m.env.keys() {
+                if !is_valid_var_name(key) {
+                    return Err(ValidateError::McpInvalidEnvKey {
+                        mcp: m.name.clone(),
+                        key: key.clone(),
+                    });
                 }
             }
         }
@@ -1768,6 +1781,24 @@ mod tests {
         }
 
         #[test]
+        fn prop_var_name_body_hyphen_rejected(
+            prefix in "[A-Za-z_][A-Za-z0-9_]{0,5}",
+            suffix in "[A-Za-z0-9_]{0,5}",
+        ) {
+            let name = format!("{prefix}-{suffix}");
+            prop_assert!(!is_valid_var_name(&name), "hyphen in var name accepted: {name}");
+        }
+
+        #[test]
+        fn prop_var_name_body_space_rejected(
+            prefix in "[A-Za-z_][A-Za-z0-9_]{0,5}",
+            suffix in "[A-Za-z0-9_]{0,5}",
+        ) {
+            let name = format!("{prefix} {suffix}");
+            prop_assert!(!is_valid_var_name(&name), "space in var name accepted: {name}");
+        }
+
+        #[test]
         fn prop_valid_mac_addresses_accepted(octets in prop::array::uniform6(0u8..=255)) {
             let mac = octets
                 .iter()
@@ -2054,6 +2085,26 @@ mod tests {
         assert!(
             msg.contains("1BAD"),
             "error message must name the offending key; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn is_valid_var_name_empty_rejected() {
+        assert!(
+            !is_valid_var_name(""),
+            "empty string must not be a valid var name"
+        );
+    }
+
+    #[test]
+    fn is_valid_var_name_unicode_rejected() {
+        assert!(
+            !is_valid_var_name("café"),
+            "non-ASCII body char must be rejected"
+        );
+        assert!(
+            !is_valid_var_name("ñame"),
+            "non-ASCII leading char must be rejected"
         );
     }
 }
