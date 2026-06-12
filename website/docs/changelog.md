@@ -63,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix missing bundle directories being silently ignored; `llmenv` now logs a warning
   when a configured bundle name has no corresponding directory, making typos and
   deleted directories detectable
+- Fix `mcp[].env` keys not being validated for the `LLMENV_` prefix or reserved state
+  vars (`CLAUDE_CONFIG_DIR`, `LLMENV_STATE_DIR`); these were accepted silently where
+  `capabilities.env` already rejected them, creating an inconsistent validation gap
+- Fix git fetch spawn errors logged at `debug` level in the background sync path;
+  a spawn error (git binary missing or misconfigured) is unexpected and is now logged
+  at `warn` so operators can see it
 
 ## [1.0.10] - 2026-06-11
 
