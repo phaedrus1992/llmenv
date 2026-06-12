@@ -127,6 +127,16 @@ pub enum ValidateError {
          (must match [A-Za-z_][A-Za-z0-9_]*). Fix: rename the key."
     )]
     McpInvalidEnvKey { mcp: String, key: String },
+    #[error(
+        "mcp '{mcp}': env key '{key}' is reserved — it is emitted by the adapter or state \
+         system and must not be overridden here. Fix: remove this key from env:."
+    )]
+    McpReservedEnvKey { mcp: String, key: String },
+    #[error(
+        "mcp '{mcp}': env key '{key}' uses the 'LLMENV_' prefix, which is reserved for \
+         llmenv-internal variables. Fix: rename the key."
+    )]
+    McpLlmenvPrefixEnvKey { mcp: String, key: String },
 }
 
 /// A marketplace name is safe to use as a single filesystem path component and
@@ -429,6 +439,18 @@ impl Config {
                 }
             }
             for key in m.env.keys() {
+                if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key.as_str()) {
+                    return Err(ValidateError::McpReservedEnvKey {
+                        mcp: m.name.clone(),
+                        key: key.clone(),
+                    });
+                }
+                if key.starts_with("LLMENV_") {
+                    return Err(ValidateError::McpLlmenvPrefixEnvKey {
+                        mcp: m.name.clone(),
+                        key: key.clone(),
+                    });
+                }
                 if !is_valid_var_name(key) {
                     return Err(ValidateError::McpInvalidEnvKey {
                         mcp: m.name.clone(),
@@ -475,6 +497,7 @@ mod tests {
     use super::*;
     use crate::config::HashingMode;
     use proptest::prelude::*;
+    use std::collections::BTreeMap;
 
     fn arb_string() -> impl Strategy<Value = String> {
         r"[a-zA-Z0-9_-]{1,20}"
@@ -1049,6 +1072,105 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(ValidateError::McpReservedName(_))
+        ));
+    }
+
+    #[test]
+    fn mcp_env_reserved_key_rejected() {
+        let mut env = BTreeMap::new();
+        env.insert("CLAUDE_CONFIG_DIR".to_string(), "x".to_string());
+        let config = Config {
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![crate::config::McpServer {
+                name: "mymcp".to_string(),
+                when: vec!["tag1".to_string()],
+                transport: crate::config::McpTransport::Stdio,
+                command: Some("echo".to_string()),
+                args: vec![],
+                env,
+                url: None,
+            }],
+            features: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
+            state: Default::default(),
+            host: Default::default(),
+            init: Default::default(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::McpReservedEnvKey { mcp, key })
+                if mcp == "mymcp" && key == "CLAUDE_CONFIG_DIR"
+        ));
+    }
+
+    #[test]
+    fn mcp_env_llmenv_prefix_rejected() {
+        let mut env = BTreeMap::new();
+        env.insert("LLMENV_CUSTOM".to_string(), "x".to_string());
+        let config = Config {
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![crate::config::McpServer {
+                name: "mymcp".to_string(),
+                when: vec!["tag1".to_string()],
+                transport: crate::config::McpTransport::Stdio,
+                command: Some("echo".to_string()),
+                args: vec![],
+                env,
+                url: None,
+            }],
+            features: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
+            state: Default::default(),
+            host: Default::default(),
+            init: Default::default(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::McpLlmenvPrefixEnvKey { mcp, key })
+                if mcp == "mymcp" && key == "LLMENV_CUSTOM"
+        ));
+    }
+
+    #[test]
+    fn mcp_env_invalid_var_name_rejected() {
+        let mut env = BTreeMap::new();
+        env.insert("123INVALID".to_string(), "x".to_string());
+        let config = Config {
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![crate::config::McpServer {
+                name: "mymcp".to_string(),
+                when: vec!["tag1".to_string()],
+                transport: crate::config::McpTransport::Stdio,
+                command: Some("echo".to_string()),
+                args: vec![],
+                env,
+                url: None,
+            }],
+            features: None,
+            marketplace: vec![],
+            plugin_collection: vec![],
+            state: Default::default(),
+            host: Default::default(),
+            init: Default::default(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::McpInvalidEnvKey { mcp, key })
+                if mcp == "mymcp" && key == "123INVALID"
         ));
     }
 
