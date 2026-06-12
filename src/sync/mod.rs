@@ -135,16 +135,15 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     }
 
     // Attempt fetch — silent on failure (network issues are transient and
-    // we don't want to spam every shell prompt while offline). Log spawn errors
-    // at debug level in case git binary is missing or broken.
+    // we don't want to spam every shell prompt while offline). A spawn error
+    // (git binary missing or broken) is unexpected and warrants a warning.
     if let Err(e) = git::secure_git()
         .args(["fetch"])
         .current_dir(repo)
-        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
     {
-        tracing::debug!("git fetch spawn error in {}: {}", repo.display(), e);
+        tracing::warn!("git fetch spawn error in {}: {}", repo.display(), e);
     }
 
     // Attempt fast-forward pull. Suppress git's stderr — we'll print our

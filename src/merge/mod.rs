@@ -188,25 +188,7 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
 
     let context = format!("bundle '{name}'");
     for key in caps.env.keys() {
-        if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key.as_str()) {
-            anyhow::bail!(
-                "{context}: capabilities.env key '{key}' is reserved — it is emitted by the \
-                 adapter or state system and must not be overridden here. \
-                 Fix: remove this key from env:, or declare env vars in bundle.yaml under capabilities.env."
-            );
-        }
-        if key.starts_with("LLMENV_") {
-            anyhow::bail!(
-                "{context}: capabilities.env key '{key}' uses the 'LLMENV_' prefix, which is \
-                 reserved for llmenv-internal variables. Fix: rename the key."
-            );
-        }
-        if !crate::config::is_valid_var_name(key) {
-            anyhow::bail!(
-                "{context}: capabilities.env key '{key}' is not a valid shell identifier \
-                 (must match [A-Za-z_][A-Za-z0-9_]*). Fix: rename the key."
-            );
-        }
+        crate::config::validate_capabilities_env_key(&context, key)?;
     }
 
     // Validate bundle-contributed memory entries with the same checks that
@@ -442,6 +424,97 @@ mod tests {
             "bundle host: entry must appear in merged capabilities"
         );
         assert_eq!(manifest.capabilities.host["still"].addr, "still.local");
+    }
+
+    // #373: reserved env key must produce an error matching ValidateError::CapabilitiesReservedEnvKey.
+    #[test]
+    fn bundle_env_reserved_key_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "env:\n  CLAUDE_CONFIG_DIR: /bad\n",
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(
+                ve,
+                crate::config::ValidateError::CapabilitiesReservedEnvKey { key, .. }
+                    if key == "CLAUDE_CONFIG_DIR"
+            ),
+            "unexpected variant: {ve}"
+        );
+    }
+
+    // #373: LLMENV_ prefix in bundle env must produce an error matching
+    // ValidateError::CapabilitiesLlmenvPrefixEnvKey.
+    #[test]
+    fn bundle_env_llmenv_prefix_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "env:\n  LLMENV_CUSTOM: bad\n",
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(
+                ve,
+                crate::config::ValidateError::CapabilitiesLlmenvPrefixEnvKey { key, .. }
+                    if key == "LLMENV_CUSTOM"
+            ),
+            "unexpected variant: {ve}"
+        );
+    }
+
+    // #373: invalid var name in bundle env must produce an error matching
+    // ValidateError::CapabilitiesInvalidVarName.
+    #[test]
+    fn bundle_env_invalid_var_name_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("bundle.yaml"), "env:\n  1INVALID: bad\n").unwrap();
+
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(
+                ve,
+                crate::config::ValidateError::CapabilitiesInvalidVarName { key, .. }
+                    if key == "1INVALID"
+            ),
+            "unexpected variant: {ve}"
+        );
     }
 
     // #335: unknown keys in bundle.yaml must error instead of being silently dropped.
