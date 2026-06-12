@@ -107,10 +107,16 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     let now = SystemTime::now();
 
     // Check if we should pull
-    if let Some(last) = read_state(state_dir)?
-        && now.duration_since(last).unwrap_or_default() < interval
-    {
-        return Ok(());
+    if let Some(last) = read_state(state_dir)? {
+        match now.duration_since(last) {
+            Ok(elapsed) if elapsed < interval => return Ok(()),
+            Err(_) => {
+                tracing::warn!(
+                    "system clock skew detected (state timestamp is in future); proceeding with pull"
+                );
+            }
+            _ => {}
+        }
     }
 
     // Validate repo is a git repository

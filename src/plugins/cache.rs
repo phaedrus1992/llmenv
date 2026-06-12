@@ -324,6 +324,15 @@ pub fn sync_external_plugin_with(
             })?;
     }
     let head = git.head(&dest);
+
+    // Validate that plugin.json exists after sync
+    if !dest.join("plugin.json").exists() {
+        tracing::warn!(
+            "plugin manifest missing at {}; plugin may not load correctly",
+            dest.join("plugin.json").display()
+        );
+    }
+
     Ok(MarketplaceState {
         install_location: dest,
         head,
@@ -388,7 +397,7 @@ fn git_pull(repo: &Path) -> Result<()> {
         .output()
         .context("spawning git reset")?;
     if !reset_out.status.success() {
-        tracing::debug!(
+        tracing::warn!(
             "marketplace refresh did not fast-forward at {}: {}",
             repo.display(),
             git::git_failure_detail(&reset_out.stderr, &reset_out.stdout, reset_out.status)
