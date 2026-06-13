@@ -153,7 +153,7 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
 
     let context = format!("bundle '{name}'");
     for key in caps.env.keys() {
-        if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key.as_str()) {
+        if crate::config::RESERVED_STATE_ENV_VARS.contains(&key.as_str()) {
             anyhow::bail!(
                 "{context}: capabilities.env key '{key}' is reserved — it is emitted by the \
                  adapter or state system and must not be overridden here. \

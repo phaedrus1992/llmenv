@@ -4,6 +4,16 @@ mod validate;
 pub use schema::*;
 pub use validate::ValidateError;
 
+/// Env var llmenv always emits pointing at the durable state directory.
+pub const STATE_DIR_ENV: &str = "LLMENV_STATE_DIR";
+
+/// Env vars reserved by llmenv that a [`StateTool`]'s `env` field must not claim.
+/// Validation rejects any `StateTool` that tries to redirect one of these.
+pub const RESERVED_STATE_ENV_VARS: &[&str] = &[STATE_DIR_ENV, "CLAUDE_CONFIG_DIR"];
+
+/// Registration name of the memory (ICM) MCP server in the resolved MCP list.
+pub const MEMORY_MCP_NAME: &str = "icm";
+
 use anyhow::Context;
 use std::path::Path;
 

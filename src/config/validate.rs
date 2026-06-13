@@ -186,7 +186,7 @@ fn is_valid_hostname(hostname: &str) -> bool {
 /// not in the LLMENV_* namespace. Returns an error with the given `context`
 /// label (e.g. `"config.yaml: capabilities"` or `"bundle 'foo'"`) on failure.
 fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), ValidateError> {
-    if crate::materialize::state::RESERVED_STATE_ENV_VARS.contains(&key) {
+    if super::RESERVED_STATE_ENV_VARS.contains(&key) {
         return Err(ValidateError::CapabilitiesReservedEnvKey {
             context: context.to_string(),
             key: key.to_string(),
@@ -365,7 +365,7 @@ impl Config {
         let mut seen_env = std::collections::HashSet::new();
         // Reserve llmenv/adapter-emitted vars so a tool can't shadow them and
         // produce a conflicting binding in the emitted env_vars set.
-        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+        for reserved in super::RESERVED_STATE_ENV_VARS {
             seen_env.insert((*reserved).to_string());
         }
         for tool in &self.state.tools {
@@ -390,7 +390,7 @@ impl Config {
             if m.tags.is_empty() {
                 return Err(ValidateError::McpNoTags(m.name.clone()));
             }
-            if m.name == crate::mcp::resolve::MEMORY_MCP_NAME {
+            if m.name == super::MEMORY_MCP_NAME {
                 return Err(ValidateError::McpReservedName(m.name.clone()));
             }
             if !seen_mcp_names.insert(&m.name) {
@@ -984,7 +984,7 @@ mod tests {
             scope: Scopes::default(),
             bundle: vec![],
             mcp: vec![crate::config::McpServer {
-                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                name: crate::config::MEMORY_MCP_NAME.to_string(),
                 tags: vec!["tag1".to_string()],
                 transport: crate::config::McpTransport::Stdio,
                 command: Some("echo".to_string()),
@@ -1592,7 +1592,7 @@ mod tests {
         // set a tool's relocation var lands in; claiming one would emit a
         // conflicting binding (e.g. redirecting CLAUDE_CONFIG_DIR), so each is
         // rejected up front (#175).
-        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+        for reserved in crate::config::RESERVED_STATE_ENV_VARS {
             let cfg = config_with_state(vec![state_tool(reserved, "x")]);
             assert!(
                 matches!(cfg.validate(), Err(ValidateError::StateDuplicateEnv(_))),
@@ -1910,7 +1910,7 @@ mod tests {
         // #354: keys that are not reserved and not LLMENV_-prefixed are accepted.
         #[test]
         fn prop_normal_env_key_accepted(key in "[A-Za-z_][A-Za-z0-9_]{0,15}") {
-            let reserved: &[&str] = crate::materialize::state::RESERVED_STATE_ENV_VARS;
+            let reserved: &[&str] = crate::config::RESERVED_STATE_ENV_VARS;
             prop_assume!(!reserved.contains(&key.as_str()));
             prop_assume!(!key.starts_with("LLMENV_"));
             prop_assert!(
@@ -2022,7 +2022,7 @@ mod tests {
 
     #[test]
     fn capabilities_env_all_reserved_state_vars_rejected() {
-        for reserved in crate::materialize::state::RESERVED_STATE_ENV_VARS {
+        for reserved in crate::config::RESERVED_STATE_ENV_VARS {
             let cfg = config_with_capabilities_env(reserved, "x");
             assert!(
                 matches!(

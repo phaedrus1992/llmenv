@@ -17,7 +17,8 @@ use mcp_client::McpHttpClient;
 
 use crate::adapter::AgentAdapter;
 use crate::adapter::claude_code::ClaudeCodeAdapter;
-use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, resolve_mcps};
+use crate::config::MEMORY_MCP_NAME;
+use crate::mcp::resolve::{ResolvedKind, resolve_mcps};
 
 /// A single cross-project, tag-scoped recall the TurnStart hook issues against
 /// ICM. Exposes the recall contract (#197) so it is testable without a live

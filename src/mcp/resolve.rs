@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{Config, HostEntry, McpServer, McpTransport, Memory};
+use crate::config::{Config, HostEntry, MEMORY_MCP_NAME, McpServer, McpTransport, Memory};
 
 use tracing::debug;
 
@@ -40,9 +40,6 @@ pub enum ResolvedKind {
         transport: McpTransport,
     },
 }
-
-/// Registration name for the memory backend in the agent's MCP config.
-pub const MEMORY_MCP_NAME: &str = "icm";
 
 /// Errors raised while resolving MCP config for the active host.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
