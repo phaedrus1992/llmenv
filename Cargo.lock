@@ -1205,6 +1205,10 @@ dependencies = [
  "hex",
  "humantime",
  "insta",
+ "llmenv-config",
+ "llmenv-git",
+ "llmenv-paths",
+ "llmenv-util",
  "predicates",
  "proptest",
  "reqwest",
@@ -1221,6 +1225,46 @@ dependencies = [
  "url",
  "walkdir",
  "wiremock",
+]
+
+[[package]]
+name = "llmenv-config"
+version = "1.0.10"
+dependencies = [
+ "anyhow",
+ "llmenv-paths",
+ "proptest",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "llmenv-git"
+version = "1.0.10"
+dependencies = [
+ "proptest",
+ "tracing",
+]
+
+[[package]]
+name = "llmenv-paths"
+version = "1.0.10"
+dependencies = [
+ "anyhow",
+ "proptest",
+ "tempfile",
+]
+
+[[package]]
+name = "llmenv-util"
+version = "1.0.10"
+dependencies = [
+ "proptest",
+ "serde_json",
+ "serde_yaml_ng",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - 'src/**'
+      - 'crates/**'
       - 'tests/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -11,6 +12,7 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'crates/**'
       - 'tests/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -37,9 +39,9 @@ jobs:
       - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25  # v2
         with:
           tool: cargo-nextest
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo nextest run
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo nextest run --workspace
   deny:
     runs-on: ubuntu-latest
     steps:

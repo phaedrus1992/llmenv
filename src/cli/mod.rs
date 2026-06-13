@@ -1762,7 +1762,7 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
         return Ok(());
     }
 
-    let template = crate::config::template::generate_template();
+    let template = crate::config::generate_template();
     std::fs::write(&config_path, template)
         .with_context(|| format!("writing template to {}", config_path.display()))?;
     eprintln!("Created template config at {}", config_path.display());

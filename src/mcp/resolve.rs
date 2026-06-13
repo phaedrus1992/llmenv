@@ -43,8 +43,7 @@ pub enum ResolvedKind {
     },
 }
 
-/// Registration name for the memory backend in the agent's MCP config.
-pub const MEMORY_MCP_NAME: &str = "icm";
+pub use llmenv_config::MEMORY_MCP_NAME;
 
 /// Errors raised while resolving MCP config for the active host.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -1,0 +1,17 @@
+[package]
+name = "llmenv-util"
+version = "1.0.10"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
