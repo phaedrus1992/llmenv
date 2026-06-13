@@ -440,11 +440,22 @@ mod tests {
 
         // ===== merge_yaml / normalize_yaml PBTs =====
 
+        fn contains_nan(v: &Y) -> bool {
+            match v {
+                Y::Number(n) => n.as_f64().is_some_and(f64::is_nan),
+                Y::Sequence(seq) => seq.iter().any(contains_nan),
+                Y::Mapping(map) => map.values().any(contains_nan),
+                _ => false,
+            }
+        }
+
         fn arb_yaml() -> impl Strategy<Value = serde_yaml::Value> {
             let leaf = prop_oneof![
                 Just(Y::Null),
                 any::<bool>().prop_map(Y::Bool),
                 any::<i32>().prop_map(|n| Y::Number(n.into())),
+                // f64 including NaN/±Inf; equality tests must prop_assume!(!contains_nan(&v))
+                any::<f64>().prop_map(|f| Y::Number(serde_yaml::Number::from(f))),
                 "[a-z]{0,4}".prop_map(Y::String),
             ];
             leaf.prop_recursive(3, 16, 4, |inner| {
@@ -478,6 +489,7 @@ mod tests {
             // Self-merge idempotency: merge(merge(v,v), merge(v,v)) == merge(v,v).
             #[test]
             fn merge_yaml_idempotent(v in arb_yaml()) {
+                prop_assume!(!contains_nan(&v));
                 let mut once = v.clone();
                 merge_yaml(&mut once, v.clone());
                 let mut twice = once.clone();
@@ -491,6 +503,7 @@ mod tests {
                 dst in arb_yaml(),
                 src in arb_yaml(),
             ) {
+                prop_assume!(!contains_nan(&dst) && !contains_nan(&src));
                 let mut once = dst;
                 merge_yaml(&mut once, src.clone());
                 let mut twice = once.clone();
@@ -530,6 +543,7 @@ mod tests {
 
             #[test]
             fn normalize_yaml_idempotent(v in arb_yaml()) {
+                prop_assume!(!contains_nan(&v));
                 let mut once = v;
                 normalize_yaml(&mut once);
                 let mut twice = once.clone();
