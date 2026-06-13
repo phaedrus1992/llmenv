@@ -435,14 +435,15 @@ mod tests {
         // produces a string that starts with HOME and ends with rest.
         #[test]
         fn expand_tilde_slash_contains_home_and_rest(rest in "[a-z0-9/_.-]{0,20}") {
-            if let Ok(home) = std::env::var("HOME") {
-                let input = format!("~/{rest}");
-                let result = expand_tilde(&input);
-                prop_assert!(result.starts_with(&home),
-                    "expected {result} to start with home={home}");
-                prop_assert!(result.ends_with(&rest) || rest.is_empty(),
-                    "expected {result} to end with rest={rest}");
-            }
+            let home_result = std::env::var("HOME");
+            prop_assume!(home_result.is_ok());
+            let home = home_result.unwrap();
+            let input = format!("~/{rest}");
+            let result = expand_tilde(&input);
+            prop_assert!(result.starts_with(&home),
+                "expected {result} to start with home={home}");
+            prop_assert!(result.ends_with(&rest) || rest.is_empty(),
+                "expected {result} to end with rest={rest}");
         }
 
         // cwd_under_prefix is reflexive: a path is always under itself.
@@ -484,7 +485,7 @@ mod tests {
         // mid-write corruption regressions across the full u8 range including
         // NUL bytes and high-bit values.
         #[test]
-        fn atomic_write_byte_roundtrip(payload in proptest::collection::vec(any::<u8>(), 0..8192)) {
+        fn atomic_write_byte_roundtrip(payload in prop::collection::vec(any::<u8>(), 0..8192)) {
             let dir = tempfile::TempDir::new().expect("tempdir");
             let path = dir.path().join("payload.bin");
             write_owner_only_atomic(&path, &payload).expect("atomic write");
@@ -497,8 +498,8 @@ mod tests {
         // escalation.
         #[test]
         fn atomic_write_overwrite_idempotent(
-            first in proptest::collection::vec(any::<u8>(), 0..4096),
-            second in proptest::collection::vec(any::<u8>(), 0..4096),
+            first in prop::collection::vec(any::<u8>(), 0..4096),
+            second in prop::collection::vec(any::<u8>(), 0..4096),
         ) {
             let dir = tempfile::TempDir::new().expect("tempdir");
             let path = dir.path().join("payload.bin");

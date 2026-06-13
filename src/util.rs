@@ -265,6 +265,7 @@ mod tests {
         use super::{dedup, merge_json, merge_yaml, normalize_yaml};
         use proptest::prelude::*;
         use serde_json::Value;
+        use serde_yaml::Value as Y;
 
         // A small recursive JSON generator: scalars, then arrays/objects of them.
         fn arb_json() -> impl Strategy<Value = Value> {
@@ -408,6 +409,29 @@ mod tests {
             }
 
             #[test]
+            fn dedup_output_len_leq_input_len(items in prop::collection::vec(0i32..10, 0..20)) {
+                let original_len = items.len();
+                let mut v = items;
+                dedup(&mut v);
+                prop_assert!(
+                    v.len() <= original_len,
+                    "dedup grew the vec: {} > {}",
+                    v.len(),
+                    original_len
+                );
+            }
+
+            #[test]
+            fn dedup_output_is_subset_of_input(items in prop::collection::vec(0i32..10, 0..20)) {
+                let original = items.clone();
+                let mut v = items;
+                dedup(&mut v);
+                for x in &v {
+                    prop_assert!(original.contains(x), "dedup introduced {}", x);
+                }
+            }
+
+            #[test]
             fn dedup_never_panics(items in prop::collection::vec(".*", 0..10)) {
                 let mut v = items;
                 dedup(&mut v);
@@ -417,7 +441,6 @@ mod tests {
         // ===== merge_yaml / normalize_yaml PBTs =====
 
         fn arb_yaml() -> impl Strategy<Value = serde_yaml::Value> {
-            use serde_yaml::Value as Y;
             let leaf = prop_oneof![
                 Just(Y::Null),
                 any::<bool>().prop_map(Y::Bool),
@@ -446,15 +469,25 @@ mod tests {
                 a in any::<i32>(),
                 b in any::<i32>(),
             ) {
-                use serde_yaml::Value as Y;
                 let mut dst = serde_yaml::from_str::<Y>(&format!("{key}: {a}")).unwrap();
                 merge_yaml(&mut dst, serde_yaml::from_str::<Y>(&format!("{key}: {b}")).unwrap());
                 let got = dst.as_mapping().unwrap().get(Y::String(key)).unwrap();
                 prop_assert_eq!(got, &Y::Number(b.into()));
             }
 
+            // Self-merge idempotency: merge(merge(v,v), merge(v,v)) == merge(v,v).
             #[test]
-            fn merge_yaml_idempotent_for_arbitrary_pairs(
+            fn merge_yaml_idempotent(v in arb_yaml()) {
+                let mut once = v.clone();
+                merge_yaml(&mut once, v.clone());
+                let mut twice = once.clone();
+                merge_yaml(&mut twice, once.clone());
+                prop_assert_eq!(once, twice);
+            }
+
+            // Convergence: re-applying src to an already-merged dst is a no-op.
+            #[test]
+            fn merge_yaml_convergent(
                 dst in arb_yaml(),
                 src in arb_yaml(),
             ) {
@@ -465,12 +498,28 @@ mod tests {
                 prop_assert_eq!(once, twice);
             }
 
+            // Dst-key preservation: keys only in dst (not in src) survive merge.
+            #[test]
+            fn merge_yaml_dst_only_keys_preserved(
+                dst_key in "[a-z]{1,4}",
+                dst_val in any::<i32>(),
+                src_key in "[a-z]{1,4}",
+                src_val in any::<i32>(),
+            ) {
+                prop_assume!(dst_key != src_key);
+                let mut dst = serde_yaml::from_str::<Y>(&format!("{dst_key}: {dst_val}")).unwrap();
+                let src = serde_yaml::from_str::<Y>(&format!("{src_key}: {src_val}")).unwrap();
+                merge_yaml(&mut dst, src);
+                let map = dst.as_mapping().unwrap();
+                let got = map.get(Y::String(dst_key)).unwrap();
+                prop_assert_eq!(got, &Y::Number(dst_val.into()));
+            }
+
             #[test]
             fn merge_yaml_sequences_no_duplicates(
                 a in prop::collection::vec(0i32..5, 0..6),
                 b in prop::collection::vec(0i32..5, 0..6),
             ) {
-                use serde_yaml::Value as Y;
                 let mut dst = Y::Sequence(a.iter().map(|n| Y::Number((*n).into())).collect());
                 merge_yaml(&mut dst, Y::Sequence(b.iter().map(|n| Y::Number((*n).into())).collect()));
                 let seq = dst.as_sequence().unwrap().clone();
@@ -503,7 +552,6 @@ mod tests {
         }
 
         fn all_yaml_sequences_deduped(v: &serde_yaml::Value) -> bool {
-            use serde_yaml::Value as Y;
             match v {
                 Y::Sequence(items) => {
                     let mut seen = items.clone();
