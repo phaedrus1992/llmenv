@@ -444,7 +444,7 @@ mod tests {
             match v {
                 Y::Number(n) => n.as_f64().is_some_and(f64::is_nan),
                 Y::Sequence(seq) => seq.iter().any(contains_nan),
-                Y::Mapping(map) => map.values().any(contains_nan),
+                Y::Mapping(map) => map.keys().any(contains_nan) || map.values().any(contains_nan),
                 _ => false,
             }
         }
@@ -454,7 +454,7 @@ mod tests {
                 Just(Y::Null),
                 any::<bool>().prop_map(Y::Bool),
                 any::<i32>().prop_map(|n| Y::Number(n.into())),
-                // f64 including NaN/±Inf; equality tests must prop_assume!(!contains_nan(&v))
+                // f64 including NaN; NaN != NaN breaks eq assertions — guard with prop_assume!
                 any::<f64>().prop_map(|f| Y::Number(serde_yaml::Number::from(f))),
                 "[a-z]{0,4}".prop_map(Y::String),
             ];

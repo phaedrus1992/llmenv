@@ -60,7 +60,8 @@ fn test_doctor_version_check_label_exists() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        stderr.contains("Doctor check complete") || stderr.contains("Found"),
-        "doctor should complete with summary"
+        stderr.contains("Doctor check complete."),
+        "doctor should complete with summary\nstderr:\n{}",
+        stderr
     );
 }

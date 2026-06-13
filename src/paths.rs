@@ -534,9 +534,7 @@ mod tests {
     // Bare `~` (no slash) must expand to exactly $HOME with no trailing slash.
     #[test]
     fn expand_tilde_bare_tilde_equals_home() {
-        let Ok(home) = std::env::var("HOME") else {
-            return;
-        };
+        let home = std::env::var("HOME").expect("HOME must be set; expand_tilde relies on it");
         let result = expand_tilde("~");
         assert_eq!(result, home);
         assert!(!result.ends_with('/'));
