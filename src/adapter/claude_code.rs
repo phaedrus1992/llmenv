@@ -4,15 +4,11 @@ use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
-use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, ResolvedMcp};
+use crate::config::MEMORY_MCP_NAME;
+use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
-
-/// Substitution value for `{{ICM_MCP}}` placeholders in bundle hook templates,
-/// so bundle hooks can reference the memory MCP server by name without knowing
-/// it ahead of time. Tracks the memory backend's registration name.
-const ICM_MCP_NAME: &str = MEMORY_MCP_NAME;
 
 /// Command the auto-emitted SessionStart hook runs (#121/#85). It shells back
 /// into `llmenv` so the runtime check can compare the booted content hash (the
@@ -83,7 +79,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             }
             if is_hook_json(rel) {
                 let raw = std::fs::read_to_string(abs)?;
-                let rendered = raw.replace("{{ICM_MCP}}", ICM_MCP_NAME);
+                let rendered = raw.replace("{{ICM_MCP}}", MEMORY_MCP_NAME);
                 crate::paths::write_owner_only(&dest, rendered.as_bytes())?;
             } else {
                 std::fs::copy(abs, &dest)?;
@@ -729,7 +725,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // the key if: (1) explicitly set in config, or (2) ICM is active and we need
     // to disable it. Emitted before native overlays so `native.claude_code.autoMemoryEnabled`
     // can still override if set (native is the highest-precedence layer).
-    let icm_active = manifest.mcps.iter().any(|m| m.name == ICM_MCP_NAME);
+    let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
     if let Some(configured) = manifest.capabilities.auto_memory_enabled {
         settings.insert("autoMemoryEnabled".into(), json!(configured));
     } else if icm_active {

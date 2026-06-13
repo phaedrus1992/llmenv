@@ -419,6 +419,66 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        // expand_tilde on anything not starting with `~` is an identity.
+        #[test]
+        fn expand_tilde_passthrough_non_tilde(s in "[^~].*") {
+            prop_assert_eq!(expand_tilde(&s), s);
+        }
+
+        // expand_tilde never panics on arbitrary input.
+        #[test]
+        fn expand_tilde_never_panics(s in ".*") {
+            let _ = expand_tilde(&s);
+        }
+
+        // When HOME is set (standard test environment), expand_tilde("~/rest")
+        // produces a string that starts with HOME and ends with rest.
+        #[test]
+        fn expand_tilde_slash_contains_home_and_rest(rest in "[a-z0-9/_.-]{0,20}") {
+            if let Ok(home) = std::env::var("HOME") {
+                let input = format!("~/{rest}");
+                let result = expand_tilde(&input);
+                prop_assert!(result.starts_with(&home),
+                    "expected {result} to start with home={home}");
+                prop_assert!(result.ends_with(&rest) || rest.is_empty(),
+                    "expected {result} to end with rest={rest}");
+            }
+        }
+
+        // cwd_under_prefix is reflexive: a path is always under itself.
+        #[test]
+        fn cwd_under_prefix_reflexive(p in "/[a-z/]{1,20}") {
+            prop_assert!(cwd_under_prefix(&p, &p));
+        }
+
+        // cwd_under_prefix: any direct child is under its parent.
+        #[test]
+        fn cwd_under_prefix_child_under_parent(
+            parent in "/[a-z]{1,10}",
+            child in "[a-z]{1,10}",
+        ) {
+            let full = format!("{parent}/{child}");
+            prop_assert!(cwd_under_prefix(&full, &parent));
+        }
+
+        // cwd_under_prefix rejects a path that merely shares a string prefix
+        // without a component boundary — the classic /foo/bar vs /foo/barbaz bug.
+        #[test]
+        fn cwd_under_prefix_no_string_prefix_false_positive(
+            base in "[a-z]{2,8}",
+            extra in "[a-z]{1,4}",
+        ) {
+            let cwd = format!("/{base}{extra}");
+            let prefix = format!("/{base}");
+            prop_assert!(!cwd_under_prefix(&cwd, &prefix));
+        }
+
+        // cwd_under_prefix never panics on arbitrary string input.
+        #[test]
+        fn cwd_under_prefix_never_panics(cwd in ".*", prefix in ".*") {
+            let _ = cwd_under_prefix(&cwd, &prefix);
+        }
+
         // Arbitrary byte payloads written through write_owner_only_atomic must
         // round-trip exactly via fs::read. Catches truncation, encoding, or
         // mid-write corruption regressions across the full u8 range including

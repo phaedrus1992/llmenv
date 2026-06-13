@@ -152,7 +152,7 @@ fn normalize_json(value: &mut serde_json::Value) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{dedup, merge_json, merge_yaml};
+    use super::{dedup, merge_json, merge_yaml, normalize_yaml};
 
     fn yaml(s: &str) -> serde_yaml::Value {
         serde_yaml::from_str(s).unwrap()
@@ -262,7 +262,7 @@ mod tests {
     }
 
     mod props {
-        use super::{dedup, merge_json};
+        use super::{dedup, merge_json, merge_yaml, normalize_yaml};
         use proptest::prelude::*;
         use serde_json::Value;
 
@@ -366,6 +366,152 @@ mod tests {
                     all_arrays_deduped(&normalized),
                     "merge introduced a non-deduped array: {normalized}"
                 );
+            }
+        }
+
+        // ===== dedup PBTs =====
+
+        proptest! {
+            #[test]
+            fn dedup_output_has_no_duplicates(items in prop::collection::vec(0i32..10, 0..20)) {
+                let mut v = items;
+                dedup(&mut v);
+                for i in 0..v.len() {
+                    for j in (i + 1)..v.len() {
+                        prop_assert_ne!(v[i], v[j], "duplicate at positions {},{}", i, j);
+                    }
+                }
+            }
+
+            #[test]
+            fn dedup_preserves_first_occurrence_order(
+                items in prop::collection::vec(0i32..5, 0..20)
+            ) {
+                let mut v = items.clone();
+                dedup(&mut v);
+                let mut expected: Vec<i32> = Vec::new();
+                for x in &items {
+                    if !expected.contains(x) {
+                        expected.push(*x);
+                    }
+                }
+                prop_assert_eq!(v, expected);
+            }
+
+            #[test]
+            fn dedup_idempotent(items in prop::collection::vec(0i32..10, 0..20)) {
+                let mut v = items;
+                dedup(&mut v);
+                let once = v.clone();
+                dedup(&mut v);
+                prop_assert_eq!(v, once);
+            }
+
+            #[test]
+            fn dedup_never_panics(items in prop::collection::vec(".*", 0..10)) {
+                let mut v = items;
+                dedup(&mut v);
+            }
+        }
+
+        // ===== merge_yaml / normalize_yaml PBTs =====
+
+        fn arb_yaml() -> impl Strategy<Value = serde_yaml::Value> {
+            use serde_yaml::Value as Y;
+            let leaf = prop_oneof![
+                Just(Y::Null),
+                any::<bool>().prop_map(Y::Bool),
+                any::<i32>().prop_map(|n| Y::Number(n.into())),
+                "[a-z]{0,4}".prop_map(Y::String),
+            ];
+            leaf.prop_recursive(3, 16, 4, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..4).prop_map(Y::Sequence),
+                    prop::collection::vec(("[a-z]{1,4}", inner), 0..4).prop_map(|kvs| {
+                        Y::Mapping(kvs.into_iter().map(|(k, v)| (Y::String(k), v)).collect())
+                    }),
+                ]
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn merge_yaml_total(mut dst in arb_yaml(), src in arb_yaml()) {
+                merge_yaml(&mut dst, src);
+            }
+
+            #[test]
+            fn merge_yaml_src_scalar_wins_on_shared_key(
+                key in "[a-z]{1,4}",
+                a in any::<i32>(),
+                b in any::<i32>(),
+            ) {
+                use serde_yaml::Value as Y;
+                let mut dst = serde_yaml::from_str::<Y>(&format!("{key}: {a}")).unwrap();
+                merge_yaml(&mut dst, serde_yaml::from_str::<Y>(&format!("{key}: {b}")).unwrap());
+                let got = dst.as_mapping().unwrap().get(Y::String(key)).unwrap();
+                prop_assert_eq!(got, &Y::Number(b.into()));
+            }
+
+            #[test]
+            fn merge_yaml_idempotent_for_arbitrary_pairs(
+                dst in arb_yaml(),
+                src in arb_yaml(),
+            ) {
+                let mut once = dst;
+                merge_yaml(&mut once, src.clone());
+                let mut twice = once.clone();
+                merge_yaml(&mut twice, src);
+                prop_assert_eq!(once, twice);
+            }
+
+            #[test]
+            fn merge_yaml_sequences_no_duplicates(
+                a in prop::collection::vec(0i32..5, 0..6),
+                b in prop::collection::vec(0i32..5, 0..6),
+            ) {
+                use serde_yaml::Value as Y;
+                let mut dst = Y::Sequence(a.iter().map(|n| Y::Number((*n).into())).collect());
+                merge_yaml(&mut dst, Y::Sequence(b.iter().map(|n| Y::Number((*n).into())).collect()));
+                let seq = dst.as_sequence().unwrap().clone();
+                let mut deduped = seq.clone();
+                dedup(&mut deduped);
+                prop_assert_eq!(seq.len(), deduped.len(), "duplicates in merged sequence");
+            }
+
+            #[test]
+            fn normalize_yaml_idempotent(v in arb_yaml()) {
+                let mut once = v;
+                normalize_yaml(&mut once);
+                let mut twice = once.clone();
+                normalize_yaml(&mut twice);
+                prop_assert_eq!(once, twice);
+            }
+
+            #[test]
+            fn normalize_yaml_sequences_have_no_duplicates(v in arb_yaml()) {
+                let mut v = v;
+                normalize_yaml(&mut v);
+                prop_assert!(all_yaml_sequences_deduped(&v), "duplicate found after normalize");
+            }
+
+            #[test]
+            fn normalize_yaml_never_panics(v in arb_yaml()) {
+                let mut v = v;
+                normalize_yaml(&mut v);
+            }
+        }
+
+        fn all_yaml_sequences_deduped(v: &serde_yaml::Value) -> bool {
+            use serde_yaml::Value as Y;
+            match v {
+                Y::Sequence(items) => {
+                    let mut seen = items.clone();
+                    dedup(&mut seen);
+                    seen.len() == items.len() && items.iter().all(all_yaml_sequences_deduped)
+                }
+                Y::Mapping(map) => map.values().all(all_yaml_sequences_deduped),
+                _ => true,
             }
         }
 
