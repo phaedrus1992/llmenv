@@ -204,7 +204,8 @@ jobs:
           }
 
           # Poll crates.io until the crate version is indexed (needed before
-          # publishing a crate that depends on it). Timeout after 5 minutes.
+          # publishing a crate that depends on it). First-time crates can take
+          # 10+ minutes to index; timeout after 15 minutes.
           wait_for_crate() {
             local crate="$1" version="$2" elapsed=0 status
             echo "Waiting for ${crate} ${version} to be indexed by crates.io..."
@@ -212,12 +213,12 @@ jobs:
               status=$(curl -sS -A 'llmenv-release-workflow' -o /dev/null -w '%{http_code}' \
                 "https://crates.io/api/v1/crates/${crate}/${version}")
               [[ "${status}" == "200" ]] && { echo "${crate} ${version} is available."; return 0; }
-              [[ ${elapsed} -ge 300 ]] && {
-                echo "Error: timed out after 300s waiting for ${crate} ${version}" >&2
+              [[ ${elapsed} -ge 900 ]] && {
+                echo "Error: timed out after 900s waiting for ${crate} ${version}" >&2
                 exit 1
               }
-              sleep 15
-              elapsed=$((elapsed + 15))
+              sleep 20
+              elapsed=$((elapsed + 20))
             done
           }
 
