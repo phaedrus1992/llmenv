@@ -28,7 +28,7 @@ panic = "deny"
 
 [package]
 name = "llmenv"
-version = "1.0.10"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"

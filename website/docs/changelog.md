@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.0] - 2026-06-14
+
 ### Added
 
 - Add token-efficiency checks to `llmenv doctor`: warns when

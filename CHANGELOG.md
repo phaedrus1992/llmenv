@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.0] - 2026-06-14
+
 ### Added
 
 - Add token-efficiency checks to `llmenv doctor`: warns when
@@ -356,7 +358,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.10...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/phaedrus1992/llmenv/compare/v1.0.10...v2.0.0
 [1.0.10]: https://github.com/phaedrus1992/llmenv/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/phaedrus1992/llmenv/compare/v1.0.7...v1.0.8
