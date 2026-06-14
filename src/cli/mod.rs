@@ -2567,7 +2567,8 @@ fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
 /// `bundle` source tag. Orphans (no scope emits any of their tags) are flagged
 /// like bundles.
 fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
-    use crate::mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, resolve_bundle_mcps, resolve_mcps};
+    use crate::mcp::resolve::MEMORY_MCP_NAME;
+    use crate::mcp::resolve::{ResolvedKind, resolve_bundle_mcps, resolve_mcps};
 
     let config_path = paths::config_path()?;
     let config_dir = config_path

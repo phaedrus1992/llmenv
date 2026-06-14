@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use llmenv::config::{Config, Scopes};
 use llmenv::scope::Env;
 use proptest::prelude::*;

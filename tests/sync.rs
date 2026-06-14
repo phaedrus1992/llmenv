@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
 
 use llmenv::sync;
 use std::path::Path;

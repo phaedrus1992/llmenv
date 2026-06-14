@@ -20,7 +20,6 @@ use crate::config::StateConfig;
 pub const STATE_DIR_NAME: &str = "state";
 
 pub use llmenv_config::{RESERVED_STATE_ENV_VARS, STATE_DIR_ENV};
-
 /// The durable state directory for an adapter, given its cache root
 /// (`<cache_dir>/<adapter>`). Sibling to the hashed config folders.
 #[must_use]
