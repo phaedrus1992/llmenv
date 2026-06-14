@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.2] - 2026-06-14
+
+### Fixed
+
+- Fix `cargo release --workspace` not bumping sub-crates: add explicit
+  `shared-version = true` to each sub-crate `release.toml` so cargo-release
+  treats them as part of the workspace version group
+- Fix CI publish step silently timing out when sub-crate versions don't match
+  the release tag: add upfront version validation that fails fast with a clear
+  error message
+- Fix `pre-release-hook = []` panic in cargo-release 1.1.2: remove empty hook
+  arrays from sub-crate configs and update workspace hook to use `${WORKSPACE_ROOT}`
+  so it resolves correctly from any sub-crate working directory
 ## [2.0.1] - 2026-06-14
 
 ### Fixed
