@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix CI publish step silently timing out when sub-crate versions don't match
   the release tag: add upfront version validation that fails fast with a clear
   error message
-
+- Fix `pre-release-hook = []` panic in cargo-release 1.1.2: remove empty hook
+  arrays from sub-crate configs and update workspace hook to use `${WORKSPACE_ROOT}`
+  so it resolves correctly from any sub-crate working directory
 ## [2.0.1] - 2026-06-14
 
 ### Fixed

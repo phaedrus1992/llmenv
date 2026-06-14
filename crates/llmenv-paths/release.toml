@@ -1,4 +1,3 @@
-# Sub-crate: shares workspace version group; skip CHANGELOG work.
+# Sub-crate: shares workspace version group; skip CHANGELOG replacements.
 shared-version = true
 pre-release-replacements = []
-pre-release-hook = []
