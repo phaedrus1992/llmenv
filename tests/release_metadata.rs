@@ -1,4 +1,5 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Release-hygiene guards (#257).
 //!
 //! These assert invariants the cargo-release flow depends on, so a broken

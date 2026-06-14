@@ -1,4 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Integration tests for the mcp-proxy lifecycle (#15, #300, #301).
 //!
 //! `ensure_running(bind, pid_path, spawn)` is the public surface. The `spawn`

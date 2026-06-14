@@ -414,6 +414,14 @@ mod tests {
         assert_eq!(expand_tilde(""), "");
     }
 
+    #[test]
+    fn expand_tilde_bare_tilde_equals_home() {
+        let home = std::env::var("HOME").expect("HOME must be set; expand_tilde relies on it");
+        let result = expand_tilde("~");
+        assert_eq!(result, home);
+        assert!(!result.ends_with('/'));
+    }
+
     // ===== Property tests for atomic-write byte roundtrip (#156 / #157) =====
 
     use proptest::prelude::*;
@@ -442,6 +450,96 @@ mod tests {
         fn absolute_path_always_unsafe_join(s in "/.*") {
             prop_assert!(is_unsafe_join_target(&s),
                 "absolute path not flagged: {s:?}");
+        }
+
+        #[test]
+        fn expand_tilde_passthrough_non_tilde(s in "[^~].*") {
+            prop_assert_eq!(expand_tilde(&s), s);
+        }
+
+        #[test]
+        fn expand_tilde_never_panics(s in ".*") {
+            let _ = expand_tilde(&s);
+        }
+
+        #[test]
+        fn expand_tilde_slash_contains_home_and_rest(rest in "[a-z0-9/_.-]{0,20}") {
+            let home_result = std::env::var("HOME");
+            prop_assume!(home_result.is_ok());
+            let home = home_result.unwrap();
+            let input = format!("~/{rest}");
+            let result = expand_tilde(&input);
+            prop_assert!(result.starts_with(&home),
+                "expected {result} to start with home={home}");
+            prop_assert!(result.ends_with(&rest) || rest.is_empty(),
+                "expected {result} to end with rest={rest}");
+        }
+
+        #[test]
+        fn cwd_under_prefix_reflexive(p in "/[a-z/]{1,20}") {
+            prop_assert!(cwd_under_prefix(&p, &p));
+        }
+
+        #[test]
+        fn cwd_under_prefix_child_under_parent(
+            parent in "/[a-z]{1,10}",
+            child in "[a-z]{1,10}",
+        ) {
+            let full = format!("{parent}/{child}");
+            prop_assert!(cwd_under_prefix(&full, &parent));
+        }
+
+        #[test]
+        fn cwd_under_prefix_no_string_prefix_false_positive(
+            base in "[a-z]{2,8}",
+            extra in "[a-z]{1,4}",
+        ) {
+            let cwd = format!("/{base}{extra}");
+            let prefix = format!("/{base}");
+            prop_assert!(!cwd_under_prefix(&cwd, &prefix));
+        }
+
+        #[test]
+        fn cwd_under_prefix_never_panics(cwd in ".*", prefix in ".*") {
+            let _ = cwd_under_prefix(&cwd, &prefix);
+        }
+
+        #[test]
+        fn cwd_under_prefix_transitive(
+            root in "/[a-z]{1,6}",
+            mid in "[a-z]{1,6}",
+            leaf in "[a-z]{1,6}",
+        ) {
+            let b = format!("{root}/{mid}");
+            let a = format!("{b}/{leaf}");
+            prop_assert!(cwd_under_prefix(&b, &root));
+            prop_assert!(cwd_under_prefix(&a, &b));
+            prop_assert!(cwd_under_prefix(&a, &root));
+        }
+
+        #[test]
+        fn cwd_under_prefix_not_symmetric(
+            parent in "/[a-z]{1,10}",
+            child in "[a-z]{1,10}",
+        ) {
+            let child_path = format!("{parent}/{child}");
+            prop_assert!(!cwd_under_prefix(&parent, &child_path));
+        }
+
+        #[test]
+        fn has_parent_component_safe_components(
+            a in "[a-z]{1,8}",
+            b in "[a-z]{1,8}",
+        ) {
+            let path = format!("{a}/{b}");
+            prop_assert!(!has_parent_component(&path));
+        }
+
+        #[test]
+        fn is_unsafe_join_target_join_safety(p in "[a-z/]{1,20}") {
+            prop_assume!(!is_unsafe_join_target(&p));
+            let joined = std::path::PathBuf::from("/base").join(&p);
+            prop_assert!(joined.starts_with("/base"), "join escaped base: {:?}", joined);
         }
 
         // Arbitrary byte payloads written through write_owner_only_atomic must

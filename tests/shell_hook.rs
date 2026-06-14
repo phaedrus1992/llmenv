@@ -1,4 +1,5 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
 //! Tests for #338: shell hook guards — non-interactive skip and already-active skip.
 //!
 //! The `llmenv hook --shell <zsh|bash>` command emits shell function code that is eval'd

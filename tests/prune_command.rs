@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for llmenv prune command (#54)
 //! Verify prune command is wired into CLI and flag validation works.
 
