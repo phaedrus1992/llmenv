@@ -1,4 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Guards that README.md and Cargo.toml are fit for external publishing (#265).
 //!
 //! Links in a crates.io README resolve relative to the GitHub repository root.

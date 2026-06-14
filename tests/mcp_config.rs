@@ -1,4 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Tests for #58 / #244: the Claude Code adapter renders all resolved MCP
 //! servers into the top-level `mcpServers` of `.claude.json` — the surface
 //! Claude Code actually reads. (Generalizes #14's ICM-only server/client

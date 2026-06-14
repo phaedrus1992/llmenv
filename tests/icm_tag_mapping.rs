@@ -1,4 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 /// Tests for ICM tag mapping (issue #81)
 /// Verify that active tags/bundles are made available to ICM so tag-scoped memory
 /// crosses scope boundaries.

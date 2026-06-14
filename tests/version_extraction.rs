@@ -1,4 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Unit tests for the version-tag extraction used by doctor's version-skew
 //! detection (#196).
 //!

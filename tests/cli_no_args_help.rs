@@ -1,4 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Test for #180: llmenv with no args should show full help (#180)
 
 use std::process::Command;

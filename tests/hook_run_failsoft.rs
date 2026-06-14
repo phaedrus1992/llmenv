@@ -1,4 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Integration tests for the fail-soft contract of `llmenv hook-run <event>` (#187).
 //!
 //! Lifecycle hooks run on the agent's hot path — session start and every prompt

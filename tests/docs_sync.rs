@@ -1,4 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Guard that `website/docs/changelog.md` stays in sync with `CHANGELOG.md` (#258).
 //!
 //! `website/docs/changelog.md` is a generated artifact derived from the root
