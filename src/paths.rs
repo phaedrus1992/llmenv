@@ -480,6 +480,20 @@ mod tests {
             let _ = cwd_under_prefix(&cwd, &prefix);
         }
 
+        // cwd_under_prefix is transitive: a⊆b and b⊆c implies a⊆c.
+        #[test]
+        fn cwd_under_prefix_transitive(
+            root in "/[a-z]{1,6}",
+            mid in "[a-z]{1,6}",
+            leaf in "[a-z]{1,6}",
+        ) {
+            let b = format!("{root}/{mid}");
+            let a = format!("{b}/{leaf}");
+            prop_assert!(cwd_under_prefix(&b, &root));
+            prop_assert!(cwd_under_prefix(&a, &b));
+            prop_assert!(cwd_under_prefix(&a, &root));
+        }
+
         // Arbitrary byte payloads written through write_owner_only_atomic must
         // round-trip exactly via fs::read. Catches truncation, encoding, or
         // mid-write corruption regressions across the full u8 range including
@@ -515,5 +529,14 @@ mod tests {
                 prop_assert_eq!(mode & 0o077, 0, "group/other bits set after overwrite: {:o}", mode);
             }
         }
+    }
+
+    // Bare `~` (no slash) must expand to exactly $HOME with no trailing slash.
+    #[test]
+    fn expand_tilde_bare_tilde_equals_home() {
+        let home = std::env::var("HOME").expect("HOME must be set; expand_tilde relies on it");
+        let result = expand_tilde("~");
+        assert_eq!(result, home);
+        assert!(!result.ends_with('/'));
     }
 }
