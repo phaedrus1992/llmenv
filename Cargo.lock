@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "llmenv-config"
-version = "1.0.10"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "llmenv-paths",
@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "llmenv-git"
-version = "1.0.10"
+version = "2.0.0"
 dependencies = [
  "proptest",
  "tracing",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "llmenv-paths"
-version = "1.0.10"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "proptest",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "llmenv-util"
-version = "1.0.10"
+version = "2.0.0"
 dependencies = [
  "proptest",
  "serde_json",

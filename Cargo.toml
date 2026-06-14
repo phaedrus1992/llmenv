@@ -48,10 +48,10 @@ exclude = ["/website", "/docs", "/.github", "/scripts", "/proptest-regressions",
 workspace = true
 
 [dependencies]
-llmenv-paths = { path = "crates/llmenv-paths", version = "1.0.10" }
-llmenv-git = { path = "crates/llmenv-git", version = "1.0.10" }
-llmenv-config = { path = "crates/llmenv-config", version = "1.0.10" }
-llmenv-util = { path = "crates/llmenv-util", version = "1.0.10" }
+llmenv-paths = { path = "crates/llmenv-paths", version = "2.0.0" }
+llmenv-git = { path = "crates/llmenv-git", version = "2.0.0" }
+llmenv-config = { path = "crates/llmenv-config", version = "2.0.0" }
+llmenv-util = { path = "crates/llmenv-util", version = "2.0.0" }
 clap = { version = "4.6.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

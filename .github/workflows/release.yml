@@ -185,24 +185,58 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # Idempotent publish: if this version is already on crates.io, skip
-          # instead of failing. crates.io rejects re-uploads, so without this a
-          # re-pushed tag (e.g. recovering from a later-stage failure) would
-          # hard-fail here and block the GitHub release that now gates on it.
-          STATUS=$(curl -sS -A 'llmenv-release-workflow' -o /dev/null -w '%{http_code}' \
-            "https://crates.io/api/v1/crates/llmenv/${VERSION}")
-          case "${STATUS}" in
-            200)
-              echo "llmenv ${VERSION} already on crates.io; skipping publish."
-              ;;
-            404)
-              cargo publish
-              ;;
-            *)
-              echo "Error: unexpected crates.io status ${STATUS} checking llmenv ${VERSION}" >&2
-              exit 1
-              ;;
-          esac
+          set -euo pipefail
+
+          # Idempotent publish for one crate. Skips if already on crates.io (for
+          # re-pushed tags); errors on unexpected HTTP status.
+          publish_crate() {
+            local crate="$1" version="$2" status
+            status=$(curl -sS -A 'llmenv-release-workflow' -o /dev/null -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/${crate}/${version}")
+            case "${status}" in
+              200) echo "${crate} ${version} already on crates.io; skipping." ;;
+              404) cargo publish --package "${crate}" ;;
+              *)
+                echo "Error: unexpected crates.io status ${status} for ${crate} ${version}" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          # Poll crates.io until the crate version is indexed (needed before
+          # publishing a crate that depends on it). Timeout after 5 minutes.
+          wait_for_crate() {
+            local crate="$1" version="$2" elapsed=0 status
+            echo "Waiting for ${crate} ${version} to be indexed by crates.io..."
+            while true; do
+              status=$(curl -sS -A 'llmenv-release-workflow' -o /dev/null -w '%{http_code}' \
+                "https://crates.io/api/v1/crates/${crate}/${version}")
+              [[ "${status}" == "200" ]] && { echo "${crate} ${version} is available."; return 0; }
+              [[ ${elapsed} -ge 300 ]] && {
+                echo "Error: timed out after 300s waiting for ${crate} ${version}" >&2
+                exit 1
+              }
+              sleep 15
+              elapsed=$((elapsed + 15))
+            done
+          }
+
+          # Publish the three independent sub-crates first (no internal deps between them).
+          publish_crate "llmenv-util"   "${VERSION}"
+          publish_crate "llmenv-paths"  "${VERSION}"
+          publish_crate "llmenv-git"    "${VERSION}"
+
+          # Wait for crates.io to index them before publishing dependents.
+          wait_for_crate "llmenv-util"   "${VERSION}"
+          wait_for_crate "llmenv-paths"  "${VERSION}"
+          wait_for_crate "llmenv-git"    "${VERSION}"
+
+          # llmenv-config depends on llmenv-paths.
+          publish_crate "llmenv-config" "${VERSION}"
+          wait_for_crate "llmenv-config" "${VERSION}"
+
+          # Root crate depends on all four sub-crates.
+          publish_crate "llmenv" "${VERSION}"
 
   create-release:
     name: Create GitHub Release
