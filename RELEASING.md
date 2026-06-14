@@ -57,8 +57,8 @@ git push -u origin release/1.1.x
 
 ```bash
 git switch release/1.1.x && git pull
-cargo release patch            # dry-run preview
-cargo release patch --execute  # bump Cargo.toml + roll CHANGELOG + commit
+cargo release patch --workspace            # dry-run preview
+cargo release patch --workspace --execute  # bump all crates + roll CHANGELOG + commit
 git push -u origin HEAD
 gh pr create --base release/1.1.x --fill
 # After merge, tag the merged commit:
@@ -94,13 +94,15 @@ the tag is cut on the merged commit.
 ```bash
 git switch main && git pull
 git switch -c release/<next-version>
-cargo release <patch|minor|major>            # dry-run preview (default)
-cargo release <patch|minor|major> --execute  # apply: bump Cargo.toml + roll CHANGELOG, commit
+cargo release <patch|minor|major> --workspace            # dry-run preview (default)
+cargo release <patch|minor|major> --workspace --execute  # apply: bump all crates + roll CHANGELOG, commit
 ```
 
-`cargo release` rewrites `Cargo.toml`'s version, turns the `[Unreleased]`
-CHANGELOG section into a dated `[<version>]` section, re-seeds a fresh
-`[Unreleased]` + compare link, and makes one `chore(release): <version>` commit.
+`cargo release --workspace` bumps all workspace crates to the same version,
+turns the `[Unreleased]` CHANGELOG section into a dated `[<version>]` section,
+re-seeds a fresh `[Unreleased]` + compare link, and makes one
+`chore(release): <version>` commit. The `--workspace` flag is required — without
+it only the root crate is bumped, leaving sub-crates at the old version.
 
 ### 2. PR and merge
 
