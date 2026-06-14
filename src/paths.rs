@@ -494,6 +494,46 @@ mod tests {
             prop_assert!(cwd_under_prefix(&a, &root));
         }
 
+        // cwd_under_prefix is not symmetric: a parent is never under its own child.
+        #[test]
+        fn cwd_under_prefix_not_symmetric(
+            parent in "/[a-z]{1,10}",
+            child in "[a-z]{1,10}",
+        ) {
+            let child_path = format!("{parent}/{child}");
+            prop_assert!(!cwd_under_prefix(&parent, &child_path));
+        }
+
+        // has_parent_component never panics on arbitrary string input.
+        #[test]
+        fn has_parent_component_never_panics(s in ".*") {
+            let _ = has_parent_component(&s);
+        }
+
+        // A path built from safe lowercase segments only never contains a parent
+        // component — no `..`, no root, no escaping.
+        #[test]
+        fn has_parent_component_safe_components(
+            a in "[a-z]{1,8}",
+            b in "[a-z]{1,8}",
+        ) {
+            let path = format!("{a}/{b}");
+            prop_assert!(!has_parent_component(&path));
+        }
+
+        // Security contract: for any path where !is_unsafe_join_target, joining it
+        // under "/base" must stay inside "/base".
+        #[test]
+        fn is_unsafe_join_target_join_safety(p in "[a-z/]{1,20}") {
+            if !is_unsafe_join_target(&p) {
+                let joined = std::path::PathBuf::from("/base").join(&p);
+                prop_assert!(
+                    joined.starts_with("/base"),
+                    "join escaped base: {:?}", joined
+                );
+            }
+        }
+
         // Arbitrary byte payloads written through write_owner_only_atomic must
         // round-trip exactly via fs::read. Catches truncation, encoding, or
         // mid-write corruption regressions across the full u8 range including
