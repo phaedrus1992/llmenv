@@ -510,6 +510,12 @@ mod tests {
             let _ = has_parent_component(&s);
         }
 
+        // is_unsafe_join_target never panics on arbitrary string input.
+        #[test]
+        fn is_unsafe_join_target_never_panics(s in ".*") {
+            let _ = is_unsafe_join_target(&s);
+        }
+
         // A path built from safe lowercase segments only never contains a parent
         // component — no `..`, no root, no escaping.
         #[test]
@@ -525,13 +531,9 @@ mod tests {
         // under "/base" must stay inside "/base".
         #[test]
         fn is_unsafe_join_target_join_safety(p in "[a-z/]{1,20}") {
-            if !is_unsafe_join_target(&p) {
-                let joined = std::path::PathBuf::from("/base").join(&p);
-                prop_assert!(
-                    joined.starts_with("/base"),
-                    "join escaped base: {:?}", joined
-                );
-            }
+            prop_assume!(!is_unsafe_join_target(&p));
+            let joined = std::path::PathBuf::from("/base").join(&p);
+            prop_assert!(joined.starts_with("/base"), "join escaped base: {:?}", joined);
         }
 
         // Arbitrary byte payloads written through write_owner_only_atomic must
