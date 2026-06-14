@@ -1,3 +1,4 @@
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
 #![expect(clippy::panic, reason = "test scaffolding")]
 //! Integration tests for the mcp-proxy lifecycle (#15, #300, #301).
