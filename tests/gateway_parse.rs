@@ -1,6 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
-#![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 use llmenv::scope::network::{
     parse_linux_gateway_ip, parse_linux_neigh_mac, parse_macos_arp_mac, parse_macos_gateway_ip,
 };

@@ -1,6 +1,4 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 //! Tests for #59: the Claude Code adapter renders resolved plugins +
 //! marketplaces into `settings.json` (`enabledPlugins` and
 //! `extraKnownMarketplaces`).

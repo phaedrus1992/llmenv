@@ -1,6 +1,4 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 //! Tests for #59: `sync_marketplace` clones a git source into the shared cache
 //! and reports a HEAD token, and fast-forwards on a second sync. Local *path*
 //! sources are used in place (no clone, no HEAD); the `ext::`/`fd::` transports

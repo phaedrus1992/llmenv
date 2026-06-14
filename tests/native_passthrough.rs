@@ -1,6 +1,5 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 use llmenv::config::{Capabilities, Config};
 use llmenv::merge::{BundleRef, merge};
 

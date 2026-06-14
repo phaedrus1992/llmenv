@@ -1,6 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
-#![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 //! Tests for the `llmenv check-stale` subcommand (#121 / #85 gap).
 //!
 //! The SessionStart hook emitted by the Claude Code adapter invokes

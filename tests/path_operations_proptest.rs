@@ -1,6 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
-#![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 use proptest::prelude::*;
 use std::path::Path;
 

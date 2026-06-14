@@ -1,4 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
 //! Test paragraph reflow for release notes (#320).
 

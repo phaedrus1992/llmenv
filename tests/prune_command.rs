@@ -1,6 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
-#![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 //! Tests for llmenv prune command (#54)
 //! Verify prune command is wired into CLI and flag validation works.
 

@@ -1,6 +1,4 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
-#![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;

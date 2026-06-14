@@ -1,6 +1,4 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
-#![expect(clippy::panic, reason = "test scaffolding")]
 //! Test for #173: doctor warns on version skew between running binary and cached materializations
 
 use std::fs;

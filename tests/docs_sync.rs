@@ -1,5 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
-#![expect(clippy::expect_used, reason = "test scaffolding")]
 #![expect(clippy::panic, reason = "test scaffolding")]
 //! Guard that `website/docs/changelog.md` stays in sync with `CHANGELOG.md` (#258).
 //!

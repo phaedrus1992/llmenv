@@ -1,5 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "test scaffolding")]
-#![expect(clippy::expect_used, reason = "test scaffolding")]
 #![expect(clippy::panic, reason = "test scaffolding")]
 //! Guards that README.md and Cargo.toml are fit for external publishing (#265).
 //!
