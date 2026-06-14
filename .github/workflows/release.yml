@@ -187,6 +187,26 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Fail fast if any workspace crate's version doesn't match the tag.
+          # Catches the case where `cargo release --workspace` was not used and
+          # sub-crates were left at the old version.
+          validate_versions() {
+            local tag_version="$1" errors=0 actual
+            for crate in llmenv llmenv-util llmenv-paths llmenv-git llmenv-config; do
+              actual=$(cargo metadata --no-deps --format-version 1 | \
+                jq -r --arg n "$crate" '.packages[] | select(.name == $n) | .version')
+              if [[ "${actual}" != "${tag_version}" ]]; then
+                echo "Error: ${crate} Cargo.toml version (${actual}) != tag version (${tag_version})" >&2
+                errors=$((errors + 1))
+              fi
+            done
+            if [[ ${errors} -gt 0 ]]; then
+              echo "Run 'cargo release <level> --workspace --execute' to bump all crates together." >&2
+              exit 1
+            fi
+          }
+          validate_versions "${VERSION}"
+
           # Idempotent publish for one crate. Skips if already on crates.io (for
           # re-pushed tags); errors on unexpected HTTP status.
           publish_crate() {
@@ -295,8 +315,9 @@ jobs:
             echo "ERROR: changelog-notes.txt is missing or empty" >&2
             exit 1
           fi
-          python3 scripts/reflow-markdown.py < changelog-notes.txt > changelog-notes-reflowed.txt
-          if [[ $? -ne 0 ]] || [[ ! -s changelog-notes-reflowed.txt ]]; then
+          if ! python3 scripts/reflow-markdown.py \
+               < changelog-notes.txt > changelog-notes-reflowed.txt \
+               || [[ ! -s changelog-notes-reflowed.txt ]]; then
             echo "ERROR: reflow failed or produced empty output; using original notes" >&2
             cp changelog-notes.txt changelog-notes-reflowed.txt
           fi
