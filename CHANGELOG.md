@@ -27,6 +27,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (matcher: `Write`, `Edit`, `MultiEdit`) by the Claude Code adapter; warns when the
   agent writes to a path inside the managed cache directory and redirects to the
   source config; always exits 0 (fail-soft, never blocks the write)
+- Add stable authentication cache: `oauthAccount` credentials are now stored in
+  `state/auth/<uuid>.json` outside the content-hashed config dir and automatically
+  re-injected on every new materialization; Claude Code no longer requires
+  re-authentication after a version bump, project switch, or directory change (#172)
+- Add `llmenv login [--global]` subcommand: captures credentials via `claude auth login`,
+  saves them to the stable auth cache, and optionally persists them globally (#172)
+- Add `init.seeded_settings` to `config.yaml`: user-selected keys from
+  `~/.claude/settings.json` are seeded into `settings.json` on first materialization of
+  a new config folder, carrying over preferences without overwriting managed settings;
+  `llmenv init` now prompts to log in, import from `~/.claude`, or skip (#172)
+- Add per-bundle `features.memory` overrides: bundles can declare a `features:` block in
+  `bundle.yaml` to use a different memory daemon `server_host` per scope, enabling
+  different daemons on different machines or networks without a global config change (#335)
 
 ### Changed
 
