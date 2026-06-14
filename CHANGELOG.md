@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.1] - 2026-06-14
+
 ### Fixed
 
 - Fix multi-crate crates.io publishing: enable sub-crates (`llmenv-util`, `llmenv-paths`,
@@ -364,7 +366,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/phaedrus1992/llmenv/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/phaedrus1992/llmenv/compare/v1.0.10...v2.0.0
 [1.0.10]: https://github.com/phaedrus1992/llmenv/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...v1.0.9

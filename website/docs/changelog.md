@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.1] - 2026-06-14
+
+### Fixed
+
+- Fix multi-crate crates.io publishing: enable sub-crates (`llmenv-util`, `llmenv-paths`,
+  `llmenv-git`, `llmenv-config`) for publishing with required metadata, bump all to 2.0.0
+  to match root, and publish in dependency order with crates.io indexing polls in CI
+
 ## [2.0.0] - 2026-06-14
 
 ### Added
