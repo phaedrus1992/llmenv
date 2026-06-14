@@ -5,6 +5,11 @@
 # The CI test in tests/docs_sync.rs fails if they drift.
 set -euo pipefail
 
+if [[ "${DRY_RUN:-}" == "true" ]]; then
+  echo "Skipping (dry-run)."
+  exit 0
+fi
+
 cd "$(dirname "$0")/.."
 
 cat > website/docs/changelog.md << 'FRONTMATTER'
