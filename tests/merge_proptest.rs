@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
 use llmenv::config::{Bundle, Config};
 use proptest::prelude::*;
 

@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
 //! Test paragraph reflow for release notes (#320).
 
 use std::io::Write;
