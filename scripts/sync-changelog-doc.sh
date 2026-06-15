@@ -25,10 +25,10 @@ sidebar_label: Changelog
 FRONTMATTER
 
 # Drop everything from <!-- next-url --> to EOF (the reference-link footer),
-# strip the <!-- next-header --> sentinel lines, then trim surrounding blank lines.
+# strip the <!-- 1.0 next-header --> sentinel lines, then trim surrounding blank lines.
 perl -0777 -pe '
   s/<!--\s*next-url\s*-->.*$//ms;  # drop URL block
-  s/^<!--\s*next-header\s*-->\n//mg; # strip sentinel lines
+  s/^<!--\s*1\.0\s+next-header\s*-->\n//mg; # strip sentinel lines
   s/^\n+//;                          # trim leading blank lines
   s/\n+$/\n/;                        # trim trailing blank lines (keep one \n)
 ' CHANGELOG.md >> website/docs/changelog.md
