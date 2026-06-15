@@ -37,10 +37,10 @@ fn expected_site_changelog(changelog: &str) -> String {
     } else {
         changelog
     };
-    // Strip the <!-- next-header --> sentinel lines.
+    // Strip next-header sentinel lines (plain and scoped forms like <!-- 1.0 next-header -->).
     let stripped = before_urls
         .lines()
-        .filter(|line| !line.starts_with("<!-- next-header -->"))
+        .filter(|line| !line.contains("next-header"))
         .collect::<Vec<_>>()
         .join("\n");
 
