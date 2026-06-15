@@ -1178,7 +1178,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llmenv"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anstream",
  "anstyle",
