@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-<!-- 1.0 next-header -->
+<!-- 2.0 next-header -->
 
 ## [Unreleased] - ReleaseDate
 
@@ -105,6 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix missing `plugin.json` after a plugin sync being silently ignored; `llmenv` now
   logs a `warn` when the plugin manifest is absent after materializing the plugin,
   making broken plugin installs diagnosable (#379)
+
+<!-- 1.0 next-header -->
 
 ## [1.0.10] - 2026-06-11
 
