@@ -24,6 +24,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: llmenv
             asset_name: llmenv-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_name: llmenv
+            asset_name: llmenv-linux-aarch64
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: llmenv
@@ -215,7 +219,7 @@ jobs:
               "https://crates.io/api/v1/crates/${crate}/${version}")
             case "${status}" in
               200) echo "${crate} ${version} already on crates.io; skipping." ;;
-              404) cargo publish --package "${crate}" ;;
+              404) cargo publish --no-verify --package "${crate}" ;;
               *)
                 echo "Error: unexpected crates.io status ${status} for ${crate} ${version}" >&2
                 exit 1
@@ -405,13 +409,15 @@ jobs:
           # Extract checksums with validation
           LINUX_X64=$(grep -h -F 'llmenv-linux-x86_64' \
             "artifacts/llmenv-linux-x86_64-sha256"/*.sha256 2>/dev/null | awk '{print $1}')
+          LINUX_ARM=$(grep -h -F 'llmenv-linux-aarch64' \
+            "artifacts/llmenv-linux-aarch64-sha256"/*.sha256 2>/dev/null | awk '{print $1}')
           MACOS_X64=$(grep -h -F 'llmenv-macos-x86_64' \
             "artifacts/llmenv-macos-x86_64-sha256"/*.sha256 2>/dev/null | awk '{print $1}')
           MACOS_ARM=$(grep -h -F 'llmenv-macos-aarch64' \
             "artifacts/llmenv-macos-aarch64-sha256"/*.sha256 2>/dev/null | awk '{print $1}')
 
           # Validate all checksums present and format (64 hex digits)
-          for checksum in "$LINUX_X64" "$MACOS_X64" "$MACOS_ARM"; do
+          for checksum in "$LINUX_X64" "$LINUX_ARM" "$MACOS_X64" "$MACOS_ARM"; do
             if [[ -z "$checksum" ]]; then
               echo "Error: Missing checksum" >&2
               exit 1
@@ -424,6 +430,7 @@ jobs:
 
           {
             echo "linux_x64=${LINUX_X64}"
+            echo "linux_arm=${LINUX_ARM}"
             echo "macos_x64=${MACOS_X64}"
             echo "macos_arm=${MACOS_ARM}"
           } >> "$GITHUB_OUTPUT"
@@ -432,6 +439,7 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ needs.create-release.outputs.release_version }}
           LINUX_X64: ${{ steps.checksums.outputs.linux_x64 }}
+          LINUX_ARM: ${{ steps.checksums.outputs.linux_arm }}
           MACOS_X64: ${{ steps.checksums.outputs.macos_x64 }}
           MACOS_ARM: ${{ steps.checksums.outputs.macos_arm }}
         run: |
@@ -439,5 +447,6 @@ jobs:
             --repo phaedrus1992/homebrew-tap \
             -f "version=${VERSION}" \
             -f "linux_x64=${LINUX_X64}" \
+            -f "linux_arm=${LINUX_ARM}" \
             -f "macos_x64=${MACOS_X64}" \
             -f "macos_arm=${MACOS_ARM}"
