@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [1.0.12] - 2026-06-15
+
 ## [1.0.11] - 2026-06-15
 
 ## [1.0.10] - 2026-06-11
@@ -273,7 +275,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.11...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v1.0.12...HEAD
+[1.0.12]: https://github.com/phaedrus1992/llmenv/compare/v1.0.11...v1.0.12
 [1.0.11]: https://github.com/phaedrus1992/llmenv/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/phaedrus1992/llmenv/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...v1.0.9
