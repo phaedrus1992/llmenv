@@ -5,6 +5,7 @@ on:
       - 'src/**'
       - 'crates/**'
       - 'tests/**'
+      - 'scripts/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'deny.toml'
@@ -14,6 +15,7 @@ on:
       - 'src/**'
       - 'crates/**'
       - 'tests/**'
+      - 'scripts/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'deny.toml'
@@ -39,9 +41,11 @@ jobs:
       - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25  # v2
         with:
           tool: cargo-nextest
+      - name: Detect CPU count
+        run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo nextest run --workspace
+      - run: cargo nextest run --workspace --test-threads "$CARGO_BUILD_JOBS"
   deny:
     runs-on: ubuntu-latest
     steps:

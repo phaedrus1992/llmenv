@@ -4,6 +4,7 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'scripts/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/coverage.yml'
@@ -11,6 +12,7 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'scripts/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/coverage.yml'
@@ -31,6 +33,8 @@ jobs:
       - uses: taiki-e/install-action@4bc351f7f2614e48088386e2a0ad917ca3a7e4ba # v2.81.5
         with:
           tool: cargo-llvm-cov
+      - name: Detect CPU count
+        run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
       # Print the per-file summary to the job log and fail if total line
       # coverage drops below the baseline minus tolerance. Baseline at the
       # time this landed was 65.12%; see issue #57. No external service.
