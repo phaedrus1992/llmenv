@@ -1412,8 +1412,8 @@ fn run_config_context() {
         Err(e) => {
             eprintln!("llmenv config-context: failed to resolve config path: {e}");
             let output = serde_json::json!({
-                "hookEventName": hook_event_name,
                 "hookSpecificOutput": {
+                    "hookEventName": hook_event_name,
                     "additionalContext":
                         "llmenv config-context: could not resolve config path. \
                          Run `llmenv doctor` to diagnose."
@@ -1446,8 +1446,8 @@ fn run_config_context() {
     );
 
     let output = serde_json::json!({
-        "hookEventName": hook_event_name,
         "hookSpecificOutput": {
+            "hookEventName": hook_event_name,
             "additionalContext": text
         }
     });

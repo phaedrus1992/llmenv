@@ -1376,8 +1376,11 @@ fn emit_hook_context_wraps_text_in_json() {
     let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", text);
     let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
     assert!(parsed.is_object());
-    assert_eq!(parsed["hookEventName"].as_str(), Some("SessionStart"));
     assert!(parsed.get("hookSpecificOutput").is_some());
+    assert_eq!(
+        parsed["hookSpecificOutput"]["hookEventName"].as_str(),
+        Some("SessionStart")
+    );
     assert!(
         parsed["hookSpecificOutput"]
             .get("additionalContext")
