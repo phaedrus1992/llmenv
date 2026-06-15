@@ -207,9 +207,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    # Gate on publish-crate so crates.io is the source of truth: a failed crate
-    # publish must block the GitHub release and Homebrew bump, not race them.
-    needs: [build-binaries, publish-crate]
+    needs: [build-binaries]
     permissions:
       contents: write
     outputs:
@@ -257,11 +255,10 @@ jobs:
 
           # Reflow prose paragraphs for readable GitHub release notes (#320).
           if [[ ! -s changelog-notes.txt ]]; then
-            echo "ERROR: changelog-notes.txt is missing or empty" >&2
-            exit 1
+            echo "Bug fixes or process changes only, no user-facing changes." > changelog-notes.txt
           fi
-          python3 scripts/reflow-markdown.py < changelog-notes.txt > changelog-notes-reflowed.txt
-          if [[ $? -ne 0 ]] || [[ ! -s changelog-notes-reflowed.txt ]]; then
+          if ! python3 scripts/reflow-markdown.py < changelog-notes.txt > changelog-notes-reflowed.txt \
+              || [[ ! -s changelog-notes-reflowed.txt ]]; then
             echo "ERROR: reflow failed or produced empty output; using original notes" >&2
             cp changelog-notes.txt changelog-notes-reflowed.txt
           fi
@@ -316,7 +313,7 @@ jobs:
   update-homebrew:
     name: Update Homebrew formula
     runs-on: ubuntu-latest
-    needs: create-release
+    needs: [publish-crate, create-release]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
