@@ -1158,7 +1158,7 @@ fn sync_plugin_payloads(
             let Ok(entries) = crate::plugins::cache::read_marketplace_plugins(&mkt_path) else {
                 tracing::warn!(
                     "cannot read marketplace manifest for '{}' — skipping external plugin '{}', \
-                     run `llmenv sync` to repair",
+                     run `llmenv plugin-sync` to repair",
                     p.marketplace,
                     p.plugin
                 );
@@ -1167,7 +1167,7 @@ fn sync_plugin_payloads(
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
                 tracing::warn!(
                     "plugin '{}' not found in marketplace '{}' manifest — \
-                     verify plugin name or run `llmenv sync`",
+                     verify plugin name or run `llmenv plugin-sync` to refresh the clone",
                     p.plugin,
                     p.marketplace
                 );
@@ -2213,8 +2213,8 @@ fn run_plugin_sync() -> anyhow::Result<()> {
             .with_context(|| format!("reading marketplace manifest for '{mkt_name}'"))?;
         let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
             eprintln!(
-                "warning: plugin '{plugin_name}@{mkt_name}' not found in marketplace manifest \
-                 — verify the plugin name or run `llmenv sync` to refresh the clone"
+                "warning: plugin '{plugin_name}@{mkt_name}' not found in the freshly-synced \
+                 marketplace manifest — verify the plugin name matches an entry in the marketplace"
             );
             continue;
         };

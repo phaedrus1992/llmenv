@@ -241,7 +241,12 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
             arr.iter()
                 .filter_map(|entry| {
                     let name = entry.get("name")?.as_str()?.to_string();
-                    let source = entry.get("source")?.as_str()?.to_string();
+                    let raw = entry.get("source")?;
+                    let source = if let Some(s) = raw.as_str() {
+                        s.to_string()
+                    } else {
+                        raw.get("url")?.as_str()?.to_string()
+                    };
                     Some(MarketplacePluginEntry { name, source })
                 })
                 .collect()
@@ -558,15 +563,19 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let manifest = r#"{"plugins": [
             {"name": "first-party", "source": "./plugins/first-party"},
-            {"name": "external", "source": "https://github.com/example/external.git"}
+            {"name": "external-str", "source": "https://github.com/example/external.git"},
+            {"name": "external-obj", "source": {"source": "url", "url": "https://github.com/example/obj.git", "sha": "abc123"}}
         ]}"#;
         std::fs::write(plugin_dir.join("marketplace.json"), manifest).unwrap();
         let plugins = read_marketplace_plugins(tmp.path()).unwrap();
-        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins.len(), 3);
         assert_eq!(plugins[0].name, "first-party");
         assert!(!is_external_plugin_source(&plugins[0].source));
-        assert_eq!(plugins[1].name, "external");
+        assert_eq!(plugins[1].name, "external-str");
         assert!(is_external_plugin_source(&plugins[1].source));
+        assert_eq!(plugins[2].name, "external-obj");
+        assert_eq!(plugins[2].source, "https://github.com/example/obj.git");
+        assert!(is_external_plugin_source(&plugins[2].source));
     }
 
     #[test]
