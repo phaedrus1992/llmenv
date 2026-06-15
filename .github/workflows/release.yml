@@ -297,6 +297,7 @@ jobs:
       - name: Build release body
         env:
           VERSION: ${{ steps.extract_version.outputs.version }}
+          GH_REPO: ${{ github.repository }}
         run: |
           # Extract changelog section for this version. Use index() for literal
           # match so version dots aren't treated as awk regex metacharacters.
@@ -319,23 +320,25 @@ jobs:
             cp changelog-notes.txt changelog-notes-reflowed.txt
           fi
 
-          # Raw git log between the previous tag and this one.
+          # Raw git log between the previous tag and this one, formatted as markdown bullets
+          # with linked short SHAs.
           CURRENT_TAG="v${VERSION}"
+          REPO_URL="https://github.com/${GH_REPO}"
           PREV_TAG=$(git describe --tags --abbrev=0 "${CURRENT_TAG}^" 2>/dev/null || echo "")
           if [[ -n "${PREV_TAG}" ]]; then
-            git log --oneline "${PREV_TAG}..${CURRENT_TAG}" > git-log.txt
+            LOG_RANGE="${PREV_TAG}..${CURRENT_TAG}"
           else
-            git log --oneline "${CURRENT_TAG}" > git-log.txt
+            LOG_RANGE="${CURRENT_TAG}"
           fi
+          git log --pretty=format:"- %s ([%h](${REPO_URL}/commit/%H))" "${LOG_RANGE}" \
+            > git-log.md
 
           {
             cat changelog-notes-reflowed.txt
             echo ""
             echo "## Commits"
             echo ""
-            echo '```'
-            cat git-log.txt
-            echo '```'
+            cat git-log.md
             echo ""
             echo "## Binary Checksums"
             echo ""
