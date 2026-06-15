@@ -50,13 +50,23 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: rustup target add "${TARGET}"
-      # No build cache here on purpose: this workflow only runs on `v*` tag
-      # pushes, and release binaries are built from a clean checkout so the
-      # published artifact can't inherit a poisoned cache entry.
+      # Cache only the Cargo registry (source tarballs + index), never target/.
+      # Registry entries are safe: cargo verifies each .crate file's SHA256
+      # against Cargo.lock before use, so a poisoned cache entry fails loudly.
+      # Compiled objects in target/ are not re-verified after linking, so we
+      # never cache those for release builds.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --target "${TARGET}"
+        run: cargo build --release --locked --target "${TARGET}"
       - name: Strip binary
         env:
           TARGET: ${{ matrix.target }}
