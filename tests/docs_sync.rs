@@ -37,10 +37,13 @@ fn expected_site_changelog(changelog: &str) -> String {
     } else {
         changelog
     };
-    // Strip the <!-- next-header --> sentinel lines.
+    // Strip versioned sentinel lines (<!-- X.Y next-header -->).
     let stripped = before_urls
         .lines()
-        .filter(|line| !line.starts_with("<!-- next-header -->"))
+        .filter(|line| {
+            let t = line.trim();
+            !(t.starts_with("<!--") && t.ends_with("next-header -->"))
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -65,7 +68,7 @@ fn docs_changelog_in_sync_with_root() {
 #[test]
 fn docs_changelog_has_no_machine_markers() {
     let site_changelog = read("website/docs/changelog.md");
-    for marker in &["<!-- next-header -->", "<!-- next-url -->"] {
+    for marker in &["next-header -->", "<!-- next-url -->"] {
         assert!(
             !site_changelog.contains(marker),
             "website/docs/changelog.md contains cargo-release marker `{marker}` \
