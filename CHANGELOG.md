@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix `SessionStart` (and other hook) output missing the required `hookEventName` field,
+  causing Claude Code to reject hook JSON with "hookSpecificOutput is missing required
+  field 'hookEventName'" on startup
+
 ## [2.0.2] - 2026-06-14
 
 ### Fixed
