@@ -1396,11 +1396,23 @@ fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
 /// Always exits 0 (fail-soft). Warns to stderr if paths cannot be resolved so
 /// the operator can diagnose the failure; never silently substitutes wrong paths.
 fn run_config_context() {
+    use std::io::Read;
+
+    let mut stdin_buf = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
+        eprintln!("llmenv config-context: failed to read stdin: {e}");
+    }
+    let hook_event_name = serde_json::from_str::<serde_json::Value>(&stdin_buf)
+        .ok()
+        .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "SessionStart".to_owned());
+
     let config_path = match paths::config_path() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("llmenv config-context: failed to resolve config path: {e}");
             let output = serde_json::json!({
+                "hookEventName": hook_event_name,
                 "hookSpecificOutput": {
                     "additionalContext":
                         "llmenv config-context: could not resolve config path. \
@@ -1434,6 +1446,7 @@ fn run_config_context() {
     );
 
     let output = serde_json::json!({
+        "hookEventName": hook_event_name,
         "hookSpecificOutput": {
             "additionalContext": text
         }

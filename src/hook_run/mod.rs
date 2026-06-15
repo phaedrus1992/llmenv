@@ -142,6 +142,17 @@ fn dispatch(
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
 /// `Ok(())` even when the backend is unreachable.
 pub fn run(event: &str) -> anyhow::Result<()> {
+    use std::io::Read;
+
+    let mut stdin_buf = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
+        eprintln!("llmenv hook-run: failed to read stdin: {e}");
+    }
+    let hook_event_name = serde_json::from_str::<serde_json::Value>(&stdin_buf)
+        .ok()
+        .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+
     let parsed = match HookEvent::from_str(event) {
         Ok(e) => e,
         Err(e) => {
@@ -151,7 +162,7 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     };
     match run_inner(parsed) {
         Ok(text) => {
-            let out = ClaudeCodeAdapter.emit_hook_context(&text);
+            let out = ClaudeCodeAdapter.emit_hook_context(&hook_event_name, &text);
             if !out.is_empty() {
                 println!("{out}");
             }

@@ -135,7 +135,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         Ok(owned)
     }
 
-    fn emit_hook_context(&self, text: &str) -> String {
+    fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
         if text.is_empty() {
             return String::new();
         }
@@ -144,6 +144,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // to escape the context block are trapped as unparseable markdown.
         let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{}", text);
         serde_json::json!({
+            "hookEventName": hook_event_name,
             "hookSpecificOutput": { "additionalContext": wrapped }
         })
         .to_string()
