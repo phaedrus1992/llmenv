@@ -319,8 +319,23 @@ jobs:
             cp changelog-notes.txt changelog-notes-reflowed.txt
           fi
 
+          # Raw git log between the previous tag and this one.
+          CURRENT_TAG="v${VERSION}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${CURRENT_TAG}^" 2>/dev/null || echo "")
+          if [[ -n "${PREV_TAG}" ]]; then
+            git log --oneline "${PREV_TAG}..${CURRENT_TAG}" > git-log.txt
+          else
+            git log --oneline "${CURRENT_TAG}" > git-log.txt
+          fi
+
           {
             cat changelog-notes-reflowed.txt
+            echo ""
+            echo "## Commits"
+            echo ""
+            echo '```'
+            cat git-log.txt
+            echo '```'
             echo ""
             echo "## Binary Checksums"
             echo ""
