@@ -2212,9 +2212,11 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         let plugins = crate::plugins::cache::read_marketplace_plugins(&mkt_path)
             .with_context(|| format!("reading marketplace manifest for '{mkt_name}'"))?;
         let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
-            eprintln!(
-                "warning: plugin '{plugin_name}@{mkt_name}' not found in the freshly-synced \
-                 marketplace manifest — verify the plugin name matches an entry in the marketplace"
+            tracing::warn!(
+                plugin = %plugin_name,
+                marketplace = %mkt_name,
+                "plugin not found in freshly-synced marketplace manifest — \
+                 verify the plugin name matches an entry in the marketplace"
             );
             continue;
         };
