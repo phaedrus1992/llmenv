@@ -114,6 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   logs a `warn` when the plugin manifest is absent after materializing the plugin,
   making broken plugin installs diagnosable (#379)
 
+
 ## [1.0.10] - 2026-06-11
 
 ### Added
