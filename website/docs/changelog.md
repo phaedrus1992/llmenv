@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.3] - 2026-06-15
+
 ### Fixed
 
 - Fix `SessionStart` (and other hook) output missing the required `hookEventName` field,
