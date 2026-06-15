@@ -17,7 +17,10 @@ Key invariants (full details in `RELEASING.md`):
 - **Branch strategy:** `main` = new features. Each major.minor gets a
   `release/X.X.x` branch for bug fixes. Fix in the oldest applicable branch
   first, then merge forward — the fix and its CHANGELOG entry propagate
-  automatically. See `RELEASING.md` §Branch strategy for the full policy.
+  automatically via the `forward-merge-release` workflow. **Never manually
+  cherry-pick to newer branches; let the workflow do it (or resolve the merge
+  conflict it opens on failure).** See `RELEASING.md` §Branch strategy for
+  the full policy.
 - **Picking a base branch for an issue:** before branching, look at the issue's
   milestone (or version label). If a matching `release/X.Y.x` branch exists on
   the remote, branch from it — **not** from `main`. Example: an issue in the
