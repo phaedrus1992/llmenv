@@ -63,6 +63,8 @@ jobs:
             ~/.cargo/git/db/
           key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-registry-${{ runner.os }}-
+      - name: Detect CPU count
+        run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
