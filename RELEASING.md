@@ -43,6 +43,11 @@ branch — document the skip in the PR description.
 The CHANGELOG entry written on `release/1.0.x` propagates forward via the merges
 — no cherry-picking or duplicate entries needed.
 
+**Do not manually cherry-pick or re-apply the fix to newer branches.** The
+`forward-merge-release` workflow does this automatically after every push to a
+release branch. If it fails (conflict, skipped branch), resolve the conflict
+in the merge PR it opens — don't work around it by applying the change twice.
+
 ### Creating a release branch
 
 After tagging a new major.minor (e.g. `v1.1.0`), branch immediately from that
