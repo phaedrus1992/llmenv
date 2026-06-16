@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   parsed, so every object-form entry was lost. Malformed object-form entries now
   emit a warning, and the related messages correctly direct users to
   `llmenv plugin-sync` instead of `llmenv sync`
+- Fix hooks crashing with a broken-pipe error when the agent truncates their
+  stdout early; hooks are fail-soft and now exit 0 on `SIGPIPE` (#422)
+- Fix bundle and tag memory recall errors being silently discarded; all MCP
+  action failures (recall, tag recall, bundle recall, store) now emit a
+  `tracing::warn!` with structured context so misconfigured or unreachable
+  recall is diagnosable without source-level debugging (#421)
 
 ## [2.0.3] - 2026-06-15
 
