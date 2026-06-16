@@ -17,6 +17,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Fold six `*-ls` listing commands into `status` subcommands: `status bundles`,
+  `status tags`, `status scopes`, `status mcps`, `status marketplaces`,
+  `status plugins`. The top-level `*-ls` forms are retained as hidden deprecated
+  shims and will be removed in 2.1.
+- Add `context --bundle <name>` to narrow the context view to a single bundle,
+  showing its env vars, hooks, MCPs, plugins, and skills
+- Add `context --why` to show activation tracing — which scope triggered each
+  active tag and which tags fired each bundle
+- Add `context --json` to emit the full context as machine-readable JSON
+- Add `doctor --verbose` to print detailed per-check reasoning alongside pass/fail
+- Add `export --explain` to annotate each exported variable with its source
+  (adapter or llmenv introspection)
+- Add `sync --dry-run` to preview pending config changes without committing
+- Add `check-stale --auto-fix` to automatically re-materialize config on drift
+  rather than only printing a warning
+- Add `validate` command to check config for structural issues (duplicate bundle
+  names, bundles with no activation tags)
+- Add `edit [bundle-name]` command to open `config.yaml` or a named bundle file
+  directly in `$EDITOR`
+- Add `completions <shell>` command to generate shell completion scripts for
+  bash, zsh, and fish
+- Document `regenerate`, `login`, `config-context`, and `config-guard` commands
+  in `commands.md`; add `regenerate` and `login` to the `getting-started.md`
+  quick-reference table
+- Expand `doctor` entry in `commands.md` to list the token-efficiency settings
+  it checks
+
 ## [2.0.4] - 2026-06-16
 
 ### Added

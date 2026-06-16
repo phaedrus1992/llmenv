@@ -3,7 +3,7 @@ use crate::paths;
 use anyhow::Context;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum StatusSection {
     Scopes,
     Tags,
@@ -14,7 +14,31 @@ pub enum StatusSection {
     All,
 }
 
-pub fn run_status(use_color: bool) -> anyhow::Result<()> {
+pub fn run_status(
+    section: Option<StatusSection>,
+    _json: bool,
+    use_color: bool,
+) -> anyhow::Result<()> {
+    match section {
+        Some(StatusSection::Scopes) => run_scope_ls(use_color),
+        Some(StatusSection::Tags) => run_tag_ls(use_color),
+        Some(StatusSection::Bundles) => run_bundle_ls(use_color),
+        Some(StatusSection::Mcps) => run_mcp_ls(use_color),
+        Some(StatusSection::Plugins) => run_plugin_ls(use_color),
+        Some(StatusSection::Marketplaces) => run_marketplace_ls(use_color),
+        Some(StatusSection::All) => {
+            run_scope_ls(use_color)?;
+            run_tag_ls(use_color)?;
+            run_bundle_ls(use_color)?;
+            run_mcp_ls(use_color)?;
+            run_plugin_ls(use_color)?;
+            run_marketplace_ls(use_color)
+        }
+        None => run_status_overview(use_color),
+    }
+}
+
+fn run_status_overview(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     match Config::load(&config_path) {
         Ok(config) => {
@@ -50,7 +74,6 @@ pub fn run_status(use_color: bool) -> anyhow::Result<()> {
             return Err(e);
         }
     }
-
     Ok(())
 }
 

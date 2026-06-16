@@ -68,7 +68,12 @@ pub(super) fn run_doctor_token_efficiency(
     }
 }
 
-pub(super) fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
+pub(super) fn run_doctor(
+    gc: bool,
+    all: bool,
+    _verbose: bool,
+    use_color: bool,
+) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
 
@@ -158,221 +163,224 @@ pub(super) fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
         eprintln!("{warn} Config directory is not a git repo");
     }
 
-    // Orphan detection
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-    let emitted = super::all_emitted_tags(&config);
-    let consumed = super::all_consumed_tags(&config);
-    let marker_enabled = super::marker_enabled_bundle_names(&active);
+    if all {
+        // Orphan detection
+        let env = crate::scope::matcher::Env::detect();
+        let active = crate::scope::evaluate(&config, &env);
+        let emitted = super::all_emitted_tags(&config);
+        let consumed = super::all_consumed_tags(&config);
+        let marker_enabled = super::marker_enabled_bundle_names(&active);
 
-    let mut orphan_count: usize = 0;
-    for s in &config.scope.network {
-        if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!(
-                "{warn} orphan scope network:{}: no bundle consumes its tags",
-                s.id
-            );
-            orphan_count += 1;
-        }
-    }
-    for s in &config.scope.host {
-        if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!(
-                "{warn} orphan scope host:{}: no bundle consumes its tags",
-                s.id
-            );
-            orphan_count += 1;
-        }
-    }
-    for s in &config.scope.user {
-        if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!(
-                "{warn} orphan scope user:{}: no bundle consumes its tags",
-                s.id
-            );
-            orphan_count += 1;
-        }
-    }
-
-    let configured_bundle_names: std::collections::HashSet<&str> =
-        config.bundle.iter().map(|b| b.name.as_str()).collect();
-    for scope in &active.scopes {
-        if scope.kind != "project" {
-            continue;
-        }
-        for field in &scope.unknown_fields {
-            eprintln!("{warn} unknown field in .llmenv.yaml: {field}");
-            orphan_count += 1;
-        }
-        for bundle_name in &scope.enable_bundles {
-            if !configured_bundle_names.contains(bundle_name.as_str()) {
+        let mut orphan_count: usize = 0;
+        for s in &config.scope.network {
+            if !s.tags.iter().any(|t| consumed.contains(t)) {
                 eprintln!(
-                    "{warn} .llmenv.yaml enable_bundles references unknown bundle: {bundle_name}"
+                    "{warn} orphan scope network:{}: no bundle consumes its tags",
+                    s.id
                 );
                 orphan_count += 1;
             }
         }
-    }
-
-    for b in &config.bundle {
-        let has_emitted_tag = b.when.iter().any(|t| emitted.contains(t));
-        let looks_marker = super::looks_marker_driven(&b.name, b);
-        if !has_emitted_tag && !marker_enabled.contains(&b.name) && !looks_marker {
-            eprintln!("{warn} orphan bundle {}: no scope emits its tags", b.name);
-            orphan_count += 1;
+        for s in &config.scope.host {
+            if !s.tags.iter().any(|t| consumed.contains(t)) {
+                eprintln!(
+                    "{warn} orphan scope host:{}: no bundle consumes its tags",
+                    s.id
+                );
+                orphan_count += 1;
+            }
         }
-    }
-
-    for m in &config.mcp {
-        let has_emitted_tag = m.when.iter().any(|t| emitted.contains(t));
-        let looks_marker = m.when.iter().any(|t| super::tag_looks_marker_sourced(t));
-        if !has_emitted_tag && !looks_marker {
-            eprintln!("{warn} orphan mcp {}: no scope emits its tags", m.name);
-            orphan_count += 1;
+        for s in &config.scope.user {
+            if !s.tags.iter().any(|t| consumed.contains(t)) {
+                eprintln!(
+                    "{warn} orphan scope user:{}: no bundle consumes its tags",
+                    s.id
+                );
+                orphan_count += 1;
+            }
         }
-    }
 
-    // Build merged host table for server_host checks
-    let doctor_firing: Vec<_> = {
-        let manually: BTreeSet<&str> = active
-            .scopes
-            .iter()
-            .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-            .collect();
-        config
-            .bundle
-            .iter()
-            .filter(|b| {
-                b.when.iter().any(|bt| active.tags.contains(bt))
-                    || manually.contains(b.name.as_str())
+        let configured_bundle_names: std::collections::HashSet<&str> =
+            config.bundle.iter().map(|b| b.name.as_str()).collect();
+        for scope in &active.scopes {
+            if scope.kind != "project" {
+                continue;
+            }
+            for field in &scope.unknown_fields {
+                eprintln!("{warn} unknown field in .llmenv.yaml: {field}");
+                orphan_count += 1;
+            }
+            for bundle_name in &scope.enable_bundles {
+                if !configured_bundle_names.contains(bundle_name.as_str()) {
+                    eprintln!(
+                        "{warn} .llmenv.yaml enable_bundles references unknown bundle: {bundle_name}"
+                    );
+                    orphan_count += 1;
+                }
+            }
+        }
+
+        for b in &config.bundle {
+            let has_emitted_tag = b.when.iter().any(|t| emitted.contains(t));
+            let looks_marker = super::looks_marker_driven(&b.name, b);
+            if !has_emitted_tag && !marker_enabled.contains(&b.name) && !looks_marker {
+                eprintln!("{warn} orphan bundle {}: no scope emits its tags", b.name);
+                orphan_count += 1;
+            }
+        }
+
+        for m in &config.mcp {
+            let has_emitted_tag = m.when.iter().any(|t| emitted.contains(t));
+            let looks_marker = m.when.iter().any(|t| super::tag_looks_marker_sourced(t));
+            if !has_emitted_tag && !looks_marker {
+                eprintln!("{warn} orphan mcp {}: no scope emits its tags", m.name);
+                orphan_count += 1;
+            }
+        }
+
+        // Build merged host table for server_host checks
+        let doctor_firing: Vec<_> = {
+            let manually: BTreeSet<&str> = active
+                .scopes
+                .iter()
+                .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+                .collect();
+            config
+                .bundle
+                .iter()
+                .filter(|b| {
+                    b.when.iter().any(|bt| active.tags.contains(bt))
+                        || manually.contains(b.name.as_str())
+                })
+                .collect()
+        };
+
+        let doctor_bundle_caps = {
+            let refs = super::build_bundle_refs(&config_dir, &active, &doctor_firing);
+            if refs.is_empty() {
+                crate::config::Capabilities::default()
+            } else {
+                crate::merge::merge(&config.capabilities, &config.native, &refs)
+                    .unwrap_or_default()
+                    .capabilities
+            }
+        };
+
+        let mut merged_host_for_doctor = doctor_bundle_caps.host.clone();
+        for (k, v) in &config.host {
+            merged_host_for_doctor.insert(k.clone(), v.clone());
+        }
+
+        // Check top-level memory entries
+        if let Some(features) = &config.features {
+            for mem in &features.memory {
+                let has_emitted_tag = mem.when.iter().any(|t| emitted.contains(t));
+                if !has_emitted_tag {
+                    eprintln!(
+                        "{warn} orphan memory (server_host '{}'): no scope emits its tags",
+                        mem.server_host
+                    );
+                    orphan_count += 1;
+                }
+                if !merged_host_for_doctor.contains_key(&mem.server_host) {
+                    eprintln!(
+                        "{warn} memory: server_host '{}' has no entry in the host: table",
+                        mem.server_host
+                    );
+                    orphan_count += 1;
+                }
+            }
+        }
+
+        // Check bundle-contributed memory entries
+        if let Some(features) = &doctor_bundle_caps.features {
+            for mem in &features.memory {
+                let has_emitted_tag = mem.when.iter().any(|t| emitted.contains(t));
+                if !has_emitted_tag {
+                    eprintln!(
+                        "{warn} orphan bundle memory (server_host '{}'): no scope emits its tags",
+                        mem.server_host
+                    );
+                    orphan_count += 1;
+                }
+                if !merged_host_for_doctor.contains_key(&mem.server_host) {
+                    eprintln!(
+                        "{warn} bundle memory: server_host '{}' has no entry in host: table",
+                        mem.server_host
+                    );
+                    orphan_count += 1;
+                }
+            }
+        }
+
+        // Plugin orphans
+        {
+            use crate::config::split_plugin_ref;
+
+            let mut referenceable: HashSet<&str> = HashSet::new();
+            for c in &config.plugin_collection {
+                let selectable = c.when.iter().any(|t| emitted.contains(t));
+                if !selectable {
+                    eprintln!(
+                        "{warn} orphan plugin-collection {}: no scope emits its tags",
+                        c.name
+                    );
+                    orphan_count += 1;
+                }
+                if selectable {
+                    referenceable.extend(
+                        c.plugins
+                            .iter()
+                            .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m)),
+                    );
+                }
+            }
+            for m in &config.marketplace {
+                if !referenceable.contains(m.name.as_str()) {
+                    eprintln!(
+                        "{warn} orphan marketplace {}: no selectable plugin references it",
+                        m.name
+                    );
+                    orphan_count += 1;
+                }
+            }
+        }
+
+        // Tag orphans
+        let mut tag_universe: HashSet<String> = HashSet::new();
+        tag_universe.extend(emitted.iter().cloned());
+        tag_universe.extend(consumed.iter().cloned());
+        tag_universe.extend(active.tags.iter().cloned());
+        let mut tag_orphans: Vec<String> = tag_universe
+            .into_iter()
+            .filter(|t| {
+                let emitted_anywhere = emitted.contains(t)
+                    || active.tags.contains(t)
+                    || super::tag_looks_marker_sourced(t);
+                let consumed_anywhere = consumed.contains(t);
+                !(emitted_anywhere && consumed_anywhere)
             })
-            .collect()
-    };
-
-    let doctor_bundle_caps = {
-        let refs = super::build_bundle_refs(&config_dir, &active, &doctor_firing);
-        if refs.is_empty() {
-            crate::config::Capabilities::default()
-        } else {
-            crate::merge::merge(&config.capabilities, &config.native, &refs)
-                .unwrap_or_default()
-                .capabilities
-        }
-    };
-
-    let mut merged_host_for_doctor = doctor_bundle_caps.host.clone();
-    for (k, v) in &config.host {
-        merged_host_for_doctor.insert(k.clone(), v.clone());
-    }
-
-    // Check top-level memory entries
-    if let Some(features) = &config.features {
-        for mem in &features.memory {
-            let has_emitted_tag = mem.when.iter().any(|t| emitted.contains(t));
-            if !has_emitted_tag {
-                eprintln!(
-                    "{warn} orphan memory (server_host '{}'): no scope emits its tags",
-                    mem.server_host
-                );
-                orphan_count += 1;
-            }
-            if !merged_host_for_doctor.contains_key(&mem.server_host) {
-                eprintln!(
-                    "{warn} memory: server_host '{}' has no entry in the host: table",
-                    mem.server_host
-                );
-                orphan_count += 1;
-            }
-        }
-    }
-
-    // Check bundle-contributed memory entries
-    if let Some(features) = &doctor_bundle_caps.features {
-        for mem in &features.memory {
-            let has_emitted_tag = mem.when.iter().any(|t| emitted.contains(t));
-            if !has_emitted_tag {
-                eprintln!(
-                    "{warn} orphan bundle memory (server_host '{}'): no scope emits its tags",
-                    mem.server_host
-                );
-                orphan_count += 1;
-            }
-            if !merged_host_for_doctor.contains_key(&mem.server_host) {
-                eprintln!(
-                    "{warn} bundle memory: server_host '{}' has no entry in host: table",
-                    mem.server_host
-                );
-                orphan_count += 1;
-            }
-        }
-    }
-
-    // Plugin orphans
-    {
-        use crate::config::split_plugin_ref;
-
-        let mut referenceable: HashSet<&str> = HashSet::new();
-        for c in &config.plugin_collection {
-            let selectable = c.when.iter().any(|t| emitted.contains(t));
-            if !selectable {
-                eprintln!(
-                    "{warn} orphan plugin-collection {}: no scope emits its tags",
-                    c.name
-                );
-                orphan_count += 1;
-            }
-            if selectable {
-                referenceable.extend(
-                    c.plugins
-                        .iter()
-                        .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m)),
-                );
-            }
-        }
-        for m in &config.marketplace {
-            if !referenceable.contains(m.name.as_str()) {
-                eprintln!(
-                    "{warn} orphan marketplace {}: no selectable plugin references it",
-                    m.name
-                );
-                orphan_count += 1;
-            }
-        }
-    }
-
-    // Tag orphans
-    let mut tag_universe: HashSet<String> = HashSet::new();
-    tag_universe.extend(emitted.iter().cloned());
-    tag_universe.extend(consumed.iter().cloned());
-    tag_universe.extend(active.tags.iter().cloned());
-    let mut tag_orphans: Vec<String> = tag_universe
-        .into_iter()
-        .filter(|t| {
+            .collect();
+        tag_orphans.sort();
+        for t in &tag_orphans {
             let emitted_anywhere = emitted.contains(t)
                 || active.tags.contains(t)
                 || super::tag_looks_marker_sourced(t);
-            let consumed_anywhere = consumed.contains(t);
-            !(emitted_anywhere && consumed_anywhere)
-        })
-        .collect();
-    tag_orphans.sort();
-    for t in &tag_orphans {
-        let emitted_anywhere =
-            emitted.contains(t) || active.tags.contains(t) || super::tag_looks_marker_sourced(t);
-        let reason = if !emitted_anywhere {
-            "no scope emits it"
-        } else {
-            "no bundle consumes it"
-        };
-        eprintln!("{warn} orphan tag {}: {}", t, reason);
-        orphan_count += 1;
-    }
+            let reason = if !emitted_anywhere {
+                "no scope emits it"
+            } else {
+                "no bundle consumes it"
+            };
+            eprintln!("{warn} orphan tag {}: {}", t, reason);
+            orphan_count += 1;
+        }
 
-    if orphan_count == 0 {
-        eprintln!("{pass} No orphan scopes/tags/bundles/plugins");
-    } else {
-        eprintln!("{warn} Found {} orphan item(s)", orphan_count);
-    }
+        if orphan_count == 0 {
+            eprintln!("{pass} No orphan scopes/tags/bundles/plugins");
+        } else {
+            eprintln!("{warn} Found {} orphan item(s)", orphan_count);
+        }
+    } // end if all
 
     // Lint for ${CLAUDE_PLUGIN_ROOT} in non-plugin hooks
     for hook in &config.capabilities.hooks {
