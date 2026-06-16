@@ -144,8 +144,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // to escape the context block are trapped as unparseable markdown.
         let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{}", text);
         serde_json::json!({
-            "hookEventName": hook_event_name,
-            "hookSpecificOutput": { "additionalContext": wrapped }
+            "hookSpecificOutput": {
+                "hookEventName": hook_event_name,
+                "additionalContext": wrapped
+            }
         })
         .to_string()
     }

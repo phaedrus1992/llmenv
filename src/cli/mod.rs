@@ -1407,19 +1407,26 @@ fn run_config_context() {
         .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "SessionStart".to_owned());
 
+    let emit = |ctx: &str| {
+        println!(
+            "{}",
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": hook_event_name,
+                    "additionalContext": ctx
+                }
+            })
+        );
+    };
+
     let config_path = match paths::config_path() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("llmenv config-context: failed to resolve config path: {e}");
-            let output = serde_json::json!({
-                "hookEventName": hook_event_name,
-                "hookSpecificOutput": {
-                    "additionalContext":
-                        "llmenv config-context: could not resolve config path. \
-                         Run `llmenv doctor` to diagnose."
-                }
-            });
-            println!("{output}");
+            emit(
+                "llmenv config-context: could not resolve config path. \
+                 Run `llmenv doctor` to diagnose.",
+            );
             return;
         }
     };
@@ -1444,14 +1451,7 @@ fn run_config_context() {
         config = config_path.display(),
         bundles = bundles_dir.display(),
     );
-
-    let output = serde_json::json!({
-        "hookEventName": hook_event_name,
-        "hookSpecificOutput": {
-            "additionalContext": text
-        }
-    });
-    println!("{output}");
+    emit(&text);
 }
 
 /// `llmenv config-guard`: warn on PreToolUse Write/Edit to managed cache paths (#289).
