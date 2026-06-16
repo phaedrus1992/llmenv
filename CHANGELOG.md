@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Document `regenerate`, `login`, `config-context`, and `config-guard` commands
+  in `commands.md`; add `regenerate` and `login` to the `getting-started.md`
+  quick-reference table
+- Expand `doctor` entry in `commands.md` to list the token-efficiency settings
+  it checks
+
 ## [2.0.4] - 2026-06-16
 
 ### Added

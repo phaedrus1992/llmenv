@@ -29,6 +29,16 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 - `--scope ID` is accepted but scope filtering is not yet implemented (prints a
   warning and exports all matching tags).
 
+## `regenerate`
+
+```
+llmenv regenerate
+```
+
+Regenerate the materialized config without emitting shell `export` lines. Use
+after editing `config.yaml` or bundle files when the current shell already has
+the right env vars.
+
 ## `hook`
 
 ```
@@ -177,14 +187,65 @@ Clean stale cache folders.
 - `--dry-run` — preview deletions without removing (works with `--all` and
   `--older-than`).
 
+## `login`
+
+```
+llmenv login [--global]
+```
+
+Capture Claude Code auth credentials and store them in the llmenv auth cache.
+Runs `claude auth login` in a temporary directory, extracts the resulting
+`oauthAccount`, and saves it so new materialized folders inherit it automatically.
+
+- (no flags) — if `CLAUDE_CONFIG_DIR` is set and managed by llmenv, updates both
+  that folder's auth and the global cache. Otherwise falls back to global-only
+  (same as `--global`) and prints a note directing you to run `llmenv export` first.
+- `--global` — store credentials in the user-level Claude config (`~/.claude/`)
+  rather than the project cache. Use this when `CLAUDE_CONFIG_DIR` is not set or
+  not managed by llmenv.
+
+`llmenv init` includes auth setup; use `llmenv login` to authenticate separately
+or to re-authenticate.
+
+## `config-context`
+
+```
+llmenv config-context
+```
+
+Print source config paths as agent context (used by the auto-registered
+`SessionStart` hook). Prints the paths of `config.yaml` and the `bundles/`
+directory so the agent knows where to direct config edits. Invoked automatically — not normally run by users.
+
+## `config-guard`
+
+```
+llmenv config-guard
+```
+
+Warn when the agent tries to write a managed cache path (used by the
+auto-registered `PreToolUse` hook with matcher `Write|Edit|MultiEdit`). Checks
+whether the target path is inside the llmenv cache and prints a redirection hint
+pointing at the source config. Always exits 0 (fail-soft — the write is not
+blocked). Invoked automatically — not normally run by users.
+
 ## `doctor`
 
 ```
 llmenv doctor [--gc]
 ```
 
-Validate adapter wiring and configuration. Checks config parsing, cache
-writability, git connectivity, and orphans (scopes/tags/bundles/MCP/plugins that
-can never activate, a memory `server_host` missing from `host:`, and unknown
-fields in project markers). With `--gc`, runs cache garbage collection after the
-diagnostics.
+Validate adapter wiring and configuration. Checks:
+
+- config parsing
+- cache directory writability
+- git connectivity
+- orphans — scopes/tags/bundles/MCP/plugins that can never activate, a memory
+  `server_host` missing from `host:`, and unknown fields in project markers
+- token-efficiency settings — warns when `BASH_MAX_OUTPUT_LENGTH`,
+  `MAX_MCP_OUTPUT_TOKENS`, `ENABLE_PROMPT_CACHING_1H`, and
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` are not set; reports (info) whether
+  `CLAUDE_CODE_SUBAGENT_MODEL` is set; and checks whether a context-mode MCP
+  server is registered
+
+With `--gc`, runs cache garbage collection after the diagnostics.
