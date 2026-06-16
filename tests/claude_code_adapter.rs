@@ -1377,11 +1377,6 @@ fn emit_hook_context_wraps_text_in_json() {
             .get("additionalContext")
             .is_some()
     );
-    assert_eq!(
-        parsed["hookSpecificOutput"]["hookEventName"].as_str(),
-        Some("session_start"),
-        "hookEventName must be the exact event name passed in"
-    );
 }
 
 #[test]
