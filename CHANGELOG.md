@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix bundle and tag memory recall errors being silently discarded; all MCP
+  action failures (recall, tag recall, bundle recall, store) now emit a
+  `tracing::warn!` with structured context so misconfigured or unreachable
+  recall is diagnosable without source-level debugging (#421)
+
 ## [1.0.12] - 2026-06-15
 
 ## [1.0.11] - 2026-06-15
