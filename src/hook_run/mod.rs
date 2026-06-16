@@ -152,7 +152,12 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     };
     match run_inner(parsed) {
         Ok(text) => {
-            let out = ClaudeCodeAdapter.emit_hook_context(&text);
+            let hook_name = match parsed {
+                HookEvent::SessionStart => "session_start",
+                HookEvent::TurnStart => "turn_start",
+                HookEvent::SessionEnd => "session_end",
+            };
+            let out = ClaudeCodeAdapter.emit_hook_context(hook_name, &text);
             if !out.is_empty() {
                 let _ = writeln!(std::io::stdout(), "{out}");
             }
