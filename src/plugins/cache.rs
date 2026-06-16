@@ -398,7 +398,6 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
     let lower = source.to_ascii_lowercase();
     if lower.starts_with("ext::")
         || lower.starts_with("fd::")
-        || lower.starts_with("file://")
         || lower.starts_with("file:")
         || lower.starts_with("http://")
     {
