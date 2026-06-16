@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+- Log malformed `marketplace.json` plugin entries (missing or non-string `name`,
+  missing `source`) with a warning instead of silently dropping them, so corrupt
+  manifests are diagnosable
+
+### Security
+
+- Reject `http://` and `file://` (and `file:`) transports for external marketplace
+  plugin sources; remote sources now require `https://`
+- Reject control characters (NUL, newline, carriage return) in environment variable
+  values to prevent shell export injection
+
+
 ## [2.0.3] - 2026-06-15
 
 ### Fixed

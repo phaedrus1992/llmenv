@@ -785,8 +785,9 @@ fn shell_escape(s: &str) -> String {
 /// Applied to adapter-returned env vars before they propagate, so the
 /// `export NAME=...` contract holds regardless of which emission path runs.
 fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Result<()> {
-    for (name, _) in env {
+    for (name, value) in env {
         validate_var_name(name)?;
+        validate_var_value(value)?;
     }
     Ok(())
 }
@@ -811,6 +812,16 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
                 ch
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_var_value(value: &str) -> anyhow::Result<()> {
+    if let Some(ch) = value.chars().find(|c| matches!(c, '\0' | '\n' | '\r')) {
+        anyhow::bail!(
+            "variable value contains forbidden control character {:?}",
+            ch
+        );
     }
     Ok(())
 }
@@ -1001,7 +1012,8 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     }
 
     for (key, value) in vars {
-        validate_var_name(&key)?;
+        validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
+        validate_var_value(&value).with_context(|| format!("variable '{key}': invalid value"))?;
         println!("export {}={}", key, shell_escape(&value));
     }
 
@@ -3126,6 +3138,24 @@ mod tests {
 
         let bad_leading_digit = vec![("1ABC".to_string(), "v".to_string())];
         assert!(reject_invalid_var_names(&bad_leading_digit).is_err());
+    }
+
+    #[test]
+    fn reject_invalid_var_names_rejects_control_characters_in_values() {
+        let with_newline = vec![(
+            "VALID_NAME".to_string(),
+            "value\nLD_PRELOAD=/evil".to_string(),
+        )];
+        assert!(reject_invalid_var_names(&with_newline).is_err());
+
+        let with_nul = vec![("VALID_NAME".to_string(), "value\0malicious".to_string())];
+        assert!(reject_invalid_var_names(&with_nul).is_err());
+
+        let with_carriage_return = vec![("VALID_NAME".to_string(), "value\rmalicious".to_string())];
+        assert!(reject_invalid_var_names(&with_carriage_return).is_err());
+
+        let valid_value = vec![("VALID_NAME".to_string(), "safe_value".to_string())];
+        assert!(reject_invalid_var_names(&valid_value).is_ok());
     }
 
     #[test]
