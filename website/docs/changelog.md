@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Provide prebuilt `linux/aarch64` (ARM64) release binaries
+
+### Fixed
+
+- Fix `hookEventName` being emitted at the top level of hook JSON instead of
+  inside `hookSpecificOutput`; it is now nested per the Claude Code hook schema,
+  so hooks that read the event name from context find it in the right place (#419)
+- Fix `llmenv plugin-sync` silently dropping all externally-sourced plugins
+  (e.g. `slack`, `superpowers`) whose `marketplace.json` entry uses the
+  `{"source": "git", "url": "..."}` object form; only bare-string sources were
+  parsed, so every object-form entry was lost. Malformed object-form entries now
+  emit a warning, and the related messages correctly direct users to
+  `llmenv plugin-sync` instead of `llmenv sync`
+
 ## [2.0.3] - 2026-06-15
 
 ### Fixed
