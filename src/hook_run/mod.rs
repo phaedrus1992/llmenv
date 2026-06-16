@@ -9,11 +9,13 @@
 mod action;
 mod mcp_client;
 
+use std::io::Write;
 use std::str::FromStr;
 use std::time::Duration;
 
 use action::Action;
 use mcp_client::McpHttpClient;
+use tracing::{debug, warn};
 
 use crate::adapter::AgentAdapter;
 use crate::adapter::claude_code::ClaudeCodeAdapter;
@@ -40,9 +42,18 @@ pub struct TagRecallQuery {
 /// # Errors
 /// Returns an error if any tag fails [`validate_tag`].
 pub fn tag_recall_queries(tags: &[String]) -> anyhow::Result<Vec<TagRecallQuery>> {
+    if tags.is_empty() {
+        debug!("no tags configured for recall");
+        return Ok(Vec::new());
+    }
+    debug!(tag_count = tags.len(), "building tag recall queries");
     tags.iter()
         .map(|tag| {
-            validate_tag(tag)?;
+            validate_tag(tag).map_err(|e| {
+                warn!(tag = %tag, error = %e, "tag name validation failed");
+                e
+            })?;
+            debug!(tag = %tag, "tag recall query created");
             Ok(TagRecallQuery {
                 tag: tag.clone(),
                 keyword: action::tag_keyword(tag),
@@ -72,10 +83,26 @@ pub struct BundleRecallQuery {
 /// # Errors
 /// Returns an error if any bundle name fails [`validate_bundle`].
 pub fn bundle_recall_queries(bundles: &[String]) -> anyhow::Result<Vec<BundleRecallQuery>> {
+    if bundles.is_empty() {
+        debug!("no bundles configured for recall");
+        return Ok(Vec::new());
+    }
+    debug!(
+        bundle_count = bundles.len(),
+        "building bundle recall queries"
+    );
     bundles
         .iter()
         .map(|bundle| {
-            validate_bundle(bundle)?;
+            validate_bundle(bundle).map_err(|e| {
+                warn!(
+                    bundle = %bundle,
+                    error = %e,
+                    "bundle name validation failed"
+                );
+                e
+            })?;
+            debug!(bundle = %bundle, "bundle recall query created");
             Ok(BundleRecallQuery {
                 bundle: bundle.clone(),
                 keyword: action::bundle_keyword(bundle),
@@ -112,6 +139,17 @@ impl FromStr for HookEvent {
                 "unknown hook event '{other}' (expected session_start|turn_start|session_end)"
             )),
         }
+    }
+}
+
+impl std::fmt::Display for HookEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            HookEvent::SessionStart => "session_start",
+            HookEvent::TurnStart => "turn_start",
+            HookEvent::SessionEnd => "session_end",
+        };
+        f.write_str(s)
     }
 }
 
@@ -163,8 +201,11 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     match run_inner(parsed) {
         Ok(text) => {
             let out = ClaudeCodeAdapter.emit_hook_context(&hook_event_name, &text);
-            if !out.is_empty() {
-                println!("{out}");
+            if !out.is_empty()
+                && let Err(e) = writeln!(std::io::stdout(), "{out}")
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                eprintln!("llmenv: failed to write hook output: {e}");
             }
         }
         Err(e) => {
@@ -504,6 +545,34 @@ mod tests {
             Action::RecallBundle(q) => assert_eq!(q.keyword, "llmenv-bundle:foo"),
             other => panic!("expected RecallBundle, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bundle_recall_queries_validates_bundle_names() {
+        assert!(bundle_recall_queries(&["".to_string()]).is_err());
+        assert!(bundle_recall_queries(&["bundle:invalid".to_string()]).is_err());
+        assert!(bundle_recall_queries(&["bundle space".to_string()]).is_err());
+        assert!(bundle_recall_queries(&["bundle/path".to_string()]).is_err());
+    }
+
+    #[test]
+    fn validate_bundle_rejects_empty() {
+        assert!(validate_bundle("").is_err());
+    }
+
+    #[test]
+    fn validate_bundle_rejects_special_characters() {
+        assert!(validate_bundle("bundle:invalid").is_err());
+        assert!(validate_bundle("bundle space").is_err());
+        assert!(validate_bundle("bundle/path").is_err());
+        assert!(validate_bundle("bundle.dot").is_err());
+    }
+
+    #[test]
+    fn validate_bundle_rejects_query_injection_attempts() {
+        assert!(validate_bundle("bundle,malicious").is_err());
+        assert!(validate_bundle("bundle OR other").is_err());
+        assert!(validate_bundle("bundle AND other").is_err());
     }
 
     use proptest::prelude::*;

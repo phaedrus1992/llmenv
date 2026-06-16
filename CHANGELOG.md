@@ -5,24 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-<!-- 3.0 next-header -->
+<!-- 2.0 next-header -->
 
 ## [Unreleased] - ReleaseDate
 
-### Changed
+### Added
 
-- Log malformed `marketplace.json` plugin entries (missing or non-string `name`,
-  missing `source`) with a warning instead of silently dropping them, so corrupt
-  manifests are diagnosable
+- Provide prebuilt `linux/aarch64` (ARM64) release binaries
 
-### Security
+### Fixed
 
-- Reject `http://` and `file://` (and `file:`) transports for external marketplace
-  plugin sources; remote sources now require `https://`
-- Reject control characters (NUL, newline, carriage return) in environment variable
-  values to prevent shell export injection
-
-<!-- 2.0 next-header -->
+- Fix `hookEventName` being emitted at the top level of hook JSON instead of
+  inside `hookSpecificOutput`; it is now nested per the Claude Code hook schema,
+  so hooks that read the event name from context find it in the right place (#419)
+- Fix `llmenv plugin-sync` silently dropping all externally-sourced plugins
+  (e.g. `slack`, `superpowers`) whose `marketplace.json` entry uses the
+  `{"source": "git", "url": "..."}` object form; only bare-string sources were
+  parsed, so every object-form entry was lost. Malformed object-form entries now
+  emit a warning, and the related messages correctly direct users to
+  `llmenv plugin-sync` instead of `llmenv sync`
+- Fix hooks crashing with a broken-pipe error when the agent truncates their
+  stdout early; hooks are fail-soft and now exit 0 on `SIGPIPE` (#422)
+- Fix bundle and tag memory recall errors being silently discarded; all MCP
+  action failures (recall, tag recall, bundle recall, store) now emit a
+  `tracing::warn!` with structured context so misconfigured or unreachable
+  recall is diagnosable without source-level debugging (#421)
 
 ## [2.0.3] - 2026-06-15
 

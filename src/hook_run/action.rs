@@ -2,6 +2,7 @@
 //! MCP tool call.
 
 use serde_json::{Value, json};
+use tracing::{debug, warn};
 
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
@@ -101,9 +102,14 @@ impl Action {
         query: &str,
         chunk: &str,
     ) -> anyhow::Result<String> {
+        debug!(action = ?self, "dispatching MCP tool call");
         client
             .call_tool(self.tool_name(), self.arguments(query, chunk))
             .await
+            .map_err(|e| {
+                warn!(action = ?self, error = %e, "MCP tool call failed");
+                e
+            })
     }
 }
 

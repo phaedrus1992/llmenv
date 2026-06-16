@@ -1393,6 +1393,19 @@ fn emit_hook_context_wraps_text_in_json() {
 }
 
 #[test]
+fn emit_hook_context_includes_correct_hook_event_name() {
+    for event in &["SessionStart", "TurnStart", "SessionEnd"] {
+        let output = ClaudeCodeAdapter.emit_hook_context(event, "context");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"].as_str(),
+            Some(*event),
+            "hookEventName must echo the input event name"
+        );
+    }
+}
+
+#[test]
 fn emit_hook_context_preserves_markdown_content() {
     let text = "## Memory\nContent";
     let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", text);
