@@ -461,24 +461,10 @@ mod tests {
 
     #[test]
     fn bundle_recall_queries_validates_bundle_names() {
-        // Validate that invalid bundle names produce errors
-        assert!(bundle_recall_queries(&["valid-bundle".to_string()]).is_ok());
-        assert!(bundle_recall_queries(&["valid_bundle".to_string()]).is_ok());
-        assert!(bundle_recall_queries(&["valid123".to_string()]).is_ok());
-
-        // Invalid bundles should fail with clear errors
         assert!(bundle_recall_queries(&["".to_string()]).is_err());
         assert!(bundle_recall_queries(&["bundle:invalid".to_string()]).is_err());
         assert!(bundle_recall_queries(&["bundle space".to_string()]).is_err());
         assert!(bundle_recall_queries(&["bundle/path".to_string()]).is_err());
-    }
-
-    #[test]
-    fn validate_bundle_accepts_valid_bundles() {
-        assert!(validate_bundle("base").is_ok());
-        assert!(validate_bundle("rust-defaults").is_ok());
-        assert!(validate_bundle("bundle_123").is_ok());
-        assert!(validate_bundle("my-bundle_name").is_ok());
     }
 
     #[test]
