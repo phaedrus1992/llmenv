@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.4] - 2026-06-16
+
 ### Added
 
 - Provide prebuilt `linux/aarch64` (ARM64) release binaries
@@ -411,7 +413,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.0.3...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.0.4...HEAD
+[2.0.4]: https://github.com/phaedrus1992/llmenv/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/phaedrus1992/llmenv/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/phaedrus1992/llmenv/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/phaedrus1992/llmenv/compare/v2.0.0...v2.0.1

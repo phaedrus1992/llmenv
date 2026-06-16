@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.4] - 2026-06-16
+
 ### Added
 
 - Provide prebuilt `linux/aarch64` (ARM64) release binaries
