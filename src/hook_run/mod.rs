@@ -116,6 +116,17 @@ impl FromStr for HookEvent {
     }
 }
 
+impl std::fmt::Display for HookEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            HookEvent::SessionStart => "session_start",
+            HookEvent::TurnStart => "turn_start",
+            HookEvent::SessionEnd => "session_end",
+        };
+        f.write_str(s)
+    }
+}
+
 /// The ordered actions to run for an event, given the active tags' and bundles'
 /// recall queries (built by [`tag_recall_queries`] and [`bundle_recall_queries`],
 /// the single sources of tag→recall and bundle→recall expansion).
@@ -152,14 +163,12 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     };
     match run_inner(parsed) {
         Ok(text) => {
-            let hook_name = match parsed {
-                HookEvent::SessionStart => "session_start",
-                HookEvent::TurnStart => "turn_start",
-                HookEvent::SessionEnd => "session_end",
-            };
-            let out = ClaudeCodeAdapter.emit_hook_context(hook_name, &text);
-            if !out.is_empty() {
-                let _ = writeln!(std::io::stdout(), "{out}");
+            let out = ClaudeCodeAdapter.emit_hook_context(&parsed.to_string(), &text);
+            if !out.is_empty()
+                && let Err(e) = writeln!(std::io::stdout(), "{out}")
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                eprintln!("llmenv: failed to write hook output: {e}");
             }
         }
         Err(e) => {
