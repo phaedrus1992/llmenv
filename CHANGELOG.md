@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+- `hookEventName` is now included in the hook context JSON inside
+  `hookSpecificOutput`, matching the Claude Code hook schema; hooks that
+  read event name from context will now find it there (#420)
+
+### Fixed
+
+- Fix `llmenv plugin-sync` silently dropping all externally-sourced plugins
+  (e.g. `slack`, `superpowers`) whose marketplace entry uses the
+  `{"source": "git", "url": "..."}` object form; only bare-string sources
+  were parsed, so every object-form entry was lost without warning
+- Fix hooks crashing with a broken-pipe error when the agent truncates their
+  stdout early; hooks are fail-soft and now exit 0 on `SIGPIPE` (#422)
+- Fix bundle and tag memory recall errors being silently discarded; all MCP
+  action failures (recall, tag recall, bundle recall, store) now emit a
+  `tracing::warn!` with structured context so misconfigured or unreachable
+  recall is diagnosable without source-level debugging (#421)
+
 ## [1.0.12] - 2026-06-15
 
 ## [1.0.11] - 2026-06-15
