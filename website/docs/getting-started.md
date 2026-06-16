@@ -146,7 +146,7 @@ See [Configuration](configuration.md) for the complete schema.
 |---------|---------|
 | `llmenv init [PATH] [--repo URL]` | Initialize configuration |
 | `llmenv export [--scope ID] [--tag TAG]` | Export environment variables |
-| `llmenv regenerate` | Regenerate materialized config (no shell export) |
+| `llmenv regenerate` | Apply config changes to the cache without exporting env vars |
 | `llmenv hook <zsh\|bash>` | Generate shell hook code |
 | `llmenv login [--global]` | Capture and cache Claude Code auth credentials |
 | `llmenv status` | Show active scopes/tags + parse status |
