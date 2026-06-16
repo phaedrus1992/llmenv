@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use action::Action;
 use mcp_client::McpHttpClient;
+use tracing::{debug, warn};
 
 use crate::adapter::AgentAdapter;
 use crate::adapter::claude_code::ClaudeCodeAdapter;
@@ -73,10 +74,26 @@ pub struct BundleRecallQuery {
 /// # Errors
 /// Returns an error if any bundle name fails [`validate_bundle`].
 pub fn bundle_recall_queries(bundles: &[String]) -> anyhow::Result<Vec<BundleRecallQuery>> {
+    if bundles.is_empty() {
+        debug!("no bundles configured for recall");
+        return Ok(Vec::new());
+    }
+    debug!(
+        bundle_count = bundles.len(),
+        "building bundle recall queries"
+    );
     bundles
         .iter()
         .map(|bundle| {
-            validate_bundle(bundle)?;
+            validate_bundle(bundle).map_err(|e| {
+                warn!(
+                    bundle = %bundle,
+                    error = %e,
+                    "bundle name validation failed"
+                );
+                e
+            })?;
+            debug!(bundle = %bundle, "bundle recall query created");
             Ok(BundleRecallQuery {
                 bundle: bundle.clone(),
                 keyword: action::bundle_keyword(bundle),
@@ -431,6 +448,48 @@ mod tests {
             Action::RecallBundle(q) => assert_eq!(q.keyword, "llmenv-bundle:foo"),
             other => panic!("expected RecallBundle, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bundle_recall_queries_validates_bundle_names() {
+        // Validate that invalid bundle names produce errors
+        assert!(bundle_recall_queries(&["valid-bundle".to_string()]).is_ok());
+        assert!(bundle_recall_queries(&["valid_bundle".to_string()]).is_ok());
+        assert!(bundle_recall_queries(&["valid123".to_string()]).is_ok());
+
+        // Invalid bundles should fail with clear errors
+        assert!(bundle_recall_queries(&["".to_string()]).is_err());
+        assert!(bundle_recall_queries(&["bundle:invalid".to_string()]).is_err());
+        assert!(bundle_recall_queries(&["bundle space".to_string()]).is_err());
+        assert!(bundle_recall_queries(&["bundle/path".to_string()]).is_err());
+    }
+
+    #[test]
+    fn validate_bundle_accepts_valid_bundles() {
+        assert!(validate_bundle("base").is_ok());
+        assert!(validate_bundle("rust-defaults").is_ok());
+        assert!(validate_bundle("bundle_123").is_ok());
+        assert!(validate_bundle("my-bundle_name").is_ok());
+    }
+
+    #[test]
+    fn validate_bundle_rejects_empty() {
+        assert!(validate_bundle("").is_err());
+    }
+
+    #[test]
+    fn validate_bundle_rejects_special_characters() {
+        assert!(validate_bundle("bundle:invalid").is_err());
+        assert!(validate_bundle("bundle space").is_err());
+        assert!(validate_bundle("bundle/path").is_err());
+        assert!(validate_bundle("bundle.dot").is_err());
+    }
+
+    #[test]
+    fn validate_bundle_rejects_query_injection_attempts() {
+        assert!(validate_bundle("bundle,malicious").is_err());
+        assert!(validate_bundle("bundle OR other").is_err());
+        assert!(validate_bundle("bundle AND other").is_err());
     }
 
     use proptest::prelude::*;

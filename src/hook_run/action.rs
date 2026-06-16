@@ -2,6 +2,7 @@
 //! MCP tool call.
 
 use serde_json::{Value, json};
+use tracing::{debug, warn};
 
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
@@ -101,9 +102,33 @@ impl Action {
         query: &str,
         chunk: &str,
     ) -> anyhow::Result<String> {
-        client
-            .call_tool(self.tool_name(), self.arguments(query, chunk))
-            .await
+        match self {
+            Action::RecallBundle(bundle_q) => {
+                debug!(bundle = %bundle_q.bundle, "recalling bundle-scoped memory");
+                client
+                    .call_tool(self.tool_name(), self.arguments(query, chunk))
+                    .await
+                    .map_err(|e| {
+                        warn!(
+                            bundle = %bundle_q.bundle,
+                            error = %e,
+                            "failed to recall bundle memory"
+                        );
+                        e
+                    })
+            }
+            Action::RecallTag(tag_q) => {
+                debug!(tag = %tag_q.tag, "recalling tag-scoped memory");
+                client
+                    .call_tool(self.tool_name(), self.arguments(query, chunk))
+                    .await
+            }
+            _ => {
+                client
+                    .call_tool(self.tool_name(), self.arguments(query, chunk))
+                    .await
+            }
+        }
     }
 }
 
