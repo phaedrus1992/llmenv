@@ -248,8 +248,27 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
         .map(|arr| {
             arr.iter()
                 .filter_map(|entry| {
-                    let name = entry.get("name")?.as_str()?.to_string();
-                    let raw = entry.get("source")?;
+                    let name = match entry.get("name").and_then(|v| v.as_str()) {
+                        Some(n) => n.to_string(),
+                        None => {
+                            tracing::warn!(
+                                "marketplace entry skipped: missing or non-string 'name' field \
+                                 (entry = {:?})",
+                                entry
+                            );
+                            return None;
+                        }
+                    };
+                    let raw = match entry.get("source") {
+                        Some(r) => r,
+                        None => {
+                            tracing::warn!(
+                                "marketplace entry '{}': missing 'source' field — skipping entry",
+                                name
+                            );
+                            return None;
+                        }
+                    };
                     let source = if let Some(s) = raw.as_str() {
                         s.to_string()
                     } else {
@@ -376,7 +395,7 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
             "marketplace source may not start with '-': {source}"
         ));
     }
-    if source.starts_with("ext::") || source.starts_with("fd::") {
+    if source.starts_with("ext::") || source.starts_with("fd::") || source.starts_with("file://") {
         return Err(anyhow::anyhow!(
             "marketplace source uses a disallowed git transport: {source}"
         ));
@@ -627,6 +646,24 @@ mod tests {
     }
 
     #[test]
+    fn read_marketplace_plugins_logs_malformed_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(".claude-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest = r#"{"plugins": [
+            {"name": "good", "source": "./plugins/good"},
+            {"name": 123, "source": "./bad-name-type"},
+            {"source": "./missing-name"},
+            {"name": "missing-source"}
+        ]}"#;
+        std::fs::write(plugin_dir.join("marketplace.json"), manifest).unwrap();
+        let plugins = read_marketplace_plugins(tmp.path()).unwrap();
+        // Only the "good" entry should be included
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "good");
+    }
+
+    #[test]
     fn read_marketplace_plugins_returns_empty_when_no_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = read_marketplace_plugins(tmp.path()).unwrap();
@@ -835,6 +872,21 @@ mod tests {
                 "error message should mention unsafe path component, got: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn reject_unsafe_source_rejects_dangerous_transports() {
+        // Valid sources should pass
+        assert!(reject_unsafe_source("https://github.com/example/repo.git").is_ok());
+        assert!(reject_unsafe_source("git@github.com:example/repo.git").is_ok());
+        assert!(reject_unsafe_source("./local/path").is_ok());
+
+        // Dangerous sources should fail
+        assert!(reject_unsafe_source("-C/evil").is_err());
+        assert!(reject_unsafe_source("ext::http://example.com").is_err());
+        assert!(reject_unsafe_source("fd::https://example.com").is_err());
+        assert!(reject_unsafe_source("file:///home/user/.ssh").is_err());
+        assert!(reject_unsafe_source("file://local/path").is_err());
     }
 
     /// git_head, git_clone, and git_pull must never block waiting for credential
