@@ -41,12 +41,50 @@ branch — document the skip in the PR description.
 3. Merge `release/1.1.x` → `main`
 
 The CHANGELOG entry written on `release/1.0.x` propagates forward via the merges
-— no cherry-picking or duplicate entries needed.
+while it still lives under `## [Unreleased]` — no cherry-picking needed. Once a
+branch **cuts a release**, that entry is frozen under a versioned heading, and
+the cross-listing rule below takes over.
 
 **Do not manually cherry-pick or re-apply the fix to newer branches.** The
 `forward-merge-release` workflow does this automatically after every push to a
 release branch. If it fails (conflict, skipped branch), resolve the conflict
 in the merge PR it opens — don't work around it by applying the change twice.
+
+### Forward-merged fixes appear in every release that ships them
+
+A fix lands once (on the oldest branch) but **ships in a separate release on
+every branch it reaches**. Each of those releases is a distinct version with its
+own changelog section, and a user reading any one of them must see the fix that
+shipped in it. So:
+
+> **Rule:** When a release inherits a fix via forward-merge, that fix's entry
+> must appear under that release's version heading too — referencing the oldest
+> version it was first fixed in.
+
+This is *not* the duplicate-entry case the workflow avoids. Forward-merge keeps
+the entry flowing **while it sits in `[Unreleased]`**. The gap appears later:
+the older branch cuts its release first (entry freezes under, say, `[1.0.13]`),
+then weeks later the newer branch cuts *its* release — and the fix, long since
+merged into its code, is invisible in the new version's section because the
+entry froze on the older branch.
+
+When cutting a release on a newer branch, check what forward-merged in since its
+last tag (`git log --no-merges <lasttag>..HEAD`) and add an entry for any
+user-facing fix that originated downstream, attributing the origin:
+
+```markdown
+## [2.0.4]
+
+### Fixed
+
+- Fix `llmenv plugin-sync` dropping object-form marketplace sources
+  (originally fixed in 1.0.13)
+```
+
+The `(originally fixed in X.Y.Z)` back-reference tells the user the fix is not
+new behavior unique to this line — it is the same fix that shipped earlier on an
+older release line, now also in this version. Reference the **oldest** version
+that carried it, not the immediately-preceding branch.
 
 ### Creating a release branch
 
