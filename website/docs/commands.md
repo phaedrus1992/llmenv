@@ -95,9 +95,8 @@ behind `status`, including which contributors fired.
 llmenv validate
 ```
 
-Check the config for structural issues. Reports duplicate bundle names and bundles
-with no activation tags (`when: []`) that would never fire. Exits non-zero if any
-issues are found.
+Check the config for structural issues. Reports duplicate bundle names. Exits
+non-zero if any issues are found.
 
 ## `edit`
 

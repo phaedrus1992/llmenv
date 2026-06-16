@@ -2185,13 +2185,6 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
             eprintln!("{fail} duplicate bundle name: {}", bundle.name);
             valid = false;
         }
-        if bundle.when.is_empty() {
-            eprintln!(
-                "{fail} bundle '{}' has no activation tags (when: []); it will never fire",
-                bundle.name
-            );
-            valid = false;
-        }
     }
     if valid {
         eprintln!("{pass} config valid ({} bundle(s))", config.bundle.len());
@@ -2206,6 +2199,9 @@ fn run_edit(bundle: Option<String>) -> anyhow::Result<()> {
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| "vi".to_owned());
     let path = if let Some(name) = bundle {
+        if crate::paths::is_unsafe_join_target(&name) {
+            anyhow::bail!("unsafe bundle name: {name}");
+        }
         let config_dir = paths::config_dir()?;
         let candidate = config_dir.join("bundles").join(format!("{name}.yaml"));
         if candidate.exists() {
@@ -2221,7 +2217,14 @@ fn run_edit(bundle: Option<String>) -> anyhow::Result<()> {
     } else {
         paths::config_path()?
     };
-    let status = std::process::Command::new(&editor)
+    let parts: Vec<&str> = editor.split_whitespace().collect();
+    let bin = parts
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("$EDITOR / $VISUAL is set but empty"))?;
+    let extra_args = parts.get(1..).unwrap_or_default();
+    let status = std::process::Command::new(bin)
+        .args(extra_args)
         .arg(&path)
         .status()
         .with_context(|| format!("failed to launch editor: {editor}"))?;
