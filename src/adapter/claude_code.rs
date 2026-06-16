@@ -146,7 +146,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": hook_event_name,
-                "additionalContext": wrapped,
+                "additionalContext": wrapped
             }
         })
         .to_string()
