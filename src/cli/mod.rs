@@ -10,6 +10,8 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod doctor;
+mod status;
 mod style;
 
 pub use style::{

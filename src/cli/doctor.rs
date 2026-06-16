@@ -2,6 +2,7 @@ use crate::adapter::AgentAdapter;
 use crate::adapter::claude_code::ClaudeCodeAdapter;
 use crate::config::Config;
 use crate::paths;
+use anyhow::Context;
 use std::collections::{BTreeSet, HashSet};
 
 pub(super) fn run_doctor_token_efficiency(
@@ -347,8 +348,9 @@ pub(super) fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
     let mut tag_orphans: Vec<String> = tag_universe
         .into_iter()
         .filter(|t| {
-            let emitted_anywhere =
-                emitted.contains(t) || active.tags.contains(t) || super::tag_looks_marker_sourced(t);
+            let emitted_anywhere = emitted.contains(t)
+                || active.tags.contains(t)
+                || super::tag_looks_marker_sourced(t);
             let consumed_anywhere = consumed.contains(t);
             !(emitted_anywhere && consumed_anywhere)
         })
