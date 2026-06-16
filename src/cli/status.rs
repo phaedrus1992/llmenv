@@ -16,9 +16,12 @@ pub enum StatusSection {
 
 pub fn run_status(
     section: Option<StatusSection>,
-    _json: bool,
+    json: bool,
     use_color: bool,
 ) -> anyhow::Result<()> {
+    if json {
+        anyhow::bail!("--json is not yet implemented");
+    }
     match section {
         Some(StatusSection::Scopes) => run_scope_ls(use_color),
         Some(StatusSection::Tags) => run_tag_ls(use_color),
@@ -305,8 +308,8 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         .mcp
         .iter()
         .map(|m| {
-            let is_active = m.when.iter().any(|t| active.tags.contains(t));
-            let is_orphan = !m.when.iter().any(|t| emitted.contains(t));
+            let is_active = m.when.is_empty() || m.when.iter().any(|t| active.tags.contains(t));
+            let is_orphan = !m.when.is_empty() && !m.when.iter().any(|t| emitted.contains(t));
             let detail = detail_for(&m.name, &format!("{:?}", m.transport).to_lowercase());
             (m.name.clone(), is_active, is_orphan, detail)
         })
@@ -320,8 +323,8 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
     }
 
     for mem in &all_memory_ls {
-        let is_active = mem.when.iter().any(|t| active.tags.contains(t));
-        let is_orphan = !mem.when.iter().any(|t| emitted.contains(t));
+        let is_active = mem.when.is_empty() || mem.when.iter().any(|t| active.tags.contains(t));
+        let is_orphan = !mem.when.is_empty() && !mem.when.iter().any(|t| emitted.contains(t));
         let detail = detail_for(MEMORY_MCP_NAME, "memory");
         let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);
         rows.push((name, is_active, is_orphan, detail));

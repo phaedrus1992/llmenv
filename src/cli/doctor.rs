@@ -71,9 +71,12 @@ pub(super) fn run_doctor_token_efficiency(
 pub(super) fn run_doctor(
     gc: bool,
     all: bool,
-    _verbose: bool,
+    verbose: bool,
     use_color: bool,
 ) -> anyhow::Result<()> {
+    if verbose {
+        anyhow::bail!("--verbose is not yet implemented");
+    }
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
 
@@ -261,7 +264,7 @@ pub(super) fn run_doctor(
                 crate::config::Capabilities::default()
             } else {
                 crate::merge::merge(&config.capabilities, &config.native, &refs)
-                    .unwrap_or_default()
+                    .context("failed to merge bundle capabilities for orphan check")?
                     .capabilities
             }
         };

@@ -1012,7 +1012,9 @@ fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
                     Ok(Some((cache_path, _))) => {
                         eprintln!("✓ Config refreshed at {}", cache_path.display());
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        eprintln!("✓ Config up-to-date (no content directory)");
+                    }
                     Err(e) => return Err(e).context("auto-fix: re-materialization failed"),
                 }
             } else {
@@ -1805,9 +1807,12 @@ fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyhow::Result<(
 fn run_context(
     bundle_filter: Option<&str>,
     why: bool,
-    _json: bool,
+    json: bool,
     use_color: bool,
 ) -> anyhow::Result<()> {
+    if json {
+        anyhow::bail!("--json is not yet implemented");
+    }
     let config_path = paths::config_path()?;
     let config_dir = config_path
         .parent()
@@ -1888,7 +1893,11 @@ fn run_context(
     }
 
     let bundles_to_show: Vec<&Bundle> = if let Some(filter) = bundle_filter {
-        config.bundle.iter().filter(|b| b.name == filter).collect()
+        let matching: Vec<&Bundle> = config.bundle.iter().filter(|b| b.name == filter).collect();
+        if matching.is_empty() {
+            anyhow::bail!("bundle not found: {filter}");
+        }
+        matching
     } else {
         config.bundle.iter().collect()
     };
@@ -2149,12 +2158,16 @@ fn run_plugin_sync() -> anyhow::Result<()> {
 fn run_sync(dry_run: bool) -> anyhow::Result<()> {
     let config_dir = paths::config_dir()?;
     if dry_run {
-        let status = git::secure_git()
+        let out = git::secure_git()
             .args(["status", "--short"])
             .current_dir(&config_dir)
             .output()
             .context("failed to run git status")?;
-        let output = String::from_utf8_lossy(&status.stdout);
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("git status failed: {stderr}");
+        }
+        let output = String::from_utf8_lossy(&out.stdout);
         if output.trim().is_empty() {
             eprintln!("Nothing to sync (working tree clean)");
         } else {
@@ -2236,7 +2249,12 @@ fn run_edit(bundle: Option<String>) -> anyhow::Result<()> {
 
 fn run_completions(shell: clap_complete::Shell) -> anyhow::Result<()> {
     use clap::CommandFactory;
-    clap_complete::generate(shell, &mut Cli::command(), "llmenv", &mut std::io::stdout());
+    use std::io::Write;
+    let mut buf: Vec<u8> = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "llmenv", &mut buf);
+    std::io::stdout()
+        .write_all(&buf)
+        .context("failed to write completions to stdout")?;
     Ok(())
 }
 
