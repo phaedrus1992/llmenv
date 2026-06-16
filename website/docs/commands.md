@@ -29,6 +29,17 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 - `--scope ID` is accepted but scope filtering is not yet implemented (prints a
   warning and exports all matching tags).
 
+## `regenerate`
+
+```
+llmenv regenerate
+```
+
+Regenerate the materialized config (applies config changes to the cache
+directory) without emitting shell `export` lines. Use this after editing
+`config.yaml` or bundle files when you don't need a full `export` run — for
+example, from within an agent session that already has the right env vars set.
+
 ## `hook`
 
 ```
@@ -177,14 +188,64 @@ Clean stale cache folders.
 - `--dry-run` — preview deletions without removing (works with `--all` and
   `--older-than`).
 
+## `login`
+
+```
+llmenv login [--global]
+```
+
+Capture Claude Code auth credentials and store them in the llmenv auth cache.
+Runs `claude auth login` in a temporary directory, extracts the resulting
+`oauthAccount`, and saves it so new materialized folders inherit it automatically.
+
+- (no flags) — updates the current materialized folder's auth (the one in
+  `CLAUDE_CONFIG_DIR`) and saves a global copy for future folders.
+- `--global` — updates the global auth cache only, without touching the current
+  folder. Use this when `CLAUDE_CONFIG_DIR` is not set or not managed by llmenv.
+
+`llmenv init` prompts for auth setup interactively; `llmenv login` handles it
+afterward or when you need to re-authenticate.
+
+## `config-context`
+
+```
+llmenv config-context
+```
+
+Emit source config paths as agent context (used by the auto-registered
+`SessionStart` hook). Prints the location of `config.yaml` and the `bundles/`
+directory so the agent knows where its source config lives and where to direct
+any config edits. Exits 0. Invoked automatically — not normally run by users.
+
+## `config-guard`
+
+```
+llmenv config-guard
+```
+
+Warn when the agent tries to write a managed cache path (used by the
+auto-registered `PreToolUse` hook with matcher `Write|Edit|MultiEdit`). Reads
+the Claude Code tool-call payload from stdin, checks whether the target path is
+inside the llmenv cache, and prints a redirection hint pointing at the source
+config. Always exits 0 (fail-soft — the write is not blocked). Invoked
+automatically — not normally run by users.
+
 ## `doctor`
 
 ```
 llmenv doctor [--gc]
 ```
 
-Validate adapter wiring and configuration. Checks config parsing, cache
-writability, git connectivity, and orphans (scopes/tags/bundles/MCP/plugins that
-can never activate, a memory `server_host` missing from `host:`, and unknown
-fields in project markers). With `--gc`, runs cache garbage collection after the
-diagnostics.
+Validate adapter wiring and configuration. Checks:
+
+- config parsing
+- cache directory writability
+- git connectivity
+- orphans — scopes/tags/bundles/MCP/plugins that can never activate, a memory
+  `server_host` missing from `host:`, and unknown fields in project markers
+- token-efficiency settings — warns when `BASH_MAX_OUTPUT_LENGTH`,
+  `MAX_MCP_OUTPUT_TOKENS`, `ENABLE_PROMPT_CACHING_1H`,
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, and `CLAUDE_CODE_SUBAGENT_MODEL` are not
+  set, and whether a context-mode MCP server is registered
+
+With `--gc`, runs cache garbage collection after the diagnostics.
