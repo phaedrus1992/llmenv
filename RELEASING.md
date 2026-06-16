@@ -86,6 +86,22 @@ new behavior unique to this line — it is the same fix that shipped earlier on 
 older release line, now also in this version. Reference the **oldest** version
 that carried it, not the immediately-preceding branch.
 
+**No automation enforces this — so check on every changelog edit.** Nothing
+triggers a docs update when a forward-merge lands, so the cross-listing can only
+be caught by hand. Make it a reflex: **any time you modify `CHANGELOG.md`** (not
+only when cutting a release), first reconcile against what has forward-merged in:
+
+```bash
+# What landed since this branch's last tag, and from where?
+git log --no-merges <last-tag>..HEAD
+# What user-facing entries exist on the older line that aren't here yet?
+git show origin/release/<older>.x:CHANGELOG.md
+```
+
+Add any missing user-facing fix to the appropriate section with its
+`(originally fixed in X.Y.Z)` back-reference before finishing your edit. A
+changelog edit that ignores an unlisted forward-merged fix is incomplete.
+
 ### Creating a release branch
 
 After tagging a new major.minor (e.g. `v1.1.0`), branch immediately from that
