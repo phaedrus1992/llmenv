@@ -21,6 +21,20 @@ Key invariants (full details in `RELEASING.md`):
   cherry-pick to newer branches; let the workflow do it (or resolve the merge
   conflict it opens on failure).** See `RELEASING.md` §Branch strategy for
   the full policy.
+- **Forward-merged fixes ship in every release that inherits them.** When
+  cutting a release on a newer branch, any user-facing fix that forward-merged
+  in from an older line must also appear under the new version's changelog
+  heading, back-referenced to the oldest version that carried it — e.g.
+  `(originally fixed in 1.0.13)`. The auto-propagation only covers entries still
+  under `[Unreleased]`; once an older branch cuts its release the entry freezes
+  there, so the newer release must re-list it. See `RELEASING.md`
+  §"Forward-merged fixes appear in every release that ships them".
+- **No trigger keeps this in sync — so check on *every* `CHANGELOG.md` edit,**
+  not just at release time. Before finishing any changelog change, reconcile
+  against the older release line (`git log --no-merges <last-tag>..HEAD` and the
+  older branch's `CHANGELOG.md`) and add any missing forward-merged fix with its
+  back-reference. A changelog edit that leaves an inherited fix unlisted is
+  incomplete.
 - **Picking a base branch for an issue:** before branching, look at the issue's
   milestone (or version label). If a matching `release/X.Y.x` branch exists on
   the remote, branch from it — **not** from `main`. Example: an issue in the
