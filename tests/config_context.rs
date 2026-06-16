@@ -1,4 +1,5 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::panic, reason = "test scaffolding")]
 //! Integration tests for `llmenv config-context` (#419).
 //!
 //! Verifies that the hook JSON output places `hookEventName` inside
@@ -21,7 +22,7 @@ fn setup_config() -> (TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn config_context_places_hookEventName_inside_hookSpecificOutput() {
+fn config_context_places_hook_event_name_inside_hook_specific_output() {
     let (_dir, config_path) = setup_config();
     let config_dir = _dir.path();
 
