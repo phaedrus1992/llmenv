@@ -9,6 +9,7 @@
 mod action;
 mod mcp_client;
 
+use std::io::Write;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -153,7 +154,7 @@ pub fn run(event: &str) -> anyhow::Result<()> {
         Ok(text) => {
             let out = ClaudeCodeAdapter.emit_hook_context(&text);
             if !out.is_empty() {
-                println!("{out}");
+                let _ = writeln!(std::io::stdout(), "{out}");
             }
         }
         Err(e) => {
