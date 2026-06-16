@@ -27,8 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   showing its env vars, hooks, MCPs, plugins, and skills
 - Add `context --why` to show activation tracing — which scope triggered each
   active tag and which tags fired each bundle
-- Add `context --json` to emit the full context as machine-readable JSON
-- Add `doctor --verbose` to print detailed per-check reasoning alongside pass/fail
 - Add `export --explain` to annotate each exported variable with its source
   (adapter or llmenv introspection)
 - Add `sync --dry-run` to preview pending config changes without committing
@@ -45,6 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   quick-reference table
 - Expand `doctor` entry in `commands.md` to list the token-efficiency settings
   it checks
+
+### Fixed
+
+- Fix `edit` command allowing paths outside the config root via `..` traversal;
+  the target path is now canonicalized and validated before opening
+- Fix `edit` command ignoring arguments in `$EDITOR` (e.g. `code --wait`);
+  the editor value is now split on whitespace before invoking
+- Fix `validate` not checking `enable_bundles` references in project-scoped
+  config; unknown bundle names now report an error regardless of scope type
+- Fix `plugin-sync` silently succeeding when a configured plugin is absent from
+  the marketplace manifest after sync; it now prints a user-visible error and
+  exits non-zero
+- Fix `status` listing commands and `doctor --all` incorrectly classifying MCPs,
+  bundles, and plugins as orphaned when their `when:` tags are emitted only by
+  project scopes; the emitted-tag set now includes project-scope active tags
 
 ## [2.0.4] - 2026-06-16
 
