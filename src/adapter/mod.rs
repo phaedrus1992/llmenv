@@ -43,8 +43,13 @@ pub trait AgentAdapter {
 
     /// Format injected hook context in the engine's native hook-output shape so
     /// the agent runtime adds it to the model's context. Empty input returns an
-    /// empty string, which suppresses any output. `hook_event_name` is the
-    /// event name from the hook payload (e.g. `"SessionStart"`) and must be
-    /// echoed back in the output for runtimes that validate it.
+    /// empty string, which suppresses any output.
+    ///
+    /// # Arguments
+    /// * `hook_event_name` — the event name from the hook payload (e.g.
+    ///   `"SessionStart"`), echoed back as `hookEventName` inside
+    ///   `hookSpecificOutput` for runtimes that validate it.
+    /// * `text` — the injected memory context, placed as `additionalContext`
+    ///   inside `hookSpecificOutput`.
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String;
 }

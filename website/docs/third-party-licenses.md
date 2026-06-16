@@ -3299,7 +3299,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 1.0.0-rc1](https://github.com/phaedrus1992/llmenv)
+- [llmenv 1.0.12](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3327,9 +3327,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [anstream 0.6.21](https://github.com/rust-cli/anstyle.git)
 - [anstream 1.0.0](https://github.com/rust-cli/anstyle.git)
-- [anstyle-parse 0.2.7](https://github.com/rust-cli/anstyle.git)
 - [anstyle-parse 1.0.0](https://github.com/rust-cli/anstyle.git)
 - [anstyle-query 1.1.5](https://github.com/rust-cli/anstyle.git)
 - [anstyle-wincon 3.0.11](https://github.com/rust-cli/anstyle.git)
@@ -3777,7 +3775,27 @@ Used by:
 - [winapi-i686-pc-windows-gnu 0.4.0](https://github.com/retep998/winapi-rs)
 - [winapi-x86_64-pc-windows-gnu 0.4.0](https://github.com/retep998/winapi-rs)
 - [windows-link 0.2.1](https://github.com/microsoft/windows-rs)
+- [windows-sys 0.52.0](https://github.com/microsoft/windows-rs)
+- [windows-sys 0.60.2](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.61.2](https://github.com/microsoft/windows-rs)
+- [windows-targets 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows-targets 0.53.5](https://github.com/microsoft/windows-rs)
+- [windows_aarch64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_aarch64_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
+- [windows_aarch64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_aarch64_msvc 0.53.1](https://github.com/microsoft/windows-rs)
+- [windows_i686_gnu 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_i686_gnu 0.53.1](https://github.com/microsoft/windows-rs)
+- [windows_i686_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_i686_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
+- [windows_i686_msvc 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_i686_msvc 0.53.1](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_gnu 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_gnu 0.53.1](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_msvc 0.53.1](https://github.com/microsoft/windows-rs)
 
 ```
 MIT License
