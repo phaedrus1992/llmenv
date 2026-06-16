@@ -817,13 +817,11 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
 }
 
 fn validate_var_value(value: &str) -> anyhow::Result<()> {
-    for ch in value.chars() {
-        match ch {
-            '\0' => anyhow::bail!("Variable value contains NUL character"),
-            '\n' => anyhow::bail!("Variable value contains newline character"),
-            '\r' => anyhow::bail!("Variable value contains carriage return character"),
-            _ => {}
-        }
+    if let Some(ch) = value.chars().find(|c| matches!(c, '\0' | '\n' | '\r')) {
+        anyhow::bail!(
+            "variable value contains forbidden control character {:?}",
+            ch
+        );
     }
     Ok(())
 }
@@ -1014,7 +1012,8 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
     }
 
     for (key, value) in vars {
-        validate_var_name(&key)?;
+        validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
+        validate_var_value(&value).with_context(|| format!("variable '{key}': invalid value"))?;
         println!("export {}={}", key, shell_escape(&value));
     }
 

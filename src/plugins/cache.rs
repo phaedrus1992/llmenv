@@ -395,9 +395,21 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
             "marketplace source may not start with '-': {source}"
         ));
     }
-    if source.starts_with("ext::") || source.starts_with("fd::") || source.starts_with("file://") {
+    let lower = source.to_ascii_lowercase();
+    if lower.starts_with("ext::")
+        || lower.starts_with("fd::")
+        || lower.starts_with("file://")
+        || lower.starts_with("file:")
+        || lower.starts_with("http://")
+    {
         return Err(anyhow::anyhow!(
             "marketplace source uses a disallowed git transport: {source}"
+        ));
+    }
+    if let Some(ch) = source.chars().find(|c| matches!(c, '\0' | '\n' | '\r')) {
+        return Err(anyhow::anyhow!(
+            "marketplace source contains disallowed control character {:?}: {source}",
+            ch
         ));
     }
     Ok(())
@@ -878,6 +890,7 @@ mod tests {
     fn reject_unsafe_source_rejects_dangerous_transports() {
         // Valid sources should pass
         assert!(reject_unsafe_source("https://github.com/example/repo.git").is_ok());
+        assert!(reject_unsafe_source("HTTPS://github.com/example/repo.git").is_ok());
         assert!(reject_unsafe_source("git@github.com:example/repo.git").is_ok());
         assert!(reject_unsafe_source("./local/path").is_ok());
 
@@ -887,6 +900,10 @@ mod tests {
         assert!(reject_unsafe_source("fd::https://example.com").is_err());
         assert!(reject_unsafe_source("file:///home/user/.ssh").is_err());
         assert!(reject_unsafe_source("file://local/path").is_err());
+        assert!(reject_unsafe_source("FILE:///path").is_err());
+        assert!(reject_unsafe_source("file:/path").is_err());
+        assert!(reject_unsafe_source("http://insecure.example.com").is_err());
+        assert!(reject_unsafe_source("HTTP://INSECURE.COM").is_err());
     }
 
     /// git_head, git_clone, and git_pull must never block waiting for credential
