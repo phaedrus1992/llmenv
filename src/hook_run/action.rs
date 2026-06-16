@@ -102,33 +102,14 @@ impl Action {
         query: &str,
         chunk: &str,
     ) -> anyhow::Result<String> {
-        match self {
-            Action::RecallBundle(bundle_q) => {
-                debug!(bundle = %bundle_q.bundle, "recalling bundle-scoped memory");
-                client
-                    .call_tool(self.tool_name(), self.arguments(query, chunk))
-                    .await
-                    .map_err(|e| {
-                        warn!(
-                            bundle = %bundle_q.bundle,
-                            error = %e,
-                            "failed to recall bundle memory"
-                        );
-                        e
-                    })
-            }
-            Action::RecallTag(tag_q) => {
-                debug!(tag = %tag_q.tag, "recalling tag-scoped memory");
-                client
-                    .call_tool(self.tool_name(), self.arguments(query, chunk))
-                    .await
-            }
-            _ => {
-                client
-                    .call_tool(self.tool_name(), self.arguments(query, chunk))
-                    .await
-            }
-        }
+        debug!(action = ?self, "dispatching MCP tool call");
+        client
+            .call_tool(self.tool_name(), self.arguments(query, chunk))
+            .await
+            .map_err(|e| {
+                warn!(action = ?self, error = %e, "MCP tool call failed");
+                e
+            })
     }
 }
 

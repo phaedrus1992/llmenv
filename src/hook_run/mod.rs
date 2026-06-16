@@ -42,9 +42,18 @@ pub struct TagRecallQuery {
 /// # Errors
 /// Returns an error if any tag fails [`validate_tag`].
 pub fn tag_recall_queries(tags: &[String]) -> anyhow::Result<Vec<TagRecallQuery>> {
+    if tags.is_empty() {
+        debug!("no tags configured for recall");
+        return Ok(Vec::new());
+    }
+    debug!(tag_count = tags.len(), "building tag recall queries");
     tags.iter()
         .map(|tag| {
-            validate_tag(tag)?;
+            validate_tag(tag).map_err(|e| {
+                warn!(tag = %tag, error = %e, "tag name validation failed");
+                e
+            })?;
+            debug!(tag = %tag, "tag recall query created");
             Ok(TagRecallQuery {
                 tag: tag.clone(),
                 keyword: action::tag_keyword(tag),
