@@ -15,8 +15,8 @@ mod status;
 mod style;
 
 pub use style::{
-    ColorMode, active_marker, doctor_fail, doctor_pass, doctor_warning, inactive_annotation,
-    orphan_annotation, should_use_color,
+    ColorMode, active_marker, doctor_fail, doctor_info, doctor_pass, doctor_warning,
+    inactive_annotation, orphan_annotation, should_use_color,
 };
 
 /// Outcome of comparing the content hash the agent booted with against the hash
@@ -266,6 +266,16 @@ enum Command {
     },
 }
 
+fn run_deprecated_shim(
+    old: &str,
+    new: &str,
+    section: status::StatusSection,
+    use_color: bool,
+) -> anyhow::Result<()> {
+    eprintln!("warning: '{old}' is deprecated; use 'status {new}' instead");
+    status::run_status(Some(section), false, use_color)
+}
+
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -301,28 +311,42 @@ pub fn run() -> anyhow::Result<()> {
             run_context(bundle.as_deref(), why, json, use_color)?;
         }
         Some(Command::ScopeLs) => {
-            eprintln!("warning: 'scope-ls' is deprecated; use 'status scopes' instead");
-            status::run_status(Some(status::StatusSection::Scopes), false, use_color)?;
+            run_deprecated_shim(
+                "scope-ls",
+                "scopes",
+                status::StatusSection::Scopes,
+                use_color,
+            )?;
         }
         Some(Command::TagLs) => {
-            eprintln!("warning: 'tag-ls' is deprecated; use 'status tags' instead");
-            status::run_status(Some(status::StatusSection::Tags), false, use_color)?;
+            run_deprecated_shim("tag-ls", "tags", status::StatusSection::Tags, use_color)?;
         }
         Some(Command::BundleLs) => {
-            eprintln!("warning: 'bundle-ls' is deprecated; use 'status bundles' instead");
-            status::run_status(Some(status::StatusSection::Bundles), false, use_color)?;
+            run_deprecated_shim(
+                "bundle-ls",
+                "bundles",
+                status::StatusSection::Bundles,
+                use_color,
+            )?;
         }
         Some(Command::McpLs) => {
-            eprintln!("warning: 'mcp-ls' is deprecated; use 'status mcps' instead");
-            status::run_status(Some(status::StatusSection::Mcps), false, use_color)?;
+            run_deprecated_shim("mcp-ls", "mcps", status::StatusSection::Mcps, use_color)?;
         }
         Some(Command::MarketplaceLs) => {
-            eprintln!("warning: 'marketplace-ls' is deprecated; use 'status marketplaces' instead");
-            status::run_status(Some(status::StatusSection::Marketplaces), false, use_color)?;
+            run_deprecated_shim(
+                "marketplace-ls",
+                "marketplaces",
+                status::StatusSection::Marketplaces,
+                use_color,
+            )?;
         }
         Some(Command::PluginLs) => {
-            eprintln!("warning: 'plugin-ls' is deprecated; use 'status plugins' instead");
-            status::run_status(Some(status::StatusSection::Plugins), false, use_color)?;
+            run_deprecated_shim(
+                "plugin-ls",
+                "plugins",
+                status::StatusSection::Plugins,
+                use_color,
+            )?;
         }
         Some(Command::PluginSync) => {
             run_plugin_sync()?;
@@ -630,17 +654,26 @@ fn run_export(scope: Option<String>, tag: Option<String>, explain: bool) -> anyh
         tracing::debug!("failed to store ICM tag memory (non-fatal): {e}");
     }
 
-    let bundle_names: Vec<&str> = firing.iter().map(|b| b.name.as_str()).collect();
-    for (key, value) in vars {
-        validate_var_name(&key)?;
-        if explain {
+    if explain {
+        let bundle_list = firing
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (key, value) in vars {
+            validate_var_name(&key)?;
             if key.starts_with("LLMENV_") {
                 println!("# source: llmenv introspection");
             } else {
-                println!("# source: adapter (bundles: {})", bundle_names.join(", "));
+                println!("# source: adapter (bundles: {bundle_list})");
             }
+            println!("export {}={}", key, shell_escape(&value));
         }
-        println!("export {}={}", key, shell_escape(&value));
+    } else {
+        for (key, value) in vars {
+            validate_var_name(&key)?;
+            println!("export {}={}", key, shell_escape(&value));
+        }
     }
 
     Ok(())

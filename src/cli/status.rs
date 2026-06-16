@@ -43,40 +43,29 @@ pub fn run_status(
 
 fn run_status_overview(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
-    match Config::load(&config_path) {
-        Ok(config) => {
-            eprintln!(
-                "{} Configuration loaded from {}",
-                super::doctor_pass(use_color),
-                config_path.display()
-            );
-            eprintln!("  Scopes:");
-            eprintln!("    Network: {}", config.scope.network.len());
-            eprintln!("    Host: {}", config.scope.host.len());
-            eprintln!("    User: {}", config.scope.user.len());
-            let env = crate::scope::matcher::Env::detect();
-            let active = crate::scope::evaluate(&config, &env);
-            if let Some(proj) = active.scopes.iter().find(|s| s.kind == "project") {
-                let label = proj.name.as_deref().unwrap_or(&proj.id);
-                if let Some(desc) = &proj.description {
-                    eprintln!("    Project: {label} — {desc}");
-                } else {
-                    eprintln!("    Project: {label}");
-                }
-            } else {
-                eprintln!("    Project: (none)");
-            }
-            eprintln!("  Bundles: {}", config.bundle.len());
+    let config = Config::load(&config_path)?;
+    eprintln!(
+        "{} Configuration loaded from {}",
+        super::doctor_pass(use_color),
+        config_path.display()
+    );
+    eprintln!("  Scopes:");
+    eprintln!("    Network: {}", config.scope.network.len());
+    eprintln!("    Host: {}", config.scope.host.len());
+    eprintln!("    User: {}", config.scope.user.len());
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    if let Some(proj) = active.scopes.iter().find(|s| s.kind == "project") {
+        let label = proj.name.as_deref().unwrap_or(&proj.id);
+        if let Some(desc) = &proj.description {
+            eprintln!("    Project: {label} — {desc}");
+        } else {
+            eprintln!("    Project: {label}");
         }
-        Err(e) => {
-            eprintln!(
-                "{} Configuration error: {}",
-                super::doctor_fail(use_color),
-                e
-            );
-            return Err(e);
-        }
+    } else {
+        eprintln!("    Project: (none)");
     }
+    eprintln!("  Bundles: {}", config.bundle.len());
     Ok(())
 }
 
@@ -127,6 +116,10 @@ fn run_scope_ls(use_color: bool) -> anyhow::Result<()> {
     }
 
     rows.sort_by(|a, b| a.0.cmp(&b.0));
+    if rows.is_empty() {
+        println!("(none configured)");
+        return Ok(());
+    }
     for (name, is_active, is_orphan) in rows {
         let mark = if is_active {
             super::active_marker(use_color)
@@ -159,6 +152,10 @@ fn run_tag_ls(use_color: bool) -> anyhow::Result<()> {
 
     let mut tags: Vec<String> = universe.into_iter().collect();
     tags.sort();
+    if tags.is_empty() {
+        println!("(none configured)");
+        return Ok(());
+    }
     for tag in tags {
         let is_active = active.tags.contains(&tag);
         let emitted_anywhere = emitted.contains(&tag) || active.tags.contains(&tag);
@@ -209,7 +206,10 @@ fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
         })
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
-
+    if rows.is_empty() {
+        println!("(none configured)");
+        return Ok(());
+    }
     for (name, is_active, is_orphan) in rows {
         let mark = if is_active {
             super::active_marker(use_color)
@@ -296,21 +296,17 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         all_resolved.entry(m.name).or_insert(m.kind);
     }
 
-    let detail_for = |name: &str, fallback: &str| match all_resolved.get(name) {
-        Some(ResolvedKind::Stdio { .. }) => "stdio server".to_string(),
-        Some(ResolvedKind::Remote { transport, .. }) => {
-            format!("{} client", format!("{transport:?}").to_lowercase())
-        }
-        None => fallback.to_string(),
-    };
-
     let mut rows: Vec<(String, bool, bool, String)> = config
         .mcp
         .iter()
         .map(|m| {
             let is_active = m.when.is_empty() || m.when.iter().any(|t| active.tags.contains(t));
             let is_orphan = !m.when.is_empty() && !m.when.iter().any(|t| emitted.contains(t));
-            let detail = detail_for(&m.name, &format!("{:?}", m.transport).to_lowercase());
+            let detail = mcp_kind_detail(
+                &m.name,
+                &format!("{:?}", m.transport).to_lowercase(),
+                &all_resolved,
+            );
             (m.name.clone(), is_active, is_orphan, detail)
         })
         .collect();
@@ -318,21 +314,47 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
     for m in &bundle_mcp_entries {
         let is_active = m.when.is_empty() || m.when.iter().any(|t| active.tags.contains(t));
         let is_orphan = !m.when.is_empty() && !m.when.iter().any(|t| emitted.contains(t));
-        let detail = format!("{} (bundle)", detail_for(&m.name, "stdio server"));
+        let detail = format!(
+            "{} (bundle)",
+            mcp_kind_detail(&m.name, "stdio server", &all_resolved)
+        );
         rows.push((m.name.clone(), is_active, is_orphan, detail));
     }
 
     for mem in &all_memory_ls {
         let is_active = mem.when.is_empty() || mem.when.iter().any(|t| active.tags.contains(t));
         let is_orphan = !mem.when.is_empty() && !mem.when.iter().any(|t| emitted.contains(t));
-        let detail = detail_for(MEMORY_MCP_NAME, "memory");
+        let detail = mcp_kind_detail(MEMORY_MCP_NAME, "memory", &all_resolved);
         let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);
         rows.push((name, is_active, is_orphan, detail));
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
+    print_detail_rows(&rows, use_color);
+    Ok(())
+}
 
+fn mcp_kind_detail(
+    name: &str,
+    fallback: &str,
+    resolved: &std::collections::HashMap<String, crate::mcp::resolve::ResolvedKind>,
+) -> String {
+    use crate::mcp::resolve::ResolvedKind;
+    match resolved.get(name) {
+        Some(ResolvedKind::Stdio { .. }) => "stdio server".to_string(),
+        Some(ResolvedKind::Remote { transport, .. }) => {
+            format!("{} client", format!("{transport:?}").to_lowercase())
+        }
+        None => fallback.to_string(),
+    }
+}
+
+fn print_detail_rows(rows: &[(String, bool, bool, String)], use_color: bool) {
+    if rows.is_empty() {
+        println!("(none configured)");
+        return;
+    }
     for (name, is_active, is_orphan, detail) in rows {
-        let mark = if is_active {
+        let mark = if *is_active {
             super::active_marker(use_color)
         } else {
             " ".to_string()
@@ -342,10 +364,9 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
             mark,
             name,
             detail,
-            super::annotate(is_active, is_orphan, use_color)
+            super::annotate(*is_active, *is_orphan, use_color)
         );
     }
-    Ok(())
 }
 
 fn run_marketplace_ls(use_color: bool) -> anyhow::Result<()> {
@@ -386,21 +407,7 @@ fn run_marketplace_ls(use_color: bool) -> anyhow::Result<()> {
         })
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (name, is_active, is_orphan, kind) in rows {
-        let mark = if is_active {
-            super::active_marker(use_color)
-        } else {
-            " ".to_string()
-        };
-        println!(
-            "{} {} ({}){}",
-            mark,
-            name,
-            kind,
-            super::annotate(is_active, is_orphan, use_color)
-        );
-    }
+    print_detail_rows(&rows, use_color);
     Ok(())
 }
 
@@ -424,7 +431,10 @@ fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
         }
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
-
+    if rows.is_empty() {
+        println!("(none configured)");
+        return Ok(());
+    }
     for (name, is_active, is_orphan, collection) in rows {
         let mark = if is_active {
             super::active_marker(use_color)

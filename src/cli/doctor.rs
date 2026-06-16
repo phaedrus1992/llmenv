@@ -11,7 +11,7 @@ pub(super) fn run_doctor_token_efficiency(
     pass: &str,
     warn: &str,
 ) {
-    let info = if use_color { "ℹ" } else { "i" };
+    let info = super::doctor_info(use_color);
     eprintln!();
     eprintln!("Token-efficiency checks:");
 
