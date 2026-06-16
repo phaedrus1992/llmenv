@@ -14,14 +14,7 @@ pub enum StatusSection {
     All,
 }
 
-pub fn run_status(
-    section: Option<StatusSection>,
-    json: bool,
-    use_color: bool,
-) -> anyhow::Result<()> {
-    if json {
-        anyhow::bail!("--json is not yet implemented");
-    }
+pub fn run_status(section: Option<StatusSection>, use_color: bool) -> anyhow::Result<()> {
     match section {
         Some(StatusSection::Scopes) => run_scope_ls(use_color),
         Some(StatusSection::Tags) => run_tag_ls(use_color),
@@ -182,7 +175,8 @@ fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
 
-    let emitted = super::all_emitted_tags(&config);
+    let mut emitted = super::all_emitted_tags(&config);
+    emitted.extend(active.tags.iter().cloned());
     let marker_enabled = super::marker_enabled_bundle_names(&active);
 
     let firing_names: HashSet<&str> = config
@@ -237,7 +231,8 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
-    let emitted = super::all_emitted_tags(&config);
+    let mut emitted = super::all_emitted_tags(&config);
+    emitted.extend(active.tags.iter().cloned());
 
     let manually_enabled: std::collections::HashSet<&str> = active
         .scopes
@@ -376,7 +371,8 @@ fn run_marketplace_ls(use_color: bool) -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
-    let emitted = super::all_emitted_tags(&config);
+    let mut emitted = super::all_emitted_tags(&config);
+    emitted.extend(active.tags.iter().cloned());
 
     let active_refs: std::collections::HashSet<&str> = config
         .plugin_collection
@@ -418,7 +414,8 @@ fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
-    let emitted = super::all_emitted_tags(&config);
+    let mut emitted = super::all_emitted_tags(&config);
+    emitted.extend(active.tags.iter().cloned());
 
     let mut rows: Vec<(String, bool, bool, String)> = Vec::new();
     for collection in &config.plugin_collection {

@@ -125,9 +125,6 @@ enum Command {
         /// Check all scopes and bundles for orphans, not just the active context
         #[arg(long)]
         all: bool,
-        /// Show additional diagnostic output
-        #[arg(long)]
-        verbose: bool,
     },
     /// Export environment variables for a scope
     Export {
@@ -161,9 +158,6 @@ enum Command {
         /// Show only a specific section (scopes, tags, bundles, mcps, plugins, marketplaces)
         #[arg(value_enum)]
         section: Option<status::StatusSection>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Show the current resolved environment and active scopes
     Context {
@@ -173,9 +167,6 @@ enum Command {
         /// Show activation reasons for each scope and bundle
         #[arg(long)]
         why: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// List available scopes (deprecated: use 'status scopes')
     #[command(alias = "scopes", hide = true)]
@@ -273,7 +264,7 @@ fn run_deprecated_shim(
     use_color: bool,
 ) -> anyhow::Result<()> {
     eprintln!("warning: '{old}' is deprecated; use 'status {new}' instead");
-    status::run_status(Some(section), false, use_color)
+    status::run_status(Some(section), use_color)
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -285,8 +276,8 @@ pub fn run() -> anyhow::Result<()> {
     let use_color = should_use_color(Some(cli.color.to_mode()), std::io::stdout().is_terminal());
 
     match cli.command {
-        Some(Command::Doctor { gc, all, verbose }) => {
-            doctor::run_doctor(gc, all, verbose, use_color)?;
+        Some(Command::Doctor { gc, all }) => {
+            doctor::run_doctor(gc, all, use_color)?;
         }
         Some(Command::Export {
             scope,
@@ -304,11 +295,11 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Init { path, repo }) => {
             run_init(path, repo)?;
         }
-        Some(Command::Status { section, json }) => {
-            status::run_status(section, json, use_color)?;
+        Some(Command::Status { section }) => {
+            status::run_status(section, use_color)?;
         }
-        Some(Command::Context { bundle, why, json }) => {
-            run_context(bundle.as_deref(), why, json, use_color)?;
+        Some(Command::Context { bundle, why }) => {
+            run_context(bundle.as_deref(), why, use_color)?;
         }
         Some(Command::ScopeLs) => {
             run_deprecated_shim(
@@ -1837,15 +1828,7 @@ fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-fn run_context(
-    bundle_filter: Option<&str>,
-    why: bool,
-    json: bool,
-    use_color: bool,
-) -> anyhow::Result<()> {
-    if json {
-        anyhow::bail!("--json is not yet implemented");
-    }
+fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config_dir = config_path
         .parent()
@@ -2152,17 +2135,17 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         .map(|(mkt, plugin)| (mkt.to_string(), plugin.to_string()))
         .collect();
 
+    let mut missing_plugins: Vec<String> = Vec::new();
     for (mkt_name, plugin_name) in &all_plugin_refs {
         let mkt_path = crate::plugins::cache::marketplace_path(&cache_root, mkt_name);
         let plugins = crate::plugins::cache::read_marketplace_plugins(&mkt_path)
             .with_context(|| format!("reading marketplace manifest for '{mkt_name}'"))?;
         let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
-            tracing::warn!(
-                plugin = %plugin_name,
-                marketplace = %mkt_name,
-                "plugin not found in freshly-synced marketplace manifest — \
-                 verify the plugin name matches an entry in the marketplace"
+            eprintln!(
+                "✗ {plugin_name}@{mkt_name}: not found in marketplace manifest after sync — \
+                 check that the plugin name matches an entry in {mkt_name}"
             );
+            missing_plugins.push(format!("{plugin_name}@{mkt_name}"));
             continue;
         };
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
@@ -2183,6 +2166,13 @@ fn run_plugin_sync() -> anyhow::Result<()> {
             mkt_name,
             state.install_location.display(),
             head
+        );
+    }
+    if !missing_plugins.is_empty() {
+        anyhow::bail!(
+            "{} plugin(s) not found after sync: {}",
+            missing_plugins.len(),
+            missing_plugins.join(", ")
         );
     }
     Ok(())
@@ -2230,6 +2220,21 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
         if !seen_names.insert(bundle.name.as_str()) {
             eprintln!("{fail} duplicate bundle name: {}", bundle.name);
             valid = false;
+        }
+    }
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    for scope in &active.scopes {
+        if scope.kind != "project" {
+            continue;
+        }
+        for bundle_name in &scope.enable_bundles {
+            if !seen_names.contains(bundle_name.as_str()) {
+                eprintln!(
+                    "{fail} .llmenv.yaml enable_bundles references unknown bundle: {bundle_name}"
+                );
+                valid = false;
+            }
         }
     }
     if valid {

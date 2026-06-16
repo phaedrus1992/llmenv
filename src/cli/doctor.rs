@@ -68,15 +68,7 @@ pub(super) fn run_doctor_token_efficiency(
     }
 }
 
-pub(super) fn run_doctor(
-    gc: bool,
-    all: bool,
-    verbose: bool,
-    use_color: bool,
-) -> anyhow::Result<()> {
-    if verbose {
-        anyhow::bail!("--verbose is not yet implemented");
-    }
+pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
 
@@ -170,7 +162,8 @@ pub(super) fn run_doctor(
         // Orphan detection
         let env = crate::scope::matcher::Env::detect();
         let active = crate::scope::evaluate(&config, &env);
-        let emitted = super::all_emitted_tags(&config);
+        let mut emitted = super::all_emitted_tags(&config);
+        emitted.extend(active.tags.iter().cloned());
         let consumed = super::all_consumed_tags(&config);
         let marker_enabled = super::marker_enabled_bundle_names(&active);
 
