@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.0.5] - 2026-06-18
+
 ### Added
 
 - Fold six `*-ls` listing commands into `status` subcommands: `status bundles`,
