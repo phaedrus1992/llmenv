@@ -102,6 +102,15 @@ pub fn doctor_fail(use_color: bool) -> String {
     paint("✗", AnsiColor::Red, use_color)
 }
 
+/// Format a doctor "info" symbol (ℹ), falling back to "i" when color is disabled.
+pub fn doctor_info(use_color: bool) -> String {
+    if use_color {
+        "ℹ".to_string()
+    } else {
+        "i".to_string()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
