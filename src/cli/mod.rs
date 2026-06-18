@@ -10,11 +10,13 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod doctor;
+mod status;
 mod style;
 
 pub use style::{
-    ColorMode, active_marker, doctor_fail, doctor_pass, doctor_warning, inactive_annotation,
-    orphan_annotation, should_use_color,
+    ColorMode, active_marker, doctor_fail, doctor_info, doctor_pass, doctor_warning,
+    inactive_annotation, orphan_annotation, should_use_color,
 };
 
 /// Outcome of comparing the content hash the agent booted with against the hash
@@ -120,6 +122,9 @@ enum Command {
         /// Run cache garbage collection after diagnostics
         #[arg(long)]
         gc: bool,
+        /// Check all scopes and bundles for orphans, not just the active context
+        #[arg(long)]
+        all: bool,
     },
     /// Export environment variables for a scope
     Export {
@@ -129,6 +134,9 @@ enum Command {
         /// Tag filter (optional)
         #[arg(short, long)]
         tag: Option<String>,
+        /// Annotate each variable with its source bundle/scope
+        #[arg(long)]
+        explain: bool,
     },
     /// Regenerate the materialized config without exporting shell variables
     Regenerate,
@@ -146,37 +154,68 @@ enum Command {
         repo: Option<String>,
     },
     /// Show current environment status
-    Status,
+    Status {
+        /// Show only a specific section (scopes, tags, bundles, mcps, plugins, marketplaces)
+        #[arg(value_enum)]
+        section: Option<status::StatusSection>,
+    },
     /// Show the current resolved environment and active scopes
-    Context,
-    /// List available scopes
-    #[command(alias = "scopes")]
+    Context {
+        /// Filter to a specific bundle name
+        #[arg(long)]
+        bundle: Option<String>,
+        /// Show activation reasons for each scope and bundle
+        #[arg(long)]
+        why: bool,
+    },
+    /// List available scopes (deprecated: use 'status scopes')
+    #[command(alias = "scopes", hide = true)]
     ScopeLs,
-    /// List available tags
-    #[command(alias = "tags")]
+    /// List available tags (deprecated: use 'status tags')
+    #[command(alias = "tags", hide = true)]
     TagLs,
-    /// List available bundles
-    #[command(alias = "bundles")]
+    /// List available bundles (deprecated: use 'status bundles')
+    #[command(alias = "bundles", hide = true)]
     BundleLs,
-    /// List selected MCP servers with their resolved role and transport
-    #[command(name = "mcp-ls", alias = "mcps")]
+    /// List selected MCP servers (deprecated: use 'status mcps')
+    #[command(name = "mcp-ls", alias = "mcps", hide = true)]
     McpLs,
-    /// List configured plugin marketplaces, marking those referenced by selected plugins
-    #[command(name = "marketplace-ls", alias = "marketplaces")]
+    /// List configured plugin marketplaces (deprecated: use 'status marketplaces')
+    #[command(name = "marketplace-ls", alias = "marketplaces", hide = true)]
     MarketplaceLs,
-    /// List configured plugins, marking those selected by the active scope
-    #[command(name = "plugin-ls", alias = "plugins")]
+    /// List configured plugins (deprecated: use 'status plugins')
+    #[command(name = "plugin-ls", alias = "plugins", hide = true)]
     PluginLs,
     /// Sync plugin marketplaces into the cache (clone or fast-forward)
     PluginSync,
     /// Sync config with GitHub (git add, commit, push)
-    Sync,
+    Sync {
+        /// Preview what would be committed/pushed without doing it
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Warn if the booted agent config has drifted from the current config.
     ///
     /// Invoked by the Claude Code SessionStart hook: compares the basename of
     /// `CLAUDE_CONFIG_DIR` (the content hash the agent booted with) against the
     /// folder llmenv would materialize now. On drift it prints a restart hint.
-    CheckStale,
+    CheckStale {
+        /// Re-export automatically when drift is detected
+        #[arg(long)]
+        auto_fix: bool,
+    },
+    /// Validate configuration syntax and wiring without running diagnostics
+    Validate,
+    /// Open configuration or a named bundle file in $EDITOR
+    Edit {
+        /// Bundle name to edit (defaults to main config.yaml)
+        bundle: Option<String>,
+    },
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
     /// Emit source config paths into agent context via SessionStart (#289).
     ///
     /// Invoked by the auto-registered SessionStart hook. Outputs a JSON
@@ -218,6 +257,16 @@ enum Command {
     },
 }
 
+fn run_deprecated_shim(
+    old: &str,
+    new: &str,
+    section: status::StatusSection,
+    use_color: bool,
+) -> anyhow::Result<()> {
+    eprintln!("warning: '{old}' is deprecated; use 'status {new}' instead");
+    status::run_status(Some(section), use_color)
+}
+
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -227,11 +276,15 @@ pub fn run() -> anyhow::Result<()> {
     let use_color = should_use_color(Some(cli.color.to_mode()), std::io::stdout().is_terminal());
 
     match cli.command {
-        Some(Command::Doctor { gc }) => {
-            run_doctor(gc, use_color)?;
+        Some(Command::Doctor { gc, all }) => {
+            doctor::run_doctor(gc, all, use_color)?;
         }
-        Some(Command::Export { scope, tag }) => {
-            run_export(scope, tag)?;
+        Some(Command::Export {
+            scope,
+            tag,
+            explain,
+        }) => {
+            run_export(scope, tag, explain)?;
         }
         Some(Command::Regenerate) => {
             run_regenerate()?;
@@ -242,38 +295,58 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Init { path, repo }) => {
             run_init(path, repo)?;
         }
-        Some(Command::Status) => {
-            run_status(use_color)?;
+        Some(Command::Status { section }) => {
+            status::run_status(section, use_color)?;
         }
-        Some(Command::Context) => {
-            run_context(use_color)?;
+        Some(Command::Context { bundle, why }) => {
+            run_context(bundle.as_deref(), why, use_color)?;
         }
         Some(Command::ScopeLs) => {
-            run_scope_ls(use_color)?;
+            run_deprecated_shim(
+                "scope-ls",
+                "scopes",
+                status::StatusSection::Scopes,
+                use_color,
+            )?;
         }
         Some(Command::TagLs) => {
-            run_tag_ls(use_color)?;
+            run_deprecated_shim("tag-ls", "tags", status::StatusSection::Tags, use_color)?;
         }
         Some(Command::BundleLs) => {
-            run_bundle_ls(use_color)?;
+            run_deprecated_shim(
+                "bundle-ls",
+                "bundles",
+                status::StatusSection::Bundles,
+                use_color,
+            )?;
         }
         Some(Command::McpLs) => {
-            run_mcp_ls(use_color)?;
+            run_deprecated_shim("mcp-ls", "mcps", status::StatusSection::Mcps, use_color)?;
         }
         Some(Command::MarketplaceLs) => {
-            run_marketplace_ls(use_color)?;
+            run_deprecated_shim(
+                "marketplace-ls",
+                "marketplaces",
+                status::StatusSection::Marketplaces,
+                use_color,
+            )?;
         }
         Some(Command::PluginLs) => {
-            run_plugin_ls(use_color)?;
+            run_deprecated_shim(
+                "plugin-ls",
+                "plugins",
+                status::StatusSection::Plugins,
+                use_color,
+            )?;
         }
         Some(Command::PluginSync) => {
             run_plugin_sync()?;
         }
-        Some(Command::Sync) => {
-            run_sync()?;
+        Some(Command::Sync { dry_run }) => {
+            run_sync(dry_run)?;
         }
-        Some(Command::CheckStale) => {
-            run_check_stale(use_color)?;
+        Some(Command::CheckStale { auto_fix }) => {
+            run_check_stale(use_color, auto_fix)?;
         }
         Some(Command::ConfigContext) => {
             run_config_context();
@@ -294,446 +367,18 @@ pub fn run() -> anyhow::Result<()> {
         }) => {
             run_prune(all, older_than, dry_run)?;
         }
+        Some(Command::Validate) => {
+            run_validate(use_color)?;
+        }
+        Some(Command::Edit { bundle }) => {
+            run_edit(bundle)?;
+        }
+        Some(Command::Completions { shell }) => {
+            run_completions(shell)?;
+        }
         None => {
             eprintln!("Usage: llmenv [COMMAND]");
             eprintln!("Run 'llmenv --help' for more information.");
-        }
-    }
-
-    Ok(())
-}
-
-/// Token-efficiency checks emitted as part of `llmenv doctor`.
-///
-/// Warns on env-var patterns that degrade context efficiency. Prints validated
-/// numeric values only; raw env var strings are never echoed to the terminal to
-/// prevent terminal escape sequence injection from crafted env values.
-fn run_doctor_token_efficiency(config: &Config, use_color: bool, pass: &str, warn: &str) {
-    let info = if use_color { "\u{2139}" } else { "i" };
-    eprintln!();
-    eprintln!("Token-efficiency checks:");
-
-    match std::env::var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") {
-        Ok(val) => match val.parse::<u32>() {
-            Ok(pct) if pct <= 70 => eprintln!("{pass} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct}"),
-            Ok(pct) => eprintln!(
-                "{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct} (recommend ≤70 for PreCompact cleanup)"
-            ),
-            Err(_) => {
-                eprintln!("{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE has invalid (non-numeric) value")
-            }
-        },
-        Err(_) => eprintln!(
-            "{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE not set (recommend 50 for PreCompact headroom)"
-        ),
-    }
-
-    match std::env::var("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
-        Ok(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
-        Ok(Err(_)) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value"),
-        Err(_) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
-    }
-
-    match std::env::var("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
-        Ok(Ok(n)) => eprintln!("{pass} MAX_MCP_OUTPUT_TOKENS={n}"),
-        Ok(Err(_)) => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS has invalid (non-numeric) value"),
-        Err(_) => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
-    }
-
-    match std::env::var("ENABLE_PROMPT_CACHING_1H") {
-        Ok(val) if val.eq_ignore_ascii_case("true") || val == "1" => {
-            eprintln!("{pass} ENABLE_PROMPT_CACHING_1H=true (1h cache TTL enabled)")
-        }
-        Ok(_) => eprintln!("{warn} ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)"),
-        Err(_) => {
-            eprintln!("{warn} ENABLE_PROMPT_CACHING_1H not set (recommend true for 1h cache reuse)")
-        }
-    }
-
-    match std::env::var("CLAUDE_CODE_SUBAGENT_MODEL") {
-        Ok(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
-        Err(_) => {
-            eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL not set (default: claude-sonnet-4-6)")
-        }
-    }
-
-    let has_context_mode = config.mcp.iter().any(|m| m.name.contains("context-mode"));
-    if has_context_mode {
-        eprintln!("{pass} context-mode MCP server is configured");
-    } else {
-        eprintln!("{warn} context-mode MCP not configured (load-bearing for token efficiency)");
-        eprintln!("{warn}   → Install context-mode plugin and add to mcp: section in config.yaml");
-    }
-}
-
-/// Validates adapter wiring: file layout, config parse, no silent breakage.
-fn run_doctor(gc: bool, use_color: bool) -> anyhow::Result<()> {
-    let pass = doctor_pass(use_color);
-    let warn = doctor_warning(use_color);
-
-    eprintln!("Running llmenv doctor...");
-
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
-    eprintln!("{pass} Configuration loaded from {}", config_path.display());
-
-    // Check that config parses
-    eprintln!("{pass} Config is valid YAML");
-
-    // Check cache directory is writable
-    let cache_dir = expand_tilde(&config.cache.cache_dir)?;
-    std::fs::create_dir_all(&cache_dir).context("cache directory not writable")?;
-    eprintln!(
-        "{pass} Cache directory is writable: {}",
-        cache_dir.display()
-    );
-
-    // Report the active cache layout so `doctor` explains the folder shape on
-    // disk (#246). loose → shape-addressed; normal → <version_mm>/<shape>;
-    // strict → content-addressed folders.
-    match config.cache.hashing {
-        crate::config::HashingMode::Loose => {
-            eprintln!("{pass} Cache hashing: loose (folder: <shape>)");
-        }
-        crate::config::HashingMode::Normal => {
-            eprintln!(
-                "{pass} Cache hashing: normal (folder: {}/<shape>)",
-                crate::materialize::cache::version_mm()
-            );
-        }
-        crate::config::HashingMode::Strict => {
-            eprintln!("{pass} Cache hashing: strict (content-addressed folders)");
-        }
-    }
-
-    // Check for version skew: warn if running binary differs from the binary
-    // that built the cached materializations (#173). Materialized folders live
-    // under `<cache_dir>/<adapter>/`, so scan there — not the cache root, whose
-    // children are adapter dirs and `marketplaces/`. Strict folders are
-    // `{VERSION_TAG}-{hash}`; normal generation dirs are the bare `version_mm`
-    // (e.g. `1.2`). Loose mode has no version axis — its folders are bare shape
-    // digests with no version meaning, so the skew check is skipped entirely
-    // (a shape would be misread as an unknown "version").
-    let adapter_cache = cache_dir.join(ClaudeCodeAdapter.name());
-    let skew_relevant = !matches!(config.cache.hashing, crate::config::HashingMode::Loose);
-    if let (true, Ok(entries)) = (skew_relevant, std::fs::read_dir(&adapter_cache)) {
-        let mut cached_versions: Vec<String> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if dir_name.ends_with(".tmp") {
-                continue; // orphaned staging dir, not a materialization
-            }
-            // Strict folder: split the content hash off the right to recover the
-            // version prefix (preserving dashes in a semver prerelease). Version
-            // folder: the whole name is the version. Distinguish by whether the
-            // tail after the last `-` looks like a 64-hex content hash.
-            let version = match dir_name.rsplit_once('-') {
-                Some((prefix, tail)) if is_content_hash(tail) => prefix.to_string(),
-                _ => dir_name.to_string(),
-            };
-            cached_versions.push(version);
-        }
-        cached_versions.sort();
-        cached_versions.dedup();
-        // Skew if no cached folder was built by *this* binary. A normal-mode
-        // generation dir (e.g. `1.2`) matches when it equals the current
-        // `version_mm`.
-        let version_folder = crate::materialize::cache::version_mm();
-        let current_built = |v: &String| v == VERSION_TAG || *v == version_folder;
-        if !cached_versions.is_empty() {
-            let cached_versions_str = cached_versions.join(", ");
-            if !cached_versions.iter().any(current_built) {
-                eprintln!(
-                    "{warn} Version skew detected: running llmenv {} but cache has versions [{}]",
-                    VERSION_TAG, cached_versions_str
-                );
-                eprintln!("{warn}   → Fix: cargo install --path . --force");
-            }
-        }
-    }
-
-    // Check git remote is reachable (if config_dir is a git repo)
-    let config_dir = paths::config_dir()?;
-    if is_git_repo(&config_dir) {
-        match check_git_remote(&config_dir) {
-            Ok(remote) => {
-                let safe_url = crate::git::sanitize_git_url(&remote);
-                eprintln!("{pass} Git remote reachable: {}", safe_url);
-            }
-            Err(e) => eprintln!("{warn} Git remote check failed: {}", e),
-        }
-    } else {
-        eprintln!("{warn} Config directory is not a git repo");
-    }
-
-    // Orphan detection: anything declared but unreachable from the
-    // scope→tag→bundle wiring is dead config. Use current env so marker-only
-    // signals (tags/enable_bundles from an active marker) count as live.
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-    let emitted = all_emitted_tags(&config);
-    let consumed = all_consumed_tags(&config);
-    let marker_enabled = marker_enabled_bundle_names(&active);
-
-    let mut orphan_count: usize = 0;
-    for s in &config.scope.network {
-        if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!(
-                "{warn} orphan scope network:{}: no bundle consumes its tags",
-                s.id
-            );
-            orphan_count += 1;
-        }
-    }
-    for s in &config.scope.host {
-        if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!(
-                "{warn} orphan scope host:{}: no bundle consumes its tags",
-                s.id
-            );
-            orphan_count += 1;
-        }
-    }
-    for s in &config.scope.user {
-        if !s.tags.iter().any(|t| consumed.contains(t)) {
-            eprintln!(
-                "{warn} orphan scope user:{}: no bundle consumes its tags",
-                s.id
-            );
-            orphan_count += 1;
-        }
-    }
-    // Project scopes are now discovered dynamically from .llmenv.yaml
-    // and do not appear in static config; orphan checking is N/A.
-    // Surface anything the active marker file did wrong:
-    //   - unknown fields (typos, stale schema) so the user can clean them up
-    //   - enable_bundles names that don't exist (silent no-op footgun)
-    let configured_bundle_names: std::collections::HashSet<&str> =
-        config.bundle.iter().map(|b| b.name.as_str()).collect();
-    for scope in &active.scopes {
-        if scope.kind != "project" {
-            continue;
-        }
-        for field in &scope.unknown_fields {
-            eprintln!("{warn} unknown field in .llmenv.yaml: {field}");
-            orphan_count += 1;
-        }
-        for bundle_name in &scope.enable_bundles {
-            if !configured_bundle_names.contains(bundle_name.as_str()) {
-                eprintln!(
-                    "{warn} .llmenv.yaml enable_bundles references unknown bundle: {bundle_name}"
-                );
-                orphan_count += 1;
-            }
-        }
-    }
-    for b in &config.bundle {
-        let has_emitted_tag = b.when.iter().any(|t| emitted.contains(t));
-        let looks_marker = looks_marker_driven(&b.name, b);
-        if !has_emitted_tag && !marker_enabled.contains(&b.name) && !looks_marker {
-            eprintln!("{warn} orphan bundle {}: no scope emits its tags", b.name);
-            orphan_count += 1;
-        }
-    }
-    for m in &config.mcp {
-        let has_emitted_tag = m.when.iter().any(|t| emitted.contains(t));
-        let looks_marker = m.when.iter().any(|t| tag_looks_marker_sourced(t));
-        if !has_emitted_tag && !looks_marker {
-            eprintln!("{warn} orphan mcp {}: no scope emits its tags", m.name);
-            orphan_count += 1;
-        }
-    }
-    // Build merged host table (top-level + bundle-contributed) for server_host checks.
-    let doctor_firing: Vec<&Bundle> = {
-        let manually: BTreeSet<&str> = active
-            .scopes
-            .iter()
-            .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-            .collect();
-        config
-            .bundle
-            .iter()
-            .filter(|b| {
-                b.when.iter().any(|bt| active.tags.contains(bt))
-                    || manually.contains(b.name.as_str())
-            })
-            .collect()
-    };
-    let doctor_bundle_caps = {
-        let refs = build_bundle_refs(&config_dir, &active, &doctor_firing);
-        if refs.is_empty() {
-            crate::config::Capabilities::default()
-        } else {
-            crate::merge::merge(&config.capabilities, &config.native, &refs)
-                .unwrap_or_default()
-                .capabilities
-        }
-    };
-    let mut merged_host_for_doctor = doctor_bundle_caps.host.clone();
-    for (k, v) in &config.host {
-        merged_host_for_doctor.insert(k.clone(), v.clone());
-    }
-
-    // Check top-level memory entries.
-    if let Some(features) = &config.features {
-        for mem in &features.memory {
-            let has_emitted_tag = mem.when.iter().any(|t| emitted.contains(t));
-            if !has_emitted_tag {
-                eprintln!(
-                    "{warn} orphan memory (server_host '{}'): no scope emits its tags",
-                    mem.server_host
-                );
-                orphan_count += 1;
-            }
-            if !merged_host_for_doctor.contains_key(&mem.server_host) {
-                eprintln!(
-                    "{warn} memory: server_host '{}' has no entry in the host: table",
-                    mem.server_host
-                );
-                orphan_count += 1;
-            }
-        }
-    }
-    // Check bundle-contributed memory entries.
-    if let Some(features) = &doctor_bundle_caps.features {
-        for mem in &features.memory {
-            let has_emitted_tag = mem.when.iter().any(|t| emitted.contains(t));
-            if !has_emitted_tag {
-                eprintln!(
-                    "{warn} orphan bundle memory (server_host '{}'): no scope emits its tags",
-                    mem.server_host
-                );
-                orphan_count += 1;
-            }
-            if !merged_host_for_doctor.contains_key(&mem.server_host) {
-                eprintln!(
-                    "{warn} bundle memory: server_host '{}' has no entry in host: table",
-                    mem.server_host
-                );
-                orphan_count += 1;
-            }
-        }
-    }
-    // Plugin orphans: a collection no scope can select, and a marketplace no
-    // selectable collection references. Mirror the bundle/mcp orphan checks.
-    {
-        use crate::config::split_plugin_ref;
-
-        // Marketplaces referenced by any collection whose tags are emitted
-        // somewhere — anything outside this set can never be pulled in.
-        let mut referenceable: HashSet<&str> = HashSet::new();
-        for c in &config.plugin_collection {
-            let selectable = c.when.iter().any(|t| emitted.contains(t));
-            if !selectable {
-                eprintln!(
-                    "{warn} orphan plugin-collection {}: no scope emits its tags",
-                    c.name
-                );
-                orphan_count += 1;
-            }
-            if selectable {
-                referenceable.extend(
-                    c.plugins
-                        .iter()
-                        .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m)),
-                );
-            }
-        }
-        for m in &config.marketplace {
-            if !referenceable.contains(m.name.as_str()) {
-                eprintln!(
-                    "{warn} orphan marketplace {}: no selectable plugin references it",
-                    m.name
-                );
-                orphan_count += 1;
-            }
-        }
-    }
-
-    // Tag orphans: declared but missing emitter or consumer. Tags that look
-    // marker-sourced (e.g., `lang-*` tags) are not flagged as orphaned, since
-    // they're expected to be available in projects using marker files.
-    let mut tag_universe: HashSet<String> = HashSet::new();
-    tag_universe.extend(emitted.iter().cloned());
-    tag_universe.extend(consumed.iter().cloned());
-    tag_universe.extend(active.tags.iter().cloned());
-    let mut tag_orphans: Vec<String> = tag_universe
-        .into_iter()
-        .filter(|t| {
-            let emitted_anywhere =
-                emitted.contains(t) || active.tags.contains(t) || tag_looks_marker_sourced(t);
-            let consumed_anywhere = consumed.contains(t);
-            !(emitted_anywhere && consumed_anywhere)
-        })
-        .collect();
-    tag_orphans.sort();
-    for t in &tag_orphans {
-        let emitted_anywhere =
-            emitted.contains(t) || active.tags.contains(t) || tag_looks_marker_sourced(t);
-        let reason = if !emitted_anywhere {
-            "no scope emits it"
-        } else {
-            "no bundle consumes it"
-        };
-        eprintln!("{warn} orphan tag {}: {}", t, reason);
-        orphan_count += 1;
-    }
-
-    if orphan_count == 0 {
-        eprintln!("{pass} No orphan scopes/tags/bundles/plugins");
-    } else {
-        eprintln!("{warn} Found {} orphan item(s)", orphan_count);
-    }
-
-    // Lint for ${CLAUDE_PLUGIN_ROOT} in non-plugin hooks (#174)
-    // Check hooks defined in config/bundles that will be materialized to top-level settings.json
-    for hook in &config.capabilities.hooks {
-        if let Some(cmd) = &hook.handler.command
-            && cmd.contains("${CLAUDE_PLUGIN_ROOT}")
-        {
-            eprintln!(
-                "{warn} Hook command references ${{CLAUDE_PLUGIN_ROOT}} but runs in top-level settings.json: {}",
-                cmd
-            );
-            eprintln!(
-                "{warn}   → ${{CLAUDE_PLUGIN_ROOT}} only works in plugin-scoped hooks/hooks.json files"
-            );
-            eprintln!("{warn}   → Move or rewrite this hook in your config or bundle YAML");
-        }
-    }
-
-    run_doctor_token_efficiency(&config, use_color, &pass, &warn);
-
-    eprintln!("{pass} Doctor check complete.");
-
-    if gc {
-        eprintln!("Running garbage collection...");
-        match std::fs::metadata(&cache_dir) {
-            Ok(meta) => {
-                if meta.permissions().readonly() {
-                    eprintln!("{warn} GC failed: cache directory is read-only");
-                } else {
-                    let cache_retention_hours = config.cache.cache_retention_hours.unwrap_or(168);
-                    let retention = std::time::Duration::from_secs(cache_retention_hours * 3600);
-                    match crate::materialize::cache::gc(&cache_dir, retention) {
-                        Ok(report) => {
-                            eprintln!(
-                                "{pass} GC complete: removed {} entries, kept {}",
-                                report.removed.len(),
-                                report.kept
-                            );
-                        }
-                        Err(e) => eprintln!("{warn} GC failed: {}", e),
-                    }
-                }
-            }
-            Err(e) => eprintln!("{warn} GC failed to stat cache directory: {}", e),
         }
     }
 
@@ -826,7 +471,7 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> {
+fn run_export(scope: Option<String>, tag: Option<String>, explain: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let config_dir = paths::config_dir()?;
@@ -1011,10 +656,30 @@ fn run_export(scope: Option<String>, tag: Option<String>) -> anyhow::Result<()> 
         tracing::debug!("failed to store ICM tag memory (non-fatal): {e}");
     }
 
-    for (key, value) in vars {
-        validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-        validate_var_value(&value).with_context(|| format!("variable '{key}': invalid value"))?;
-        println!("export {}={}", key, shell_escape(&value));
+    if explain {
+        let bundle_list = firing
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (key, value) in vars {
+            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
+            validate_var_value(&value)
+                .with_context(|| format!("variable '{key}': invalid value"))?;
+            if key.starts_with("LLMENV_") {
+                println!("# source: llmenv introspection");
+            } else {
+                println!("# source: adapter (bundles: {bundle_list})");
+            }
+            println!("export {}={}", key, shell_escape(&value));
+        }
+    } else {
+        for (key, value) in vars {
+            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
+            validate_var_value(&value)
+                .with_context(|| format!("variable '{key}': invalid value"))?;
+            println!("export {}={}", key, shell_escape(&value));
+        }
     }
 
     Ok(())
@@ -1335,7 +1000,7 @@ fn build_manifest(
 /// too. On drift, prints a restart hint to stderr (the agent lifecycle hook
 /// relays it into the model's context). Resolution mirrors `export` but writes
 /// nothing and skips network marketplace refresh (fastest path).
-fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
+fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
     let booted = std::env::var("CLAUDE_CONFIG_DIR")
         .ok()
         .map(PathBuf::from)
@@ -1381,11 +1046,23 @@ fn run_check_stale(use_color: bool) -> anyhow::Result<()> {
 
     match stale_status(booted.as_deref(), &current) {
         StaleStatus::Stale { .. } => {
-            let warn = doctor_warning(use_color);
-            eprintln!(
-                "{warn} llmenv config changed in place; restart your agent to load it. \
-                 (Bundles, MCP wiring, or plugin paths changed since this session started.)"
-            );
+            if auto_fix {
+                match build_and_materialize(&config, &config_dir, &active, &firing) {
+                    Ok(Some((cache_path, _))) => {
+                        eprintln!("✓ Config refreshed at {}", cache_path.display());
+                    }
+                    Ok(None) => {
+                        eprintln!("✓ Config up-to-date (no content directory)");
+                    }
+                    Err(e) => return Err(e).context("auto-fix: re-materialization failed"),
+                }
+            } else {
+                let warn = doctor_warning(use_color);
+                eprintln!(
+                    "{warn} llmenv config changed in place; restart your agent to load it. \
+                     (Bundles, MCP wiring, or plugin paths changed since this session started.)"
+                );
+            }
         }
         StaleStatus::Fresh => {}
         // No booted hash to compare against: llmenv didn't boot this agent
@@ -2166,43 +1843,7 @@ fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-fn run_status(use_color: bool) -> anyhow::Result<()> {
-    let config_path = paths::config_path()?;
-    match Config::load(&config_path) {
-        Ok(config) => {
-            eprintln!(
-                "{} Configuration loaded from {}",
-                doctor_pass(use_color),
-                config_path.display()
-            );
-            eprintln!("  Scopes:");
-            eprintln!("    Network: {}", config.scope.network.len());
-            eprintln!("    Host: {}", config.scope.host.len());
-            eprintln!("    User: {}", config.scope.user.len());
-            let env = crate::scope::matcher::Env::detect();
-            let active = crate::scope::evaluate(&config, &env);
-            if let Some(proj) = active.scopes.iter().find(|s| s.kind == "project") {
-                let label = proj.name.as_deref().unwrap_or(&proj.id);
-                if let Some(desc) = &proj.description {
-                    eprintln!("    Project: {label} — {desc}");
-                } else {
-                    eprintln!("    Project: {label}");
-                }
-            } else {
-                eprintln!("    Project: (none)");
-            }
-            eprintln!("  Bundles: {}", config.bundle.len());
-        }
-        Err(e) => {
-            eprintln!("{} Configuration error: {}", doctor_fail(use_color), e);
-            return Err(e);
-        }
-    }
-
-    Ok(())
-}
-
-fn run_context(use_color: bool) -> anyhow::Result<()> {
+fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config_dir = config_path
         .parent()
@@ -2228,11 +1869,26 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
         let annotation = annotate(is_active, is_orphan, use_color);
 
         if is_active {
+            let why_str = if why {
+                let matched: Vec<&str> = tags
+                    .iter()
+                    .filter(|t| active.tags.contains(*t))
+                    .map(String::as_str)
+                    .collect();
+                if matched.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [why: tags={}]", matched.join(","))
+                }
+            } else {
+                String::new()
+            };
             active_scopes.push(format!(
-                "{} {}{}",
+                "{} {}{}{}",
                 active_marker(use_color),
                 name,
-                annotation
+                annotation,
+                why_str
             ));
         } else {
             inactive_scopes.push(format!("  {}{}", name, annotation));
@@ -2248,7 +1904,6 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
     for s in &config.scope.user {
         classify("user", &s.id, &s.tags);
     }
-    // Project scopes are discovered dynamically; display them from active scopes if present.
     for scope in &active.scopes {
         if scope.kind == "project" {
             classify("project", &scope.id, &scope.tags);
@@ -2261,7 +1916,6 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
             println!("{}", line);
         }
     }
-
     if !inactive_scopes.is_empty() {
         println!("Inactive");
         for line in inactive_scopes {
@@ -2269,7 +1923,40 @@ fn run_context(use_color: bool) -> anyhow::Result<()> {
         }
     }
 
-    // Render merged manifest for the active context using existing bundle resolution
+    let bundles_to_show: Vec<&Bundle> = if let Some(filter) = bundle_filter {
+        let matching: Vec<&Bundle> = config.bundle.iter().filter(|b| b.name == filter).collect();
+        if matching.is_empty() {
+            anyhow::bail!("bundle not found: {filter}");
+        }
+        matching
+    } else {
+        config.bundle.iter().collect()
+    };
+
+    if !bundles_to_show.is_empty() {
+        println!("\nBundles");
+        for b in &bundles_to_show {
+            let is_active = b.when.iter().any(|tag| active.tags.contains(tag));
+            let mark = if is_active {
+                active_marker(use_color)
+            } else {
+                " ".to_string()
+            };
+            let why_str = if why && is_active {
+                let matched: Vec<&str> = b
+                    .when
+                    .iter()
+                    .filter(|t| active.tags.contains(*t))
+                    .map(String::as_str)
+                    .collect();
+                format!(" [why: tags={}]", matched.join(","))
+            } else {
+                String::new()
+            };
+            println!("{} {}{}", mark, b.name, why_str);
+        }
+    }
+
     let firing: Vec<&Bundle> = config
         .bundle
         .iter()
@@ -2428,402 +2115,6 @@ fn annotate(active: bool, orphan: bool, use_color: bool) -> String {
     }
 }
 
-fn run_scope_ls(use_color: bool) -> anyhow::Result<()> {
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-    let consumed = all_consumed_tags(&config);
-
-    let active_ids: HashSet<(&str, &str)> = active
-        .scopes
-        .iter()
-        .map(|s| (s.kind, s.id.as_str()))
-        .collect();
-
-    let mut rows: Vec<(String, bool, bool)> = Vec::new();
-    let push = |rows: &mut Vec<(String, bool, bool)>,
-                kind: &str,
-                id: &str,
-                tags: &[String],
-                active_ids: &HashSet<(&str, &str)>,
-                consumed: &HashSet<String>| {
-        let is_active = active_ids.contains(&(kind, id));
-        let is_orphan = !tags.iter().any(|t| consumed.contains(t));
-        rows.push((format!("{}:{}", kind, id), is_active, is_orphan));
-    };
-    for s in &config.scope.network {
-        push(&mut rows, "network", &s.id, &s.tags, &active_ids, &consumed);
-    }
-    for s in &config.scope.host {
-        push(&mut rows, "host", &s.id, &s.tags, &active_ids, &consumed);
-    }
-    for s in &config.scope.user {
-        push(&mut rows, "user", &s.id, &s.tags, &active_ids, &consumed);
-    }
-    // Project scopes are discovered dynamically; include active project if present.
-    for scope in &active.scopes {
-        if scope.kind == "project" {
-            push(
-                &mut rows,
-                "project",
-                &scope.id,
-                &scope.tags,
-                &active_ids,
-                &consumed,
-            );
-        }
-    }
-
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, is_active, is_orphan) in rows {
-        let mark = if is_active {
-            active_marker(use_color)
-        } else {
-            " ".to_string()
-        };
-        println!(
-            "{} {}{}",
-            mark,
-            name,
-            annotate(is_active, is_orphan, use_color)
-        );
-    }
-    Ok(())
-}
-
-fn run_tag_ls(use_color: bool) -> anyhow::Result<()> {
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-
-    let emitted = all_emitted_tags(&config);
-    let consumed = all_consumed_tags(&config);
-
-    // Universe: every tag referenced anywhere (scopes static, bundles, and
-    // marker-supplied tags currently in `active.tags`).
-    let mut universe: HashSet<String> = HashSet::new();
-    universe.extend(emitted.iter().cloned());
-    universe.extend(consumed.iter().cloned());
-    universe.extend(active.tags.iter().cloned());
-
-    let mut tags: Vec<String> = universe.into_iter().collect();
-    tags.sort();
-    for tag in tags {
-        let is_active = active.tags.contains(&tag);
-        // Orphan if no scope emits it OR no bundle consumes it. (Marker-only
-        // tags are emitted by virtue of being in `active.tags` even when not
-        // in `emitted`.)
-        let emitted_anywhere = emitted.contains(&tag) || active.tags.contains(&tag);
-        let consumed_anywhere = consumed.contains(&tag);
-        let is_orphan = !(emitted_anywhere && consumed_anywhere);
-        let mark = if is_active {
-            active_marker(use_color)
-        } else {
-            " ".to_string()
-        };
-        println!(
-            "{} {}{}",
-            mark,
-            tag,
-            annotate(is_active, is_orphan, use_color)
-        );
-    }
-    Ok(())
-}
-
-fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-
-    let emitted = all_emitted_tags(&config);
-    let marker_enabled = marker_enabled_bundle_names(&active);
-
-    // A bundle "fires" iff one of its tags intersects active.tags OR its name
-    // appears in any active marker's enable_bundles list. Mirrors the filter
-    // used by run_export.
-    let firing_names: HashSet<&str> = config
-        .bundle
-        .iter()
-        .filter(|b| {
-            b.when.iter().any(|t| active.tags.contains(t))
-                || marker_enabled.contains(b.name.as_str())
-        })
-        .map(|b| b.name.as_str())
-        .collect();
-
-    let mut rows: Vec<(String, bool, bool)> = config
-        .bundle
-        .iter()
-        .map(|b| {
-            let is_active = firing_names.contains(b.name.as_str());
-            // Orphan: no scope emits any of its tags AND it isn't marker-enabled
-            // by any currently active marker. Bundles with no tags at all are
-            // also orphans unless marker-enabled.
-            let has_emitted_tag = b.when.iter().any(|t| emitted.contains(t));
-            let is_orphan = !has_emitted_tag && !marker_enabled.contains(&b.name);
-            (b.name.clone(), is_active, is_orphan)
-        })
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (name, is_active, is_orphan) in rows {
-        let mark = if is_active {
-            active_marker(use_color)
-        } else {
-            " ".to_string()
-        };
-        println!(
-            "{} {}{}",
-            mark,
-            name,
-            annotate(is_active, is_orphan, use_color)
-        );
-    }
-    Ok(())
-}
-
-/// List configured MCP servers, marking those selected by the active scope and
-/// annotating each with its resolved transport for this host. The memory
-/// backend is listed too (as `icm`). Bundle-declared MCPs are listed with a
-/// `bundle` source tag. Orphans (no scope emits any of their tags) are flagged
-/// like bundles.
-fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
-    use crate::mcp::resolve::MEMORY_MCP_NAME;
-    use crate::mcp::resolve::{ResolvedKind, resolve_bundle_mcps, resolve_mcps};
-
-    let config_path = paths::config_path()?;
-    let config_dir = config_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-    let emitted = all_emitted_tags(&config);
-
-    // Bundle MCPs: merge the active bundles to get their capabilities.
-    let manually_enabled: std::collections::HashSet<&str> = active
-        .scopes
-        .iter()
-        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-        .collect();
-    let firing: Vec<&Bundle> = config
-        .bundle
-        .iter()
-        .filter(|b| {
-            b.when.iter().any(|bt| active.tags.contains(bt))
-                || manually_enabled.contains(b.name.as_str())
-        })
-        .collect();
-    let bundle_refs = build_bundle_refs(config_dir, &active, &firing);
-    let bundle_caps = if !bundle_refs.is_empty() {
-        crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
-            .context("merging bundles for mcp-ls")?
-            .capabilities
-    } else {
-        crate::config::Capabilities::default()
-    };
-
-    // Combined memory + host: top-level + bundle-contributed (top-level wins on host collision).
-    let top_memory_ls = config
-        .features
-        .as_ref()
-        .map(|f| f.memory.as_slice())
-        .unwrap_or_default();
-    let bundle_memory_ls = bundle_caps
-        .features
-        .as_ref()
-        .map(|f| f.memory.as_slice())
-        .unwrap_or_default();
-    let mut all_memory_ls: Vec<crate::config::Memory> = top_memory_ls
-        .iter()
-        .chain(bundle_memory_ls.iter())
-        .cloned()
-        .collect();
-    crate::util::dedup(&mut all_memory_ls);
-    let mut all_host_ls = bundle_caps.host.clone();
-    for (k, v) in &config.host {
-        all_host_ls.insert(k.clone(), v.clone());
-    }
-
-    // Resolved entries (active host only) keyed by name, so we can annotate
-    // each selected server with its concrete transport.
-    let mut all_resolved: std::collections::HashMap<String, ResolvedKind> =
-        resolve_mcps(&config.mcp, &all_memory_ls, &all_host_ls, &active.tags)
-            .context("resolving MCP servers for listing")?
-            .into_iter()
-            .map(|m| (m.name, m.kind))
-            .collect();
-
-    let bundle_mcp_entries = bundle_caps.mcp;
-    let bundle_resolved = resolve_bundle_mcps(&bundle_mcp_entries, &active.tags)
-        .context("resolving bundle MCP servers for listing")?;
-    for m in bundle_resolved {
-        all_resolved.entry(m.name).or_insert(m.kind);
-    }
-
-    let detail_for = |name: &str, fallback: &str| match all_resolved.get(name) {
-        Some(ResolvedKind::Stdio { .. }) => "stdio server".to_string(),
-        Some(ResolvedKind::Remote { transport, .. }) => {
-            format!("{} client", format!("{transport:?}").to_lowercase())
-        }
-        None => fallback.to_string(),
-    };
-
-    let mut rows: Vec<(String, bool, bool, String)> = config
-        .mcp
-        .iter()
-        .map(|m| {
-            let is_active = m.when.iter().any(|t| active.tags.contains(t));
-            let is_orphan = !m.when.iter().any(|t| emitted.contains(t));
-            let detail = detail_for(&m.name, &format!("{:?}", m.transport).to_lowercase());
-            (m.name.clone(), is_active, is_orphan, detail)
-        })
-        .collect();
-
-    // Bundle MCPs: always active when tagless, tag-filtered when tagged.
-    for m in &bundle_mcp_entries {
-        let is_active = m.when.is_empty() || m.when.iter().any(|t| active.tags.contains(t));
-        // Tagless entries are never orphaned — the bundle itself gates them.
-        let is_orphan = !m.when.is_empty() && !m.when.iter().any(|t| emitted.contains(t));
-        let detail = format!("{} (bundle)", detail_for(&m.name, "stdio server"));
-        rows.push((m.name.clone(), is_active, is_orphan, detail));
-    }
-
-    for mem in &all_memory_ls {
-        let is_active = mem.when.iter().any(|t| active.tags.contains(t));
-        let is_orphan = !mem.when.iter().any(|t| emitted.contains(t));
-        let detail = detail_for(MEMORY_MCP_NAME, "memory");
-        let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);
-        rows.push((name, is_active, is_orphan, detail));
-    }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (name, is_active, is_orphan, detail) in rows {
-        let mark = if is_active {
-            active_marker(use_color)
-        } else {
-            " ".to_string()
-        };
-        println!(
-            "{} {} ({}){}",
-            mark,
-            name,
-            detail,
-            annotate(is_active, is_orphan, use_color)
-        );
-    }
-    Ok(())
-}
-
-/// List configured marketplaces, marking those referenced by a plugin the
-/// active scope selects. A marketplace is an orphan when no plugin in any
-/// scope-emittable collection references it (nothing can ever pull it in).
-fn run_marketplace_ls(use_color: bool) -> anyhow::Result<()> {
-    use crate::config::split_plugin_ref;
-
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-    let emitted = all_emitted_tags(&config);
-
-    // Marketplaces referenced by plugins in collections the active scope selects.
-    let active_refs: std::collections::HashSet<&str> = config
-        .plugin_collection
-        .iter()
-        .filter(|c| c.when.iter().any(|t| active.tags.contains(t)))
-        .flat_map(|c| c.plugins.iter())
-        .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m))
-        .collect();
-    // Marketplaces referenced by any collection that *could* be selected by some
-    // scope (its tags are emitted somewhere). The complement is orphan.
-    let referenceable: std::collections::HashSet<&str> = config
-        .plugin_collection
-        .iter()
-        .filter(|c| c.when.iter().any(|t| emitted.contains(t)))
-        .flat_map(|c| c.plugins.iter())
-        .filter_map(|p| split_plugin_ref(p).map(|(m, _)| m))
-        .collect();
-
-    let mut rows: Vec<(String, bool, bool, String)> = config
-        .marketplace
-        .iter()
-        .map(|m| {
-            let is_active = active_refs.contains(m.name.as_str());
-            let is_orphan = !referenceable.contains(m.name.as_str());
-            let kind = match m.classify_source() {
-                crate::config::MarketplaceSource::Git => "git",
-                crate::config::MarketplaceSource::Path => "path",
-            };
-            (m.name.clone(), is_active, is_orphan, kind.to_string())
-        })
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (name, is_active, is_orphan, kind) in rows {
-        let mark = if is_active {
-            active_marker(use_color)
-        } else {
-            " ".to_string()
-        };
-        println!(
-            "{} {} ({}){}",
-            mark,
-            name,
-            kind,
-            annotate(is_active, is_orphan, use_color)
-        );
-    }
-    Ok(())
-}
-
-/// List configured plugins (flattened across collections), marking those the
-/// active scope selects. A plugin is an orphan when no scope emits any of its
-/// collection's tags.
-fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
-    use crate::config::split_plugin_ref;
-
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-    let emitted = all_emitted_tags(&config);
-
-    // One row per (collection, plugin) pair so provenance is visible — the same
-    // plugin in two collections shows twice, mirroring the config as authored.
-    let mut rows: Vec<(String, bool, bool, String)> = Vec::new();
-    for collection in &config.plugin_collection {
-        let is_active = collection.when.iter().any(|t| active.tags.contains(t));
-        let is_orphan = !collection.when.iter().any(|t| emitted.contains(t));
-        for plugin in &collection.plugins {
-            let display = split_plugin_ref(plugin)
-                .map_or_else(|| plugin.clone(), |(m, p)| format!("{p}@{m}"));
-            rows.push((display, is_active, is_orphan, collection.name.clone()));
-        }
-    }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (name, is_active, is_orphan, collection) in rows {
-        let mark = if is_active {
-            active_marker(use_color)
-        } else {
-            " ".to_string()
-        };
-        println!(
-            "{} {} (from {}){}",
-            mark,
-            name,
-            collection,
-            annotate(is_active, is_orphan, use_color)
-        );
-    }
-    Ok(())
-}
-
 /// Sync every configured marketplace into the shared cache: git sources are
 /// cloned on first use and fast-forwarded on subsequent runs; path sources are
 /// resolved in place. Reports each marketplace's resolved location + HEAD.
@@ -2859,17 +2150,17 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         .map(|(mkt, plugin)| (mkt.to_string(), plugin.to_string()))
         .collect();
 
+    let mut missing_plugins: Vec<String> = Vec::new();
     for (mkt_name, plugin_name) in &all_plugin_refs {
         let mkt_path = crate::plugins::cache::marketplace_path(&cache_root, mkt_name);
         let plugins = crate::plugins::cache::read_marketplace_plugins(&mkt_path)
             .with_context(|| format!("reading marketplace manifest for '{mkt_name}'"))?;
         let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
-            tracing::warn!(
-                plugin = %plugin_name,
-                marketplace = %mkt_name,
-                "plugin not found in freshly-synced marketplace manifest — \
-                 verify the plugin name matches an entry in the marketplace"
+            eprintln!(
+                "✗ {plugin_name}@{mkt_name}: not found in marketplace manifest after sync — \
+                 check that the plugin name matches an entry in {mkt_name}"
             );
+            missing_plugins.push(format!("{plugin_name}@{mkt_name}"));
             continue;
         };
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
@@ -2892,11 +2183,36 @@ fn run_plugin_sync() -> anyhow::Result<()> {
             head
         );
     }
+    if !missing_plugins.is_empty() {
+        anyhow::bail!(
+            "{} plugin(s) not found after sync: {}",
+            missing_plugins.len(),
+            missing_plugins.join(", ")
+        );
+    }
     Ok(())
 }
 
-fn run_sync() -> anyhow::Result<()> {
+fn run_sync(dry_run: bool) -> anyhow::Result<()> {
     let config_dir = paths::config_dir()?;
+    if dry_run {
+        let out = git::secure_git()
+            .args(["status", "--short"])
+            .current_dir(&config_dir)
+            .output()
+            .context("failed to run git status")?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("git status failed: {stderr}");
+        }
+        let output = String::from_utf8_lossy(&out.stdout);
+        if output.trim().is_empty() {
+            eprintln!("Nothing to sync (working tree clean)");
+        } else {
+            eprintln!("Would sync:\n{output}");
+        }
+        return Ok(());
+    }
     match crate::sync::commit_and_push(&config_dir, "Update llmenv config")? {
         crate::sync::SyncOutcome::NothingToCommit => {
             eprintln!("No changes to commit (working tree clean)");
@@ -2905,6 +2221,93 @@ fn run_sync() -> anyhow::Result<()> {
             eprintln!("✓ Synced config to GitHub");
         }
     }
+    Ok(())
+}
+
+fn run_validate(use_color: bool) -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+    let pass = doctor_pass(use_color);
+    let fail = doctor_fail(use_color);
+    let mut valid = true;
+    let mut seen_names = HashSet::new();
+    for bundle in &config.bundle {
+        if !seen_names.insert(bundle.name.as_str()) {
+            eprintln!("{fail} duplicate bundle name: {}", bundle.name);
+            valid = false;
+        }
+    }
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+    for scope in &active.scopes {
+        if scope.kind != "project" {
+            continue;
+        }
+        for bundle_name in &scope.enable_bundles {
+            if !seen_names.contains(bundle_name.as_str()) {
+                eprintln!(
+                    "{fail} .llmenv.yaml enable_bundles references unknown bundle: {bundle_name}"
+                );
+                valid = false;
+            }
+        }
+    }
+    if valid {
+        eprintln!("{pass} config valid ({} bundle(s))", config.bundle.len());
+    } else {
+        anyhow::bail!("validation failed");
+    }
+    Ok(())
+}
+
+fn run_edit(bundle: Option<String>) -> anyhow::Result<()> {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "vi".to_owned());
+    let path = if let Some(name) = bundle {
+        if crate::paths::is_unsafe_join_target(&name) {
+            anyhow::bail!("unsafe bundle name: {name}");
+        }
+        let config_dir = paths::config_dir()?;
+        let candidate = config_dir.join("bundles").join(format!("{name}.yaml"));
+        if candidate.exists() {
+            candidate
+        } else {
+            let alt = config_dir.join("bundles").join(format!("{name}.yml"));
+            if alt.exists() {
+                alt
+            } else {
+                anyhow::bail!("bundle file not found: bundles/{name}.yaml");
+            }
+        }
+    } else {
+        paths::config_path()?
+    };
+    let parts: Vec<&str> = editor.split_whitespace().collect();
+    let bin = parts
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("$EDITOR / $VISUAL is set but empty"))?;
+    let extra_args = parts.get(1..).unwrap_or_default();
+    let status = std::process::Command::new(bin)
+        .args(extra_args)
+        .arg(&path)
+        .status()
+        .with_context(|| format!("failed to launch editor: {editor}"))?;
+    if !status.success() {
+        anyhow::bail!("editor exited with {status}");
+    }
+    Ok(())
+}
+
+fn run_completions(shell: clap_complete::Shell) -> anyhow::Result<()> {
+    use clap::CommandFactory;
+    use std::io::Write;
+    let mut buf: Vec<u8> = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "llmenv", &mut buf);
+    std::io::stdout()
+        .write_all(&buf)
+        .context("failed to write completions to stdout")?;
     Ok(())
 }
 

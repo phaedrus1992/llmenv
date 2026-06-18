@@ -1511,6 +1511,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [heck 0.5.0](https://github.com/withoutboats/heck)
+- [unicode-width 0.2.2](https://github.com/unicode-rs/unicode-width)
 
 ```
 Copyright (c) 2015 The Rust Project Developers
@@ -1948,6 +1949,40 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+```
+
+## MIT License (MIT)
+
+Used by:
+- [shell-words 1.1.1](https://github.com/tmiasko/shell-words)
+
+```
+Copyright (c) 2016 Tomasz Miąsko
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 
 ```
 
@@ -3299,7 +3334,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 1.0.12](https://github.com/phaedrus1992/llmenv)
+- [llmenv 2.0.4](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3335,6 +3370,7 @@ Used by:
 - [assert_cmd 2.2.2](https://github.com/assert-rs/assert_cmd.git)
 - [clap 4.6.1](https://github.com/clap-rs/clap)
 - [clap_builder 4.6.0](https://github.com/clap-rs/clap)
+- [clap_complete 4.6.5](https://github.com/clap-rs/clap)
 - [clap_derive 4.6.1](https://github.com/clap-rs/clap)
 - [clap_lex 1.1.0](https://github.com/clap-rs/clap)
 - [colorchoice 1.0.5](https://github.com/rust-cli/anstyle.git)
@@ -3760,6 +3796,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
+- [llmenv-config 2.0.4](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 2.0.4](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 2.0.4](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 2.0.4](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
@@ -3775,27 +3815,7 @@ Used by:
 - [winapi-i686-pc-windows-gnu 0.4.0](https://github.com/retep998/winapi-rs)
 - [winapi-x86_64-pc-windows-gnu 0.4.0](https://github.com/retep998/winapi-rs)
 - [windows-link 0.2.1](https://github.com/microsoft/windows-rs)
-- [windows-sys 0.52.0](https://github.com/microsoft/windows-rs)
-- [windows-sys 0.60.2](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.61.2](https://github.com/microsoft/windows-rs)
-- [windows-targets 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows-targets 0.53.5](https://github.com/microsoft/windows-rs)
-- [windows_aarch64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_aarch64_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
-- [windows_aarch64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_aarch64_msvc 0.53.1](https://github.com/microsoft/windows-rs)
-- [windows_i686_gnu 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_i686_gnu 0.53.1](https://github.com/microsoft/windows-rs)
-- [windows_i686_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_i686_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
-- [windows_i686_msvc 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_i686_msvc 0.53.1](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_gnu 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_gnu 0.53.1](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_msvc 0.53.1](https://github.com/microsoft/windows-rs)
 
 ```
 MIT License
@@ -4303,6 +4323,7 @@ THE SOFTWARE.
 
 Used by:
 - [console 0.16.3](https://github.com/console-rs/console)
+- [dialoguer 0.12.0](https://github.com/console-rs/dialoguer)
 
 ```
 The MIT License (MIT)

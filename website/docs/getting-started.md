@@ -145,21 +145,21 @@ See [Configuration](configuration.md) for the complete schema.
 | Command | Purpose |
 |---------|---------|
 | `llmenv init [PATH] [--repo URL]` | Initialize configuration |
-| `llmenv export [--scope ID] [--tag TAG]` | Export environment variables |
+| `llmenv export [--scope ID] [--tag TAG] [--explain]` | Export environment variables |
 | `llmenv regenerate` | Apply config changes to the cache without exporting env vars |
 | `llmenv hook <zsh\|bash>` | Generate shell hook code |
 | `llmenv login [--global]` | Capture and cache Claude Code auth credentials |
-| `llmenv status` | Show active scopes/tags + parse status |
-| `llmenv context` | Show the resolved environment in detail |
-| `llmenv scope-ls` / `tag-ls` / `bundle-ls` | List scopes / tags / bundles |
-| `llmenv mcp-ls` | List selected MCP servers |
-| `llmenv marketplace-ls` / `plugin-ls` | List marketplaces / plugins |
+| `llmenv status [bundles\|tags\|scopes\|mcps\|marketplaces\|plugins]` | Show status; add subcommand for a detailed listing |
+| `llmenv context [--bundle NAME] [--why] [--json]` | Show the resolved environment in detail |
+| `llmenv validate` | Check config for structural issues |
+| `llmenv edit [BUNDLE-NAME]` | Open config (or a bundle file) in `$EDITOR` |
+| `llmenv completions <bash\|zsh\|fish>` | Generate shell completion scripts |
 | `llmenv plugin-sync` | Sync plugin marketplaces into the cache |
-| `llmenv sync` | Commit and push config to GitHub |
-| `llmenv check-stale` | Warn if the running agent's config drifted |
+| `llmenv sync [--dry-run]` | Commit and push config to GitHub |
+| `llmenv check-stale [--auto-fix]` | Warn if the running agent's config drifted |
 | `llmenv hook-run <session_start\|turn_start\|session_end>` | Inject ICM memory context (invoked by agent runtime) |
 | `llmenv prune [--all] [--older-than DUR] [--dry-run]` | Clean stale cache folders |
-| `llmenv doctor [--gc]` | Run diagnostics (optionally GC) |
+| `llmenv doctor [--gc] [--all] [--verbose]` | Run diagnostics (optionally GC or full orphan analysis) |
 
 Full per-command reference: [commands.md](commands.md).
 
@@ -168,8 +168,9 @@ Full per-command reference: [commands.md](commands.md).
 - **"Config already exists"** from `init` — expected; `init` never overwrites.
   Edit `~/.config/llmenv/config.yaml` directly.
 - **Nothing activates** — your scopes' tags don't match any contributor's tags,
-  or no scope matches your environment. Run `llmenv scope-ls` and `llmenv tag-ls`
-  (active items are marked) and check [Troubleshooting](troubleshooting.md).
+  or no scope matches your environment. Run `llmenv status scopes` and
+  `llmenv status tags` (active items are marked) and check
+  [Troubleshooting](troubleshooting.md).
 - **YAML parse error** — usually an unquoted value containing a colon. Quote
   addresses, MACs, SSIDs, and URLs. See
   [Configuration → YAML gotchas](configuration.md#yaml-gotchas).

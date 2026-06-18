@@ -17,7 +17,7 @@ repository instead of writing a template. No-op if a config already exists.
 ## `export`
 
 ```
-llmenv export [--scope ID] [--tag TAG]
+llmenv export [--scope ID] [--tag TAG] [--explain]
 ```
 
 Resolve the current environment and print shell `export` lines. This is what the
@@ -28,6 +28,9 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 - `--tag TAG` filters to bundles carrying that tag.
 - `--scope ID` is accepted but scope filtering is not yet implemented (prints a
   warning and exports all matching tags).
+- `--explain` annotates each exported variable with a `# source:` comment line
+  showing whether it comes from the adapter (with the firing bundle names) or
+  from llmenv introspection.
 
 ## `regenerate`
 
@@ -52,73 +55,77 @@ prompt.
 ## `status`
 
 ```
-llmenv status
+llmenv status [bundles|tags|scopes|mcps|marketplaces|plugins]
 ```
 
 Show the current environment status: active scopes and tags, and whether the
-config parses.
+config parses. With a subcommand, show a detailed listing for that category:
+
+- `status bundles` — list configured bundles, marking those that fire for the
+  current environment.
+- `status tags` — list all tags across scopes and contributors, marking active
+  and orphaned tags.
+- `status scopes` — list configured scopes (network/host/user/project), marking
+  which are active and which are orphaned.
+- `status mcps` — list MCP servers selected for the current environment, with
+  each server's resolved role and transport (stdio / http / sse).
+- `status marketplaces` — list configured plugin marketplaces, marking those
+  referenced by selected plugins.
+- `status plugins` — list configured plugins, marking those selected by the
+  active scope and showing their source collection.
 
 ## `context`
 
 ```
-llmenv context
+llmenv context [--bundle NAME] [--why] [--json]
 ```
 
 Show the resolved environment and active scopes in detail — the fuller view
 behind `status`, including which contributors fired.
 
-## `scope-ls`
+- `--bundle NAME` narrows the view to a single named bundle, showing its env
+  vars, hooks (with event, matcher, type, and handler), MCPs, plugins, and skills.
+- `--why` shows activation tracing: which scope triggered each active tag, and
+  which tags caused each bundle to fire.
+- `--json` emits the full context as machine-readable JSON.
+
+## `validate`
 
 ```
-llmenv scope-ls
+llmenv validate
 ```
 
-List configured scopes (network/host/user/project), marking which are active and
-which are orphaned (tags no contributor consumes).
+Check the config for structural issues. Reports duplicate bundle names. Exits
+non-zero if any issues are found.
 
-## `tag-ls`
-
-```
-llmenv tag-ls
-```
-
-List all tags across scopes and contributors, marking active and orphaned tags.
-
-## `bundle-ls`
+## `edit`
 
 ```
-llmenv bundle-ls
+llmenv edit [BUNDLE-NAME]
 ```
 
-List configured bundles, marking those that fire for the current environment.
+Open `config.yaml` (or, if `BUNDLE-NAME` is given, the matching
+`bundles/<name>.yaml` file) in `$EDITOR`. Falls back to `$VISUAL`, then `vi`.
 
-## `mcp-ls`
-
-```
-llmenv mcp-ls
-```
-
-List the MCP servers selected for the current environment, with each server's
-resolved role and transport (stdio / http / sse). Includes the memory backend
-when active.
-
-## `marketplace-ls`
+## `completions`
 
 ```
-llmenv marketplace-ls
+llmenv completions <bash|zsh|fish>
 ```
 
-List configured plugin marketplaces, marking those referenced by selected
-plugins.
+Generate shell completion scripts. Pipe the output to a file your shell loads at
+startup:
 
-## `plugin-ls`
+```sh
+# zsh — add to your .zshrc or drop into $fpath
+llmenv completions zsh > ~/.zfunc/_llmenv
 
+# bash — add to your .bashrc
+llmenv completions bash > ~/.local/share/bash-completion/completions/llmenv
+
+# fish
+llmenv completions fish > ~/.config/fish/completions/llmenv.fish
 ```
-llmenv plugin-ls
-```
-
-List configured plugins, marking those selected by the active scope and showing
-their source collection.
 
 ## `plugin-sync`
 
@@ -133,22 +140,28 @@ need no sync.
 ## `sync`
 
 ```
-llmenv sync
+llmenv sync [--dry-run]
 ```
 
 Sync the config repository with GitHub: `git add`, `commit`, and `push` the
 config directory. Use this to propagate config changes to other hosts.
 
+- `--dry-run` previews pending changes (`git status --short`) without committing
+  or pushing.
+
 ## `check-stale`
 
 ```
-llmenv check-stale
+llmenv check-stale [--auto-fix]
 ```
 
 Warn if the running agent's config has drifted from what llmenv would
 materialize now. Invoked automatically by the Claude Code `SessionStart` hook: it
 compares the content hash in the booted `CLAUDE_CONFIG_DIR` against the
 freshly-computed one and prints a restart hint on drift. Safe to run manually.
+
+- `--auto-fix` re-materializes the config automatically on drift instead of only
+  printing a warning.
 
 ## `hook-run`
 
@@ -232,10 +245,11 @@ blocked). Invoked automatically — not normally run by users.
 ## `doctor`
 
 ```
-llmenv doctor [--gc]
+llmenv doctor [--gc] [--all] [--verbose]
 ```
 
-Validate adapter wiring and configuration. Checks:
+Validate adapter wiring and configuration. By default runs checks only for the
+active context (active bundles, active MCP servers, etc.). Checks:
 
 - config parsing
 - cache directory writability
@@ -248,4 +262,22 @@ Validate adapter wiring and configuration. Checks:
   `CLAUDE_CODE_SUBAGENT_MODEL` is set; and checks whether a context-mode MCP
   server is registered
 
-With `--gc`, runs cache garbage collection after the diagnostics.
+- `--all` runs the full orphan analysis across the entire config (all bundles and
+  scopes, not just active ones).
+- `--gc` runs cache garbage collection after the diagnostics.
+- `--verbose` prints detailed per-check reasoning alongside each pass/fail result.
+
+## Deprecated commands (removed in 2.1)
+
+The following top-level listing commands are still accepted in 2.0.x as hidden
+shims but will be removed in 2.1. Use the `status <subcommand>` equivalents
+instead:
+
+| Deprecated | Replacement |
+|---|---|
+| `llmenv scope-ls` | `llmenv status scopes` |
+| `llmenv tag-ls` | `llmenv status tags` |
+| `llmenv bundle-ls` | `llmenv status bundles` |
+| `llmenv mcp-ls` | `llmenv status mcps` |
+| `llmenv marketplace-ls` | `llmenv status marketplaces` |
+| `llmenv plugin-ls` | `llmenv status plugins` |
