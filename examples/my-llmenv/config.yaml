@@ -85,7 +85,9 @@ capabilities:
       - { tool: Bash, pattern: "semgrep *" }
 
       # slop-scan.sh — prose quality checker (bundled helper script).
-      # Absolute path required until llmenv #162 lands bundle-relative paths.
+      # Capabilities allow patterns are matched verbatim against what the agent
+      # calls, so this must be the absolute path to the installed script.
+      # Hook commands use bundle-relative paths; allow patterns do not.
       - { tool: Bash, pattern: "/Users/alice/git/my-llmenv/bundles/base/scripts/slop-scan.sh *" }
 
       # just ci — run the project's CI recipe locally.
@@ -202,10 +204,11 @@ capabilities:
 # native — engine-specific raw config, passed verbatim into the engine's own
 # config file. Nothing here is engine-agnostic; it's Claude Code–specific.
 #
-# llmenv only merges the TOP-LEVEL `native:` block. Any `native:` key inside
-# a bundle.yaml is silently dropped at materialize time (known limitation,
-# tracked in llmenv #177). Put global native config here; per-bundle native
-# config must go in the capabilities: section using native_permissions.
+# llmenv merges `native:` blocks from both config.yaml and bundle.yaml.
+# Per-bundle native blocks were silently dropped before PR #294 (issue #291)
+# landed in 2.0.x. Engine-specific config (cleanupPeriodDays, statusLine)
+# that has no neutral vocabulary equivalent can live in a bundle's native:
+# block, or here at the top level — both are merged now.
 ################################################################################
 native:
   claude_code:

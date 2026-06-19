@@ -7,10 +7,6 @@
 # The `base` bundle fires whenever the `user-alice` tag is active, meaning
 # every session on every machine. Put only universal capabilities here.
 #
-# Hook commands currently require absolute paths to this bundle's source.
-# Once llmenv issue #162 lands (bundle-relative path resolution at materialize
-# time), these can be rewritten to relative paths like `hooks/session-log.sh`.
-#
 # HOW HOOKS WORK:
 #   - Each hook entry fires on the named `event` for every tool call.
 #   - `handler.command` is executed as a shell process; llmenv passes the event
@@ -32,7 +28,7 @@ hooks:
   - event: PostToolUse
     handler:
       type: command
-      command: "bash ${HOME}/git/my-llmenv/bundles/base/hooks/session-log.sh"
+      command: "bash hooks/session-log.sh"
 
   # identity-guard: on UserPromptSubmit and PreToolUse, check that the prompt
   # or tool input doesn't reference a forbidden identity while operating under
@@ -41,11 +37,11 @@ hooks:
   - event: UserPromptSubmit
     handler:
       type: command
-      command: "bash ${HOME}/git/my-llmenv/bundles/base/hooks/identity-guard.sh"
+      command: "bash hooks/identity-guard.sh"
   - event: PreToolUse
     handler:
       type: command
-      command: "bash ${HOME}/git/my-llmenv/bundles/base/hooks/identity-guard.sh"
+      command: "bash hooks/identity-guard.sh"
 
 mcp:
   # codebase-memory-mcp: indexes the current repository into a graph database
