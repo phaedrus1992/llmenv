@@ -1,0 +1,46 @@
+# Capability fragment for the `work` bundle.
+#
+# Fires on the `work` tag, which is emitted by the `work-laptop` host scope
+# in config.yaml. This bundle is only active on the employer-issued machine.
+#
+# It pairs with the `work` plugin-collection in config.yaml, which wires up
+# the official Slack MCP plugin (claude-plugins-official:slack). The plugin
+# contributes its own MCP server config via its bundled .mcp.json; no separate
+# `mcp:` entry is needed here.
+#
+# PERMISSIONS DESIGN:
+#   The Slack MCP plugin exposes many tools. This bundle grants read-only
+#   tools without prompting (useful for ambient context: "what did my team
+#   discuss while I was in this meeting?"). Write tools (send, create,
+#   schedule, react) remain prompt-gated so messages are never sent without
+#   explicit confirmation.
+#
+#   These are raw Claude Code permission strings under `native_permissions`
+#   because the neutral permission vocabulary (allow/deny in config.yaml)
+#   can't represent MCP tool grants — those require the `mcp__<server>__<tool>`
+#   format which is engine-specific.
+#
+# NOTE ON MCP TOOL NAMES:
+#   The tool prefix `mcp__slack_slack__` comes from the plugin's server name
+#   ("slack") combined with Claude Code's MCP tool naming convention:
+#   mcp__<plugin-name>_<server-name>__<tool-name>. Inspect the plugin's
+#   .mcp.json to find the server name if you add other plugins.
+
+native_permissions:
+  claude_code:
+    allow:
+      # Read-only Slack tools — no prompt required.
+      # These let the agent fetch context (messages, user info, channel lists)
+      # without interrupting the user for approval on every call.
+      - "mcp__slack_slack__slack_get_channel_history"
+      - "mcp__slack_slack__slack_get_thread_replies"
+      - "mcp__slack_slack__slack_list_channels"
+      - "mcp__slack_slack__slack_list_users"
+      - "mcp__slack_slack__slack_search_messages"
+      - "mcp__slack_slack__slack_get_user_profile"
+      - "mcp__slack_slack__slack_get_users_conversations"
+
+      # Write tools are deliberately omitted from this allow list.
+      # slack_post_message, slack_reply_to_thread, slack_add_reaction,
+      # slack_schedule_message, slack_set_status — all remain prompt-gated.
+      # This prevents accidental sends during automated agentic runs.

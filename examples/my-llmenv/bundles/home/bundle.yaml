@@ -1,0 +1,36 @@
+# Capability fragment for the `home` bundle.
+#
+# Fires on the `home` tag, which is emitted by the `home-wifi` network scope
+# in config.yaml when the machine is connected to the home Wi-Fi network.
+#
+# WHY NETWORK-SCOPED:
+#   The media-server skill (in skills/media-server/) talks to a local Plex or
+#   Jellyfin instance. That server is only reachable on the home LAN — it's
+#   not exposed to the internet and not on a VPN. Loading the skill on a work
+#   laptop at the office would produce a skill that always times out.
+#
+#   The SSID-based scope ensures the skill is only available when the agent
+#   can actually reach the server. If you want it available over VPN too, add
+#   a second network scope in config.yaml with the VPN tunnel interface.
+#
+# INTERACTION CHAIN:
+#   SSID == "HomeNet"
+#     → scope `home-wifi` fires
+#     → emits tags: [home, trusted-network]
+#     → bundle `home` loads (this file)
+#     → skills/media-server/SKILL.md is available as /media-server
+#     → native_permissions below allows the Plex API WebFetch without prompt
+#
+# IF YOU DON'T HAVE A MEDIA SERVER:
+#   Replace the media-server skill with any other home-only resource:
+#   a local NAS, a home automation hub (Home Assistant), a self-hosted service.
+#   The pattern is the same: SSID scope → home bundle → resource-specific skill.
+
+native_permissions:
+  claude_code:
+    allow:
+      # Allow WebFetch to the local media server without prompting.
+      # Replace with your server's actual hostname/IP. Use a local hostname
+      # (e.g. plex.local or the LAN IP) — not a public URL.
+      - "WebFetch(domain:plex.local)"
+      - "WebFetch(domain:jellyfin.local)"

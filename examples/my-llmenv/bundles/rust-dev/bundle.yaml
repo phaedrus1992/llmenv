@@ -1,0 +1,27 @@
+# Capability fragment for the `rust-dev` bundle.
+#
+# Fires on the `lang-rust` tag, which is emitted by a project's .llmenv.yaml:
+#
+#   # myproject/.llmenv.yaml
+#   tags: [lang-rust]
+#
+# When active, this bundle loads:
+#   - rules/rust.md          Rust-specific coding conventions
+#   - skills/build-check/    /build-check skill for CI-aware local builds
+#
+# It also activates the `rust-lsp` plugin-collection (declared in config.yaml),
+# which wires up rust-analyzer-lsp and rust-skills.
+#
+# NO hooks or native_permissions in this bundle — the language server plugin
+# handles its own permissions, and Rust tooling (cargo, clippy) is invoked via
+# normal Bash calls covered by the universal allow list in config.yaml.
+#
+# HOW .llmenv.yaml TAG INJECTION WORKS:
+#   When Claude Code opens a project directory, llmenv checks for a
+#   .llmenv.yaml at the project root. Any tags listed there are merged into
+#   the active tag set for that session only. This means the rust-dev bundle
+#   loads in Rust projects but not in Python or Go projects — the agent gets
+#   language-appropriate context automatically, without any manual configuration.
+#
+# (This file is intentionally minimal — the bundle's value is its rules/ and
+# skills/ content, not its capability contributions.)
