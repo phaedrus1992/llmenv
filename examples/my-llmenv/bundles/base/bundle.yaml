@@ -1,0 +1,54 @@
+# Capability fragment for the `base` bundle.
+#
+# This file is merged into the top-level capabilities: block at `llmenv
+# regenerate` time. Lists (hooks, mcp) are concatenated and deduplicated;
+# scalars use scope-precedence resolution.
+#
+# The `base` bundle fires whenever the `user-alice` tag is active, meaning
+# every session on every machine. Put only universal capabilities here.
+#
+# HOW HOOKS WORK:
+#   - Each hook entry fires on the named `event` for every tool call.
+#   - `handler.command` is executed as a shell process; llmenv passes the event
+#     payload as JSON on stdin.
+#   - Exit code 2 from a hook blocks the action and surfaces stderr to Claude.
+#   - Exit code 0 allows the action to proceed.
+#   - Other non-zero exit codes are treated as errors (logged, action proceeds).
+#
+# HOW MCP ENTRIES WORK:
+#   - Each mcp entry declares a server that starts as a child process.
+#   - The server name becomes the prefix for tool IDs: mcp__<name>__<tool>.
+#   - Permissions for these tools go in native_permissions in config.yaml.
+
+hooks:
+  # session-log: append a JSONL record to a daily log file for every tool call.
+  # Useful for answering "what did Claude do while I was away?" and for audit
+  # trails during automated agentic runs.
+  # Output: ${CLAUDE_CONFIG_DIR}/session-logs/YYYY-MM-DD.jsonl
+  - event: PostToolUse
+    handler:
+      type: command
+      command: "bash hooks/session-log.sh"
+
+  # identity-guard: on UserPromptSubmit and PreToolUse, check that the prompt
+  # or tool input doesn't reference a forbidden identity while operating under
+  # an alternate (e.g. open-source contributor) git identity.
+  # See hooks/identity-guard.sh for the full logic.
+  - event: UserPromptSubmit
+    handler:
+      type: command
+      command: "bash hooks/identity-guard.sh"
+  - event: PreToolUse
+    handler:
+      type: command
+      command: "bash hooks/identity-guard.sh"
+
+mcp:
+  # codebase-memory-mcp: indexes the current repository into a graph database
+  # and exposes semantic code search, architecture queries, and dependency
+  # tracing as MCP tools. Starts as a stdio child process.
+  # Tools: mcp__codebase-memory-mcp__search_code, __query_graph, etc.
+  # Permissions for these tools live in native_permissions in config.yaml.
+  - name: codebase-memory-mcp
+    type: stdio
+    command: "${HOME}/.local/bin/codebase-memory-mcp"
