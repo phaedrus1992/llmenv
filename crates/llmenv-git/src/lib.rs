@@ -161,14 +161,13 @@ mod tests {
 
     #[test]
     fn apply_git_timeout_sets_env_var() {
+        use std::ffi::OsStr;
         let mut cmd = secure_git();
         apply_git_timeout(&mut cmd, 10);
-        // Verify timeout was applied by checking the command
-        // (actual verification would be in integration tests with actual git invocation)
-        let cmd_str = format!("{:?}", cmd);
         assert!(
-            cmd_str.contains("GIT_CONNECT_TIMEOUT") || cmd_str.contains("10"),
-            "timeout should be applied to git command"
+            cmd.get_envs()
+                .any(|(k, v)| k == OsStr::new("GIT_CONNECT_TIMEOUT") && v == Some(OsStr::new("10"))),
+            "GIT_CONNECT_TIMEOUT env var should be set to 10"
         );
     }
 
