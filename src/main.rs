@@ -2,10 +2,10 @@ use std::{fs::OpenOptions, sync::Mutex};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 fn expand_tilde(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{home}/{rest}");
     }
     p.to_string()
 }
