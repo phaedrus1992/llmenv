@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix long interactive session pause when GitHub remote is unreachable: all git
+  subprocesses now apply a TCP connection timeout (`GIT_CONNECT_TIMEOUT` — 10 s
+  for background fetch/pull, 30 s for explicit plugin clone/fetch)
+
 ## [2.0.5] - 2026-06-18
 
 ### Added
