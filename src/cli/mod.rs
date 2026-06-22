@@ -783,6 +783,8 @@ fn build_and_materialize(
     // Must run post-materialize so a materialize failure leaves settings.json
     // either absent (new folder) or in its prior good state (re-render).
     crate::adapter::claude_code::apply_seeded_settings(&cache_path, &config.init.seeded_settings)?;
+    // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
+    crate::adapter::claude_code::seed_install_method(&cache_path)?;
 
     // Auth inheritance (#172): inject cached credentials after the adapter has
     // finished its own .claude.json writes (mcpServers upsert). Only fires

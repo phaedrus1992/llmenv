@@ -917,6 +917,54 @@ pub(crate) fn apply_seeded_settings(
         .map_err(|e| anyhow::anyhow!("writing seeded settings {}: {e}", path.display()))
 }
 
+/// Classify a `claude` binary path as `"homebrew"`, `"npm"`, or `"native"`.
+fn classify_claude_path(path: &str) -> &'static str {
+    let lc = path.to_ascii_lowercase();
+    if lc.contains("/homebrew/") || lc.contains("/cellar/") || lc.contains("/linuxbrew/") {
+        "homebrew"
+    } else if lc.contains("node_modules")
+        || lc.contains("/.npm")
+        || lc.contains("/.nvm")
+        || lc.contains("/npm/")
+    {
+        "npm"
+    } else {
+        "native"
+    }
+}
+
+fn find_claude_binary() -> Option<String> {
+    let out = std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() { None } else { Some(path) }
+}
+
+/// Seed `installMethod` into `out/settings.json` if absent (#346).
+///
+/// Detects how `claude` was installed by inspecting its binary path, then
+/// writes the result as a foreign key so it survives every re-render.
+/// No-op if `settings.json` does not exist (materialize hasn't run yet).
+///
+/// # Errors
+/// Returns an error if the file exists but cannot be read or written.
+pub(crate) fn seed_install_method(out: &std::path::Path) -> anyhow::Result<()> {
+    let method = find_claude_binary()
+        .as_deref()
+        .map_or("native", classify_claude_path);
+    let mut seeded = serde_json::Map::new();
+    seeded.insert(
+        "installMethod".to_string(),
+        serde_json::Value::String(method.to_string()),
+    );
+    apply_seeded_settings(out, &seeded)
+}
+
 /// Merge llmenv's freshly-rendered settings (`fresh`) onto whatever already
 /// exists at `path`, preserving foreign in-session state (#175, #196).
 ///
@@ -1124,10 +1172,10 @@ enum PermissionAction {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        CLAUDE_JSON_FILE, MODELED_SETTINGS_KEYS, is_hook_json, merge_mcp_into_claude_json,
-        overlay_native, reconcile_settings, reject_hardcoded_config_path,
-        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        validate_skills,
+        CLAUDE_JSON_FILE, MODELED_SETTINGS_KEYS, classify_claude_path, is_hook_json,
+        merge_mcp_into_claude_json, overlay_native, reconcile_settings,
+        reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
+        render_permission_rule, validate_skills,
     };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -1945,6 +1993,42 @@ mod tests {
         write_skill(&skills, "empty", &[("notes.md", "hi")]);
         let err = validate_skills(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("missing SKILL.md"), "got: {err}");
+    }
+
+    #[test]
+    fn classify_claude_path_detects_homebrew() {
+        assert_eq!(classify_claude_path("/opt/homebrew/bin/claude"), "homebrew");
+        assert_eq!(
+            classify_claude_path("/usr/local/Cellar/claude-code/1.0/bin/claude"),
+            "homebrew"
+        );
+        assert_eq!(
+            classify_claude_path("/home/linuxbrew/.linuxbrew/bin/claude"),
+            "homebrew"
+        );
+    }
+
+    #[test]
+    fn classify_claude_path_detects_npm() {
+        assert_eq!(
+            classify_claude_path("/usr/local/lib/node_modules/.bin/claude"),
+            "npm"
+        );
+        assert_eq!(
+            classify_claude_path("/home/user/.nvm/versions/node/v20/bin/claude"),
+            "npm"
+        );
+        assert_eq!(classify_claude_path("/home/user/.npm/bin/claude"), "npm");
+    }
+
+    #[test]
+    fn classify_claude_path_falls_back_to_native() {
+        assert_eq!(classify_claude_path("/usr/local/bin/claude"), "native");
+        assert_eq!(
+            classify_claude_path("/home/user/.local/bin/claude"),
+            "native"
+        );
+        assert_eq!(classify_claude_path(""), "native");
     }
 
     #[cfg(unix)]
