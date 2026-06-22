@@ -40,12 +40,34 @@ pub const DEFAULT_GIT_TIMEOUT_SECS: u64 = 10;
 /// operations and users understand that a clone can take a moment.
 pub const DEFAULT_GIT_PLUGIN_TIMEOUT_SECS: u64 = 30;
 
-/// Apply a TCP connection timeout to a git command.
+/// Apply TCP connection and auth/transfer timeouts to a git command.
 ///
-/// Sets `GIT_CONNECT_TIMEOUT` (TCP handshake only — not SSH auth negotiation or
-/// HTTP pack transfer) to prevent indefinite hangs when a remote is unreachable (#449).
+/// Sets three timeout mechanisms to prevent indefinite hangs (#449, #453):
+/// - `GIT_CONNECT_TIMEOUT`: TCP handshake timeout
+/// - `GIT_SSH_COMMAND`: SSH auth negotiation timeout via `-o ConnectTimeout` and
+///   `-o BatchMode=yes` (non-interactive). Only sets this env var if not already present,
+///   preserving any user-configured SSH identity files, ProxyJump, or other customizations.
+/// - `http.lowSpeedTime` and `http.lowSpeedLimit`: HTTP pack transfer stall timeout
 pub fn apply_git_timeout(cmd: &mut Command, secs: u64) -> &mut Command {
-    cmd.env("GIT_CONNECT_TIMEOUT", secs.to_string())
+    cmd.env("GIT_CONNECT_TIMEOUT", secs.to_string());
+
+    // Only set GIT_SSH_COMMAND if not already in the environment; preserve user's existing config
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env(
+            "GIT_SSH_COMMAND",
+            format!("ssh -o ConnectTimeout={secs} -o BatchMode=yes"),
+        );
+    }
+
+    // HTTP transfer stall timeout: fail if download speed drops below 1 byte/sec for N seconds
+    cmd.args([
+        "-c",
+        &format!("http.lowSpeedTime={secs}"),
+        "-c",
+        "http.lowSpeedLimit=1",
+    ]);
+
+    cmd
 }
 
 /// Scrub embedded credentials from a git URL before it lands in an error
@@ -160,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_git_timeout_sets_env_var() {
+    fn apply_git_timeout_sets_tcp_timeout() {
         use std::ffi::OsStr;
         let mut cmd = secure_git();
         apply_git_timeout(&mut cmd, 10);
@@ -168,6 +190,39 @@ mod tests {
             cmd.get_envs()
                 .any(|(k, v)| k == OsStr::new("GIT_CONNECT_TIMEOUT") && v == Some(OsStr::new("10"))),
             "GIT_CONNECT_TIMEOUT env var should be set to 10"
+        );
+    }
+
+    #[test]
+    fn apply_git_timeout_sets_ssh_command() {
+        use std::ffi::OsStr;
+        let mut cmd = secure_git();
+        apply_git_timeout(&mut cmd, 10);
+        // Function checks std::env::var_os to avoid clobbering existing GIT_SSH_COMMAND.
+        // In this test environment it's not set, so the function should set it.
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == OsStr::new("GIT_SSH_COMMAND")
+                    && v == Some(OsStr::new("ssh -o ConnectTimeout=10 -o BatchMode=yes"))),
+            "GIT_SSH_COMMAND should be set correctly"
+        );
+    }
+
+    #[test]
+    fn apply_git_timeout_sets_http_config() {
+        let mut cmd = secure_git();
+        apply_git_timeout(&mut cmd, 10);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2).any(|w| w == ["-c", "http.lowSpeedTime=10"]),
+            "should set http.lowSpeedTime=10"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["-c", "http.lowSpeedLimit=1"]),
+            "should set http.lowSpeedLimit=1"
         );
     }
 
