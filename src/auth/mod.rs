@@ -453,14 +453,14 @@ mod tests {
         assert!(ts.ends_with('Z'));
     }
 
-    // Property tests for datetime arithmetic and UUID safety.
     use proptest::prelude::*;
 
     proptest! {
-        #[test]
         // ponytail: bounded to year ~2100; days_to_ymd loops year-by-year from 1970, unbounded u64 never terminates
+        #[test]
         fn prop_secs_roundtrip(secs in 0u64..=4_102_444_800u64) {
-            let (_year, month, day, hour, min, sec) = secs_to_datetime(secs);
+            let (year, month, day, hour, min, sec) = secs_to_datetime(secs);
+            prop_assert!((1970..=2100).contains(&year), "year out of range: {}", year);
             prop_assert!((1..=12).contains(&month), "month out of range: {}", month);
             prop_assert!((1..=31).contains(&day), "day out of range: {}", day);
             prop_assert!(hour < 24, "hour out of range: {}", hour);
@@ -469,6 +469,7 @@ mod tests {
         }
 
         #[test]
+        // ponytail: 50000 days ≈ year 2106, consistent with secs upper bound (~47481 days)
         fn prop_days_to_ymd_valid_ranges(days in 0u64..=50000) {
             let (year, month, day) = days_to_ymd(days);
             prop_assert!(year >= 1970, "year before epoch: {}", year);
@@ -478,16 +479,13 @@ mod tests {
 
         #[test]
         fn prop_is_safe_uuid_accepts_valid_hex(s in "[0-9a-fA-F-]+") {
-            if !s.is_empty() && !crate::paths::is_unsafe_join_target(&s) {
-                prop_assert!(is_safe_uuid(&s), "expected valid hex UUID to be accepted: {}", s);
-            }
+            prop_assert!(is_safe_uuid(&s), "expected valid hex UUID to be accepted: {}", s);
         }
 
         #[test]
         fn prop_is_safe_uuid_rejects_unsafe_paths(
-            s in r"[a-zA-Z0-9\-]*(\.\.|\.|/|\\|:|\x00)"
+            s in r"[a-zA-Z0-9\-]*(\.\.|\.|/|\\|:|\x00)[a-zA-Z0-9\-]*"
         ) {
-            // Should reject paths with traversal, slashes, colons, etc.
             prop_assert!(!is_safe_uuid(&s), "expected path-unsafe UUID to be rejected: {:?}", s);
         }
     }
