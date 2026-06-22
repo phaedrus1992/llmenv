@@ -33,11 +33,14 @@ pub enum SyncOutcome {
 /// # Errors
 /// Returns an error if git cannot be spawned or exits non-zero (stderr included).
 fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
-    let output = git::secure_git()
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .with_context(|| format!("failed to spawn git to {what}"))?;
+    let output = {
+        let mut cmd = git::secure_git();
+        git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS);
+        cmd.args(args)
+            .current_dir(repo)
+            .output()
+            .with_context(|| format!("failed to spawn git to {what}"))?
+    };
     if !output.status.success() {
         anyhow::bail!(
             "failed to {what}: {}",
