@@ -958,10 +958,7 @@ pub(crate) fn seed_install_method(out: &std::path::Path) -> anyhow::Result<()> {
         .as_deref()
         .map_or("native", classify_claude_path);
     let mut seeded = serde_json::Map::new();
-    seeded.insert(
-        "installMethod".to_string(),
-        serde_json::Value::String(method.to_string()),
-    );
+    seeded.insert("installMethod".to_string(), serde_json::Value::from(method));
     apply_seeded_settings(out, &seeded)
 }
 

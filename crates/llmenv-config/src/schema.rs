@@ -88,7 +88,7 @@ pub struct Config {
     /// Path to a `.jsonl` file for session logging. When set, llmenv appends one
     /// JSON object per tracing event. Tilde-expanded at startup. Disabled by
     /// default (`None` = no file written).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_log: Option<String>,
 }
 

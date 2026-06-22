@@ -1,13 +1,21 @@
-use std::{fs::OpenOptions, sync::Mutex};
+use std::{fs::OpenOptions, io::BufWriter, sync::Mutex};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
-fn expand_tilde(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
+fn open_session_log(path: &str) -> Option<std::fs::File> {
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
     {
-        return format!("{home}/{rest}");
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
-    p.to_string()
+    match opts.open(path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("llmenv: session_log: cannot open {path:?}: {e}");
+            None
+        }
+    }
 }
 
 fn main() {
@@ -17,18 +25,13 @@ fn main() {
         .and_then(|c| c.session_log);
 
     let file_layer = session_log.and_then(|raw| {
-        let path = expand_tilde(&raw);
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()
-            .map(|file| {
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_writer(Mutex::new(file))
-                    .with_filter(EnvFilter::from_default_env())
-            })
+        let path = llmenv_paths::expand_tilde(&raw);
+        open_session_log(&path).map(|file| {
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(Mutex::new(BufWriter::new(file)))
+                .with_filter(EnvFilter::from_default_env())
+        })
     });
 
     tracing_subscriber::registry()
