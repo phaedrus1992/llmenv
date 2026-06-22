@@ -415,7 +415,8 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
 }
 
 fn git_clone(source: &str, dest: &Path) -> Result<()> {
-    let output = git::secure_git()
+    let mut cmd = git::secure_git();
+    let output = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS)
         .args(["clone", "--depth", "1", "--", source])
         .arg(dest)
         .output()
@@ -438,7 +439,8 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
 /// `reset` (no upstream change / diverged) keeps the current checkout and is
 /// non-fatal: the clone is still usable, it just didn't advance.
 fn git_pull(repo: &Path) -> Result<()> {
-    let fetch_out = git::secure_git()
+    let mut cmd = git::secure_git();
+    let fetch_out = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS)
         .args(["fetch", "--depth", "1"])
         .current_dir(repo)
         .output()

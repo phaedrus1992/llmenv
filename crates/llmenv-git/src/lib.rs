@@ -30,6 +30,24 @@ pub fn secure_git() -> Command {
     cmd
 }
 
+/// Default TCP connection timeout for background git operations (fetch/pull on every shell
+/// prompt). Short enough that a stuck remote doesn't freeze the prompt; long enough that a
+/// briefly loaded GitHub doesn't produce spurious failures.
+pub const DEFAULT_GIT_TIMEOUT_SECS: u64 = 10;
+
+/// Default TCP connection timeout for explicit, user-initiated git operations (clone/fetch
+/// for plugin installation). Longer than the background default because these are one-shot
+/// operations and users understand that a clone can take a moment.
+pub const DEFAULT_GIT_PLUGIN_TIMEOUT_SECS: u64 = 30;
+
+/// Apply a TCP connection timeout to a git command.
+///
+/// Sets `GIT_CONNECT_TIMEOUT` (TCP handshake only — not SSH auth negotiation or
+/// HTTP pack transfer) to prevent indefinite hangs when a remote is unreachable (#449).
+pub fn apply_git_timeout(cmd: &mut Command, secs: u64) -> &mut Command {
+    cmd.env("GIT_CONNECT_TIMEOUT", secs.to_string())
+}
+
 /// Scrub embedded credentials from a git URL before it lands in an error
 /// message or log. A URL like `https://user:token@host/path` becomes
 /// `https://***@host/path`; an SSH-style `user@host:path` becomes `***@host:path`.
@@ -139,6 +157,18 @@ mod tests {
         let cmd = secure_git();
         // Just verify command is created; actual flag testing is in integration tests
         assert_eq!(cmd.get_program(), "git");
+    }
+
+    #[test]
+    fn apply_git_timeout_sets_env_var() {
+        use std::ffi::OsStr;
+        let mut cmd = secure_git();
+        apply_git_timeout(&mut cmd, 10);
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == OsStr::new("GIT_CONNECT_TIMEOUT") && v == Some(OsStr::new("10"))),
+            "GIT_CONNECT_TIMEOUT env var should be set to 10"
+        );
     }
 
     #[test]
