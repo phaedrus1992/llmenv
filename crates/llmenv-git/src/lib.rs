@@ -44,8 +44,8 @@ pub const DEFAULT_GIT_PLUGIN_TIMEOUT_SECS: u64 = 30;
 ///
 /// Sets `GIT_CONNECT_TIMEOUT` (TCP handshake only — not SSH auth negotiation or
 /// HTTP pack transfer) to prevent indefinite hangs when a remote is unreachable (#449).
-pub fn apply_git_timeout(cmd: &mut Command, secs: u64) {
-    cmd.env("GIT_CONNECT_TIMEOUT", secs.to_string());
+pub fn apply_git_timeout(cmd: &mut Command, secs: u64) -> &mut Command {
+    cmd.env("GIT_CONNECT_TIMEOUT", secs.to_string())
 }
 
 /// Scrub embedded credentials from a git URL before it lands in an error

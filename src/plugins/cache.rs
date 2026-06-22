@@ -415,14 +415,12 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
 }
 
 fn git_clone(source: &str, dest: &Path) -> Result<()> {
-    let output = {
-        let mut cmd = git::secure_git();
-        git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS);
-        cmd.args(["clone", "--depth", "1", "--", source])
-            .arg(dest)
-            .output()
-            .context("spawning git clone")?
-    };
+    let mut cmd = git::secure_git();
+    let output = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS)
+        .args(["clone", "--depth", "1", "--", source])
+        .arg(dest)
+        .output()
+        .context("spawning git clone")?;
     if !output.status.success() {
         // Both the source URL and git's stderr can carry embedded credentials —
         // scrub both before they reach the user's terminal (#312).
@@ -441,14 +439,12 @@ fn git_clone(source: &str, dest: &Path) -> Result<()> {
 /// `reset` (no upstream change / diverged) keeps the current checkout and is
 /// non-fatal: the clone is still usable, it just didn't advance.
 fn git_pull(repo: &Path) -> Result<()> {
-    let fetch_out = {
-        let mut cmd = git::secure_git();
-        git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS);
-        cmd.args(["fetch", "--depth", "1"])
-            .current_dir(repo)
-            .output()
-            .context("spawning git fetch")?
-    };
+    let mut cmd = git::secure_git();
+    let fetch_out = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS)
+        .args(["fetch", "--depth", "1"])
+        .current_dir(repo)
+        .output()
+        .context("spawning git fetch")?;
     if !fetch_out.status.success() {
         anyhow::bail!(
             "git fetch failed at {}: {}",

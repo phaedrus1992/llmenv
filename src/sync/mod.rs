@@ -33,14 +33,12 @@ pub enum SyncOutcome {
 /// # Errors
 /// Returns an error if git cannot be spawned or exits non-zero (stderr included).
 fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
-    let output = {
-        let mut cmd = git::secure_git();
-        git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS);
-        cmd.args(args)
-            .current_dir(repo)
-            .output()
-            .with_context(|| format!("failed to spawn git to {what}"))?
-    };
+    let mut cmd = git::secure_git();
+    let output = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS)
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("failed to spawn git to {what}"))?;
     if !output.status.success() {
         anyhow::bail!(
             "failed to {what}: {}",
@@ -148,30 +146,27 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     // we don't want to spam every shell prompt while offline). A spawn error
     // (git binary missing or broken) is unexpected and warrants a warning.
     // Apply a short timeout to prevent freezing on stuck remotes (#449).
-    if let Err(e) = {
-        let mut cmd = git::secure_git();
-        git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS);
-        cmd.args(["fetch"])
-            .current_dir(repo)
-            .stderr(std::process::Stdio::null())
-            .status()
-    } {
+    let mut fetch_cmd = git::secure_git();
+    if let Err(e) = git::apply_git_timeout(&mut fetch_cmd, git::DEFAULT_GIT_TIMEOUT_SECS)
+        .args(["fetch"])
+        .current_dir(repo)
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
         tracing::warn!("git fetch failed to start in {}: {}", repo.display(), e);
     }
 
     // Attempt fast-forward pull. Suppress git's stderr — we'll print our
     // own one-line warning on failure rather than git's two-line message.
     // Apply a short timeout to prevent freezing on stuck remotes (#449).
-    let pull_status = {
-        let mut cmd = git::secure_git();
-        git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS);
-        cmd.args(["pull", "--ff-only"])
-            .current_dir(repo)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .context(format!("git pull --ff-only failed in {}", repo.display()))?
-    };
+    let mut pull_cmd = git::secure_git();
+    let pull_status = git::apply_git_timeout(&mut pull_cmd, git::DEFAULT_GIT_TIMEOUT_SECS)
+        .args(["pull", "--ff-only"])
+        .current_dir(repo)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context(format!("git pull --ff-only failed in {}", repo.display()))?;
 
     if pull_status.success() {
         write_state(state_dir, now)?;
