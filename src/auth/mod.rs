@@ -461,8 +461,8 @@ mod tests {
         // ponytail: bounded to year ~2100; days_to_ymd loops year-by-year from 1970, unbounded u64 never terminates
         fn prop_secs_roundtrip(secs in 0u64..=4_102_444_800u64) {
             let (_year, month, day, hour, min, sec) = secs_to_datetime(secs);
-            prop_assert!(month >= 1 && month <= 12, "month out of range: {}", month);
-            prop_assert!(day >= 1 && day <= 31, "day out of range: {}", day);
+            prop_assert!((1..=12).contains(&month), "month out of range: {}", month);
+            prop_assert!((1..=31).contains(&day), "day out of range: {}", day);
             prop_assert!(hour < 24, "hour out of range: {}", hour);
             prop_assert!(min < 60, "minute out of range: {}", min);
             prop_assert!(sec < 60, "second out of range: {}", sec);
@@ -471,11 +471,9 @@ mod tests {
         #[test]
         fn prop_days_to_ymd_valid_ranges(days in 0u64..=50000) {
             let (year, month, day) = days_to_ymd(days);
-            // Year should be >= 1970 (Unix epoch).
             prop_assert!(year >= 1970, "year before epoch: {}", year);
-            // Month/day should be in valid ranges.
-            prop_assert!(month >= 1 && month <= 12, "month out of range: {}", month);
-            prop_assert!(day >= 1 && day <= 31, "day out of range: {}", day);
+            prop_assert!((1..=12).contains(&month), "month out of range: {}", month);
+            prop_assert!((1..=31).contains(&day), "day out of range: {}", day);
         }
 
         #[test]
