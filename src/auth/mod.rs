@@ -452,4 +452,41 @@ mod tests {
         assert_eq!(&ts[10..11], "T");
         assert!(ts.ends_with('Z'));
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // ponytail: bounded to year ~2100; days_to_ymd loops year-by-year from 1970, unbounded u64 never terminates
+        #[test]
+        fn prop_secs_roundtrip(secs in 0u64..=4_102_444_800u64) {
+            let (year, month, day, hour, min, sec) = secs_to_datetime(secs);
+            prop_assert!((1970..=2100).contains(&year), "year out of range: {}", year);
+            prop_assert!((1..=12).contains(&month), "month out of range: {}", month);
+            prop_assert!((1..=31).contains(&day), "day out of range: {}", day);
+            prop_assert!(hour < 24, "hour out of range: {}", hour);
+            prop_assert!(min < 60, "minute out of range: {}", min);
+            prop_assert!(sec < 60, "second out of range: {}", sec);
+        }
+
+        #[test]
+        // ponytail: 50000 days ≈ year 2106, consistent with secs upper bound (~47481 days)
+        fn prop_days_to_ymd_valid_ranges(days in 0u64..=50000) {
+            let (year, month, day) = days_to_ymd(days);
+            prop_assert!(year >= 1970, "year before epoch: {}", year);
+            prop_assert!((1..=12).contains(&month), "month out of range: {}", month);
+            prop_assert!((1..=31).contains(&day), "day out of range: {}", day);
+        }
+
+        #[test]
+        fn prop_is_safe_uuid_accepts_valid_hex(s in "[0-9a-fA-F-]+") {
+            prop_assert!(is_safe_uuid(&s), "expected valid hex UUID to be accepted: {}", s);
+        }
+
+        #[test]
+        fn prop_is_safe_uuid_rejects_unsafe_paths(
+            s in r"[a-zA-Z0-9\-]*(\.\.|\.|/|\\|:|\x00)[a-zA-Z0-9\-]*"
+        ) {
+            prop_assert!(!is_safe_uuid(&s), "expected path-unsafe UUID to be rejected: {:?}", s);
+        }
+    }
 }
