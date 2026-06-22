@@ -40,10 +40,10 @@ pub const DEFAULT_GIT_TIMEOUT_SECS: u64 = 10;
 /// operations and users understand that a clone can take a moment.
 pub const DEFAULT_GIT_PLUGIN_TIMEOUT_SECS: u64 = 30;
 
-/// Apply timeout to a git command for network operations.
+/// Apply a TCP connection timeout to a git command.
 ///
-/// Sets git's connection timeout via environment variable to prevent
-/// long hangs during fetch/pull if the remote is unreachable (#449).
+/// Sets `GIT_CONNECT_TIMEOUT` (TCP handshake only — not SSH auth negotiation or
+/// HTTP pack transfer) to prevent indefinite hangs when a remote is unreachable (#449).
 pub fn apply_git_timeout(cmd: &mut Command, secs: u64) {
     cmd.env("GIT_CONNECT_TIMEOUT", secs.to_string());
 }
