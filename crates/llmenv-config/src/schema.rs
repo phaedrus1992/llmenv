@@ -85,6 +85,11 @@ pub struct Config {
     /// new materialized folders' `settings.json`, surviving every re-render.
     #[serde(default)]
     pub init: InitConfig,
+    /// Path to a `.jsonl` file for session logging. When set, llmenv appends one
+    /// JSON object per tracing event. Tilde-expanded at startup. Disabled by
+    /// default (`None` = no file written).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_log: Option<String>,
 }
 
 /// llmenv's own cache/sync behavior. Distinct from engine `capabilities` — this

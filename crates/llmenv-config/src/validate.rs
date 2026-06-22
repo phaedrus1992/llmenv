@@ -840,6 +840,7 @@ mod tests {
                         state: Default::default(),
                         host,
                         init: Default::default(),
+                        session_log: None,
                     }
                 },
             )
@@ -883,6 +884,7 @@ mod tests {
                 state: Default::default(),
                 host: Default::default(),
                 init: Default::default(),
+                session_log: None,
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -913,6 +915,7 @@ mod tests {
                 state: Default::default(),
                 host: Default::default(),
                 init: Default::default(),
+                session_log: None,
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -940,6 +943,7 @@ mod tests {
                 state: Default::default(),
                 host: Default::default(),
                 init: Default::default(),
+                session_log: None,
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -978,6 +982,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -1009,6 +1014,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1040,6 +1046,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1069,6 +1076,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(matches!(
             config.validate(),
@@ -1101,6 +1109,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(matches!(
             config.validate(),
@@ -1134,6 +1143,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(matches!(
             config.validate(),
@@ -1167,6 +1177,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(matches!(
             config.validate(),
@@ -1202,6 +1213,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1233,6 +1245,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1262,6 +1275,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1291,6 +1305,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1320,6 +1335,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1351,6 +1367,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1383,6 +1400,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1412,6 +1430,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1441,6 +1460,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1465,6 +1485,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1491,6 +1512,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1515,6 +1537,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1534,6 +1557,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -1558,6 +1582,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_err());
     }
@@ -1582,6 +1607,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -1606,6 +1632,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -1627,6 +1654,7 @@ mod tests {
             state: Default::default(),
             host: Default::default(),
             init: Default::default(),
+            session_log: None,
         }
     }
 

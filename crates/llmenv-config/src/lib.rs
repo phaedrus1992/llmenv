@@ -60,6 +60,24 @@ mod tests {
     }
 
     #[test]
+    fn session_log_defaults_to_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        std::fs::write(&p, "cache: {}\n").unwrap();
+        let cfg = Config::load(&p).unwrap();
+        assert!(cfg.session_log.is_none());
+    }
+
+    #[test]
+    fn session_log_parses_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        std::fs::write(&p, "session_log: /tmp/session.jsonl\n").unwrap();
+        let cfg = Config::load(&p).unwrap();
+        assert_eq!(cfg.session_log.as_deref(), Some("/tmp/session.jsonl"));
+    }
+
+    #[test]
     #[should_panic(expected = "expanded path")]
     fn load_rejects_tilde_path_in_debug() {
         let _ = Config::load(Path::new("~/.config/llmenv/config.yaml"));
