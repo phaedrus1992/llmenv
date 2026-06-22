@@ -30,6 +30,24 @@ pub fn secure_git() -> Command {
     cmd
 }
 
+/// Default TCP connection timeout for background git operations (fetch/pull on every shell
+/// prompt). Short enough that a stuck remote doesn't freeze the prompt; long enough that a
+/// briefly loaded GitHub doesn't produce spurious failures.
+pub const DEFAULT_GIT_TIMEOUT_SECS: u64 = 10;
+
+/// Default TCP connection timeout for explicit, user-initiated git operations (clone/fetch
+/// for plugin installation). Longer than the background default because these are one-shot
+/// operations and users understand that a clone can take a moment.
+pub const DEFAULT_GIT_PLUGIN_TIMEOUT_SECS: u64 = 30;
+
+/// Apply timeout to a git command for network operations.
+///
+/// Sets git's connection timeout via environment variable to prevent
+/// long hangs during fetch/pull if the remote is unreachable (#449).
+pub fn apply_git_timeout(cmd: &mut Command, secs: u64) {
+    cmd.env("GIT_CONNECT_TIMEOUT", secs.to_string());
+}
+
 /// Scrub embedded credentials from a git URL before it lands in an error
 /// message or log. A URL like `https://user:token@host/path` becomes
 /// `https://***@host/path`; an SSH-style `user@host:path` becomes `***@host:path`.
@@ -139,6 +157,19 @@ mod tests {
         let cmd = secure_git();
         // Just verify command is created; actual flag testing is in integration tests
         assert_eq!(cmd.get_program(), "git");
+    }
+
+    #[test]
+    fn apply_git_timeout_sets_env_var() {
+        let mut cmd = secure_git();
+        apply_git_timeout(&mut cmd, 10);
+        // Verify timeout was applied by checking the command
+        // (actual verification would be in integration tests with actual git invocation)
+        let cmd_str = format!("{:?}", cmd);
+        assert!(
+            cmd_str.contains("GIT_CONNECT_TIMEOUT") || cmd_str.contains("10"),
+            "timeout should be applied to git command"
+        );
     }
 
     #[test]

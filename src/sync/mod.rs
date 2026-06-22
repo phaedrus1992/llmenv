@@ -144,24 +144,31 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     // Attempt fetch — silent on failure (network issues are transient and
     // we don't want to spam every shell prompt while offline). A spawn error
     // (git binary missing or broken) is unexpected and warrants a warning.
-    if let Err(e) = git::secure_git()
-        .args(["fetch"])
-        .current_dir(repo)
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
+    // Apply a short timeout to prevent freezing on stuck remotes (#449).
+    if let Err(e) = {
+        let mut cmd = git::secure_git();
+        git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS);
+        cmd.args(["fetch"])
+            .current_dir(repo)
+            .stderr(std::process::Stdio::null())
+            .status()
+    } {
         tracing::warn!("git fetch spawn error in {}: {}", repo.display(), e);
     }
 
     // Attempt fast-forward pull. Suppress git's stderr — we'll print our
     // own one-line warning on failure rather than git's two-line message.
-    let pull_status = git::secure_git()
-        .args(["pull", "--ff-only"])
-        .current_dir(repo)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .context(format!("git pull --ff-only failed in {}", repo.display()))?;
+    // Apply a short timeout to prevent freezing on stuck remotes (#449).
+    let pull_status = {
+        let mut cmd = git::secure_git();
+        git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS);
+        cmd.args(["pull", "--ff-only"])
+            .current_dir(repo)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context(format!("git pull --ff-only failed in {}", repo.display()))?
+    };
 
     if pull_status.success() {
         write_state(state_dir, now)?;
