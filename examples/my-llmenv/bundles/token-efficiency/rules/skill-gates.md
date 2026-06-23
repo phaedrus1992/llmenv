@@ -1,7 +1,5 @@
 # Skill-Gate Pattern — Conditional Skill Activation
 
-**Issue #222:** Per-stack rule files with skill-gate pattern
-
 ## Overview
 
 A "skill-gate" is a **prerequisite check** that guards skill availability. Gates prevent skills from running when their preconditions aren't met, reducing wasted prompts and context cost.
@@ -87,30 +85,7 @@ skills:
 
 ### 2. Prerequisite Gates (Scaffold)
 
-Add a `gate-check.sh` script to your skill directory:
-
-```bash
-# skills/my-skill/gate-check.sh
-#!/bin/bash
-set -euo pipefail
-
-# Check: build passed?
-if ! cargo build --quiet 2>/dev/null; then
-  echo "❌ Prerequisite failed: cargo build" >&2
-  exit 1
-fi
-
-# Check: tests pass?
-if ! cargo test --quiet 2>/dev/null; then
-  echo "❌ Prerequisite failed: cargo test" >&2
-  exit 1
-fi
-
-echo "✓ All prerequisites met"
-exit 0
-```
-
-The adapter can invoke `gate-check.sh` before offering the skill.
+Document prerequisites in the skill descriptor (SKILL.md). The adapter invokes the check before offering the skill.
 
 ### 3. Context Gates (Scaffold)
 
@@ -167,10 +142,4 @@ When they open a TypeScript project, they get:
 - `ts-build` skill available
 - `typescript.md` rules loaded
 - Rust skills hidden
-
-## Future Enhancements
-
-1. **Hook-based gates:** Check prerequisites via hooks (SessionStart hook runs gate-check.sh, disables skill if it fails)
-2. **Capability gates:** Block a capability (e.g., `Bash` for certain patterns) until a prerequisite passes
-3. **Dynamic gates:** Gate activation based on code analysis (e.g., "only offer refactoring skill if complexity > 8")
 

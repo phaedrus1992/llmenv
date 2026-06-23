@@ -32,13 +32,5 @@
 - Counting/aggregating (use `mcp__plugin_context-mode_context-mode__ctx_execute` with language-native processing)
 - Looping over results (use `mcp__plugin_context-mode_context-mode__ctx_batch_execute` for parallel work)
 
-## Context-Mode Tool Reference
-
-| Tool | Use When | Example |
-|------|----------|---------|
-| `ctx_batch_execute` | Running 3+ related commands in parallel | `ctx_batch_execute(commands: [{label: "logs", command: "tail -f app.log"}, ...])` |
-| `ctx_execute` | Processing data (filter, count, parse, aggregate) | `ctx_execute(language: "shell", code: "find . -name '*.go' \| wc -l")` |
-| `ctx_execute_file` | Analyzing a single file without reading it to context | `ctx_execute_file(path: "huge.log", language: "shell", code: "grep ERROR FILE_CONTENT")` |
-| `ctx_fetch_and_index` | Fetching web content for later search | `ctx_fetch_and_index(url: "...", source: "label")` |
-| `ctx_search` | Searching previously indexed content | `ctx_search(queries: ["q1", "q2"])` |
+See [skill-gates.md](skill-gates.md) for the full context-mode tool reference.
 

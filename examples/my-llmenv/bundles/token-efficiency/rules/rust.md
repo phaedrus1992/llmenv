@@ -38,26 +38,4 @@
 - Read full compiler error output to context — extract key errors with `ctx_execute_file`
 - Run interactive tools (tests in watch mode, cargo-watch) — these belong in a separate terminal
 
-## Cargo-Specific Patterns
-
-### Testing
-
-```rust
-// DON'T: Read full `cargo test` output
-$ cargo test
-
-// DO: Use ctx_execute to extract test results
-ctx_execute(language: "shell", code: "cargo test 2>&1 | grep -A 5 'test result:'")
-```
-
-### Dependency Audit
-
-```rust
-// DON'T: Full `cargo tree` output with all dependencies
-$ cargo tree
-
-// DO: Use ctx_execute_file to analyze a subset
-ctx_execute_file(path: "/tmp/cargo-tree.txt", language: "shell", 
-  code: "grep 'YANKED\|DEPRECATED' FILE_CONTENT")
-```
 

@@ -6,37 +6,21 @@
 # - PreCompact/SessionEnd auto-handoff: defer non-critical work until context compaction
 # - PostToolUse reject-scanner: scan and block capability calls before they execute (scaffold)
 # - Per-stack rule files: language-specific standards + skill-gates
-#
-# USAGE:
-#   Enable in your config.yaml:
-#     bundle:
-#       - name: token-efficiency
-#         when: [your-tag-here]
-#   Or manually enable a scope with: enable_bundles: [token-efficiency]
-#
-#   Then copy rules/*.md to your ~/.config/llmenv/rules/ directory.
 
 env:
-  # Ban these bash commands outright. Prevents accidental token waste.
-  # Examples: cat (use Read tool), find (use fast fd), grep (use rg)
   BASH_BAN: "cat,find,grep,awk,sed"
-  # Threshold: abort if a single tool call eats more than N tokens
   CBM_WARN_THRESHOLD: "5000"
-  # Enable context-mode auto-indexing at SessionStart
   CBM_AUTOINDEX: "true"
 
 hooks:
-  # PreCompact/SessionEnd auto-handoff: defer non-critical work until compaction.
-  # At SessionEnd, hand off deferred work items (logs, debug traces, summaries)
-  # to a separate context window so live session context stays lean.
+  # PreCompact/SessionEnd auto-handoff: hand off deferred work to keep live context lean.
   - event: SessionEnd
     handler:
       type: command
       command: |
         llmenv hook-run session_end
 
-  # SessionStart context-mode + CBM reminder.
-  # Injects a reminder about available context-mode tools and current CBM state.
+  # SessionStart: inject context-mode tool reminder + CBM state.
   - event: SessionStart
     handler:
       type: command
@@ -47,9 +31,7 @@ hooks:
         echo "  Use context-mode tools: ctx_batch_execute, ctx_search, ctx_execute"
         echo "  CBM Auto-Index: ${CBM_AUTOINDEX:-off}"
 
-  # PostToolUse reject-scanner scaffold.
-  # TODO: implement actual BASH_BAN enforcement in the adapter layer (#220).
-  # This hook fires after bash runs — it cannot block execution, only log.
+  # PostToolUse scaffold: fires after bash runs — cannot block, only log. (#220 tracks enforcement)
   - event: PostToolUse
     matcher: "bash"
     handler:
@@ -59,10 +41,6 @@ hooks:
 
 native_permissions:
   claude_code:
-    # Token-efficiency specific: minimal permission set.
-    # Reason: broad Bash access encourages expensive patterns (pipes, loops, re-reads).
-    # Instead: use Bash for state mutation (git, mkdir, network) only.
-    # Use sandboxed context-mode tools for analysis.
     allow:
       - "Bash(command: ^git )"         # version control only
       - "Bash(command: ^mkdir )"       # directory creation only

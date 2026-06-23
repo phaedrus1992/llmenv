@@ -36,13 +36,4 @@
 - `npm install` then show full terminal output — let NPM run in background, check `npm list` via `ctx_execute`
 - Build the app and show full output — use `npm run build 2>&1 | tail -20` instead
 
-## When to Use Vitest
-
-```typescript
-// DON'T: Read full test suite output
-$ npm test
-
-// DO: Run tests and extract failures
-ctx_execute(language: "shell", code: "npm test -- --reporter=verbose 2>&1 | grep -E 'FAIL|PASS|✓|✗'")
-```
 
