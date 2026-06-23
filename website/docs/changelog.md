@@ -19,13 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Add built-in `token-efficiency` example bundle: env vars (`LLMENV_BASH_BAN`, `CBM_WARN_THRESHOLD`,
+- Add built-in `token-efficiency` example bundle with env vars (`LLMENV_BASH_BAN`, `CBM_WARN_THRESHOLD`,
   `CBM_AUTOINDEX`), SessionEnd auto-handoff hook, SessionStart context-mode reminder hook,
   PostToolUse reject-scanner scaffold, and minimal `native_permissions` limiting Bash to
-  state-mutation operations (git, mkdir, curl, trash) (#218, #219, #220, #223)
-- Add per-stack rule files to the token-efficiency bundle: `bash.md`, `rust.md`, `typescript.md`,
-  and `skill-gates.md` documenting the skill-gate pattern for conditional skill activation by
-  language tag, prerequisite, or indexed content (#222)
+  state-mutation operations (git, mkdir, curl, trash). Include per-stack rule files (`bash.md`,
+  `rust.md`, `typescript.md`, `skill-gates.md`) documenting the skill-gate pattern for conditional
+  skill activation by language tag, prerequisite, or indexed content (#218, #219, #220, #222, #223)
+- Add `--compress` flag to `llmenv export`: strips trailing whitespace and collapses excessive blank
+  lines for token-efficient AGENTS.md output (#226)
+- Wire `LLMENV_BASH_BAN` env var into the Claude Code adapter permission layer: when set, denies
+  Bash tool invocations whose commands match any comma-separated prefix pattern before execution
+  (#464)
+
+### Fixed
+
+- Fix `token-efficiency` example bundle declaring `BASH_BAN` instead of `LLMENV_BASH_BAN`; the
+  Bash deny feature silently failed for any user of the example config (#466)
+- Fix `token-efficiency` example bundle placing env vars under `features.env` instead of the
+  top-level `env` key and using snake_case hook event names instead of PascalCase (e.g.
+  `session_end` → `SessionEnd`); env vars were not exported and hooks never fired
+- Fix `LLMENV_BASH_BAN` accepting patterns containing `)`, `(`, and newlines that produced
+  malformed deny rules; invalid pattern characters are now rejected at startup (#465)
+- Fix `LLMENV_BASH_BAN` treating a non-unicode env var value the same as the variable being
+  unset; non-unicode values now return an error instead of silently disabling enforcement (#465)
+- Fix `llmenv export --compress` not preserving the final newline, producing non-POSIX output
+  (#465)
 
 
 ## [2.1.0] - 2026-06-23
