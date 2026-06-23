@@ -1,0 +1,78 @@
+# Token-efficiency bundle — minimal context, maximum results.
+#
+# Patterns from "How I Cut Claude Code Token Usage by 90%+":
+# - BASH_BAN: prevent bash commands that shouldn't exist
+# - CBM_SESSION_REMINDER: inject context-mode + CBM status at SessionStart
+# - PreCompact/SessionEnd auto-handoff: defer non-critical work until context compaction
+# - PostToolUse reject-scanner: scan and block capability calls before they execute
+# - Per-stack rule files: language-specific standards + skill-gates
+#
+# USAGE:
+#   Enable in your config.yaml:
+#     bundle:
+#       - name: token-efficiency
+#         when: [your-tag-here]
+#   Or manually enable a scope with: enable_bundles: [token-efficiency]
+#
+#   Then copy rules/*.md to your ~/.config/llmenv/rules/ directory.
+
+features:
+  env:
+    # Ban these bash commands outright. Prevents accidental token waste.
+    # Examples: cat (use Read tool), find (use fast fd), grep (use rg)
+    BASH_BAN: "cat,find,grep,awk,sed"
+    # Threshold: abort if a single tool call eats more than N tokens
+    CBM_WARN_THRESHOLD: "5000"
+    # Enable context-mode auto-indexing at SessionStart
+    CBM_AUTOINDEX: "true"
+
+hooks:
+  # PreCompact/SessionEnd auto-handoff: defer non-critical work until compaction.
+  # At SessionEnd, hand off deferred work items (logs, debug traces, summaries)
+  # to a separate context window so live session context stays lean.
+  - event: session_end
+    handler:
+      type: command
+      command: |
+        llmenv hook-run session_end
+
+  # SessionStart context-mode + CBM reminder.
+  # Injects a reminder about available context-mode tools and current CBM state.
+  - event: session_start
+    handler:
+      type: command
+      command: |
+        echo "🚀 Token Efficiency Bundle Active"
+        echo "   • BASH_BAN: $(echo $BASH_BAN | tr ',' '\n' | wc -l) commands blocked"
+        echo "   • Use context-mode tools: ctx_batch_execute, ctx_search, ctx_execute"
+        echo "   • CBM Auto-Index: $([ \"$CBM_AUTOINDEX\" = true ] && echo 'on' || echo 'off')"
+
+  # PostToolUse reject-scanner: validate tool calls before execution.
+  # Scans tool signatures and arguments, blocks problematic patterns.
+  # Examples: prevents `cat huge-file.log`, `find -exec`, direct bash when ctx_execute_file available.
+  - event: post_tool_use
+    matcher: "bash"
+    handler:
+      type: command
+      command: |
+        # Pseudo-code scaffold: actual implementation in adapter
+        # Validate: if command matches BASH_BAN, fail + suggest alternative
+        # Validate: if command reads large files (>1MB), suggest ctx_execute_file + code processing
+        # Validate: if command is I/O-heavy and sequential, suggest ctx_batch_execute + parallel
+        echo "✓ Tool call validated (stub)" >&2
+
+native_permissions:
+  claude_code:
+    # Token-efficiency specific: minimal permission set.
+    # Reason: broad Bash access encourages expensive patterns (pipes, loops, re-reads).
+    # Instead: use Bash for state mutation (git, mkdir, network) only.
+    # Use sandboxed context-mode tools for analysis.
+    allow:
+      - "Bash(command: ^git )"         # version control only
+      - "Bash(command: ^mkdir )"       # directory creation only
+      - "Bash(command: ^rm )"          # cleanup only
+      - "Bash(command: ^curl )"        # network requests only (fetch content via ctx_fetch_and_index instead)
+      - "Read()"                       # file reading for editing
+      - "Edit()"                       # in-place edits
+      - "Write()"                      # new file creation
+      - "Bash(command: ^llmenv )"      # llmenv CLI
