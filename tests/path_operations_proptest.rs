@@ -23,12 +23,10 @@ fn prop_expand_tilde_non_tilde_unchanged() {
 }
 
 #[test]
-fn prop_expand_tilde_bare_tilde() {
-    proptest!(|(_ in 0..1)| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
-        let result = expand_tilde("~");
-        prop_assert_eq!(result, home);
-    });
+fn expand_tilde_bare_tilde() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let result = expand_tilde("~");
+    assert_eq!(result, home);
 }
 
 // ===== Path Canonicalization Idempotence =====

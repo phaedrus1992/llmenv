@@ -929,6 +929,7 @@ fn classify_claude_path(path: &str) -> &'static str {
         || lc.contains("/.volta/")
         || lc.contains("/.fnm/")
         || lc.contains("/.local/share/pnpm/")
+        || lc.contains("/library/pnpm/")
     {
         "npm"
     } else {
@@ -961,12 +962,24 @@ pub(crate) fn seed_install_method(out: &std::path::Path) -> anyhow::Result<()> {
     let settings_path = out.join("settings.json");
 
     // Skip fork if installMethod already present.
-    if let Ok(bytes) = std::fs::read(&settings_path)
-        && let Ok(serde_json::Value::Object(obj)) =
-            serde_json::from_slice::<serde_json::Value>(&bytes)
-        && obj.contains_key("installMethod")
-    {
-        return Ok(());
+    match std::fs::read(&settings_path) {
+        Ok(bytes) => {
+            if let Ok(serde_json::Value::Object(obj)) =
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                && obj.contains_key("installMethod")
+            {
+                return Ok(());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist yet, that's fine.
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "reading {} for seeding installMethod: {e}",
+                settings_path.display()
+            ));
+        }
     }
 
     let method = find_claude_binary()
@@ -2052,6 +2065,10 @@ mod tests {
         );
         assert_eq!(
             classify_claude_path("/home/user/.local/share/pnpm/claude"),
+            "npm"
+        );
+        assert_eq!(
+            classify_claude_path("/Users/user/Library/pnpm/claude"),
             "npm"
         );
     }
