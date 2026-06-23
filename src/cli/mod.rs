@@ -747,8 +747,10 @@ fn run_regenerate() -> anyhow::Result<()> {
 type Materialized = (PathBuf, Vec<(String, String)>);
 
 /// Compress agents_md by removing excess whitespace and blank lines.
+/// Preserves trailing newline (POSIX text file convention).
 /// ponytail: simple rule-based compression; use claude -p for higher-quality compression.
 fn compress_agents_md(text: &str) -> String {
+    let has_trailing_newline = text.ends_with('\n');
     let mut result = text
         .lines()
         .map(|line| line.trim_end())
@@ -756,8 +758,14 @@ fn compress_agents_md(text: &str) -> String {
         .join("\n");
 
     // Collapse 3+ consecutive newlines to 2 (preserves paragraph breaks).
+    // Loop until no more `\n\n\n` sequences exist (handles 5+ consecutive newlines).
     while result.contains("\n\n\n") {
         result = result.replace("\n\n\n", "\n\n");
+    }
+
+    // Restore trailing newline if original had one (POSIX convention).
+    if has_trailing_newline && !result.ends_with('\n') {
+        result.push('\n');
     }
     result
 }
@@ -2431,6 +2439,13 @@ mod tests {
     fn compress_agents_md_preserves_double_blank_lines() {
         let input = "text\n\ndouble\n\nmore";
         assert_eq!(compress_agents_md(input), input);
+    }
+
+    #[test]
+    fn compress_agents_md_preserves_trailing_newline() {
+        let input = "text\n\n\n\nmore\n";
+        let expected = "text\n\nmore\n";
+        assert_eq!(compress_agents_md(input), expected);
     }
 
     #[test]
