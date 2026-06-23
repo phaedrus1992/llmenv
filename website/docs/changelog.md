@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add built-in `token-efficiency` example bundle: env vars (`BASH_BAN`, `CBM_WARN_THRESHOLD`,
+  `CBM_AUTOINDEX`), SessionEnd auto-handoff hook, SessionStart context-mode reminder hook,
+  PostToolUse reject-scanner scaffold, and minimal `native_permissions` limiting Bash to
+  state-mutation operations (git, mkdir, curl, trash) (#218, #219, #220, #223)
+- Add per-stack rule files to the token-efficiency bundle: `bash.md`, `rust.md`, `typescript.md`,
+  and `skill-gates.md` documenting the skill-gate pattern for conditional skill activation by
+  language tag, prerequisite, or indexed content (#222)
+
+
 ## [2.1.0] - 2026-06-23
 
 ### Added
@@ -57,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Remove `StrictHostKeyChecking=accept-new` from llmenv's SSH options for git
   operations; this option weakened host-key verification (MITM/DNS-hijacking
   exposure) and was unrelated to the timeout feature it was grouped with
+
 
 ## [2.0.5] - 2026-06-18
 

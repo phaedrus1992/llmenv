@@ -748,11 +748,51 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         native.map_or(&[], |n| &n.ask),
         PermissionAction::Ask,
     );
-    let deny = render_action(
+    let mut deny = render_action(
         &perms.deny,
         native.map_or(&[], |n| &n.deny),
         PermissionAction::Deny,
     );
+
+    // #464: Wire LLMENV_BASH_BAN env var into tool dispatch path to reject banned bash commands.
+    // ponytail: simple prefix-based ban; enhance to support full regex patterns if needed.
+    match std::env::var("LLMENV_BASH_BAN") {
+        Ok(banned_patterns) => {
+            for pattern in banned_patterns.split(',') {
+                let pattern = pattern.trim();
+                if !pattern.is_empty() {
+                    // Validate pattern contains only safe characters for the Tool(pattern) grammar.
+                    if pattern
+                        .chars()
+                        .any(|c| matches!(c, ')' | '(' | '\n' | '\r'))
+                    {
+                        tracing::warn!(
+                            "LLMENV_BASH_BAN pattern {:?} contains unsafe characters, skipping",
+                            pattern
+                        );
+                        continue;
+                    }
+                    deny.push(format!("Bash({}*)", pattern));
+                }
+            }
+            if !deny.is_empty() {
+                tracing::debug!(
+                    "LLMENV_BASH_BAN: added {} deny rule(s) to adapter config",
+                    deny.len()
+                );
+            }
+            dedup(&mut deny);
+        }
+        Err(std::env::VarError::NotPresent) => {
+            // Expected: feature is opt-in via LLMENV_BASH_BAN env var.
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                "LLMENV_BASH_BAN contains non-UTF-8 bytes and will not be applied; \
+                 ensure the env var contains only valid UTF-8"
+            );
+        }
+    }
 
     let has_perms =
         !allow.is_empty() || !ask.is_empty() || !deny.is_empty() || perms.default_mode.is_some();
