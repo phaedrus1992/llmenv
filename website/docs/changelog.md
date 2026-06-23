@@ -19,12 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Add `session_log` config field: opt-in JSONL tracing of all llmenv log events to
+  a file for diagnosing hooks and materialization without reading stderr (#382)
+- Add SSH auth negotiation timeout (`ssh -o ConnectTimeout`) and HTTP pack-transfer
+  stall detection (`http.lowSpeedTime`/`http.lowSpeedLimit`) to all git subprocesses,
+  preventing indefinite hangs on slow or unresponsive servers (#453)
+- Add annotated `examples/my-llmenv/` reference config: a fully commented example
+  covering `config.yaml`, five bundles, hooks, skills, rules, and scripts
 - Detect volta, fnm, Linux pnpm (`~/.local/share/pnpm/`), and macOS pnpm
   (`~/Library/pnpm/`) install paths when seeding `installMethod` in Claude Code
   settings; previously these were classified as `native`
 
 ### Fixed
 
+- Fix `GIT_SSH_COMMAND` being overwritten by llmenv's SSH timeout injection;
+  user SSH identity files, `ProxyJump`, and other existing SSH customizations
+  are now preserved
 - Fix `seed_install_method` overwriting a user-customized `installMethod` value
   in Claude Code `settings.json`; the field is now only written when absent
 - Fix `seed_install_method` silently swallowing I/O errors (e.g. permission
@@ -32,6 +42,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix long interactive session pause when GitHub remote is unreachable: all git
   subprocesses now apply a TCP connection timeout (`GIT_CONNECT_TIMEOUT` — 10 s
   for background fetch/pull, 30 s for explicit plugin clone/fetch)
+- Fix malformed `marketplace.json` entries (missing or invalid `source` field)
+  being silently dropped; these now emit a `warn` log with the entry details (#361)
+
+### Security
+
+- Reject NUL, newline, and carriage-return characters in env var values at config
+  load time; these were previously accepted silently and could interfere with shell
+  export (#356)
+- Reject `file://` transport in external plugin source URLs; only `https://` and
+  SSH remotes are permitted (#360)
+- Remove `StrictHostKeyChecking=accept-new` from llmenv's SSH options for git
+  operations; this option weakened host-key verification (MITM/DNS-hijacking
+  exposure) and was unrelated to the timeout feature it was grouped with
 
 ## [2.0.5] - 2026-06-18
 
