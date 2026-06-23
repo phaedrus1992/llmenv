@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.2.0] - 2026-06-23
+
 ### Added
 
 - Add built-in `token-efficiency` example bundle with env vars (`LLMENV_BASH_BAN`, `CBM_WARN_THRESHOLD`,
