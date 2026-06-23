@@ -15,7 +15,7 @@
 
 | Skill | Gate | Trigger |
 |-------|------|---------|
-| `/run` | `BASH_BAN` contains `cat,find,grep` | Prevents bare file inspection; user must use appropriate tool |
+| `/run` | `LLMENV_BASH_BAN` contains `cat,find,grep` | Prevents bare file inspection; user must use appropriate tool |
 | `/ctx-stats` | Requires `mcp__plugin_context-mode_context-mode__ctx_stats()` invocation first | Ensures user understands current context consumption |
 
 ## When to Use Bash

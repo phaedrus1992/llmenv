@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Add built-in `token-efficiency` example bundle: env vars (`BASH_BAN`, `CBM_WARN_THRESHOLD`,
+- Add built-in `token-efficiency` example bundle: env vars (`LLMENV_BASH_BAN`, `CBM_WARN_THRESHOLD`,
   `CBM_AUTOINDEX`), SessionEnd auto-handoff hook, SessionStart context-mode reminder hook,
   PostToolUse reject-scanner scaffold, and minimal `native_permissions` limiting Bash to
   state-mutation operations (git, mkdir, curl, trash) (#218, #219, #220, #223)

@@ -1,14 +1,14 @@
 # Token-efficiency bundle — minimal context, maximum results.
 #
 # Patterns from "How I Cut Claude Code Token Usage by 90%+":
-# - BASH_BAN: prevent bash commands that shouldn't exist
+# - LLMENV_BASH_BAN: prevent bash commands that shouldn't exist
 # - CBM_SESSION_REMINDER: inject context-mode + CBM status at SessionStart
 # - PreCompact/SessionEnd auto-handoff: defer non-critical work until context compaction
 # - PostToolUse reject-scanner: scan and block capability calls before they execute (scaffold)
 # - Per-stack rule files: language-specific standards + skill-gates
 
 env:
-  BASH_BAN: "cat,find,grep,awk,sed"
+  LLMENV_BASH_BAN: "cat,find,grep,awk,sed"
   CBM_WARN_THRESHOLD: "5000"
   CBM_AUTOINDEX: "true"
 
@@ -25,9 +25,9 @@ hooks:
     handler:
       type: command
       command: |
-        ban_count=$(echo "${BASH_BAN:-}" | tr ',' '\n' | grep -c .)
+        ban_count=$(echo "${LLMENV_BASH_BAN:-}" | tr ',' '\n' | grep -c .)
         echo "Token Efficiency Bundle Active"
-        echo "  BASH_BAN: ${ban_count} commands blocked (${BASH_BAN:-none})"
+        echo "  LLMENV_BASH_BAN: ${ban_count} commands blocked (${LLMENV_BASH_BAN:-none})"
         echo "  Use context-mode tools: ctx_batch_execute, ctx_search, ctx_execute"
         echo "  CBM Auto-Index: ${CBM_AUTOINDEX:-off}"
 
