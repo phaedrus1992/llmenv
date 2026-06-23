@@ -806,6 +806,7 @@ mod tests {
                         .collect()
                 },
             ),
+            arb_opt_string(),
         )
             .prop_map(
                 |(
@@ -818,6 +819,7 @@ mod tests {
                     capabilities,
                     marketplace,
                     plugin_collection,
+                    session_log,
                 )| {
                     Config {
                         cache,
@@ -840,7 +842,7 @@ mod tests {
                         state: Default::default(),
                         host,
                         init: Default::default(),
-                        session_log: None,
+                        session_log,
                     }
                 },
             )

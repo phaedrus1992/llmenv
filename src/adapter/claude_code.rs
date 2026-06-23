@@ -926,6 +926,10 @@ fn classify_claude_path(path: &str) -> &'static str {
         || lc.contains("/.npm")
         || lc.contains("/.nvm")
         || lc.contains("/npm/")
+        || lc.contains("/.volta/")
+        || lc.contains("/.fnm/")
+        || lc.contains("/.local/share/pnpm/")
+        || lc.contains("/library/pnpm/")
     {
         "npm"
     } else {
@@ -949,11 +953,35 @@ fn find_claude_binary() -> Option<String> {
 ///
 /// Detects how `claude` was installed by inspecting its binary path, then
 /// writes the result as a foreign key so it survives every re-render.
-/// No-op if `settings.json` does not exist (materialize hasn't run yet).
+/// No-op if `settings.json` does not exist (materialize hasn't run yet) or if
+/// `installMethod` is already present.
 ///
 /// # Errors
 /// Returns an error if the file exists but cannot be read or written.
 pub(crate) fn seed_install_method(out: &std::path::Path) -> anyhow::Result<()> {
+    let settings_path = out.join("settings.json");
+
+    // Skip fork if installMethod already present.
+    match std::fs::read(&settings_path) {
+        Ok(bytes) => {
+            if let Ok(serde_json::Value::Object(obj)) =
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                && obj.contains_key("installMethod")
+            {
+                return Ok(());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist yet, that's fine.
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "reading {} for seeding installMethod: {e}",
+                settings_path.display()
+            ));
+        }
+    }
+
     let method = find_claude_binary()
         .as_deref()
         .map_or("native", classify_claude_path);
@@ -1172,7 +1200,7 @@ mod tests {
         CLAUDE_JSON_FILE, MODELED_SETTINGS_KEYS, classify_claude_path, is_hook_json,
         merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, validate_skills,
+        render_permission_rule, seed_install_method, validate_skills,
     };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -2026,6 +2054,42 @@ mod tests {
             "native"
         );
         assert_eq!(classify_claude_path(""), "native");
+    }
+
+    #[test]
+    fn classify_claude_path_detects_volta_fnm_pnpm() {
+        assert_eq!(classify_claude_path("/home/user/.volta/bin/claude"), "npm");
+        assert_eq!(
+            classify_claude_path("/home/user/.fnm/node-versions/v20/bin/claude"),
+            "npm"
+        );
+        assert_eq!(
+            classify_claude_path("/home/user/.local/share/pnpm/claude"),
+            "npm"
+        );
+        assert_eq!(
+            classify_claude_path("/Users/user/Library/pnpm/claude"),
+            "npm"
+        );
+    }
+
+    #[test]
+    fn seed_install_method_skips_when_already_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("settings.json");
+        let existing = serde_json::json!({
+            "installMethod": "homebrew",
+            "otherKey": "value"
+        });
+        std::fs::write(&settings, existing.to_string()).unwrap();
+
+        seed_install_method(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(&settings).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        // installMethod should remain unchanged from existing
+        assert_eq!(json["installMethod"], "homebrew");
+        assert_eq!(json["otherKey"], "value");
     }
 
     #[cfg(unix)]

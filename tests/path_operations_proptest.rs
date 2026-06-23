@@ -1,5 +1,33 @@
+use llmenv::paths::expand_tilde;
 use proptest::prelude::*;
 use std::path::Path;
+
+// ===== expand_tilde Idempotence =====
+
+#[test]
+fn prop_expand_tilde_idempotent_on_expanded() {
+    proptest!(|(subpath in "[a-z0-9/_-]{0,50}")| {
+        let tilde_path = format!("~/{}", subpath);
+        let expanded_once = expand_tilde(&tilde_path);
+        let expanded_twice = expand_tilde(&expanded_once);
+        prop_assert_eq!(expanded_once, expanded_twice);
+    });
+}
+
+#[test]
+fn prop_expand_tilde_non_tilde_unchanged() {
+    proptest!(|(path in "[a-z0-9/_.-]{1,50}")| {
+        let result = expand_tilde(&path);
+        prop_assert_eq!(result, path);
+    });
+}
+
+#[test]
+fn expand_tilde_bare_tilde() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let result = expand_tilde("~");
+    assert_eq!(result, home);
+}
 
 // ===== Path Canonicalization Idempotence =====
 
