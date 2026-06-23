@@ -28,7 +28,7 @@ panic = "deny"
 
 [package]
 name = "llmenv"
-version = "2.0.5"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -48,10 +48,10 @@ exclude = ["/website", "/docs", "/.github", "/scripts", "/proptest-regressions",
 workspace = true
 
 [dependencies]
-llmenv-paths = { path = "crates/llmenv-paths", version = "2.0.5" }
-llmenv-git = { path = "crates/llmenv-git", version = "2.0.5" }
-llmenv-config = { path = "crates/llmenv-config", version = "2.0.5" }
-llmenv-util = { path = "crates/llmenv-util", version = "2.0.5" }
+llmenv-paths = { path = "crates/llmenv-paths", version = "2.1.0" }
+llmenv-git = { path = "crates/llmenv-git", version = "2.1.0" }
+llmenv-config = { path = "crates/llmenv-config", version = "2.1.0" }
+llmenv-util = { path = "crates/llmenv-util", version = "2.1.0" }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.5"
 serde = { version = "1.0.228", features = ["derive"] }

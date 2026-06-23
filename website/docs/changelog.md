@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.1.0] - 2026-06-23
+
 ### Added
 
 - Add `session_log` config field: opt-in JSONL tracing of all llmenv log events to
