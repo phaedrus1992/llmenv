@@ -137,6 +137,9 @@ enum Command {
         /// Annotate each variable with its source bundle/scope
         #[arg(long)]
         explain: bool,
+        /// Compress the materialized AGENTS.md (CLAUDE.md) to reduce token cost
+        #[arg(long)]
+        compress: bool,
     },
     /// Regenerate the materialized config without exporting shell variables
     Regenerate,
@@ -283,8 +286,9 @@ pub fn run() -> anyhow::Result<()> {
             scope,
             tag,
             explain,
+            compress,
         }) => {
-            run_export(scope, tag, explain)?;
+            run_export(scope, tag, explain, compress)?;
         }
         Some(Command::Regenerate) => {
             run_regenerate()?;
@@ -471,7 +475,12 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_export(scope: Option<String>, tag: Option<String>, explain: bool) -> anyhow::Result<()> {
+fn run_export(
+    scope: Option<String>,
+    tag: Option<String>,
+    explain: bool,
+    compress: bool,
+) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let config_dir = paths::config_dir()?;
@@ -574,7 +583,7 @@ fn run_export(scope: Option<String>, tag: Option<String>, explain: bool) -> anyh
     // emit env vars pointing the agent at it. Failure here exits non-zero
     // so callers (shell hooks, CI) can detect it — silently continuing
     // without CLAUDE_CONFIG_DIR violates the export contract. (#281)
-    match build_and_materialize(&config, &config_dir, &active, &firing) {
+    match build_and_materialize(&config, &config_dir, &active, &firing, compress) {
         Ok(Some((ref cache_path, ref extra_vars))) => {
             tracing::debug!("materialized agent config at {}", cache_path.display());
             for (k, v) in extra_vars {
@@ -709,7 +718,7 @@ fn run_regenerate() -> anyhow::Result<()> {
         .collect();
 
     // Materialize the config
-    match build_and_materialize(&config, &config_dir, &active, &firing) {
+    match build_and_materialize(&config, &config_dir, &active, &firing, false) {
         Ok(Some((cache_path, _))) => {
             eprintln!("✓ Regenerated config at {}", cache_path.display());
             eprintln!(
@@ -737,6 +746,22 @@ fn run_regenerate() -> anyhow::Result<()> {
 
 type Materialized = (PathBuf, Vec<(String, String)>);
 
+/// Compress agents_md by removing excess whitespace and blank lines.
+/// ponytail: simple rule-based compression; use claude -p for higher-quality compression.
+fn compress_agents_md(text: &str) -> String {
+    let mut result = text
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Collapse 3+ consecutive newlines to 2 (preserves paragraph breaks).
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+    result
+}
+
 /// Build BundleRefs for firing bundles in scope-precedence order, merge them
 /// into a manifest, materialize through the Claude Code adapter, and return
 /// the env vars the adapter wants exported. Returns `Ok(None)` when no
@@ -746,11 +771,18 @@ fn build_and_materialize(
     config_dir: &Path,
     active: &ActiveScopes,
     firing: &[&Bundle],
+    compress: bool,
 ) -> anyhow::Result<Option<Materialized>> {
-    let Some((manifest, cache_root)) = build_manifest(config, config_dir, active, firing, false)?
+    let Some((mut manifest, cache_root)) =
+        build_manifest(config, config_dir, active, firing, false)?
     else {
         return Ok(None);
     };
+
+    // Apply compression if requested: strip trailing whitespace and collapse triple blank lines.
+    if compress {
+        manifest.agents_md = compress_agents_md(&manifest.agents_md);
+    }
 
     // The selection *shape* (#246) addresses the folder in loose/normal mode:
     // active tags ∪ directly-enabled bundles. Bundles come from active scopes'
@@ -1049,7 +1081,7 @@ fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
     match stale_status(booted.as_deref(), &current) {
         StaleStatus::Stale { .. } => {
             if auto_fix {
-                match build_and_materialize(&config, &config_dir, &active, &firing) {
+                match build_and_materialize(&config, &config_dir, &active, &firing, false) {
                     Ok(Some((cache_path, _))) => {
                         eprintln!("✓ Config refreshed at {}", cache_path.display());
                     }
@@ -2380,6 +2412,26 @@ mod tests {
     use super::*;
     use crate::config::HashingMode;
     use crate::materialize::manifest::{CacheManifest, MANIFEST_FILE};
+
+    #[test]
+    fn compress_agents_md_removes_trailing_whitespace() {
+        let input = "line1  \nline2   \nline3";
+        let expected = "line1\nline2\nline3";
+        assert_eq!(compress_agents_md(input), expected);
+    }
+
+    #[test]
+    fn compress_agents_md_collapses_triple_blank_lines() {
+        let input = "text\n\n\n\n\nmore text";
+        let expected = "text\n\nmore text";
+        assert_eq!(compress_agents_md(input), expected);
+    }
+
+    #[test]
+    fn compress_agents_md_preserves_double_blank_lines() {
+        let input = "text\n\ndouble\n\nmore";
+        assert_eq!(compress_agents_md(input), input);
+    }
 
     #[test]
     fn is_content_hash_matches_only_64_lowercase_hex() {

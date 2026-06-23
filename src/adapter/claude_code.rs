@@ -748,11 +748,23 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         native.map_or(&[], |n| &n.ask),
         PermissionAction::Ask,
     );
-    let deny = render_action(
+    let mut deny = render_action(
         &perms.deny,
         native.map_or(&[], |n| &n.deny),
         PermissionAction::Deny,
     );
+
+    // #464: Wire LLMENV_BASH_BAN env var into tool dispatch path to reject banned bash commands.
+    // ponytail: simple prefix-based ban; enhance to support full regex patterns if needed.
+    if let Ok(banned_patterns) = std::env::var("LLMENV_BASH_BAN") {
+        for pattern in banned_patterns.split(',') {
+            let pattern = pattern.trim();
+            if !pattern.is_empty() {
+                deny.push(format!("Bash({}*)", pattern));
+            }
+        }
+        dedup(&mut deny);
+    }
 
     let has_perms =
         !allow.is_empty() || !ask.is_empty() || !deny.is_empty() || perms.default_mode.is_some();
