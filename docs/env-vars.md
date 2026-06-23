@@ -19,13 +19,10 @@ Variables used for llmenv-internal communication, state management, or integrati
 | `LLMENV_ACTIVE_SCOPES` | Colon-separated active scopes | llmenv scope matcher | Session/process |
 | `LLMENV_ACTIVE_BUNDLES` | Colon-separated active bundles | llmenv scope matcher | Session/process |
 | `LLMENV_ICM_CONTEXT` | ICM context chunk (from memory store) | llmenv SessionStart | Session/process |
-| `LLMENV_BASH_BAN` | Bash commands to deny in PostToolUse | User config bundle | Session/process |
 | `LLMENV_VERSION` | llmenv version (compile-time) | llmenv binary | Build-time |
 | `LLMENV_VERSION_TAG` | llmenv version tag (compile-time) | llmenv binary | Build-time |
 
 **Rule:** All new internal/IPC variables **must** use the `LLMENV_` prefix. Exceptions only with justification in code comments.
-
-**Validation:** The adapter's capabilities validation rejects any bundle env var using `LLMENV_` that wasn't explicitly declared as reserved — this prevents accidental shadowing of internal variables.
 
 ### 2. **External Tool Variables** (no `LLMENV_` prefix)
 
@@ -48,7 +45,7 @@ Variables for controlling external LLM CLI tools, tools installed on the system,
 
 ### 3. **Bundle-Provided Variables** (user-defined, optional prefix)
 
-Variables that bundles define for their own use (e.g., token-efficiency bundle thresholds). These can be named freely, but **recommended to use `LLMENV_` if they're configuration that affects llmenv's own behavior**, and **recommended NOT to use `LLMENV_` if they're just helper variables for the bundle's own rules/hooks**.
+Variables that bundles define for their own use (e.g., token-efficiency bundle thresholds). These can be named freely. **Use `LLMENV_` only for variables that control llmenv's adapter behavior and are in the `LLMENV_OWNED_SETTINGS_KEYS` allowlist.** Otherwise, use a tool-specific prefix or no prefix.
 
 Example:
 
@@ -73,15 +70,9 @@ env:
 - Property tests verify that capabilities validation correctly rejects non-allowlisted `LLMENV_*` keys.
 - Example bundles are validated by the test suite to catch documentation drift.
 
-## Migration Path (for existing code)
+## Auditing for New Variables
 
-The audit in #466 found that `BASH_BAN` was already standardized to `LLMENV_BASH_BAN` in code (#465), but documentation lag existed. This was fixed:
-
-- ✅ CHANGELOG.md updated
-- ✅ website/docs/changelog.md updated
-- ✅ examples/my-llmenv/bundles/token-efficiency/rules/bash.md updated
-
-Future audits should:
+When auditing for new or inconsistent variables:
 1. Search codebase for env var usage: `grep -r 'env::var\|std::env'`
 2. Categorize each by purpose (internal, external, bundle-config)
 3. Update code/docs as needed
@@ -89,5 +80,5 @@ Future audits should:
 
 ## See Also
 
-- [`CLAUDE.md`](../CLAUDE.md) — global development standards (covers env var conventions in **Workflow** section)
-- [`rules/general.md`](../rules/general.md) — general coding rules (includes env var validation principles)
+- [`CLAUDE.md`](../CLAUDE.md) — global development standards
+- [`RELEASING.md`](../RELEASING.md) — release checklist and version management
