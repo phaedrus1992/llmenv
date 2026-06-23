@@ -50,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   operations; this option weakened host-key verification (MITM/DNS-hijacking
   exposure) and was unrelated to the timeout feature it was grouped with
 
+<!-- 2.0 next-header -->
+
 ## [2.0.5] - 2026-06-18
 
 ### Added
