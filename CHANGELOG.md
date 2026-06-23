@@ -9,8 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Detect volta, fnm, Linux pnpm (`~/.local/share/pnpm/`), and macOS pnpm
+  (`~/Library/pnpm/`) install paths when seeding `installMethod` in Claude Code
+  settings; previously these were classified as `native`
+
 ### Fixed
 
+- Fix `seed_install_method` overwriting a user-customized `installMethod` value
+  in Claude Code `settings.json`; the field is now only written when absent
+- Fix `seed_install_method` silently swallowing I/O errors (e.g. permission
+  denied) when reading `settings.json`; non-NotFound errors now propagate
 - Fix long interactive session pause when GitHub remote is unreachable: all git
   subprocesses now apply a TCP connection timeout (`GIT_CONNECT_TIMEOUT` — 10 s
   for background fetch/pull, 30 s for explicit plugin clone/fetch)
