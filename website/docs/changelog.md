@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.2.1] - 2026-06-24
+
 ### Fixed
 
 - Fix `llmenv export` aborting with "variable value contains forbidden control character" for
