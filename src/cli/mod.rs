@@ -466,11 +466,12 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
 }
 
 fn validate_var_value(value: &str) -> anyhow::Result<()> {
-    if let Some(ch) = value.chars().find(|c| matches!(c, '\0' | '\n' | '\r')) {
-        anyhow::bail!(
-            "variable value contains forbidden control character {:?}",
-            ch
-        );
+    // Only NUL is rejected: it can't survive in a C-string env var and would
+    // truncate the export. Newlines/CR are safe because every emission path
+    // single-quotes the value (shell_escape), and values like
+    // LLMENV_ICM_CONTEXT are legitimately multiline. (#469)
+    if value.contains('\0') {
+        anyhow::bail!("variable value contains forbidden NUL byte");
     }
     Ok(())
 }
@@ -2614,17 +2615,20 @@ mod tests {
 
     #[test]
     fn reject_invalid_var_names_rejects_control_characters_in_values() {
-        let with_newline = vec![(
-            "VALID_NAME".to_string(),
-            "value\nLD_PRELOAD=/evil".to_string(),
-        )];
-        assert!(reject_invalid_var_names(&with_newline).is_err());
-
+        // NUL truncates the C-string env var — still rejected.
         let with_nul = vec![("VALID_NAME".to_string(), "value\0malicious".to_string())];
         assert!(reject_invalid_var_names(&with_nul).is_err());
 
-        let with_carriage_return = vec![("VALID_NAME".to_string(), "value\rmalicious".to_string())];
-        assert!(reject_invalid_var_names(&with_carriage_return).is_err());
+        // Newlines/CR are safe inside single-quoted exports (shell_escape) and
+        // legitimately appear in multiline values like LLMENV_ICM_CONTEXT. (#469)
+        let with_newline = vec![(
+            "VALID_NAME".to_string(),
+            "## context\nActive tags: `foo`".to_string(),
+        )];
+        assert!(reject_invalid_var_names(&with_newline).is_ok());
+
+        let with_carriage_return = vec![("VALID_NAME".to_string(), "value\rmore".to_string())];
+        assert!(reject_invalid_var_names(&with_carriage_return).is_ok());
 
         let valid_value = vec![("VALID_NAME".to_string(), "safe_value".to_string())];
         assert!(reject_invalid_var_names(&valid_value).is_ok());
