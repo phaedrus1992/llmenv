@@ -13,8 +13,9 @@
 #   - tag/push: `main` is protected (PR-only), so the prep commit lands via a PR
 #     and the `v*` tag is cut on the merged commit. See RELEASING.md.
 
-# Only cut releases from main or a release/* prep branch.
-allow-branch = ["main", "release/*"]
+# Only cut releases from main, a long-lived release/X.x branch (patch/minor),
+# or a short-lived chore/release-<version> prep branch (minor/major from main).
+allow-branch = ["main", "release/*", "chore/release-*"]
 
 # crates.io publish is owned by the publish-crate job in release.yml.
 publish = false

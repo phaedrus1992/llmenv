@@ -14,12 +14,12 @@ Key invariants (full details in `RELEASING.md`):
   `Cargo.toml`, regenerating `Cargo.lock`, all in one release commit, then
   tagging `vX.Y.Z`).
 - `git tag -l` is the source of truth. No tag → no version section, no bump.
-- **Branch strategy:** `main` = new features. Each major.minor gets a
-  `release/X.X.x` branch for bug fixes. Fix in the oldest applicable branch
-  first, then merge forward — the fix and its CHANGELOG entry propagate
-  automatically via the `forward-merge-release` workflow. **Never manually
-  cherry-pick to newer branches; let the workflow do it (or resolve the merge
-  conflict it opens on failure).** See `RELEASING.md` §Branch strategy for
+- **Branch strategy:** `main` = large features. Each major version gets a
+  `release/X.x` branch for bug fixes and small enhancements. Fix in the oldest
+  applicable branch first, then merge forward — the fix and its CHANGELOG entry
+  propagate automatically via the `forward-merge-release` workflow. **Never
+  manually cherry-pick to newer branches; let the workflow do it (or resolve the
+  merge conflict it opens on failure).** See `RELEASING.md` §Branch strategy for
   the full policy.
 - **Forward-merged fixes ship in every release that inherits them.** When
   cutting a release on a newer branch, any user-facing fix that forward-merged
@@ -35,13 +35,10 @@ Key invariants (full details in `RELEASING.md`):
   older branch's `CHANGELOG.md`) and add any missing forward-merged fix with its
   back-reference. A changelog edit that leaves an inherited fix unlisted is
   incomplete.
-- **Picking a base branch for an issue:** before branching, look at the issue's
-  milestone (or version label). If a matching `release/X.Y.x` branch exists on
-  the remote, branch from it — **not** from `main`. Example: an issue in the
-  `1.0` milestone is a 1.0.x patch and must branch from `origin/release/1.0.x`,
-  so it doesn't drag in unreleased feature work that lives only on `main`. Only
-  fall back to `main` when no matching release branch exists. Check with
-  `git ls-remote --heads origin 'release/*'`.
+- **Picking a base branch for an issue:** look at the issue's milestone.
+  **Bug Fixes** and **Small Enhancements** branch from the newest `release/X.x`
+  branch. **Large Features** branch from `main`. Check available release branches
+  with `git ls-remote --heads origin 'release/*'`.
 
 ## Licensing & Attribution
 
