@@ -18,29 +18,28 @@ configured (in [`release.toml`](release.toml)) to **not** publish, tag, or push
 
 ## Branch strategy
 
-Feature development happens on `main`. Each major.minor version gets a long-lived
-`release/X.X.x` branch (created from the release tag) for managing bug fixes
-without picking up new feature work.
+Feature development happens on `main`. Each major version gets a long-lived
+`release/X.x` branch (created from the first release tag of that major) for
+bug fixes and small enhancements without picking up feature work.
 
 **Backport policy** — fixes are applied (when feasible) to:
 
 | Branch | Description |
 |--------|-------------|
-| `release/X.X.x` | Current major.minor — always patched |
-| `release/X.(X-1).x` | Previous minor of the current major — always patched |
-| `release/(X-1).Y.x` | Last minor branch of the previous major — always patched |
+| `release/X.x` | Current major — always patched |
+| `release/(X-1).x` | Previous major — always patched |
 
 Fix in the **oldest applicable branch** first, then merge forward through the
 chain to carry the fix (and its CHANGELOG entry) into newer branches
 automatically. Only skip a backport when the fix does not apply to an older
 branch — document the skip in the PR description.
 
-**Example:** a fix that applies to 1.0, 1.1, and main:
-1. Land fix on `release/1.0.x`
-2. Merge `release/1.0.x` → `release/1.1.x`
-3. Merge `release/1.1.x` → `main`
+**Example:** a fix that applies to major 1, major 2, and main:
+1. Land fix on `release/1.x`
+2. Merge `release/1.x` → `release/2.x`
+3. Merge `release/2.x` → `main`
 
-The CHANGELOG entry written on `release/1.0.x` propagates forward via the merges
+The CHANGELOG entry written on `release/1.x` propagates forward via the merges
 while it still lives under `## [Unreleased]` — no cherry-picking needed. Once a
 branch **cuts a release**, that entry is frozen under a versioned heading, and
 the cross-listing rule below takes over.
@@ -95,7 +94,7 @@ only when cutting a release), first reconcile against what has forward-merged in
 # What landed since this branch's last tag, and from where?
 git log --no-merges <last-tag>..HEAD
 # What user-facing entries exist on the older line that aren't here yet?
-git show origin/release/<older>.x:CHANGELOG.md
+git show origin/release/<older-major>.x:CHANGELOG.md
 ```
 
 Add any missing user-facing fix to the appropriate section with its
@@ -104,27 +103,34 @@ changelog edit that ignores an unlisted forward-merged fix is incomplete.
 
 ### Creating a release branch
 
-After tagging a new major.minor (e.g. `v1.1.0`), branch immediately from that
-tag so the branch starts at exactly what was released:
+After tagging the first release of a new major (e.g. `v2.0.0`), branch
+immediately from that tag so the branch starts at exactly what was released:
 
 ```bash
-git checkout -b release/1.1.x v1.1.0
-git push -u origin release/1.1.x
+git checkout -b release/2.x v2.0.0
+git push -u origin release/2.x
 ```
 
-### Cutting a patch release from a release branch
+The same `release/X.x` branch hosts all subsequent patch and minor releases
+within that major (2.0.1, 2.1.0, …). A new branch is only created when the
+major increments.
+
+### Cutting a patch or minor release from a release branch
 
 ```bash
-git switch release/1.1.x && git pull
-cargo release patch --workspace            # dry-run preview
+git switch release/2.x && git pull
+cargo release patch --workspace            # dry-run preview (patch: 2.0.0 → 2.0.1)
 cargo release patch --workspace --execute  # bump all crates + roll CHANGELOG + commit
 git push -u origin HEAD
-gh pr create --base release/1.1.x --fill
+gh pr create --base release/2.x --fill
 # After merge, tag the merged commit:
-git switch release/1.1.x && git pull
-git tag -a "v1.1.1" -m "v1.1.1"
-git push origin "v1.1.1"
+git switch release/2.x && git pull
+git tag -a "v2.0.1" -m "v2.0.1"
+git push origin "v2.0.1"
 ```
+
+Use `cargo release minor` instead of `patch` when the accumulated changes on
+`release/X.x` warrant a minor bump (e.g. `2.0.x` → `2.1.0`).
 
 After the patch tag is pushed, merge forward into the next release branch (or
 `main`) so the fix and its CHANGELOG entry propagate.
@@ -152,9 +158,9 @@ the tag is cut on the merged commit.
 
 ```bash
 git switch main && git pull
-git switch -c release/<next-version>
-cargo release <patch|minor|major> --workspace            # dry-run preview (default)
-cargo release <patch|minor|major> --workspace --execute  # apply: bump all crates + roll CHANGELOG, commit
+git switch -c chore/release-<next-version>
+cargo release <minor|major> --workspace            # dry-run preview (default)
+cargo release <minor|major> --workspace --execute  # apply: bump all crates + roll CHANGELOG, commit
 ```
 
 `cargo release --workspace` bumps all workspace crates to the same version,

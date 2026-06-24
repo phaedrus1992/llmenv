@@ -137,6 +137,9 @@ enum Command {
         /// Annotate each variable with its source bundle/scope
         #[arg(long)]
         explain: bool,
+        /// Compress the materialized AGENTS.md (CLAUDE.md) to reduce token cost
+        #[arg(long)]
+        compress: bool,
     },
     /// Regenerate the materialized config without exporting shell variables
     Regenerate,
@@ -283,8 +286,9 @@ pub fn run() -> anyhow::Result<()> {
             scope,
             tag,
             explain,
+            compress,
         }) => {
-            run_export(scope, tag, explain)?;
+            run_export(scope, tag, explain, compress)?;
         }
         Some(Command::Regenerate) => {
             run_regenerate()?;
@@ -462,16 +466,22 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
 }
 
 fn validate_var_value(value: &str) -> anyhow::Result<()> {
-    if let Some(ch) = value.chars().find(|c| matches!(c, '\0' | '\n' | '\r')) {
-        anyhow::bail!(
-            "variable value contains forbidden control character {:?}",
-            ch
-        );
+    // Only NUL is rejected: it can't survive in a C-string env var and would
+    // truncate the export. Newlines/CR are safe because every emission path
+    // single-quotes the value (shell_escape), and values like
+    // LLMENV_ICM_CONTEXT are legitimately multiline. (#469)
+    if value.contains('\0') {
+        anyhow::bail!("variable value contains forbidden NUL byte");
     }
     Ok(())
 }
 
-fn run_export(scope: Option<String>, tag: Option<String>, explain: bool) -> anyhow::Result<()> {
+fn run_export(
+    scope: Option<String>,
+    tag: Option<String>,
+    explain: bool,
+    compress: bool,
+) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let config_dir = paths::config_dir()?;
@@ -574,7 +584,7 @@ fn run_export(scope: Option<String>, tag: Option<String>, explain: bool) -> anyh
     // emit env vars pointing the agent at it. Failure here exits non-zero
     // so callers (shell hooks, CI) can detect it — silently continuing
     // without CLAUDE_CONFIG_DIR violates the export contract. (#281)
-    match build_and_materialize(&config, &config_dir, &active, &firing) {
+    match build_and_materialize(&config, &config_dir, &active, &firing, compress) {
         Ok(Some((ref cache_path, ref extra_vars))) => {
             tracing::debug!("materialized agent config at {}", cache_path.display());
             for (k, v) in extra_vars {
@@ -709,7 +719,7 @@ fn run_regenerate() -> anyhow::Result<()> {
         .collect();
 
     // Materialize the config
-    match build_and_materialize(&config, &config_dir, &active, &firing) {
+    match build_and_materialize(&config, &config_dir, &active, &firing, false) {
         Ok(Some((cache_path, _))) => {
             eprintln!("✓ Regenerated config at {}", cache_path.display());
             eprintln!(
@@ -737,6 +747,30 @@ fn run_regenerate() -> anyhow::Result<()> {
 
 type Materialized = (PathBuf, Vec<(String, String)>);
 
+/// Compress agents_md by removing excess whitespace and blank lines.
+/// Preserves trailing newline (POSIX text file convention).
+/// ponytail: simple rule-based compression; use claude -p for higher-quality compression.
+fn compress_agents_md(text: &str) -> String {
+    let has_trailing_newline = text.ends_with('\n');
+    let mut result = text
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Collapse 3+ consecutive newlines to 2 (preserves paragraph breaks).
+    // Loop until no more `\n\n\n` sequences exist (handles 5+ consecutive newlines).
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+
+    // Restore trailing newline if original had one (POSIX convention).
+    if has_trailing_newline && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
 /// Build BundleRefs for firing bundles in scope-precedence order, merge them
 /// into a manifest, materialize through the Claude Code adapter, and return
 /// the env vars the adapter wants exported. Returns `Ok(None)` when no
@@ -746,11 +780,18 @@ fn build_and_materialize(
     config_dir: &Path,
     active: &ActiveScopes,
     firing: &[&Bundle],
+    compress: bool,
 ) -> anyhow::Result<Option<Materialized>> {
-    let Some((manifest, cache_root)) = build_manifest(config, config_dir, active, firing, false)?
+    let Some((mut manifest, cache_root)) =
+        build_manifest(config, config_dir, active, firing, false)?
     else {
         return Ok(None);
     };
+
+    // Apply compression if requested: strip trailing whitespace and collapse triple blank lines.
+    if compress {
+        manifest.agents_md = compress_agents_md(&manifest.agents_md);
+    }
 
     // The selection *shape* (#246) addresses the folder in loose/normal mode:
     // active tags ∪ directly-enabled bundles. Bundles come from active scopes'
@@ -1049,7 +1090,7 @@ fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
     match stale_status(booted.as_deref(), &current) {
         StaleStatus::Stale { .. } => {
             if auto_fix {
-                match build_and_materialize(&config, &config_dir, &active, &firing) {
+                match build_and_materialize(&config, &config_dir, &active, &firing, false) {
                     Ok(Some((cache_path, _))) => {
                         eprintln!("✓ Config refreshed at {}", cache_path.display());
                     }
@@ -2382,6 +2423,33 @@ mod tests {
     use crate::materialize::manifest::{CacheManifest, MANIFEST_FILE};
 
     #[test]
+    fn compress_agents_md_removes_trailing_whitespace() {
+        let input = "line1  \nline2   \nline3";
+        let expected = "line1\nline2\nline3";
+        assert_eq!(compress_agents_md(input), expected);
+    }
+
+    #[test]
+    fn compress_agents_md_collapses_triple_blank_lines() {
+        let input = "text\n\n\n\n\nmore text";
+        let expected = "text\n\nmore text";
+        assert_eq!(compress_agents_md(input), expected);
+    }
+
+    #[test]
+    fn compress_agents_md_preserves_double_blank_lines() {
+        let input = "text\n\ndouble\n\nmore";
+        assert_eq!(compress_agents_md(input), input);
+    }
+
+    #[test]
+    fn compress_agents_md_preserves_trailing_newline() {
+        let input = "text\n\n\n\nmore\n";
+        let expected = "text\n\nmore\n";
+        assert_eq!(compress_agents_md(input), expected);
+    }
+
+    #[test]
     fn is_content_hash_matches_only_64_lowercase_hex() {
         assert!(is_content_hash(&"a".repeat(64)));
         assert!(is_content_hash(&"0123456789abcdef".repeat(4)));
@@ -2511,6 +2579,9 @@ mod tests {
         assert_eq!(shell_escape("$var"), "'$var'");
         assert_eq!(shell_escape("$(cmd)"), "'$(cmd)'");
         assert_eq!(shell_escape("`cmd`"), "'`cmd`'");
+        // Newlines/CR stay inside the single-quoted string — inert at shell source time.
+        assert_eq!(shell_escape("line1\nline2"), "'line1\nline2'");
+        assert_eq!(shell_escape("line1\rline2"), "'line1\rline2'");
     }
 
     #[test]
@@ -2546,21 +2617,20 @@ mod tests {
     }
 
     #[test]
-    fn reject_invalid_var_names_rejects_control_characters_in_values() {
-        let with_newline = vec![(
-            "VALID_NAME".to_string(),
-            "value\nLD_PRELOAD=/evil".to_string(),
-        )];
-        assert!(reject_invalid_var_names(&with_newline).is_err());
-
+    fn reject_invalid_var_names_allows_multiline_values() {
+        // NUL truncates the C-string env var — still rejected.
         let with_nul = vec![("VALID_NAME".to_string(), "value\0malicious".to_string())];
         assert!(reject_invalid_var_names(&with_nul).is_err());
 
-        let with_carriage_return = vec![("VALID_NAME".to_string(), "value\rmalicious".to_string())];
-        assert!(reject_invalid_var_names(&with_carriage_return).is_err());
+        // Newlines/CR are safe — emission always single-quotes via shell_escape. (#469)
+        let with_newline = vec![(
+            "VALID_NAME".to_string(),
+            "## context\nActive tags: `foo`".to_string(),
+        )];
+        assert!(reject_invalid_var_names(&with_newline).is_ok());
 
-        let valid_value = vec![("VALID_NAME".to_string(), "safe_value".to_string())];
-        assert!(reject_invalid_var_names(&valid_value).is_ok());
+        let with_cr = vec![("VALID_NAME".to_string(), "value\rmore".to_string())];
+        assert!(reject_invalid_var_names(&with_cr).is_ok());
     }
 
     #[test]

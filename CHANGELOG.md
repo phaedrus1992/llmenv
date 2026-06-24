@@ -5,9 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-<!-- 2.0 next-header -->
+<!-- 3.0 next-header -->
 
 ## [Unreleased] - ReleaseDate
+
+### Fixed
+
+- Fix `llmenv export` aborting with "variable value contains forbidden control character" for
+  `LLMENV_ICM_CONTEXT` and other legitimately multiline values; value validation now rejects only
+  NUL, since every emission path single-quotes the value and newlines are inert there (#469)
+
+## [2.2.0] - 2026-06-23
+
+### Added
+
+- Add built-in `token-efficiency` example bundle with env vars (`LLMENV_BASH_BAN`, `CBM_WARN_THRESHOLD`,
+  `CBM_AUTOINDEX`), SessionEnd auto-handoff hook, SessionStart context-mode reminder hook,
+  PostToolUse reject-scanner scaffold, and minimal `native_permissions` limiting Bash to
+  state-mutation operations (git, mkdir, curl, trash). Include per-stack rule files (`bash.md`,
+  `rust.md`, `typescript.md`, `skill-gates.md`) documenting the skill-gate pattern for conditional
+  skill activation by language tag, prerequisite, or indexed content (#218, #219, #220, #222, #223)
+- Add `--compress` flag to `llmenv export`: strips trailing whitespace and collapses excessive blank
+  lines for token-efficient AGENTS.md output (#226)
+- Wire `LLMENV_BASH_BAN` env var into the Claude Code adapter permission layer: when set, denies
+  Bash tool invocations whose commands match any comma-separated prefix pattern before execution
+  (#464)
+
+### Fixed
+
+- Fix `token-efficiency` example bundle declaring `BASH_BAN` instead of `LLMENV_BASH_BAN`; the
+  Bash deny feature silently failed for any user of the example config (#466)
+- Fix `token-efficiency` example bundle placing env vars under `features.env` instead of the
+  top-level `env` key and using snake_case hook event names instead of PascalCase (e.g.
+  `session_end` → `SessionEnd`); env vars were not exported and hooks never fired
+- Fix `LLMENV_BASH_BAN` accepting patterns containing `)`, `(`, and newlines that produced
+  malformed deny rules; invalid pattern characters are now rejected at startup (#465)
+- Fix `LLMENV_BASH_BAN` treating a non-unicode env var value the same as the variable being
+  unset; non-unicode values now return an error instead of silently disabling enforcement (#465)
+- Fix `llmenv export --compress` not preserving the final newline, producing non-POSIX output
+  (#465)
+
+<!-- 2.1 next-header -->
 
 ## [2.1.0] - 2026-06-23
 
@@ -49,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Remove `StrictHostKeyChecking=accept-new` from llmenv's SSH options for git
   operations; this option weakened host-key verification (MITM/DNS-hijacking
   exposure) and was unrelated to the timeout feature it was grouped with
+
+<!-- 2.0 next-header -->
 
 ## [2.0.5] - 2026-06-18
 
@@ -498,7 +538,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/phaedrus1992/llmenv/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/phaedrus1992/llmenv/compare/v2.0.5...v2.1.0
 [2.0.5]: https://github.com/phaedrus1992/llmenv/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/phaedrus1992/llmenv/compare/v2.0.3...v2.0.4
