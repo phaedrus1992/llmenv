@@ -105,7 +105,6 @@ pub fn matches_network(s: &NetworkScope, env: &Env) -> bool {
         .is_some_and(|got| got.eq_ignore_ascii_case(want))
 }
 
-// Visible to tests via pub; internal-only (not part of public API)
 pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
     let pattern_lower = pattern.to_ascii_lowercase();
     let text_lower = text.to_ascii_lowercase();
@@ -123,25 +122,23 @@ pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
     }
 
     // Last part must match at the end (unless empty, which means pattern ended with *)
-    if !parts[parts.len() - 1].is_empty() && !text_lower.ends_with(parts[parts.len() - 1]) {
+    let last_part = parts[parts.len() - 1];
+    if !last_part.is_empty() && !text_lower.ends_with(last_part) {
         return false;
     }
 
-    // Middle parts must appear in order
+    // Prefix and suffix must not overlap: text must be long enough for both
+    if text_lower.len() < parts[0].len() + last_part.len() {
+        return false;
+    }
+
+    // Middle parts must appear in order between prefix and suffix
     let mut pos = parts[0].len();
     for &part in &parts[1..parts.len() - 1] {
         if let Some(idx) = text_lower[pos..].find(part) {
             pos += idx + part.len();
         } else {
             return false;
-        }
-    }
-
-    // If there's more than one part, check that the last part doesn't overlap with middle search
-    if parts.len() > 1 {
-        let last_part = parts[parts.len() - 1];
-        if !last_part.is_empty() {
-            // Last part is already checked by ends_with, so we're good
         }
     }
 
@@ -503,6 +500,30 @@ mod tests {
     fn glob_matches_preserves_ordering() {
         assert!(glob_matches("*-prod-*-01", "web-prod-east-01"));
         assert!(!glob_matches("*-prod-*-01", "web-01-prod-east"));
+    }
+
+    #[test]
+    fn glob_matches_overlapping_prefix_suffix() {
+        // Critical: prefix and suffix must not overlap
+        assert!(!glob_matches("abc*abc", "abc"));
+        assert!(!glob_matches("abc*cd", "abcd"));
+        assert!(!glob_matches("abcde*cde", "abcde"));
+        assert!(!glob_matches("host*host", "host"));
+        // Valid matches where prefix+suffix fits
+        assert!(glob_matches("abc*abc", "abcXabc"));
+        assert!(glob_matches("abc*cd", "abcXcd"));
+    }
+
+    #[test]
+    fn glob_matches_exact_length_match() {
+        // Pattern prefix+suffix exactly matches text length (no middle content)
+        assert!(glob_matches("a*b", "ab"));
+        assert!(glob_matches("host*prod", "hostprod"));
+        assert!(!glob_matches("host*prod", "host"));
+        assert!(glob_matches("abc*def", "abcdef")); // prefix+suffix fit exactly
+        // Pattern with middle parts matching exactly
+        assert!(glob_matches("a*b*c", "abc")); // a + nothing + b + nothing + c
+        assert!(!glob_matches("a*x*c", "abc")); // a + nothing + x (missing) + nothing + c
     }
 
     proptest! {
