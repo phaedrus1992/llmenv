@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix `llmenv export` aborting with "variable value contains forbidden control character" for
+  `LLMENV_ICM_CONTEXT` and other legitimately multiline values; value validation now rejects only
+  NUL, since every emission path single-quotes the value and newlines are inert there (#469)
+
 ## [2.2.0] - 2026-06-23
 
 ### Added
