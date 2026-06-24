@@ -155,7 +155,7 @@ jobs:
             if git push origin HEAD:"$TARGET" 2>/dev/null; then
               echo "Pushed directly to $TARGET"
             else
-              git checkout -B "$MERGE_BRANCH" "origin/$TARGET"
+              git checkout -B "$MERGE_BRANCH"
               git push origin "$MERGE_BRANCH" --force-with-lease
 
               gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
