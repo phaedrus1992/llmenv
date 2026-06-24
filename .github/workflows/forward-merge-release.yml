@@ -155,8 +155,21 @@ jobs:
             if git push origin HEAD:"$TARGET" 2>/dev/null; then
               echo "Pushed directly to $TARGET"
             else
+              if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
+                echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
+                echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
+                echo "::endgroup::"
+                HALTED="protected branch $TARGET"
+                break
+              fi
+
               git checkout -B "$MERGE_BRANCH" "origin/$TARGET"
-              git push origin "$MERGE_BRANCH" --force-with-lease
+              if ! git push origin "$MERGE_BRANCH" --force-with-lease; then
+                echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
+                echo "::endgroup::"
+                HALTED="protected branch $TARGET"
+                break
+              fi
 
               gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
                 --title "Forward-merge $CURRENT into $TARGET" \

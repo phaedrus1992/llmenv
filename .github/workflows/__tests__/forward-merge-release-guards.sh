@@ -30,17 +30,24 @@ HALTED=""
 if git push origin HEAD:"$TARGET" 2>/dev/null; then
   echo "Pushed directly to $TARGET"
 else
-  # --- Issue #476 guard should live here ---
-  # (currently absent; fix adds: ls-remote check before checkout/push)
-  git checkout -B "$MERGE_BRANCH"
-  git push origin "$MERGE_BRANCH" --force-with-lease
+  if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
+    echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
+    echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
+    HALTED="protected branch $TARGET"
+  else
+    git checkout -B "$MERGE_BRANCH"
+    if ! git push origin "$MERGE_BRANCH" --force-with-lease; then
+      echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
+      HALTED="protected branch $TARGET"
+    else
+      gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
+        --title "Forward-merge $CURRENT into $TARGET" \
+        --body "Direct push to $TARGET blocked by branch protection; opening PR." || true
 
-  gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
-    --title "Forward-merge $CURRENT into $TARGET" \
-    --body "Direct push to $TARGET blocked by branch protection; opening PR." || true
-
-  echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
-  HALTED="protected branch $TARGET"
+      echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
+      HALTED="protected branch $TARGET"
+    fi
+  fi
 fi
 
 if [[ -n "$HALTED" ]]; then
