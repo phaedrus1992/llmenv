@@ -105,12 +105,52 @@ pub fn matches_network(s: &NetworkScope, env: &Env) -> bool {
         .is_some_and(|got| got.eq_ignore_ascii_case(want))
 }
 
+pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern_lower = pattern.to_ascii_lowercase();
+    let text_lower = text.to_ascii_lowercase();
+
+    // ponytail: simple `*` glob, no `?` or `[..]`. Upgrade if needed for complex patterns.
+    if !pattern_lower.contains('*') {
+        return pattern_lower == text_lower;
+    }
+
+    let parts: Vec<&str> = pattern_lower.split('*').collect();
+
+    // First part must match at the start (unless empty, which means pattern started with *)
+    if !parts[0].is_empty() && !text_lower.starts_with(parts[0]) {
+        return false;
+    }
+
+    // Last part must match at the end (unless empty, which means pattern ended with *)
+    let last_part = parts[parts.len() - 1];
+    if !last_part.is_empty() && !text_lower.ends_with(last_part) {
+        return false;
+    }
+
+    // Prefix and suffix must not overlap: text must be long enough for both
+    if text_lower.len() < parts[0].len() + last_part.len() {
+        return false;
+    }
+
+    // Middle parts must appear in order between prefix and suffix
+    let mut pos = parts[0].len();
+    for &part in &parts[1..parts.len() - 1] {
+        if let Some(idx) = text_lower[pos..].find(part) {
+            pos += idx + part.len();
+        } else {
+            return false;
+        }
+    }
+
+    true
+}
+
 #[must_use]
 pub fn matches_host(s: &HostScope, env: &Env) -> bool {
     s.r#match
         .hostname
         .as_deref()
-        .is_some_and(|h| h.eq_ignore_ascii_case(&env.hostname))
+        .is_some_and(|h| glob_matches(h, &env.hostname))
 }
 
 #[must_use]
@@ -226,7 +266,7 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{Env, discover_project};
+    use super::{Env, discover_project, glob_matches};
     use proptest::prelude::*;
     use std::path::Path;
 
@@ -408,6 +448,82 @@ mod tests {
                 .contains(&"unknown_field".to_string())
         );
         assert!(project.unknown_fields.contains(&"another".to_string()));
+    }
+
+    #[test]
+    fn glob_matches_exact() {
+        assert!(glob_matches("localhost", "localhost"));
+        assert!(glob_matches("example.com", "example.com"));
+        assert!(!glob_matches("example.com", "other.com"));
+    }
+
+    #[test]
+    fn glob_matches_case_insensitive() {
+        assert!(glob_matches("LOCALHOST", "localhost"));
+        assert!(glob_matches("Example.COM", "example.com"));
+        assert!(glob_matches("localhost", "LOCALHOST"));
+    }
+
+    #[test]
+    fn glob_matches_leading_wildcard() {
+        assert!(glob_matches("*.example.com", "dev.example.com"));
+        assert!(glob_matches("*.example.com", "prod.example.com"));
+        assert!(glob_matches("*.example.com", "api.staging.example.com"));
+        assert!(!glob_matches("*.example.com", "example.com"));
+        assert!(!glob_matches("*.example.com", "example.org"));
+    }
+
+    #[test]
+    fn glob_matches_trailing_wildcard() {
+        assert!(glob_matches("host-*", "host-001"));
+        assert!(glob_matches("host-*", "host-prod"));
+        assert!(glob_matches("host-*", "host-"));
+        assert!(!glob_matches("host-*", "other-001"));
+    }
+
+    #[test]
+    fn glob_matches_multiple_wildcards() {
+        assert!(glob_matches("*-prod-*", "web-prod-01"));
+        assert!(glob_matches("*-prod-*", "api-prod-staging"));
+        assert!(glob_matches("*-prod-*", "-prod-"));
+        assert!(!glob_matches("*-prod-*", "web-dev-01"));
+    }
+
+    #[test]
+    fn glob_matches_only_wildcard() {
+        assert!(glob_matches("*", "localhost"));
+        assert!(glob_matches("*", "any.host.example.com"));
+        assert!(glob_matches("*", ""));
+    }
+
+    #[test]
+    fn glob_matches_preserves_ordering() {
+        assert!(glob_matches("*-prod-*-01", "web-prod-east-01"));
+        assert!(!glob_matches("*-prod-*-01", "web-01-prod-east"));
+    }
+
+    #[test]
+    fn glob_matches_overlapping_prefix_suffix() {
+        // Critical: prefix and suffix must not overlap
+        assert!(!glob_matches("abc*abc", "abc"));
+        assert!(!glob_matches("abc*cd", "abcd"));
+        assert!(!glob_matches("abcde*cde", "abcde"));
+        assert!(!glob_matches("host*host", "host"));
+        // Valid matches where prefix+suffix fits
+        assert!(glob_matches("abc*abc", "abcXabc"));
+        assert!(glob_matches("abc*cd", "abcXcd"));
+    }
+
+    #[test]
+    fn glob_matches_exact_length_match() {
+        // Pattern prefix+suffix exactly matches text length (no middle content)
+        assert!(glob_matches("a*b", "ab"));
+        assert!(glob_matches("host*prod", "hostprod"));
+        assert!(!glob_matches("host*prod", "host"));
+        assert!(glob_matches("abc*def", "abcdef")); // prefix+suffix fit exactly
+        // Pattern with middle parts matching exactly
+        assert!(glob_matches("a*b*c", "abc")); // a + nothing + b + nothing + c
+        assert!(!glob_matches("a*x*c", "abc")); // a + nothing + x (missing) + nothing + c
     }
 
     proptest! {
