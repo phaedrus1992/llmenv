@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.2.1] - 2026-06-24
+
 ### Fixed
 
 - Fix `llmenv export` aborting with "variable value contains forbidden control character" for
@@ -538,7 +540,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.2.1...HEAD
+[2.2.1]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/phaedrus1992/llmenv/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/phaedrus1992/llmenv/compare/v2.0.5...v2.1.0
 [2.0.5]: https://github.com/phaedrus1992/llmenv/compare/v2.0.4...v2.0.5
