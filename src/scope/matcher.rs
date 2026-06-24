@@ -105,12 +105,55 @@ pub fn matches_network(s: &NetworkScope, env: &Env) -> bool {
         .is_some_and(|got| got.eq_ignore_ascii_case(want))
 }
 
+// Visible to tests via pub; internal-only (not part of public API)
+pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern_lower = pattern.to_ascii_lowercase();
+    let text_lower = text.to_ascii_lowercase();
+
+    // ponytail: simple `*` glob, no `?` or `[..]`. Upgrade if needed for complex patterns.
+    if !pattern_lower.contains('*') {
+        return pattern_lower == text_lower;
+    }
+
+    let parts: Vec<&str> = pattern_lower.split('*').collect();
+
+    // First part must match at the start (unless empty, which means pattern started with *)
+    if !parts[0].is_empty() && !text_lower.starts_with(parts[0]) {
+        return false;
+    }
+
+    // Last part must match at the end (unless empty, which means pattern ended with *)
+    if !parts[parts.len() - 1].is_empty() && !text_lower.ends_with(parts[parts.len() - 1]) {
+        return false;
+    }
+
+    // Middle parts must appear in order
+    let mut pos = parts[0].len();
+    for &part in &parts[1..parts.len() - 1] {
+        if let Some(idx) = text_lower[pos..].find(part) {
+            pos += idx + part.len();
+        } else {
+            return false;
+        }
+    }
+
+    // If there's more than one part, check that the last part doesn't overlap with middle search
+    if parts.len() > 1 {
+        let last_part = parts[parts.len() - 1];
+        if !last_part.is_empty() {
+            // Last part is already checked by ends_with, so we're good
+        }
+    }
+
+    true
+}
+
 #[must_use]
 pub fn matches_host(s: &HostScope, env: &Env) -> bool {
     s.r#match
         .hostname
         .as_deref()
-        .is_some_and(|h| h.eq_ignore_ascii_case(&env.hostname))
+        .is_some_and(|h| glob_matches(h, &env.hostname))
 }
 
 #[must_use]
@@ -226,7 +269,7 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{Env, discover_project};
+    use super::{Env, discover_project, glob_matches};
     use proptest::prelude::*;
     use std::path::Path;
 
@@ -408,6 +451,58 @@ mod tests {
                 .contains(&"unknown_field".to_string())
         );
         assert!(project.unknown_fields.contains(&"another".to_string()));
+    }
+
+    #[test]
+    fn glob_matches_exact() {
+        assert!(glob_matches("localhost", "localhost"));
+        assert!(glob_matches("example.com", "example.com"));
+        assert!(!glob_matches("example.com", "other.com"));
+    }
+
+    #[test]
+    fn glob_matches_case_insensitive() {
+        assert!(glob_matches("LOCALHOST", "localhost"));
+        assert!(glob_matches("Example.COM", "example.com"));
+        assert!(glob_matches("localhost", "LOCALHOST"));
+    }
+
+    #[test]
+    fn glob_matches_leading_wildcard() {
+        assert!(glob_matches("*.example.com", "dev.example.com"));
+        assert!(glob_matches("*.example.com", "prod.example.com"));
+        assert!(glob_matches("*.example.com", "api.staging.example.com"));
+        assert!(!glob_matches("*.example.com", "example.com"));
+        assert!(!glob_matches("*.example.com", "example.org"));
+    }
+
+    #[test]
+    fn glob_matches_trailing_wildcard() {
+        assert!(glob_matches("host-*", "host-001"));
+        assert!(glob_matches("host-*", "host-prod"));
+        assert!(glob_matches("host-*", "host-"));
+        assert!(!glob_matches("host-*", "other-001"));
+    }
+
+    #[test]
+    fn glob_matches_multiple_wildcards() {
+        assert!(glob_matches("*-prod-*", "web-prod-01"));
+        assert!(glob_matches("*-prod-*", "api-prod-staging"));
+        assert!(glob_matches("*-prod-*", "-prod-"));
+        assert!(!glob_matches("*-prod-*", "web-dev-01"));
+    }
+
+    #[test]
+    fn glob_matches_only_wildcard() {
+        assert!(glob_matches("*", "localhost"));
+        assert!(glob_matches("*", "any.host.example.com"));
+        assert!(glob_matches("*", ""));
+    }
+
+    #[test]
+    fn glob_matches_preserves_ordering() {
+        assert!(glob_matches("*-prod-*-01", "web-prod-east-01"));
+        assert!(!glob_matches("*-prod-*-01", "web-01-prod-east"));
     }
 
     proptest! {
