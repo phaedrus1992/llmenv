@@ -152,7 +152,7 @@ STUB
   # Post-fix: output must include a ::error:: annotation for the push failure.
   # Current code does NOT emit such an annotation → FAIL.
   # After fix adds an error handler on the merge-branch push → PASS.
-  if echo "$out" | grep -qE '::error::.*push (failed|rejected|error)|::error::.*merge.branch.*(fail|reject)'; then
+  if echo "$out" | grep -E '::error::.*([Pp]ush|MERGE_BRANCH|merge.branch)' | grep -qv 'Cascade halted'; then
     return 0
   fi
   return 1
