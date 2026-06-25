@@ -25,7 +25,6 @@ run_test() {
 cascade_block() {
   cat <<'SHELL'
 set -uo pipefail
-HALTED=""
 
 FETCH_STDERR=$(git fetch origin "$CURRENT" "$TARGET" 2>&1 >/dev/null)
 FETCH_RC=$?
@@ -36,10 +35,6 @@ if [[ $FETCH_RC -ne 0 ]]; then
     echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
   fi
   echo "::endgroup::"
-  HALTED="fetch failed for $TARGET"
-fi
-
-if [[ -n "$HALTED" ]]; then
   exit 1
 fi
 SHELL
