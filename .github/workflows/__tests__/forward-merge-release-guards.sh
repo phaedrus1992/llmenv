@@ -19,7 +19,7 @@ run_test() {
   fi
 }
 
-# Build the fallback script — this mirrors the block at lines 155-169 of
+# Build the fallback script — this mirrors the block at lines 155-182 of
 # forward-merge-release.yml (the protected-branch fallback path).
 # Callers export: CURRENT TARGET MERGE_BRANCH and provide git/gh stubs on PATH.
 fallback_block() {
@@ -27,9 +27,16 @@ fallback_block() {
 set -uo pipefail
 HALTED=""
 
-if git push origin HEAD:"$TARGET" 2>/dev/null; then
+PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null)
+PUSH_RC=$?
+if [[ $PUSH_RC -eq 0 ]]; then
   echo "Pushed directly to $TARGET"
 else
+  if [[ -n "$PUSH_STDERR" ]]; then
+    echo "::warning::push to $TARGET failed: $PUSH_STDERR"
+  else
+    echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
+  fi
   if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
     echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
     echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
@@ -166,6 +173,96 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# Test 3 (Issue #480): initial push stderr is logged for non-protection failures
+#
+# Scenario: direct push fails with a non-protection error (e.g. auth failure).
+# The actual stderr from git must appear in the workflow log so operators can
+# diagnose the real cause rather than assuming branch protection.
+#
+# Before fix: 2>/dev/null swallowed stderr; nothing was logged → FAIL.
+# After fix: stderr captured and emitted via ::warning:: → PASS.
+# ---------------------------------------------------------------------------
+test_480_initial_push_stderr_logged() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # git stub:
+  #   push HEAD:<target>  → fail with diagnostic stderr (non-protection error)
+  #   ls-remote           → 1     (branch does not exist)
+  #   push $MERGE_BRANCH  → 0     (succeeds so the test isolation is clean)
+  #   checkout            → 0
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "push" && "$2" == "origin" && "$3" == HEAD:* ]]; then
+  echo "fatal: unable to access 'https://github.com/': Could not resolve host" >&2
+  exit 1
+fi
+if [[ "$1" == "ls-remote" ]]; then
+  exit 1
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/gh"
+  chmod +x "$tmpdir/gh"
+
+  local script out
+  script=$(fallback_block)
+  export CURRENT="release/2.x" TARGET="main" MERGE_BRANCH="forward-merge/release/2.x-to-main"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  rm -rf "$tmpdir"
+
+  # The actual git stderr must surface in the output via ::warning::.
+  if echo "$out" | grep -q "::warning::.*unable to access"; then
+    return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test 4 (Issue #480): ::warning:: emitted when push fails with empty stderr
+#
+# Scenario: direct push fails with no stderr (e.g. silent rejection).
+# The ::warning:: annotation must still be emitted with the exit code.
+#
+# Before fix: empty-stderr branch was missing; nothing logged.
+# After fix: else branch emits ::warning:: with exit code.
+# ---------------------------------------------------------------------------
+test_480_empty_stderr_push_logged() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "push" && "$2" == "origin" && "$3" == HEAD:* ]]; then
+  exit 1
+fi
+if [[ "$1" == "ls-remote" ]]; then
+  exit 1
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/gh"
+  chmod +x "$tmpdir/gh"
+
+  local script out
+  script=$(fallback_block)
+  export CURRENT="release/2.x" TARGET="main" MERGE_BRANCH="forward-merge/release/2.x-to-main"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  rm -rf "$tmpdir"
+
+  if echo "$out" | grep -q "::warning::push to main failed (exit"; then
+    return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -173,6 +270,12 @@ run_test "Issue #476: branch-exists guard prevents overwrite of in-progress reso
 
 run_test "Issue #475: push failure in fallback emits ::error:: annotation" \
   test_475_push_failure_annotation
+
+run_test "Issue #480: initial push stderr logged for non-protection failures" \
+  test_480_initial_push_stderr_logged
+
+run_test "Issue #480: ::warning:: emitted when push fails with empty stderr" \
+  test_480_empty_stderr_push_logged
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
