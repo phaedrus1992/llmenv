@@ -152,11 +152,30 @@ jobs:
             # release branch, with no manual step. If a target is branch-protected
             # the push is rejected; fall back to opening a PR and halt so the
             # remaining (now un-merged) targets aren't silently skipped.
-            if git push origin HEAD:"$TARGET" 2>/dev/null; then
+            PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); PUSH_RC=$?
+            if [[ $PUSH_RC -eq 0 ]]; then
               echo "Pushed directly to $TARGET"
             else
-              git checkout -B "$MERGE_BRANCH"
-              git push origin "$MERGE_BRANCH" --force-with-lease
+              if [[ -n "$PUSH_STDERR" ]]; then
+                # Log the actual error so operators can distinguish protection
+                # rejections from auth/network failures.
+                echo "::warning::push to $TARGET failed: $PUSH_STDERR"
+              fi
+              if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
+                echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
+                echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
+                echo "::endgroup::"
+                HALTED="protected branch $TARGET"
+                break
+              fi
+
+              git checkout -B "$MERGE_BRANCH" "origin/$TARGET"
+              if ! git push origin "$MERGE_BRANCH" --force-with-lease; then
+                echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
+                echo "::endgroup::"
+                HALTED="protected branch $TARGET"
+                break
+              fi
 
               gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
                 --title "Forward-merge $CURRENT into $TARGET" \
