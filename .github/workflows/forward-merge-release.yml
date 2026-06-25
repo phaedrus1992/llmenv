@@ -132,7 +132,7 @@ jobs:
             FETCH_RC=$?
             if [[ $FETCH_RC -ne 0 ]]; then
               if [[ -n "$FETCH_STDERR" ]]; then
-                echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR"
+                echo "::warning::fetch of $CURRENT $TARGET failed: ${FETCH_STDERR//$'\n'/ }"
               else
                 echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
               fi
@@ -172,7 +172,7 @@ jobs:
               # Log the actual error so operators can distinguish protection
               # rejections from auth/network failures.
               if [[ -n "$PUSH_STDERR" ]]; then
-                echo "::warning::push to $TARGET failed: $PUSH_STDERR"
+                echo "::warning::push to $TARGET failed: ${PUSH_STDERR//$'\n'/ }"
               else
                 echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
               fi
