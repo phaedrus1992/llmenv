@@ -128,7 +128,19 @@ jobs:
               continue
             fi
 
-            git fetch origin "$CURRENT" "$TARGET" 2>/dev/null || true
+            FETCH_STDERR=$(git fetch origin "$CURRENT" "$TARGET" 2>&1 >/dev/null)
+            FETCH_RC=$?
+            if [[ $FETCH_RC -ne 0 ]]; then
+              if [[ -n "$FETCH_STDERR" ]]; then
+                echo "::warning::fetch of $CURRENT $TARGET failed: ${FETCH_STDERR//$'\n'/ }"
+              else
+                echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
+              fi
+              echo "::endgroup::"
+              HALTED="fetch failed for $TARGET"
+              break
+            fi
+
             git checkout -q "origin/$TARGET"
 
             MERGE_BRANCH="forward-merge/$CURRENT-to-$TARGET"
@@ -152,14 +164,17 @@ jobs:
             # release branch, with no manual step. If a target is branch-protected
             # the push is rejected; fall back to opening a PR and halt so the
             # remaining (now un-merged) targets aren't silently skipped.
-            PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); PUSH_RC=$?
+            PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null)
+            PUSH_RC=$?
             if [[ $PUSH_RC -eq 0 ]]; then
               echo "Pushed directly to $TARGET"
             else
+              # Log the actual error so operators can distinguish protection
+              # rejections from auth/network failures.
               if [[ -n "$PUSH_STDERR" ]]; then
-                # Log the actual error so operators can distinguish protection
-                # rejections from auth/network failures.
-                echo "::warning::push to $TARGET failed: $PUSH_STDERR"
+                echo "::warning::push to $TARGET failed: ${PUSH_STDERR//$'\n'/ }"
+              else
+                echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
               fi
               if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
                 echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
