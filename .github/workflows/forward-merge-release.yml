@@ -128,7 +128,19 @@ jobs:
               continue
             fi
 
-            git fetch origin "$CURRENT" "$TARGET" 2>/dev/null || true
+            FETCH_STDERR=$(git fetch origin "$CURRENT" "$TARGET" 2>&1 >/dev/null)
+            FETCH_RC=$?
+            if [[ $FETCH_RC -ne 0 ]]; then
+              if [[ -n "$FETCH_STDERR" ]]; then
+                echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR"
+              else
+                echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
+              fi
+              echo "::endgroup::"
+              HALTED="fetch failed for $TARGET"
+              break
+            fi
+
             git checkout -q "origin/$TARGET"
 
             MERGE_BRANCH="forward-merge/$CURRENT-to-$TARGET"

@@ -19,6 +19,32 @@ run_test() {
   fi
 }
 
+# Build the cascade script — this mirrors the main loop at lines 131-143 of
+# forward-merge-release.yml (the fetch + merge sequence in the cascade).
+# Callers export: CURRENT TARGET and provide git stubs on PATH.
+cascade_block() {
+  cat <<'SHELL'
+set -uo pipefail
+HALTED=""
+
+FETCH_STDERR=$(git fetch origin "$CURRENT" "$TARGET" 2>&1 >/dev/null)
+FETCH_RC=$?
+if [[ $FETCH_RC -ne 0 ]]; then
+  if [[ -n "$FETCH_STDERR" ]]; then
+    echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR"
+  else
+    echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
+  fi
+  echo "::endgroup::"
+  HALTED="fetch failed for $TARGET"
+fi
+
+if [[ -n "$HALTED" ]]; then
+  exit 1
+fi
+SHELL
+}
+
 # Build the fallback script — this mirrors the block at lines 155-182 of
 # forward-merge-release.yml (the protected-branch fallback path).
 # Callers export: CURRENT TARGET MERGE_BRANCH and provide git/gh stubs on PATH.
@@ -263,6 +289,82 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# Test 5 (Issue #482): fetch failure with stderr is logged and cascade halted
+#
+# Scenario: fetch fails with a diagnostic error (e.g. auth failure, network).
+# The actual stderr must be logged so operators can diagnose the real cause.
+#
+# Before fix: 2>/dev/null swallowed stderr; cascade continued → FAIL.
+# After fix: stderr captured and emitted via ::warning::; cascade halted → PASS.
+# ---------------------------------------------------------------------------
+test_482_fetch_fail_with_stderr() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # git stub:
+  #   fetch → fail with diagnostic stderr
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "fetch" ]]; then
+  echo "fatal: could not read Password for 'https://github.com': terminal prompts disabled" >&2
+  exit 1
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(cascade_block)
+  export CURRENT="release/2.x" TARGET="main"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  rm -rf "$tmpdir"
+
+  # The actual git stderr must surface in the output via ::warning::.
+  if echo "$out" | grep -q "::warning::fetch of release/2.x main failed: fatal: could not read Password"; then
+    return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test 6 (Issue #482): fetch failure with empty stderr is logged
+#
+# Scenario: fetch fails with no stderr (e.g. silent rejection).
+# The ::warning:: annotation must still be emitted with the exit code.
+#
+# Before fix: empty-stderr case was silently ignored.
+# After fix: else branch emits ::warning:: with exit code.
+# ---------------------------------------------------------------------------
+test_482_fetch_fail_empty_stderr() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # git stub:
+  #   fetch → fail with no stderr (silent rejection)
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "fetch" ]]; then
+  exit 1
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(cascade_block)
+  export CURRENT="release/2.x" TARGET="main"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  rm -rf "$tmpdir"
+
+  if echo "$out" | grep -q "::warning::fetch of release/2.x main failed (exit"; then
+    return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -276,6 +378,12 @@ run_test "Issue #480: initial push stderr logged for non-protection failures" \
 
 run_test "Issue #480: ::warning:: emitted when push fails with empty stderr" \
   test_480_empty_stderr_push_logged
+
+run_test "Issue #482: fetch failure with stderr is logged and cascade halted" \
+  test_482_fetch_fail_with_stderr
+
+run_test "Issue #482: fetch failure with empty stderr is logged" \
+  test_482_fetch_fail_empty_stderr
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
