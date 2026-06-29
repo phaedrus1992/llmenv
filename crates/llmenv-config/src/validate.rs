@@ -48,6 +48,10 @@ pub enum ValidateError {
         "memory: listen_host '{0}' is not a valid IP address literal (hostnames not supported)"
     )]
     MemoryInvalidListenHost(String),
+    #[error("throttle entry for '{0}' has no when: tags")]
+    ThrottleNoTags(String),
+    #[error("throttle entry has an empty 'backend' field")]
+    ThrottleEmptyBackend,
     #[error("duplicate marketplace name: {0}")]
     DuplicateMarketplaceName(String),
     #[error(
@@ -487,6 +491,14 @@ impl Config {
                     ));
                 }
             }
+            for th in &features.throttle {
+                if th.backend.is_empty() {
+                    return Err(ValidateError::ThrottleEmptyBackend);
+                }
+                if th.when.is_empty() {
+                    return Err(ValidateError::ThrottleNoTags(th.backend.clone()));
+                }
+            }
         }
         Ok(())
     }
@@ -835,7 +847,10 @@ mod tests {
                         features: if memory.is_empty() {
                             None
                         } else {
-                            Some(Features { memory })
+                            Some(Features {
+                                memory,
+                                throttle: vec![],
+                            })
                         },
                         marketplace,
                         plugin_collection,
@@ -1083,6 +1098,59 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(ValidateError::McpReservedName(_))
+        ));
+    }
+
+    fn config_with_throttle(throttle: Vec<crate::Throttle>) -> Config {
+        Config {
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![],
+            features: Some(crate::Features {
+                memory: vec![],
+                throttle,
+            }),
+            marketplace: vec![],
+            plugin_collection: vec![],
+            state: Default::default(),
+            host: Default::default(),
+            init: Default::default(),
+            session_log: None,
+        }
+    }
+
+    #[test]
+    fn throttle_without_when_tags_is_rejected() {
+        // An entry with no when: tags can never activate — reject it rather than
+        // silently materializing a dead throttle (parity with memory).
+        let config = config_with_throttle(vec![crate::Throttle {
+            backend: "umans".to_string(),
+            when: vec![],
+            cache_ttl: 30,
+            max_wait: 300,
+            soft_threshold: 20,
+        }]);
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::ThrottleNoTags(_))
+        ));
+    }
+
+    #[test]
+    fn throttle_with_empty_backend_is_rejected() {
+        let config = config_with_throttle(vec![crate::Throttle {
+            backend: String::new(),
+            when: vec!["tag1".to_string()],
+            cache_ttl: 30,
+            max_wait: 300,
+            soft_threshold: 20,
+        }]);
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::ThrottleEmptyBackend)
         ));
     }
 

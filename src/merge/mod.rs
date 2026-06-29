@@ -55,6 +55,9 @@ pub struct MergedManifest {
     /// Sources: top-level `config.yaml` `native:` block (highest precedence) deep-merged
     /// with `native:` blocks from each selected bundle's `bundle.yaml`.
     pub native: std::collections::BTreeMap<String, serde_yaml::Value>,
+    /// The single active throttle entry after tag-intersection resolution, or
+    /// `None` when no throttle entry is active for this scope.
+    pub throttle: Option<crate::config::Throttle>,
 }
 
 const COPIED_SUBDIRS: &[&str] = &["skills", "plugins", "hooks"];
@@ -208,6 +211,18 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
                     mem.server_host,
                     mem.listen_host
                 );
+            }
+        }
+        for th in &features.throttle {
+            if th.when.is_empty() {
+                anyhow::bail!(
+                    "{context}: features.throttle entry for '{}' has no 'when' tags — \
+                     every throttle entry must declare at least one activation tag",
+                    th.backend
+                );
+            }
+            if th.backend.is_empty() {
+                anyhow::bail!("{context}: features.throttle entry has an empty 'backend' field");
             }
         }
     }

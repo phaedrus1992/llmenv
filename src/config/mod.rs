@@ -5,7 +5,7 @@ pub use llmenv_config::{
     HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, Marketplace, MarketplaceSource,
     McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch, NetworkScope,
     OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    RESERVED_OFFICIAL_MARKETPLACES, Scopes, StateConfig, StateTool, UserMatch, UserScope,
+    RESERVED_OFFICIAL_MARKETPLACES, Scopes, StateConfig, StateTool, Throttle, UserMatch, UserScope,
     classify_source, generate_template, github_owner_repo, is_reserved_official_marketplace,
     split_plugin_ref,
 };

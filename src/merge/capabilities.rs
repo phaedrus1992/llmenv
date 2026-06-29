@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{
     Capabilities, Features, HostEntry, Memory, NativePermissionRules, PermissionMode, Permissions,
+    Throttle,
 };
 use crate::util::{dedup, merge_yaml, normalize_yaml};
 
@@ -101,19 +102,22 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         .max_by_key(|(p, _)| *p)
         .map(|(_, v)| v);
 
-    // Collect memory entries from all contributors: concat + dedup (same list model
-    // as hooks, plugins, mcp). Ambiguity at resolve-time, not merge-time.
+    // Collect memory and throttle entries from all contributors: concat + dedup
+    // (same list model as hooks, plugins, mcp). Ambiguity at resolve-time, not merge-time.
     let mut memory: Vec<Memory> = Vec::new();
+    let mut throttle: Vec<Throttle> = Vec::new();
     for c in &ordered {
         if let Some(features) = &c.capabilities.features {
             memory.extend(features.memory.iter().cloned());
+            throttle.extend(features.throttle.iter().cloned());
         }
     }
     dedup(&mut memory);
-    let features = if memory.is_empty() {
+    dedup(&mut throttle);
+    let features = if memory.is_empty() && throttle.is_empty() {
         None
     } else {
-        Some(Features { memory })
+        Some(Features { memory, throttle })
     };
 
     Ok(Capabilities {
@@ -1183,6 +1187,7 @@ mod tests {
                         when: vec![tag.into()],
                         default_topics: vec![],
                     }],
+                    throttle: vec![],
                 }),
                 ..Default::default()
             }
@@ -1208,6 +1213,7 @@ mod tests {
                         when: vec!["home".into()],
                         default_topics: vec![],
                     }],
+                    throttle: vec![],
                 }),
                 ..Default::default()
             }

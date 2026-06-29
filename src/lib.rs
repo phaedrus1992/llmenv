@@ -13,4 +13,5 @@ pub mod paths;
 pub mod plugins;
 pub mod scope;
 pub mod sync;
+pub mod throttle;
 pub mod util;

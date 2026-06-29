@@ -1,4 +1,4 @@
-# Umans usage-throttling support — design
+# Usage-throttling support — design
 
 Issue: #487 — feat: umans usage-throttling support
 Milestone: Small Enhancements
@@ -8,148 +8,138 @@ Base branch: `release/2.x`
 
 Claude Code backed by the Umans API hits Umans' rate limits fast and lands in a
 hard-locked state. Umans enforces a **moving 5-hour window** with a soft request
-limit, a higher hard cap, and short burst tolerance. Crucially, exceeding the
-cap triggers a **deprioritization penalty** (`priority.low` / `boxed_until`) that
-*persists across window resets* — the user observed being throttled in a fresh
-window because of hitting the cap in the previous one.
+limit, a higher hard cap, and short burst tolerance. Exceeding the cap triggers
+a **deprioritization penalty** (`priority.low` / `boxed_until`) that *persists
+across window resets* — the user observed being throttled in a fresh window
+because of hitting the cap in the previous one.
 
-The goal is to spread requests out *before* the cap is reached so work keeps
-flowing slowly rather than slamming into a 429, while never stalling the session
-for the (potentially multi-hour) full penalty period.
+The goal: spread requests out *before* the cap is hit so work keeps flowing
+slowly rather than slamming into a 429, while never stalling the session for the
+(potentially multi-hour) full penalty period.
 
-## Investigation findings (live API, 2026-06-29)
+## Scope decision: generic built-in feature, not a Umans-specific bundle
+
+This is a **built-in llmenv core feature** (Rust, ships with the binary), not
+example bundle content. Per project rules, new features live in core.
+
+The config is **backend-agnostic**, modeled on `features.memory`: a tag-scoped
+list where each entry names a `backend`. Throttling is useful across multiple
+clients/backends; Umans is the first backend implementation. Backend-specific
+options (custom endpoints, auth file locations) belong in the `native:`
+passthrough, not the generic schema.
+
+## Investigation findings (live Umans API, 2026-06-29)
 
 `~/.umans/config.json` keys: `api_token`, `api_endpoint`
-(`https://api.code.umans.ai`), `model` (`umans-coder`), `plan_slug`
-(`code_pro`), `max_concurrency` (5), `per_user_max_concurrency`.
+(`https://api.code.umans.ai`), `model`, `plan_slug`, `max_concurrency`.
 
-**`GET /v1/usage` carries NO rate-limit headers** (no `X-RateLimit-*`,
-`Retry-After`, quota headers). State must be obtained by **explicit polling** —
-this is the decisive architectural fact.
-
-The `GET /v1/usage` JSON body is rich:
+**`GET /v1/usage` carries NO rate-limit headers** — state must be obtained by
+**explicit polling**. The JSON body is rich:
 
 | Field | Meaning |
 |---|---|
 | `limits.requests.limit` | soft limit per window (200) |
 | `limits.requests.hard_cap` | hard 429 ceiling (400) |
 | `limits.requests.window_seconds` | window length (18000 = 5h) |
-| `window.started_at` / `window.resets_at` | window bounds (ISO 8601) |
-| `window.remaining_minutes` | minutes left in window |
-| `usage.requests_in_window` | requests used so far |
+| `window.resets_at` | when window resets (ISO 8601) |
+| `usage.requests_in_window` | requests used |
 | `usage.remaining_requests` | soft headroom |
-| `usage.concurrent_sessions` | active concurrent sessions |
-| `usage.priority.low` | **deprioritized right now (bool)** |
-| `usage.priority.boxed_until` | **throttled until this ISO time** |
+| `usage.priority.low` | deprioritized right now (bool) |
+| `usage.priority.boxed_until` | throttled until this ISO time |
 | `usage.priority.reason` | why (e.g. `rate_limited`) |
 
-`GET /v1/usage/history` requires a `from` query param (ISO timestamp). Not used
-by the throttle — the live `priority` block already signals throttle state.
+`GET /v1/usage/history` needs a `from` query param — not used; the live
+`priority` block already signals throttle state.
 
-## Approach
+## Architecture
 
-A **PreToolUse + UserPromptSubmit hook pair** that polls `/v1/usage` (shared,
-TTL-cached) and introduces a **capped, box-aware adaptive delay** before letting
-the session proceed. Ships as a new `bundles/umans/` bundle, consistent with how
-`rtk`, `slop-scan`, and `session-log` ship in this repo.
+Follows the built-in-feature pattern (ICM as reference):
 
-Both gates share one poll cache so they never double-poll within the TTL:
-- **PreToolUse** — gates per tool call (proxy for "Claude is actively working").
-- **UserPromptSubmit** — gates per turn, and prints a one-line budget note as
-  context so the user/agent sees remaining headroom.
+1. **Config** (`crates/llmenv-config/src/schema.rs`): add `throttle: Vec<Throttle>`
+   to the `Features` struct. `Throttle` is generic:
 
-The hook **never hard-blocks**: any error (missing config, network failure,
-parse error, throttling disabled) logs to stderr and exits 0 with zero delay.
-Throttling must never break a session.
+   | Field | Type | Default | Purpose |
+   |---|---|---|---|
+   | `backend` | String | — (required) | selects backend impl (`"umans"`) |
+   | `when` | Vec<String> | `[]` | tag-scoped activation (like `memory`) |
+   | `cache_ttl` | u64 | 30 | shared usage-poll cache, seconds |
+   | `max_wait` | u64 | 300 | hard cap on any single delay, seconds |
+   | `soft_threshold` | u64 | 20 | `remaining` level where delays begin |
 
-## Components (`bundles/umans/`)
+   Resolver selects the active entry by tag intersection (same model as memory);
+   more than one active entry is an error (single throttle per scope).
 
-1. **`hooks/umans_usage.py`** — shared helper. Reads `~/.umans/config.json`,
-   polls `GET /v1/usage`, caches the JSON to
-   `${XDG_STATE_HOME:-~/.local/state}/llmenv/umans-throttle/usage.json` with a
-   TTL. First caller past the TTL refreshes; others reuse the file (mtime check,
-   no locking — worst case a couple extra polls, harmless). Exposes
-   `get_usage(config) -> dict | None` and `compute_delay(usage, config) -> float`.
+2. **Hook injection** (`src/adapter/claude_code.rs`, `generate_settings_json()`):
+   when a throttle entry is active, inject two hooks that call back into the
+   binary, mirroring the existing `config-guard` injection:
+   - `PreToolUse` → `llmenv throttle pre-tool`
+   - `UserPromptSubmit` → `llmenv throttle prompt`
 
-2. **`hooks/umans-throttle.sh`** — single hook entrypoint wired to both events.
-   Reads the hook event from stdin, loads usage via the helper, computes the
-   delay, sleeps (capped), and for `UserPromptSubmit` prints a budget line. Exits
-   0 always.
+3. **Runtime logic** (new module `src/throttle/`, CLI subcommand in
+   `src/cli/mod.rs`): `llmenv throttle <event>` reads the hook JSON from stdin,
+   resolves the active throttle config, asks the backend for a `UsageSnapshot`
+   (TTL-cached), computes a capped delay, sleeps, and on `prompt` prints a
+   one-line budget note as `additionalContext`. Always exits 0.
 
-3. **`bundle.yaml`** — wires two `hooks:` entries (PreToolUse, UserPromptSubmit)
-   both invoking `umans-throttle.sh`, declares the `env:` defaults, and allows
-   the `~/.umans/config.json` read + the script invocation in `permissions:`.
+4. **Backend abstraction**: a `ThrottleBackend` trait returning a normalized
+   snapshot. One impl (`umans`) selected by a `match` on `backend` — no plugin
+   registry (YAGNI).
 
-4. **config.yaml registration** — `bundle: - name: umans, when: [backend-umans]`,
-   and the `backend-umans` tag added to hosts that use the Umans backend (the
-   personal-laptop host, per its `umans-coder` model).
+   ```rust
+   struct UsageSnapshot {
+       remaining: Option<u64>,   // remaining requests in window
+       limit: Option<u64>,       // soft limit (for the budget line)
+       resets_at: Option<String>,// ISO window reset (for the budget line)
+       penalized: bool,          // priority.low OR boxed_until in future
+   }
+   trait ThrottleBackend {
+       fn fetch_usage(&self) -> anyhow::Result<UsageSnapshot>;
+   }
+   ```
 
-## Throttle logic — `compute_delay(usage, config)`
+   `UmansBackend` reads `~/.umans/config.json`, polls `GET /v1/usage`, maps the
+   body to `UsageSnapshot` (`penalized = priority.low || boxed_until > now`).
 
-Pure function, unit-tested. Returns seconds to sleep (0 = proceed immediately).
+## Throttle logic — `compute_delay(snapshot, cfg) -> Duration`
+
+Pure, backend-agnostic, unit-tested. Always capped at `max_wait`; we never wait
+until `boxed_until` (it can span hours / future windows, #487).
 
 ```
-max_wait   = LLMENV_UMANS_THROTTLE_MAX_WAIT        # default 300
-threshold  = LLMENV_UMANS_THROTTLE_SOFT_THRESHOLD  # default 20
-remaining  = usage.usage.remaining_requests
-boxed      = usage.usage.priority.low is true OR priority.boxed_until in future
-
-if boxed:
-    # Server is already deprioritizing us. Spread requests out, but NEVER wait
-    # until boxed_until (it can be hours away / span windows). Cap hard.
-    return max_wait
-elif remaining <= 0:
-    # At/over soft limit, not yet boxed. Cap the wait.
-    return max_wait
-elif remaining < threshold:
-    # Scale linearly: closer to 0 remaining => closer to max_wait.
-    return max_wait * (threshold - remaining) / threshold
-else:
-    return 0
+if snapshot.penalized:            return max_wait        # server deprioritizing us
+if remaining is None:             return 0               # unknown -> don't block
+if remaining == 0:                return max_wait
+if remaining < soft_threshold:    return max_wait * (soft_threshold - remaining) / soft_threshold
+else:                             return 0
 ```
 
-The cap (`max_wait`, default 5 min) is a hard requirement: the wait is always
-bounded regardless of how far in the future `boxed_until` is.
+## Caching
 
-## Configuration (env vars — `LLMENV_` prefix, llmenv-internal)
-
-| Var | Default | Purpose |
-|---|---|---|
-| `LLMENV_UMANS_THROTTLE_CACHE_TTL` | `30` | shared `/v1/usage` poll cache, seconds |
-| `LLMENV_UMANS_THROTTLE_MAX_WAIT` | `300` | hard cap on any single delay, seconds |
-| `LLMENV_UMANS_THROTTLE_SOFT_THRESHOLD` | `20` | `remaining_requests` level where delays begin |
-| `LLMENV_UMANS_THROTTLE_DISABLE` | unset | any non-empty value disables throttling (exit 0, no delay) |
-
-Defaults are baked into the helper so the bundle works with no env config; the
-`env:` block in `bundle.yaml` documents and can override them.
+Shared TTL cache so the two hooks never double-poll within `cache_ttl`. JSON
+snapshot written to `${state_dir}/throttle/<backend>-usage.json`; mtime-based
+TTL check, no locking (a race just causes a harmless extra poll).
 
 ## Error handling
 
-Every failure path exits 0 with zero delay and a one-line stderr diagnostic
-(`umans-throttle: <reason>`). Covered cases: config file missing/unparseable,
-network/HTTP error polling `/v1/usage`, unexpected JSON shape, throttle disabled.
-A throttle that breaks the session is worse than no throttle.
+Every failure (missing/invalid backend config, network error, parse error,
+no active throttle) → exit 0, zero delay, one-line stderr diagnostic. A throttle
+that breaks the session is worse than no throttle.
 
 ## Testing
 
-`compute_delay` is pure and gets a `pytest` (colocated `hooks/test_umans_usage.py`)
-covering:
-- boxed (`priority.low: true`) → returns `max_wait` (capped)
-- `boxed_until` far in the future → still returns `max_wait`, never the gap to
-  `boxed_until`
-- `remaining_requests <= 0`, not boxed → `max_wait`
-- `remaining_requests` just under threshold → scaled, `< max_wait`
-- healthy headroom → `0`
-- malformed usage dict → no crash (helper returns None → hook no-ops)
-
-Cache TTL behavior verified with a small filesystem test (write usage file,
-assert reuse within TTL, refresh past TTL) if cheap; otherwise covered by the
-mtime check being a one-liner.
+- `compute_delay` (pure): penalized→capped; `boxed_until` far future→still
+  capped; remaining 0→max; just under threshold→scaled `< max`; healthy→0;
+  grows as remaining shrinks; unknown remaining→0.
+- Umans body→`UsageSnapshot` mapping: a recorded sample body maps to expected
+  fields; `penalized` true when `priority.low`; `penalized` true when
+  `boxed_until` in future; false when in past.
+- Config: `Throttle` deserializes with defaults; `backend` required; multiple
+  active entries for one scope is a validation/resolve error.
+- Cache TTL: write snapshot, reuse within TTL, refresh past TTL.
 
 ## Out of scope (YAGNI)
 
-- `/v1/usage/history` trend analysis — the live `priority` block is sufficient
-  to decide throttling. Add only if simple polling proves inadequate.
-- Concurrency throttling (`concurrent_sessions` vs `limit`) — the request-window
-  limit is what the user actually hits. Revisit if concurrency 429s appear.
-- Cross-process locking on the cache file — mtime check is enough.
+- `/v1/usage/history` trend analysis — live `priority` block is sufficient.
+- Concurrency throttling — the request-window limit is what users hit.
+- Additional backends beyond `umans` — the trait leaves room; we ship one impl.
+- A plugin registry for backends — a `match` on the `backend` string is enough.

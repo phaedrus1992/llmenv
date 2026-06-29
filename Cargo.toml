@@ -66,6 +66,7 @@ directories = "6"
 sha2 = "0.11"
 hex = "0.4.3"
 humantime = "2.3.0"
+jiff = { version = "0.2.30", default-features = false, features = ["std"] }
 anstyle = "1.0.14"
 glob = "0.3.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }

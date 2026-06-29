@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add `features.throttle` config field: tag-scoped usage throttling via external backends
+  (currently `umans`); injects `PreToolUse` and `UserPromptSubmit` hooks that poll the
+  backend's request budget and sleep an adaptive, capped delay to avoid rate limits; budget
+  remaining is surfaced as `additionalContext` on each prompt (#487)
+
+### Fixed
+
+- Fix `forward-merge-release` workflow: add branch-exists guard to protected-branch fallback to prevent
+  overwriting in-progress conflict resolution when a human is working on the merge branch (#476)
+- Fix `forward-merge-release` workflow: add error handling on protected-branch fallback push to emit
+  structured `::error::` annotation on push failure instead of silent fall-through (#475)
+
 ## [2.2.1] - 2026-06-24
 
 ### Fixed
