@@ -1,0 +1,65 @@
+# Capability fragment for the `personal-laptop-host` bundle. Fires on the
+# `host-personal-laptop` tag (see config.yaml scope: host:). Everything here is
+# specific to this one machine — its env, its installed tools, its hooks — so it
+# never merges into sessions on other hosts.
+
+env:
+  # /opt/homebrew is the Apple-silicon Homebrew prefix (Intel Macs use
+  # /usr/local). HOST_KIND lets scripts/skills branch on the machine type.
+  HOST_KIND: "macos-laptop"
+  HOMEBREW_PREFIX: "/opt/homebrew"
+
+permissions:
+  allow:
+    # macOS system tooling.
+    - { tool: Bash, pattern: "security find-identity:*" }
+    - { tool: Bash, pattern: "plutil:*" }
+    # Locally-installed dev tooling.
+    - { tool: Bash, pattern: "plexctl *" }
+    - { tool: Bash, pattern: "replicated *" }
+    - { tool: Bash, pattern: "prek *" }
+    - { tool: Bash, pattern: "uv run:*" }
+    - { tool: Bash, pattern: "dart pub:*" }
+    - { tool: Bash, pattern: "dart format:*" }
+    - { tool: Bash, pattern: "dart run:*" }
+    - { tool: Bash, pattern: "flutter analyze:*" }
+    - { tool: Bash, pattern: "flutter test:*" }
+    - { tool: Bash, pattern: "flutter build:*" }
+
+# Hooks rely on absolute paths to tools installed on THIS host (rtk,
+# claude-control). They are not portable — a second machine gets its own host
+# bundle (e.g. bundles/work-laptop-host/) wired to its own host tag in config.yaml.
+hooks:
+  # rtk (Rust Token Killer) — transparently rewrites every Bash invocation
+  # through the rtk proxy, which filters redundant output before it reaches the
+  # agent's context (60-90% savings on verbose commands like `git log`,
+  # `cargo test`). The tool call looks identical to the agent; the savings
+  # happen in the returned output. Requires `rtk` on PATH for this host.
+  - event: PreToolUse
+    matcher: Bash
+    handler:
+      type: command
+      command: "rtk hook claude"
+
+  # claude-control status dashboard — emits session state (active/idle/stopped)
+  # to an external monitor process. Best-effort: if claude-control isn't running
+  # or the hook times out, the session continues (the engine surfaces hook
+  # errors as warnings, not failures). One script handles all four events; it
+  # reads the event type from the payload. Requires ~/.claude-control/ here.
+  - event: SessionStart
+    handler:
+      type: command
+      command: "${HOME}/.claude-control/hooks/status-hook.sh"
+  - event: SessionEnd
+    handler:
+      type: command
+      command: "${HOME}/.claude-control/hooks/status-hook.sh"
+  - event: Stop
+    handler:
+      type: command
+      command: "${HOME}/.claude-control/hooks/status-hook.sh"
+  - event: UserPromptSubmit
+    handler:
+      type: command
+      command: "${HOME}/.claude-control/hooks/status-hook.sh"
+

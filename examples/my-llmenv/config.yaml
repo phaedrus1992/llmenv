@@ -1,70 +1,89 @@
 ################################################################################
-# my-llmenv/config.yaml — example llmenv configuration
+# llmenv example configuration — phaedrus@personal-laptop.local
 #
-# This is the single entry point for all llmenv configuration. llmenv reads
-# this file and the bundles/ tree, then materializes the final agent config
-# into ~/.cache/llmenv/.
+# This is a *sanitized copy* of a real personal llmenv setup. It is meant to be
+# read as documentation, not just data. Every section below explains why the
+# setting exists, how it interacts with other settings, and what assumptions it
+# encodes about scopes and engines.
 #
-# Top-level sections (in order):
-#   cache:             where llmenv stores materialized configs
-#   capabilities:      permissions, hooks, and plugins that apply everywhere
-#   native:            engine-specific raw passthrough (Claude Code settings)
-#   scope:             conditions that activate tags (hostname, user, SSID, …)
-#   bundle:            bundles to load per active tag set
-#   marketplace:       plugin sources (git repos)
-#   plugin-collection: groups of plugins selected by tag
-#   mcp:               MCP servers selected by tag
-#   host:              ICM memory daemon topology
-#   features:          feature flags (memory backend, etc.)
+# Layout this file expects:
+#   config.yaml         — top-level schema (cache, capabilities, scopes, bundles,
+#                         marketplaces, plugin-collections, MCP servers, memory)
+#   bundles/<name>/     — per-bundle directories containing AGENTS.md, rules/,
+#                         skills/, commands/, hooks/, and an optional bundle.yaml
+#                         capability fragment.
 #
-# After any edit:
-#   llmenv doctor      # validate
-#   llmenv status      # show active scopes/bundles on this machine
-#   llmenv regenerate  # write new agent config to cache
+# How to test changes:
+#   LLMENV_CONFIG_DIR=/Users/phaedrus/git/my-llmenv llmenv doctor
+#   LLMENV_CONFIG_DIR=/Users/phaedrus/git/my-llmenv llmenv status
+#   LLMENV_CONFIG_DIR=/Users/phaedrus/git/my-llmenv llmenv export
+#
+# See also:
+#   - RELEASING.md (branch/version policy for the llmenv project itself)
+#   - docs/design/engine-capabilities.md (how top-level + bundle fragments merge)
+#   - crates/llmenv-config/src/schema.rs (the actual serde schema)
 ################################################################################
 
+# Cache topology.
+#
+# llmenv keeps downloaded marketplaces, plugin manifests, and materialized
+# engine configs under a single root. A one-hour sync interval is aggressive
+# enough for daily work without cloning marketplaces on every session start.
+# Seven-day retention means stale plugin tarballs die automatically; normal
+# hashing keeps the cache comparable across hosts that share the same source.
 cache:
   cache_dir: "~/.cache/llmenv"
   sync_interval_minutes: 60
-  cache_retention_hours: 168  # 7 days
+  cache_retention_hours: 168
   hashing: normal
 
 ################################################################################
-# capabilities — engine-agnostic rules that apply on every host
+# Engine-agnostic capabilities.
 #
-# Bundle-contributed `bundle.yaml` fragments are MERGED into this block at
-# materialize time:
-#   - lists (allow, deny, hooks, plugins) → concatenated and deduplicated
-#   - scalars → resolved by scope precedence (more-specific scope wins)
+# This block defines permissions, native-permission passthrough, hooks, and
+# plugins that are *universal* (selected by the `user-phaedrus` tag in the
+# bundle section below). Bundle-contributed fragments in bundles/*/bundle.yaml
+# use the same shape and are merged by llmenv at materialize time:
+#   - list values concatenate and deduplicate
+#   - scalar values resolve by scope precedence (host > user > network > project)
 #
-# This section is the universal floor. Put here only what should fire
-# regardless of which host, user, or project is active.
+# That merge model is why host-specific tools (plexctl, security, etc.) live in
+# bundles/personal-laptop-host/bundle.yaml instead of here: they only make sense
+# on one machine. The base bundle (bundles/base/bundle.yaml) contributes the
+# session-log hook + codebase-memory MCP server for every session that selects the
+# user scope.
+#
+# For the schema, see llmenv's crates/llmenv-config/src/schema.rs and the
+# engine-capabilities design doc in the main repo.
 ################################################################################
 capabilities:
   permissions:
-    # default_mode controls the fallback when a tool call matches no explicit
-    # allow or deny rule. "default" means Claude Code's built-in behavior
-    # (prompt for most write operations, allow reads by default).
+    # default_mode is a fallback used when no explicit allow/deny matches.
+    # We default to "default" rather than "ask" because the `deny:` list below
+    # catches the really dangerous patterns; everything else can be decided by
+    # the engine's own prompt gating.
     default_mode: default
 
-    # Universal allow list — applies on every host.
-    # Host-specific and project-specific allows live in bundle.yaml files.
+    # Universal Bash allow patterns. These commands are safe enough to permit
+    # on every host. The engine still validates the literal command string, so
+    # wildcards must be explicit; this is not a shell interpreter.
+    #
+    # Git commands are grouped here because nearly every project interaction
+    # needs status, diff, log, branch, checkout, pull, push, fetch, merge, and
+    # merge-base. `git add` is allow-listed with a colon suffix so it does not
+    # catch unrelated commands.
     allow:
-      # GitHub CLI — allow all common read/write subcommands without prompting.
-      # The deny list below still blocks force-push even if gh uses git under
-      # the hood.
+      # --- GitHub CLI (read-only project plumbing) ---------------------------
       - { tool: Bash, pattern: "gh pr *" }
       - { tool: Bash, pattern: "gh issue *" }
       - { tool: Bash, pattern: "gh run *" }
       - { tool: Bash, pattern: "gh api *" }
 
-      # Git read operations — safe to auto-approve everywhere.
+      # --- core git workflow --------------------------------------------------
       - { tool: Bash, pattern: "git status" }
       - { tool: Bash, pattern: "git diff *" }
       - { tool: Bash, pattern: "git log *" }
       - { tool: Bash, pattern: "git branch *" }
-
-      # Git write operations — approved but still logged by session-log hook.
       - { tool: Bash, pattern: "git checkout *" }
       - { tool: Bash, pattern: "git pull *" }
       - { tool: Bash, pattern: "git push *" }
@@ -73,8 +92,10 @@ capabilities:
       - { tool: Bash, pattern: "git add:*" }
       - { tool: Bash, pattern: "git merge-base:*" }
 
-      # Project tooling — yx (Yaks task tracker), rtk (token-saving proxy),
-      # wc, trash (macOS recoverable delete), shellcheck, grep, semgrep.
+      # --- local productivity scripts -----------------------------------------
+      # rtk (Rust Token Killer) intercepts expensive Bash calls and proxies them
+      # through a token-saving filter. It is defined as a PreToolUse hook in
+      # bundles/personal-laptop-host/bundle.yaml because it is host-specific.
       - { tool: Bash, pattern: "rtk *" }
       - { tool: Bash, pattern: "yx *" }
       - { tool: Bash, pattern: "wc *" }
@@ -83,54 +104,45 @@ capabilities:
       - { tool: Bash, pattern: "shellcheck *" }
       - { tool: Bash, pattern: "grep *" }
       - { tool: Bash, pattern: "semgrep *" }
-
-      # slop-scan.sh — prose quality checker (bundled helper script).
-      # Capabilities allow patterns are matched verbatim against what the agent
-      # calls, so this must be the absolute path to the installed script.
-      # Hook commands use bundle-relative paths; allow patterns do not.
-      - { tool: Bash, pattern: "/Users/alice/git/my-llmenv/bundles/base/scripts/slop-scan.sh *" }
-
-      # just ci — run the project's CI recipe locally.
+      # slop-scan is a custom bundle hook for catching low-quality output.
+      - { tool: Bash, pattern: "/Users/phaedrus/git/my-llmenv/bundles/base/scripts/slop-scan.sh *" }
       - { tool: Bash, pattern: "just ci" }
 
-      # .tmp/ — scratch space that Claude Code is allowed to read/write freely.
-      # Projects gitignore this directory; it's for intermediate artifacts.
+      # --- safe scratch space -------------------------------------------------
+      # Reading/writing under ./.tmp is allowed so plans and temporary artifacts
+      # can live next to the project without escaping into arbitrary paths.
       - { tool: Read, pattern: "./.tmp/**" }
       - { tool: Write, pattern: "./.tmp/**" }
 
-      # WebSearch — allowed everywhere; specific domain WebFetch goes in
-      # native_permissions below because the neutral vocabulary can't express
-      # domain restrictions.
+      # --- web search (no domain restriction at top level) --------------------
       - { tool: WebSearch }
 
-    # Universal deny list — these patterns block unconditionally, taking
-    # precedence over any allow rule. They protect against the most dangerous
-    # accidental operations.
+    # Deny patterns are evaluated before allow patterns (deny wins). Keep the
+    # list small and unambiguous: anything matching these is blocked outright
+    # rather than prompt-gated.
     deny:
-      # Destructive filesystem operations.
+      # Destructive system commands.
       - { tool: Bash, pattern: "rm -rf *" }
       - { tool: Bash, pattern: "rm -fr *" }
       - { tool: Bash, pattern: "sudo *" }
       - { tool: Bash, pattern: "mkfs *" }
       - { tool: Bash, pattern: "dd *" }
 
-      # Pipe-to-shell patterns — classic supply-chain attack vector.
+      # Piped-to-shell installers are almost always the wrong thing to run.
       - { tool: Bash, pattern: "curl *|bash*" }
       - { tool: Bash, pattern: "wget *|bash*" }
 
-      # Git destructive operations — explicit denial even if other rules allow
-      # git push broadly.
+      # Git history destruction.
       - { tool: Bash, pattern: "git push --force*" }
       - { tool: Bash, pattern: "git push *--force*" }
       - { tool: Bash, pattern: "git reset --hard*" }
 
-      # Shell rc files — must never be auto-edited; changes here affect every
-      # future shell session and are easy to miss.
+      # Shell rc files must never be edited automatically; they outlive any
+      # single project and are not version-controlled by llmenv.
       - { tool: Edit, paths: ["~/.bashrc", "~/.zshrc"] }
       - { tool: Edit, paths: ["~/.ssh/**"] }
 
-      # Credential stores — deny reads so secrets can't be exfiltrated via
-      # tool results even if a prompt injection attempts it.
+      # Credential stores are never readable.
       - { tool: Read, paths: ["~/.ssh/**"] }
       - { tool: Read, paths: ["~/.gnupg/**"] }
       - { tool: Read, paths: ["~/.aws/**"] }
@@ -144,53 +156,47 @@ capabilities:
       - { tool: Read, paths: ["~/.pypirc"] }
       - { tool: Read, paths: ["~/.gem/credentials"] }
 
-      # macOS-specific: keychains and browser-based crypto wallet stores.
+      # macOS-specific: keychains and crypto wallet stores.
       - { tool: Read, paths: ["~/Library/Keychains/**"] }
       - { tool: Read, paths: ["~/Library/Application Support/**/metamask*/**"] }
+      - { tool: Read, paths: ["~/Library/Application Support/**/electrum*/**"] }
       - { tool: Read, paths: ["~/Library/Application Support/**/exodus*/**"] }
+      - { tool: Read, paths: ["~/Library/Application Support/**/phantom*/**"] }
+      - { tool: Read, paths: ["~/Library/Application Support/**/solflare*/**"] }
 
-  # native_permissions — raw Claude Code permission strings that the neutral
-  # vocabulary (allow/deny above) cannot represent. These are passed verbatim
-  # into Claude Code's settings.json permissionRules.
-  #
-  # Use this for:
-  #   - MCP tool wildcards (mcp__<server>__*)
-  #   - Domain-scoped WebFetch (WebFetch(domain:…))
-  #   - Named skill auto-approval (Skill(name))
+  # Per-engine raw permission strings. Use only when the neutral vocabulary
+  # cannot express the grant: MCP tool wildcards, domain-bound WebFetch, and
+  # engine-specific skills are the canonical cases.
   native_permissions:
     claude_code:
       allow:
-        # MCP servers — allow all tools from these servers without prompting.
-        # Each entry corresponds to a server name from the `mcp:` section or
-        # from a plugin's bundled .mcp.json.
+        # Context7 / long-term memory / context-mode plugin families.
         - "mcp__context7__*"
-        - "mcp__icm__*"                                   # ICM memory backend
-        - "mcp__plugin_context-mode_context-mode__*"      # context-mode plugin
-        - "mcp__plugin_github_github__*"                  # GitHub plugin
-        - "mcp__codebase-memory-mcp__*"                   # codebase memory
-
-        # Domain-scoped WebFetch — allow fetching from specific domains without
-        # a prompt. Add only domains you actually use; each entry is a trust
-        # decision. The general WebSearch allow above doesn't cover WebFetch.
-        - "WebFetch(domain:docs.rs)"
-        - "WebFetch(domain:crates.io)"
-        - "WebFetch(domain:doc.rust-lang.org)"
-
-        # Auto-approve specific skills that are safe and frequently used.
-        # Without this, the first invocation of the skill prompts for approval.
+        - "mcp__icm__*"
+        - "mcp__plugin_context-mode_context-mode__*"
+        # GitHub MCP connector from the Claude plugin market.
+        - "mcp__plugin_github_github__*"
+        # Domain-locked fetches for package docs and reference sites.
+        - "WebFetch(domain:pub.dev)"
+        - "WebFetch(domain:getsongbpm.com)"
+        - "WebFetch(domain:godot-rust.github.io)"
+        # Engine skill: sharp-edges flags risky patterns during refinement.
         - "Skill(sharp-edges)"
 
-  # NOTE: The context-mode plugin ships its own hooks/hooks.json, which uses
-  # ${CLAUDE_PLUGIN_ROOT} to resolve paths. Do NOT copy those hooks here — they
-  # belong to the plugin's config directory, not the top-level settings.json,
-  # and ${CLAUDE_PLUGIN_ROOT} won't resolve correctly outside that directory.
+  # IMPORTANT: context-mode's hooks are NOT duplicated here. The context-mode
+  # plugin (plugin-collection `core` → context-mode:context-mode) ships its own
+  # hooks/hooks.json, where ${CLAUDE_PLUGIN_ROOT} resolves correctly. Copying
+  # those entries into native_hooks pushes them into top-level settings.json,
+  # where ${CLAUDE_PLUGIN_ROOT} cannot resolve and produces a SessionStart hook
+  # error. Let the plugin own its own hooks.
 
-  # Universal hooks — fire on every host for every session.
-  # Host-scoped hooks live in the relevant bundle's bundle.yaml.
+  # Universal hooks (every host). Host- and project-scoped hooks live in the
+  # bundle.yaml of bundles tagged for those scopes (see bundles/base and
+  # bundles/personal-laptop-host).
   hooks:
-    # Safety guard: block any Bash command that contains rm -rf even if it
-    # slips through a creative shell invocation that the deny pattern misses
-    # (e.g. embedded in a heredoc or subshell). Belt-and-suspenders.
+    # Block recursive `rm -rf` / `rm -r -f` invocations before they reach the
+    # shell. This is intentionally a guard, not a permission: `trash` is the
+    # preferred recoverable delete on macOS.
     - event: PreToolUse
       matcher: Bash
       handler:
@@ -198,187 +204,157 @@ capabilities:
         command: |
           CMD=$(jq -r '.tool_input.command'); if echo "$CMD" | grep -qE 'rm[[:space:]]+-[^[:space:]]*r[^[:space:]]*f'; then echo 'BLOCKED: Use trash instead of rm -rf' >&2; exit 2; fi
 
+  # Top-level plugins list is empty because all plugins are selected through
+  # `plugin-collection:` below. Keeping it explicit documents that the list is
+  # intentionally unused.
   plugins: []
 
-################################################################################
-# native — engine-specific raw config, passed verbatim into the engine's own
-# config file. Nothing here is engine-agnostic; it's Claude Code–specific.
+# Per-engine native passthrough. These values are written verbatim into the
+# engine's own configuration file (settings.json for Claude Code).
 #
-# llmenv merges `native:` blocks from both config.yaml and bundle.yaml.
-# Per-bundle native blocks were silently dropped before PR #294 (issue #291)
-# landed in 2.0.x. Engine-specific config (cleanupPeriodDays, statusLine)
-# that has no neutral vocabulary equivalent can live in a bundle's native:
-# block, or here at the top level — both are merged now.
-################################################################################
+# WARNING: bundle-level `native:` blocks are currently dropped at materialize
+# time (llmenv 1.0.2). Put engine-native settings here if they must survive.
 native:
   claude_code:
-    # How long to retain conversation history in the local cache.
+    # Long cleanup horizon for ephemeral session artifacts.
     cleanupPeriodDays: 365
 
-    # statusLine — a command whose stdout is displayed in Claude Code's status
-    # bar. Useful for showing git branch, model, or custom info.
-    # This MUST live here (top-level native), not in a bundle's native: block.
+    # Status line configuration lives here (top-level native), not in bundles,
+    # because llmenv only merges the top-level `native:` block for Claude Code.
     statusLine:
       type: command
       command: "/usr/local/bin/rusty-claude-status"
 
     # Environment variables injected into every Claude Code session.
     env:
-      # Cap how many bytes a Bash tool result can be before truncation.
-      # Keeps context windows from blowing up on noisy command output.
+      # Cap Bash tool output so the context window is not swamped accidentally.
       BASH_MAX_OUTPUT_LENGTH: "10000"
 
-      # Start auto-compact at 50% context used instead of the default ~80%.
-      # Aggressive compaction keeps headroom for long agentic tasks.
+      # Autocompact when context crosses the halfway mark.
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50"
 
-      # Disable background tasks (file watcher, telemetry pings) that consume
-      # resources and produce noise in audit logs.
+      # Disable background tasks, feedback surveys, and non-essential traffic so
+      # the local sessions are deterministic and quiet.
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
       CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 
-      # Enable experimental multi-agent team support.
+      # Enable agent teams and a fixed subagent model (sonnet-4-6) for
+      # predictable multi-agent behavior.
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
-
-      # Model used for spawned subagents. Set to a smaller/faster model to
-      # reduce cost on parallelized agentic workflows.
       CLAUDE_CODE_SUBAGENT_MODEL: "claude-sonnet-4-6"
 
+      # Telemetry off. These are paired with the user-level config choice.
       DISABLE_ERROR_REPORTING: "1"
       DISABLE_TELEMETRY: "1"
 
-      # Exclude claude.ai account MCP connectors. They are account-synced (not
-      # llmenv-managed) and inject a large tool catalog (~45k tokens) of
-      # irrelevant connectors into every session.
+      # Exclude claude.ai account MCP connectors from this config dir. They are
+      # account-synced (not llmenv-managed) and inject a large tool catalog
+      # (~45k tokens) of irrelevant connectors into every session.
       ENABLE_CLAUDEAI_MCP_SERVERS: "false"
 
-      # Enable 1-hour prompt caching to reduce cost on repeated system prompts.
+      # Hour-long prompt caching window for repeated tool schemas and skills.
       ENABLE_PROMPT_CACHING_1H: "1"
 
-      # Cap how many tokens an MCP tool response can consume. Prevents a
-      # runaway MCP server from filling the context window.
+      # Bound MCP server output to avoid surprise context exhaustion.
       MAX_MCP_OUTPUT_TOKENS: "10000"
 
-      # Store context-mode state outside the llmenv cache dir.
-      # The cache dir is regenerated on every config-hash change; without this,
-      # context-mode loses its session history each time the config changes.
+      # Keep context-mode's session/memory state outside the llmenv cache dir
+      # (CLAUDE_CONFIG_DIR), which is regenerated on every config-hash change.
+      # Without this, context-mode loses its history each time the hash moves.
       CONTEXT_MODE_DATA_DIR: "~/.context-mode"
 
 ################################################################################
-# scope — conditions that activate tags
+# Scopes — conditions that activate tags.
 #
-# Scopes are evaluated at `llmenv regenerate` time on the current machine.
-# Each matching scope emits its `tags:` list into the active tag set.
-# Those tags determine which bundles, plugin-collections, and mcp servers load.
+# A scope is a predicate (hostname, SSID, user, project tag, etc.). When a
+# predicate matches, its tags are added to the active tag set. Bundles and
+# plugin-collections then fire based on `when:` tag intersection:
+#   when: [tag-a, tag-b]  → fires only if BOTH tags are active.
 #
-# Available matchers:
-#   hostname:  machine's hostname (from `hostname -s`)
-#   user:      UNIX user name (from `whoami`)
-#   ssid:      current Wi-Fi SSID (macOS: `networksetup -getairportnetwork`)
-#
-# Tags are arbitrary strings. Convention:
-#   host-<id>    for host-specific tags
-#   user-<id>    for user-specific tags
-#   personal     for "not work" context
-#   work         for work context
-#   home         for home-network context
-#   lang-<name>  for programming language (also emitted by project .llmenv.yaml)
+# Host scopes are evaluated first, then user, network, and the tags from a
+# project's local `.llmenv.yaml` take effect inside that project directory.
+# Because the bundle `when:` list is an intersection, use broad tags like
+# `personal` or `work` to group bundles, and narrow tags like `host-fixed` for
+# one-machine-only capabilities.
 ################################################################################
 scope:
   # --- Host scopes -----------------------------------------------------------
-  # One entry per machine. The `id` is a short internal name used in comments
-  # and bundle `when:` conditions. The `match.hostname` must match exactly what
-  # `hostname -s` returns on that machine.
+  # Each host maps its hostname to a set of tags. `personal-laptop` and `fixed`
+  # are both personal machines; they share the `personal` tag so bundles that
+  # should run on both declare `when: [personal]`. Host-specific bundles
+  # (e.g. personal-laptop-host) use the narrower host tag.
   host:
-    - id: studio            # Personal Mac (laptop/desktop at home)
-      match: { hostname: "studio.local" }
-      tags: [host-studio, personal]
+    - id: personal-laptop
+      match: { hostname: "personal-laptop.local" }
+      tags: [host-personal-laptop, personal]
 
-    - id: tower             # Personal tower (always-on home server)
-      match: { hostname: "tower" }
-      tags: [host-tower, personal]
+    - id: fixed
+      match: { hostname: "fixed" }
+      tags: [host-fixed, personal]
 
-    - id: work-laptop       # Employer-issued laptop
-      match: { hostname: "office-laptop.local" }
+    - id: work-laptop
+      match: { hostname: "work-laptop.local" }
       tags: [host-work-laptop, work]
 
   # --- User scopes -----------------------------------------------------------
-  # Useful when multiple people share a machine or for matching a specific
-  # UNIX account. Here we tag the primary user so `base` bundle loads.
   user:
-    - id: alice
-      match: { user: "alice" }
-      tags: [user-alice]
+    - id: phaedrus
+      match: { user: "phaedrus" }
+      tags: [user-phaedrus]
 
   # --- Network scopes --------------------------------------------------------
-  # SSID-based scopes activate when connected to a specific Wi-Fi network.
-  # Useful for enabling home-only resources (local media server, NAS, etc.)
-  # that aren't reachable elsewhere.
+  # Home network is identified by SSID. The `home` tag enables the `home` bundle
+  # (plex skill), and `trusted-network` can be used to relax settings that
+  # should only run on a known LAN.
   network:
-    - id: home-wifi
-      match: { ssid: "HomeNet" }
+    - id: home
+      match: { ssid: "MyWifiSSID" }
       tags: [home, trusted-network]
 
 ################################################################################
-# bundle — which bundle directories to activate per tag set
+# Bundles — content + (via bundle.yaml) capability fragments.
 #
-# Each entry maps a bundle name to the tags that must ALL be present in the
-# active tag set for that bundle to load (`when:` is AND logic across the list,
-# OR logic within a list item is not supported — split into two bundle entries).
-#
-# Bundle directories live at bundles/<name>/ relative to this config.yaml.
-# A bundle can contribute:
-#   AGENTS.md             injected into the agent's system context
-#   rules/*.md            additional rules injected alongside AGENTS.md
-#   skills/*/SKILL.md     invocable skills (llmenv materializes as plugins)
-#   hooks/*.sh            referenced from bundle.yaml hook commands
-#   commands/*.md         slash-command definitions
-#   bundle.yaml           capability fragment merged into capabilities: above
+# Order does not matter for selection, but it matters for documentation: list
+# base first, then host, then project-type bundles. A bundle only fires when
+# every tag in its `when:` list is active. The content it carries
+# (AGENTS.md/rules/skills/commands) is loaded by the engine's prompt system;
+# its bundle.yaml fragment is merged into capabilities.
 ################################################################################
 bundle:
-  # --- Always-active bundles -------------------------------------------------
-
-  # `base` fires whenever the primary user is active (i.e., every session).
-  # Contains: universal AGENTS.md, session-log hook, identity-guard hook,
-  # writing-style skill, general coding rules, workflow-continuity rules,
-  # and the slop-scan helper script.
+  # Base bundle: universal rules, skills, commands, and the context-mode
+  # cache-heal hook. Selected by the `user-phaedrus` tag so it loads for every
+  # session run as this user. See bundles/base/bundle.yaml.
   - name: base
-    when: [user-alice]
+    when: [user-phaedrus]
 
-  # --- Host-specific bundles -------------------------------------------------
+  # Host bundle for the personal laptop. Contains macOS-specific permissions
+  # (security, plutil, homebrew tooling), the rtk hook, and the claude-control
+  # status hooks. See bundles/personal-laptop-host/bundle.yaml.
+  - name: personal-laptop-host
+    when: [host-personal-laptop]
 
-  # `host-laptop` fires only on the personal studio Mac.
-  # Contains: rtk (token-killer) hook, claude-control status dashboard hooks.
-  # These depend on binaries installed only on that machine, so they must not
-  # load on other hosts.
-  - name: host-laptop
-    when: [host-studio]
-
-  # --- Context bundles — personal vs work ------------------------------------
-
-  # `personal` fires on personal machines (studio, tower). Currently empty —
-  # placeholder for personal-only rules or skills that shouldn't load at work.
+  # Personal / non-work bundle. A placeholder for rules and skills that should
+  # only run outside the work-laptop host scope. Currently no directory exists
+  # because the personal rules are still in base; this tag is reserved.
   - name: personal
     when: [personal]
 
-  # `work` fires on the employer laptop (work tag from work-laptop scope).
-  # Contains: Slack MCP integration, work-specific permission grants.
+  # Work profile: fires on the `work` tag emitted by the work-laptop host
+  # scope. Pairs with the `work` plugin-collection below, which wires the
+  # official Slack MCP plugin (claude-plugins-official:slack). See
+  # bundles/work/bundle.yaml for the read-only grid-MCP grants.
   - name: work
     when: [work]
 
-  # `home` fires when connected to the home Wi-Fi network.
-  # Contains: media-server skill (accesses a local Plex/Jellyfin instance that
-  # is only reachable on the home network).
+  # Home network bundle: fires on the `home` tag (SSID "MyWifiSSID"). Carries
+  # the plex skill because the local media server is only reachable at home.
   - name: home
     when: [home]
 
-  # --- Language bundles — activated by project .llmenv.yaml tags ------------
-  #
-  # These load when a project sets `tags: [lang-rust]` (or similar) in its
-  # `.llmenv.yaml`. The agent then gets language-appropriate rules and skills
-  # scoped to that project directory.
-
+  # Language and framework bundles. These are activated by tags emitted from a
+  # project's local `.llmenv.yaml` (see llmenv issue #164). Each bundle carries
+  # style rules, commands, and any language-specific plugin collections.
   - name: rust-dev
     when: [lang-rust]
 
@@ -386,138 +362,171 @@ bundle:
     when: [lang-python]
 
   - name: lang-c-cpp
-    when: [lang-c, lang-cpp]    # either tag triggers this bundle
+    when: [lang-c, lang-cpp]
 
+  # Windows PowerShell 5.1 (Desktop edition) baseline; includes PSScriptAnalyzer
+  # hook, security hardening rules, and style conventions.
+  - name: lang-powershell
+    when: [lang-powershell]
+
+  # Web/TypeScript project defaults. Shares the `web` tag with the typescript-lsp
+  # plugin collection and the playwright MCP server.
   - name: web-dev
     when: [web]
 
-  # --- Infrastructure bundles -----------------------------------------------
-
+  # Kubernetes project rules — manifests/workload conventions plus Rust
+  # operator and CRD-design rules.
   - name: kubernetes
     when: [kubernetes]
 
+  # Docker build rules — multi-stage build hygiene and image hardening.
   - name: docker
     when: [docker]
 
+  # Finance bundle: carries the InvestSkill plugin (US-stock analysis
+  # frameworks). Fires on the `finance` tag.
+  - name: finance
+    when: [finance]
+
 ################################################################################
-# marketplace — plugin source repositories
+# Plugin marketplaces.
 #
-# Each marketplace is a git repo cloned into:
-#   ~/.cache/llmenv/marketplaces/<name>/
+# Each marketplace is cloned into ~/.cache/llmenv/marketplaces/<name>/ and
+# referenced by `plugin-collection` entries as `<name>:<plugin>`. The `name:`
+# here is a local alias; it does not have to match the repo name.
 #
-# Plugin-collection entries then reference plugins as "<marketplace>:<plugin>".
-# llmenv fetches/updates these repos at configure time.
-#
-# Source URLs: use HTTPS for public repos, SSH for private ones. If you have
-# multiple GitHub accounts (personal + work), use SSH config aliases
-# (e.g. github-work) to route to the right key.
+# Private Git host aliases (e.g. github-phaedrus) are resolved by the user's
+# SSH config and keep the marketplace source portable between machines that
+# share the same alias definitions.
 ################################################################################
 marketplace:
-  # Official Anthropic plugin registry.
   - name: claude-plugins-official
     source: "https://github.com/anthropics/claude-plugins-official"
 
-  # Trail of Bits security skills (public).
   - name: trailofbits
-    source: "https://github.com/trailofbits/claude-skills"
+    source: "https://github-phaedrus/trailofbits/skills"
 
-  # context-mode — context-window management plugin.
+  - name: skills-curated
+    source: "https://github-phaedrus/trailofbits/skills-curated"
+
+  # Personal commons repo. Holds private/team plugins and the `llmenv-dev`
+  # workflow plugin used by the `llmenv` plugin-collection below.
+  - name: llmenv-commons
+    source: "git@github-phaedrus:phaedrus1992/llmenv-commons"
+
   - name: context-mode
-    source: "https://github.com/example-user/context-mode"
+    source: "https://github-phaedrus/mksglu/context-mode"
 
-  # Employer's internal plugin collection (private repo via SSH alias).
-  # The "github-work" alias in ~/.ssh/config routes to the work GitHub account.
-  - name: dev-commons
-    source: "git@github-work:acme-corp/dev-commons"
+  - name: agent-browser
+    source: "https://github.com/vercel-labs/agent-browser"
 
-  # Third-party skill collections.
+  - name: caveman
+    source: "https://github.com/JuliusBrussee/caveman"
+
   - name: rust-skills
-    source: "https://github.com/example-user/rust-skills"
+    source: "https://github-phaedrus/actionbook/rust-skills"
+
+  - name: godot-claude-skills
+    source: "https://github-phaedrus/alexmeckes/godot-claude-skills"
 
   - name: fullstack-dev-skills
-    source: "https://github.com/example-user/claude-skills"
-
-  - name: ponytail
-    source: "https://github.com/example-user/ponytail"
-
-  - name: i-have-adhd
-    source: "https://github.com/ayghri/i-have-adhd"
+    source: "https://github-phaedrus/jeffallan/claude-skills"
 
   - name: invest-skill
     source: "https://github.com/yennanliu/InvestSkill"
 
+  - name: i-have-adhd
+    source: "https://github.com/ayghri/i-have-adhd"
+
+  - name: ponytail
+    source: "https://github.com/DietrichGebert/ponytail"
+
+  - name: ghcp-dev-plugin
+    source: "https://github.com/shouenlee/ghcp-dev-plugin"
+
 ################################################################################
-# plugin-collection — groups of plugins loaded per tag set
+# Plugin collections — selected onto scopes by tag intersection.
 #
-# Like `bundle:`, each collection has a `when:` tag condition. When all listed
-# tags are present, every plugin in `plugins:` is activated for this session.
+# Each collection is a named set of plugins from the marketplaces above. The
+# `when:` tags work the same way as bundles: all listed tags must be active for
+# the collection to load. Plugins are referenced as `<marketplace>:<plugin>`.
 #
-# Plugin references use the format "<marketplace>:<plugin-name>". The plugin
-# name must match a directory inside the marketplace repo.
-#
-# Plugins can contribute: skills, commands, hooks, MCP servers, permissions.
-# They are fully self-contained — adding a plugin entry here wires everything
-# the plugin declares automatically.
+# Ordering here is mostly for documentation. Within a collection, plugins are
+# loaded in list order and later duplicates are deduplicated.
 ################################################################################
 plugin-collection:
-  # Core developer plugins — load for every session (user-alice fires always).
-  # These are the baseline productivity tools: commit workflows, PR review,
-  # context management, attention-management, and style enforcement.
+  # Core dev plugins. Tagged for `user-phaedrus` so they activate everywhere
+  # this user runs a session. context-mode is included here because its own
+  # hooks file is what wires SessionStart/PreToolUse support correctly.
   - name: core
-    when: [user-alice]
+    when: [user-phaedrus]
     plugins:
-      - "claude-plugins-official:commit-commands"    # /commit, /push, /pr
-      - "claude-plugins-official:code-review"        # /code-review
-      - "claude-plugins-official:code-simplifier"    # /simplify
-      - "claude-plugins-official:feature-dev"        # /feature-dev
-      - "claude-plugins-official:plugin-dev"         # /plugin-dev
-      - "claude-plugins-official:pr-review-toolkit"  # /review-pr
-      - "claude-plugins-official:superpowers"        # meta-skills
-      - "context-mode:context-mode"                  # /ctx-* commands
-      - "i-have-adhd:i-have-adhd"                    # attention management
-      - "ponytail:ponytail"                          # lazy-dev mode
-      - "trailofbits:gh-cli"                         # /gh-cli skill
-      - "trailofbits:git-cleanup"                    # /clean_gone
+      # - "caveman:caveman"  # currently disabled pending upstream cleanup
+      - "claude-plugins-official:commit-commands"
+      - "claude-plugins-official:code-review"
+      - "claude-plugins-official:code-simplifier"
+      - "claude-plugins-official:feature-dev"
+      - "claude-plugins-official:plugin-dev"
+      - "claude-plugins-official:pr-review-toolkit"
+      - "claude-plugins-official:superpowers"
+      - "context-mode:context-mode"
+      - "i-have-adhd:i-have-adhd"
+      - "ponytail:ponytail"
+      - "trailofbits:gh-cli"
+      - "trailofbits:git-cleanup"
+      - "ghcp-dev-plugin:deep-review"
 
-  # Frontend/web plugins — activated by the `web` tag from a project
-  # .llmenv.yaml. Brings in browser automation (agent-browser) and
-  # TypeScript/React skills.
+  # Disabled extras kept as a reference for what can be opted into later.
+  # - name: extra-dev-disabled
+  #   tags: []
+  #   plugins:
+  #     - "claude-plugins-official:context7"
+  #     - "claude-plugins-official:github"
+  #     - "claude-plugins-official:claude-md-management"
+  #     - "claude-plugins-official:security-guidance"
+  #     - "claude-plugins-official:skill-creator"
+
+  # Frontend plugins. Activated by the `web` tag from web-dev bundles or a
+  # project's `.llmenv.yaml`.
   - name: frontend
     when: [web]
     plugins:
       - "claude-plugins-official:frontend-design"
       - "agent-browser:agent-browser"
 
-  # Work plugins — only on the employer laptop (work tag).
-  # Activating the Slack plugin wires up the Slack MCP server automatically;
-  # no separate `mcp:` entry needed — the plugin's .mcp.json handles it.
+  # Work profile plugins. Fires on the `work` tag (work-laptop host).
+  # The official Slack integration (slackapi/slack-mcp-plugin) ships its own
+  # .mcp.json, so enabling the plugin wires up the Slack MCP server.
   - name: work
     when: [work]
     plugins:
       - "claude-plugins-official:slack"
 
-  # Security audit plugins — activated by `security` tag (set manually or
-  # from a project .llmenv.yaml for security-focused work).
+  # Trail of Bits security + skill tooling. Activated by the `security` tag.
   - name: security
     when: [security]
     plugins:
       - "trailofbits:agentic-actions-auditor"
+      - "trailofbits:ask-questions-if-underspecified"
       - "trailofbits:differential-review"
+      - "trailofbits:dimensional-analysis"
+      - "trailofbits:entry-point-analyzer"
+      - "trailofbits:insecure-defaults"
+      - "trailofbits:modern-python"
+      - "trailofbits:mutation-testing"
+      - "trailofbits:property-based-testing"
       - "trailofbits:sharp-edges"
+      - "trailofbits:skill-improver"
       - "trailofbits:static-analysis"
       - "trailofbits:variant-analysis"
-      - "trailofbits:property-based-testing"
-      - "trailofbits:mutation-testing"
 
-  # Employer internal tooling — loads everywhere the primary user is active.
-  # Contains workflow skills specific to this employer's engineering process.
-  - name: acme-dev
-    when: [user-alice]
+  # llmenv Labs / personal workflow plugins from the commons marketplace.
+  - name: llmenv
+    when: [user-phaedrus]
     plugins:
-      - "dev-commons:acme-dev"
+      - "llmenv-commons:llmenv-dev"
 
-  # Language server plugins — each activated by its respective lang-* tag.
-  # LSP plugins bring in IDE-grade completions and diagnostics for the agent.
+  # Language-server plugins, scoped by language tag.
   - name: rust-lsp
     when: [lang-rust]
     plugins:
@@ -530,34 +539,38 @@ plugin-collection:
       - "claude-plugins-official:typescript-lsp"
       - "fullstack-dev-skills:fullstack-dev-skills"
 
+  - name: swift-lsp
+    when: [lang-swift]
+    plugins:
+      - "claude-plugins-official:swift-lsp"
+
   - name: clangd
     when: [lang-c, lang-cpp]
     plugins:
       - "claude-plugins-official:clangd-lsp"
 
-  # Finance/investment analysis — activated by `finance` tag.
+  - name: godot
+    when: [godot]
+    plugins:
+      - "godot-claude-skills:godot-claude-skills"
+
+  # InvestSkill — US-stock analysis frameworks.
   - name: finance
     when: [finance]
     plugins:
       - "invest-skill:us-stock-analysis"
 
 ################################################################################
-# mcp — MCP servers selected and started per tag set
+# MCP servers — selected by tag, rendered into the agent's MCP config.
 #
-# Unlike plugin-contributed MCP servers (which are declared inside the plugin's
-# own .mcp.json), these are MCP servers you manage directly. They start as
-# child processes of the agent session.
+# These are external tool servers started on demand. The `playwright` server
+# is only loaded when the `web` tag is active, keeping non-web sessions lean.
 #
-# Each entry:
-#   name:    logical name; also the prefix for mcp__<name>__* tool names
-#   when:    tag condition (same semantics as bundle: and plugin-collection:)
-#   type:    "stdio" (child process) or "sse" (HTTP server)
-#   command: executable to run
-#   args:    arguments list
+# The `icm` server is llmenv's memory backend; it is configured under the
+# `memory:` / `host:` blocks below, not here, because the config needs both a
+# server_host and listen_host.
 ################################################################################
 mcp:
-  # Playwright browser automation — only for web projects.
-  # Gives the agent a real browser for E2E testing and visual verification.
   - name: playwright
     when: [web]
     type: stdio
@@ -565,39 +578,23 @@ mcp:
     args: ["@playwright/mcp@latest"]
 
 ################################################################################
-# host — ICM memory daemon topology
+# Memory backend (llmenv's ICM topology).
 #
-# ICM (Intelligent Context Memory) is llmenv's persistent memory backend. One
-# machine runs the daemon; all other machines connect to it as clients.
+# `personal-laptop` runs the daemon; every selected host points at it. The `host:`
+# mapping resolves the abstract server_host name to a reachable address.
 #
-# The `host:` block maps logical host IDs (used in `features.memory`) to
-# network addresses. This allows the same config to work on machines with
-# different network paths to the daemon.
-#
-# In this example, `studio` runs the ICM daemon at studio.local:9092. The
-# work laptop connects to it over the local network (assumes both are on the
-# same LAN or VPN when needed).
+# Why `listen_host: 0.0.0.0` on a personal laptop? Because other local agents
+# (multi-agent workflows spawned in separate worktrees) may connect back to the
+# same daemon. Binding only loopback would prevent those cross-process reads.
+# Port 9092 is the conventional default used by the ICM CLI.
 ################################################################################
 host:
-  studio:
-    addr: "studio.local"
+  personal-laptop:
+    addr: "personal-laptop.local"
 
-################################################################################
-# features — llmenv feature flags
-#
-# memory: configures which hosts participate in the ICM memory topology.
-#   server_host:  logical name from the `host:` block above — this machine
-#                 binds the listening port (daemon role).
-#   listen_host:  interface to bind (0.0.0.0 = all interfaces).
-#   port:         TCP port the daemon listens on.
-#   when:         tag condition — only activate memory on matching sessions.
-################################################################################
 features:
   memory:
-    # Run the ICM daemon on the studio host, listen on all interfaces so other
-    # machines on the LAN can connect. The `user-alice` condition means this
-    # activates for every session where the primary user is logged in.
-    - server_host: studio
+    - server_host: personal-laptop
       listen_host: 0.0.0.0
       port: 9092
-      when: [user-alice]
+      when: [user-phaedrus]

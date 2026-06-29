@@ -1,103 +1,107 @@
 #!/usr/bin/env bash
-# session-log.sh — audit trail for Claude Code sessions
+# session-log: Audit trail for Claude Code sessions
+# Logs every tool call with timestamp, tool name, and key parameters
+# Helps answer "what did Claude do while I was away?"
 #
-# Fires on: PostToolUse (after every tool call)
-# Output:   ${CLAUDE_CONFIG_DIR}/session-logs/YYYY-MM-DD.jsonl
+# Hook type: PostToolUse (fires after every tool call)
+# Output: ${CLAUDE_CONFIG_DIR}/session-logs/YYYY-MM-DD.jsonl
 #
-# Each line in the log is a JSON object with:
-#   timestamp   ISO-8601 timestamp
-#   session_id  Claude Code session identifier (from CLAUDE_SESSION_ID env var)
-#   tool        tool name (Bash, Read, Edit, Write, …)
-#   detail      most useful parameter for that tool type (command, path, etc.)
-#   status      exit_code or error message from the tool response
-#
-# WHY: Long agentic runs can make many tool calls over hours. This log lets you
-# review exactly what happened, in order, without relying on Claude's summary.
-#
-# HOW IT INTEGRATES:
-#   bundle.yaml registers this as a PostToolUse hook. llmenv injects the
-#   handler into Claude Code's settings.json hooks array at materialize time.
-#   Claude Code executes it after every tool call, passing the event payload
-#   as JSON on stdin.
-#
-# DESIGN NOTES:
-#   - All processing is done in Python (launched inline via heredoc) to avoid
-#     shell quoting issues with arbitrary tool input/output strings.
-#   - The script always exits 0 — logging must never block Claude.
-#   - The log directory is created if it doesn't exist.
-#   - One file per day keeps individual files manageable.
+# MIT License - https://github.com/Bande-a-Bonnot/Boucle-framework
 
+set -euo pipefail
+
+# All processing in Python to avoid shell quoting issues
 # shellcheck disable=SC2016  # heredoc body is Python, not shell
-
-python3 - "$@" <<'PYEOF'
-import json
-import os
-import sys
+python3 -c "
+import json, sys, os
 from datetime import datetime, timezone
-from pathlib import Path
 
-# --------------------------------------------------------------------------
-# Read the event payload from stdin.
-# Claude Code sends the full PostToolUse event as a JSON object.
-# --------------------------------------------------------------------------
+# Read event from stdin
 try:
     event = json.load(sys.stdin)
-except (json.JSONDecodeError, EOFError):
-    sys.exit(0)  # malformed input — skip silently, never block
+except (json.JSONDecodeError, EOFError) as e:
+    # Never block Claude (exit 0), but surface the failure so a changed event
+    # schema or a misconfigured (empty-stdin) hook doesn't vanish silently.
+    print(f'session-log: could not parse hook event: {e}', file=sys.stderr)
+    sys.exit(0)
 
-tool_name = event.get("tool_name", "unknown")
-tool_input = event.get("tool_input", {})
-tool_response = event.get("tool_response", {})
+# Extract tool name
+tool = event.get('tool_name', 'unknown')
 
-# --------------------------------------------------------------------------
-# Extract the most useful detail per tool type.
-# We log only the key parameter — full inputs can be huge and redundant.
-# --------------------------------------------------------------------------
-if tool_name == "Bash":
-    detail = tool_input.get("command", "")[:200]  # truncate long commands
-elif tool_name in ("Read", "Write", "Edit"):
-    detail = tool_input.get("file_path", tool_input.get("path", ""))
-elif tool_name == "WebFetch":
-    detail = tool_input.get("url", "")
-elif tool_name == "WebSearch":
-    detail = tool_input.get("query", "")
-elif tool_name == "Agent":
-    detail = tool_input.get("description", "")[:100]
+# Extract the most useful detail per tool type
+ti = event.get('tool_input', {})
+detail = ''
+if isinstance(ti, dict):
+    if 'file_path' in ti:
+        detail = ti['file_path']
+    elif 'command' in ti:
+        detail = ti['command'][:200]
+    elif 'pattern' in ti:
+        path = ti.get('path', '.')
+        detail = f'{ti[\"pattern\"]} in {path}'
+    elif 'file' in ti:
+        detail = ti['file']
+    elif 'query' in ti:
+        detail = str(ti['query'])[:200]
+    elif ti:
+        k, v = next(iter(ti.items()))
+        detail = f'{k}={str(v)[:100]}'
 else:
-    # For any other tool, log the first value from the input dict.
-    detail = str(next(iter(tool_input.values()), "")) [:100]
+    detail = str(ti)[:200]
 
-# --------------------------------------------------------------------------
-# Extract tool response status (exit codes for Bash, errors for others).
-# --------------------------------------------------------------------------
-if isinstance(tool_response, dict):
-    status = tool_response.get("exit_code", tool_response.get("error", "ok"))
-elif isinstance(tool_response, str):
-    # Some tools return a plain string on success.
-    status = "ok"
-else:
-    status = "ok"
+# Extract tool response status (exit codes, errors)
+tr = event.get('tool_response', '')
+status = None
+exit_code = None
 
-# --------------------------------------------------------------------------
-# Build and append the log entry.
-# --------------------------------------------------------------------------
-entry = {
-    "timestamp": datetime.now(timezone.utc).isoformat(),
-    "session_id": os.environ.get("CLAUDE_SESSION_ID", "unknown"),
-    "tool": tool_name,
-    "detail": detail,
-    "status": str(status),
-}
+if isinstance(tr, str):
+    # Bash tool: check for exit code errors
+    if tr.startswith('Exit code '):
+        try:
+            exit_code = int(tr.split('\\n')[0].replace('Exit code ', ''))
+        except (ValueError, IndexError):
+            pass
+    # General error detection
+    lower = tr[:500].lower()
+    if any(sig in lower for sig in ['error:', 'fatal:', 'permission denied', 'not found',
+                                     'exit code ', 'command not found', 'failed']):
+        status = 'error'
 
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude"))
-log_dir = Path(config_dir) / "session-logs"
-log_dir.mkdir(parents=True, exist_ok=True)
+# Only log exit_code when it was actually observed (parsed from an 'Exit code N'
+# response). Don't fabricate a 0 for no-error Bash output — an unobserved code
+# logged as success is misleading; absence + no error status is the honest state.
 
-date_str = datetime.now().strftime("%Y-%m-%d")
-log_file = log_dir / f"{date_str}.jsonl"
+# Timestamp
+now = datetime.now(timezone.utc)
+ts = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+date_str = now.strftime('%Y-%m-%d')
 
-with open(log_file, "a", encoding="utf-8") as f:
-    f.write(json.dumps(entry) + "\n")
+# Session ID
+session = os.environ.get('CLAUDE_SESSION_ID',
+          os.environ.get('CLAUDE_CODE_SESSION',
+          str(int(now.timestamp()))))
 
-sys.exit(0)  # always 0 — logging must never block Claude
-PYEOF
+claude_config_dir = os.environ.get('CLAUDE_CONFIG_DIR', os.path.join(os.path.expanduser('~'), '.claude'))
+
+# Log directory
+log_dir = os.environ.get('CLAUDE_SESSION_LOG_DIR', os.path.join(claude_config_dir, 'session-logs'))
+os.makedirs(log_dir, exist_ok=True)
+
+# Build entry
+entry = {'ts': ts, 'session': session, 'tool': tool}
+if detail:
+    entry['detail'] = detail
+entry['cwd'] = os.getcwd()
+if exit_code is not None:
+    entry['exit_code'] = exit_code
+if status:
+    entry['status'] = status
+
+# Append to daily log
+log_file = os.path.join(log_dir, f'{date_str}.jsonl')
+with open(log_file, 'a') as f:
+    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+"
+
+# Always exit 0 — logging should never block Claude
+exit 0

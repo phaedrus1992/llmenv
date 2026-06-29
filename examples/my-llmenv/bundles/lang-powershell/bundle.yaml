@@ -1,0 +1,25 @@
+env:
+  # Windows PowerShell 5.1 settings (Desktop edition, not Core/7+)
+  PSModulePath: "$PSModulePath"
+
+permissions:
+  allow:
+    # Primary: powershell.exe (Windows PowerShell 5.1, Windows-only)
+    # Secondary: pwsh (PowerShell 7+, cross-platform, not baseline-tested)
+    - { tool: Bash, pattern: "powershell *" }
+    - { tool: Bash, pattern: "pwsh *" }
+    - { tool: Bash, pattern: "Invoke-ScriptAnalyzer *" }
+    - { tool: Bash, pattern: "Get-ExecutionPolicy" }
+    - { tool: Read, paths: ["$PROFILE", "~/.config/powershell/**"] }
+
+hooks:
+  # Auto-analyze on every PowerShell edit with PSScriptAnalyzer
+  # Runs only on Windows (powershell.exe); no-op on macOS/Linux.
+  # ponytail: quiet + head-truncated so hook doesn't spam; warnings surface.
+  - event: PostToolUse
+    matcher: "*.ps1"
+    handler:
+      type: command
+      command: |
+        ps=$(command -v pwsh || command -v powershell) && \
+          "$ps" -Command "Invoke-ScriptAnalyzer -Path '$FILE' 2>&1" | head -20

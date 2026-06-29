@@ -69,9 +69,9 @@ scopes/                     ← (optional) scope overrides; most scopes live in
 ### Scope → Tag → Bundle chain (example)
 
 ```
-hostname == "office-laptop.local"
-    → scope `work-host` fires
-    → emits tags: [host-work, work]
+hostname == "work-laptop.local"
+    → scope `work-laptop` fires
+    → emits tags: [host-work-laptop, work]
 
 tag `work` matches:
     → bundle `work` loads        (Slack integration, work permissions)

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fyi</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+         max-width: 820px; margin: 0 auto; padding: 24px 18px 64px;
+         background: #14171c; color: #d7dbe0; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+           border-bottom: 1px solid #2a2f37; padding-bottom: 12px; margin-bottom: 18px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .meta { color: #6b7480; font-size: 12px; margin-left: auto; }
+  button { font: inherit; background: #222831; color: #d7dbe0; border: 1px solid #39414c;
+           border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+  button:hover { background: #2b333e; }
+  button:disabled { opacity: .5; cursor: default; }
+  .focus { background: #1b2733; border: 1px solid #2d4257; border-radius: 8px;
+           padding: 10px 14px; margin-bottom: 22px; }
+  .focus .lbl { color: #5aa9e6; font-size: 11px; text-transform: uppercase;
+                letter-spacing: .08em; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+       color: #8893a0; margin: 22px 0 6px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; gap: 9px; padding: 6px 0; align-items: flex-start;
+       border-bottom: 1px solid #1d2128; }
+  li input { margin-top: 4px; flex: none; width: 15px; height: 15px; cursor: pointer; }
+  .body { flex: 1; }
+  .title { }
+  .done .title { text-decoration: line-through; color: #6b7480; }
+  .note { color: #7e8895; font-size: 12px; }
+  .refs { margin-left: 6px; }
+  .refs a { color: #5aa9e6; text-decoration: none; margin-left: 6px; }
+  .refs a:hover { text-decoration: underline; }
+  .badge { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+           padding: 1px 6px; border-radius: 4px; margin-left: 6px; vertical-align: 1px; }
+  .badge.new  { background: #1f3a2a; color: #6bd49a; }
+  .badge.done { background: #33291f; color: #d4a96b; }
+  .empty { color: #6b7480; }
+</style>
+</head>
+<body>
+<header>
+  <h1>fyi</h1>
+  <button id="refresh">Refresh</button>
+  <span class="meta" id="meta"></span>
+</header>
+<div id="focus"></div>
+<div id="list"></div>
+
+<script>
+const TIERS = [["urgent", "Urgent"], ["in_progress", "In progress"],
+               ["pending", "Pending / blocked"]];
+let polling;
+
+function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+function refs(item) {
+  if (!item.refs || !item.refs.length) return "";
+  return '<span class="refs">' + item.refs.map(r =>
+    `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label)}</a>`).join("") + "</span>";
+}
+
+function row(item) {
+  const li = document.createElement("li");
+  if (item.status === "done") li.className = "done";
+  const badge = item.status === "new" ? '<span class="badge new">new</span>'
+              : item.status === "done" ? '<span class="badge done">done</span>' : "";
+  li.innerHTML =
+    `<input type="checkbox" ${item.checked ? "checked" : ""}>` +
+    `<span class="body"><span class="title">${esc(item.title)}</span>${badge}${refs(item)}` +
+    (item.note ? `<div class="note">${esc(item.note)}</div>` : "") + `</span>`;
+  li.querySelector("input").addEventListener("change", e => toggle(item.id, e.target.checked, li));
+  return li;
+}
+
+async function toggle(id, checked, li) {
+  li.classList.toggle("done-pending", checked);
+  await fetch("/api/toggle", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, checked }) });
+}
+
+function topFocus(items) {
+  return items.find(it => !it.checked && it.status !== "done");
+}
+
+function render(data) {
+  const items = data.items || [];
+  const focus = topFocus(items);
+  document.getElementById("focus").innerHTML = focus
+    ? `<div class="focus"><div class="lbl">top focus</div>${esc(focus.title)}${refs(focus)}</div>`
+    : (items.length ? `<div class="focus"><div class="lbl">top focus</div>all clear — nice.</div>` : "");
+
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  if (!items.length) { list.innerHTML = '<p class="empty">No data yet. Hit Refresh to run a scan.</p>'; return; }
+  for (const [key, label] of TIERS) {
+    const group = items.filter(it => it.tier === key);
+    if (!group.length) continue;
+    const h = document.createElement("h2"); h.textContent = label; list.appendChild(h);
+    const ul = document.createElement("ul");
+    group.forEach(it => ul.appendChild(row(it)));
+    list.appendChild(ul);
+  }
+}
+
+async function load() {
+  const [data, status] = await Promise.all([
+    fetch("/api/data").then(r => r.json()),
+    fetch("/api/status").then(r => r.json()),
+  ]);
+  render(data);
+  const when = data.lastScan ? new Date(data.lastScan).toLocaleString() : "never";
+  document.getElementById("meta").textContent =
+    (status.refreshing ? "scanning…  " : "") + `${data.date || ""}  ·  last scan ${when}`;
+  document.getElementById("refresh").disabled = status.refreshing;
+  return status.refreshing;
+}
+
+async function refresh() {
+  document.getElementById("refresh").disabled = true;
+  const r = await fetch("/api/refresh", { method: "POST" });
+  if (r.status === 409) { await load(); return; }
+  // poll faster until the scan finishes
+  clearInterval(polling);
+  const tick = async () => { if (!(await load())) { clearInterval(fast); polling = setInterval(load, 30000); } };
+  const fast = setInterval(tick, 3000);
+}
+
+document.getElementById("refresh").addEventListener("click", refresh);
+load();
+polling = setInterval(load, 30000);
+</script>
+</body>
+</html>

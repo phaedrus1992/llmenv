@@ -1,0 +1,4 @@
+.DS_Store
+*.local.toml
+.tmp/
+apps/fyi/data/

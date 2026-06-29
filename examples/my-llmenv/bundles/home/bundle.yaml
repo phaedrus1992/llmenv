@@ -1,7 +1,8 @@
 # Capability fragment for the `home` bundle.
 #
-# Fires on the `home` tag, which is emitted by the `home-wifi` network scope
-# in config.yaml when the machine is connected to the home Wi-Fi network.
+# Fires on the `home` tag, which is emitted by the `home` network scope
+# in config.yaml (match: { ssid: "MyWifiSSID" }) when the machine is connected
+# to the home Wi-Fi network.
 #
 # WHY NETWORK-SCOPED:
 #   The media-server skill (in skills/media-server/) talks to a local Plex or
@@ -14,8 +15,8 @@
 #   a second network scope in config.yaml with the VPN tunnel interface.
 #
 # INTERACTION CHAIN:
-#   SSID == "HomeNet"
-#     → scope `home-wifi` fires
+#   SSID == "MyWifiSSID"
+#     → scope `home` fires
 #     → emits tags: [home, trusted-network]
 #     → bundle `home` loads (this file)
 #     → skills/media-server/SKILL.md is available as /media-server
