@@ -19,7 +19,10 @@ from datetime import datetime, timezone
 # Read event from stdin
 try:
     event = json.load(sys.stdin)
-except (json.JSONDecodeError, EOFError):
+except (json.JSONDecodeError, EOFError) as e:
+    # Never block Claude (exit 0), but surface the failure so a changed event
+    # schema or a misconfigured (empty-stdin) hook doesn't vanish silently.
+    print(f'session-log: could not parse hook event: {e}', file=sys.stderr)
     sys.exit(0)
 
 # Extract tool name
@@ -64,9 +67,9 @@ if isinstance(tr, str):
                                      'exit code ', 'command not found', 'failed']):
         status = 'error'
 
-if tool == 'Bash' and exit_code is None and tr and not status:
-    # Bash with output and no error signals: likely success
-    exit_code = 0
+# Only log exit_code when it was actually observed (parsed from an 'Exit code N'
+# response). Don't fabricate a 0 for no-error Bash output — an unobserved code
+# logged as success is misleading; absence + no error status is the honest state.
 
 # Timestamp
 now = datetime.now(timezone.utc)
