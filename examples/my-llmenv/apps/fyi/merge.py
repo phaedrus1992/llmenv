@@ -17,6 +17,7 @@ Usage:
     merge.py --selftest                   run the built-in checks
 """
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -72,7 +73,7 @@ def merge(scan, prior, now=None, today=None):
 
 def _load_scan(path):
     """Load the raw scan, tolerating stray prose / markdown fences around it."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         raw = f.read().strip()
     try:
         data = json.loads(raw)
@@ -80,7 +81,12 @@ def _load_scan(path):
         m = re.search(r"(\[.*\]|\{.*\})", raw, re.S)
         if not m:
             raise SystemExit(f"scan: no JSON found in {path}")
-        data = json.loads(m.group(1))
+        print(f"merge: {path} wasn't clean JSON; extracting embedded JSON "
+              "via regex fallback", file=sys.stderr)
+        try:
+            data = json.loads(m.group(1))
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"scan: could not parse extracted JSON from {path}: {e}")
     if isinstance(data, dict):
         data = data.get("items", [])
     return data
@@ -88,7 +94,7 @@ def _load_scan(path):
 
 def _load_data(path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
@@ -130,8 +136,11 @@ if __name__ == "__main__":
         if not scan:
             raise SystemExit("scan: empty, refusing to overwrite data.json")
         result = merge(scan, _load_data(sys.argv[2]))
-        with open(sys.argv[2], "w") as f:
+        out_path = sys.argv[2]
+        tmp_path = out_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
-        print(f"merged {len(result['items'])} items -> {sys.argv[2]}")
+        os.replace(tmp_path, out_path)
+        print(f"merged {len(result['items'])} items -> {out_path}")
     else:
         raise SystemExit(__doc__)
