@@ -5,12 +5,20 @@
 # time), these can be rewritten to relative paths like `hooks/foo.sh`.
 
 hooks:
+  # Append a one-line audit record after every tool call. The script lives in
+  # this bundle (hooks/session-log.sh); because base is selected by the
+  # `user-phaedrus` tag, this runs in every session for this user.
   - event: PostToolUse
     handler:
       type: command
       command: "bash ${HOME}/git/my-llmenv/bundles/base/hooks/session-log.sh"
 
 
+# codebase-memory-mcp backs the `source-code` skill: it indexes a repo into a
+# knowledge graph so the agent can search/trace code without re-reading whole
+# files. Defined here (not in a host bundle) so it is available in every session
+# — it's a per-repo cache, not a host-specific binary path. Install the binary
+# to ~/.local/bin/codebase-memory-mcp first; `llmenv doctor` flags it if missing.
 mcp:
   - name: codebase-memory-mcp
     type: stdio

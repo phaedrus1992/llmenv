@@ -1,7 +1,9 @@
 # Capability fragment for the `python-dev` bundle. Fires for the `python` tag.
 
 env:
+  # No __pycache__ clutter in working trees the agent edits.
   PYTHONDONTWRITEBYTECODE: "1"
+  # copy (not hardlink) so uv installs don't break across filesystem boundaries.
   UV_LINK_MODE: "copy"
 
 hooks:

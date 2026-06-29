@@ -1,16 +1,25 @@
+# Capability fragment for the `rust-dev` bundle. Fires for the `lang-rust` tag
+# (emitted by a project's .llmenv.yaml — see config.yaml's bundle: section).
+# These env vars and permissions are merged into the universal capabilities
+# from config.yaml only while a Rust project is active, so non-Rust sessions
+# never see the cargo grants.
+
 env:
   CARGO_TERM_COLOR: "always"
   RUST_BACKTRACE: "1"
+  # sccache caches compiled crates across builds. Requires `sccache` on PATH;
+  # remove this line if it isn't installed or cargo will fail to launch rustc.
   RUSTC_WRAPPER: "sccache"
 
 permissions:
   allow:
+    # `cargo *` covers build/test/clippy/fmt; the clippy hook below relies on it.
     - { tool: Bash, pattern: "cargo *" }
     - { tool: Bash, pattern: "rustc --version" }
+    # Read the cargo home (registry/config) so the agent can resolve crate
+    # sources and the active toolchain without prompting.
     - { tool: Bash, pattern: "cat ~/.cargo/*" }
     - { tool: Read, paths: ["~/.cargo/**"] }
-
-# Capability fragment for the `rust-dev` bundle. Fires for the `rust` tag.
 
 hooks:
   # Auto-clippy on every Rust edit. Quiet + head-truncated so the hook
