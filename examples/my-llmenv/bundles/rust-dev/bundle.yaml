@@ -1,27 +1,31 @@
-# Capability fragment for the `rust-dev` bundle.
-#
-# Fires on the `lang-rust` tag, which is emitted by a project's .llmenv.yaml:
-#
-#   # myproject/.llmenv.yaml
-#   tags: [lang-rust]
-#
-# When active, this bundle loads:
-#   - rules/rust.md          Rust-specific coding conventions
-#   - skills/build-check/    /build-check skill for CI-aware local builds
-#
-# It also activates the `rust-lsp` plugin-collection (declared in config.yaml),
-# which wires up rust-analyzer-lsp and rust-skills.
-#
-# NO hooks or native_permissions in this bundle — the language server plugin
-# handles its own permissions, and Rust tooling (cargo, clippy) is invoked via
-# normal Bash calls covered by the universal allow list in config.yaml.
-#
-# HOW .llmenv.yaml TAG INJECTION WORKS:
-#   When Claude Code opens a project directory, llmenv checks for a
-#   .llmenv.yaml at the project root. Any tags listed there are merged into
-#   the active tag set for that session only. This means the rust-dev bundle
-#   loads in Rust projects but not in Python or Go projects — the agent gets
-#   language-appropriate context automatically, without any manual configuration.
-#
-# (This file is intentionally minimal — the bundle's value is its rules/ and
-# skills/ content, not its capability contributions.)
+# Capability fragment for the `rust-dev` bundle. Fires for the `lang-rust` tag
+# (emitted by a project's .llmenv.yaml — see config.yaml's bundle: section).
+# These env vars and permissions are merged into the universal capabilities
+# from config.yaml only while a Rust project is active, so non-Rust sessions
+# never see the cargo grants.
+
+env:
+  CARGO_TERM_COLOR: "always"
+  RUST_BACKTRACE: "1"
+  # sccache caches compiled crates across builds. Requires `sccache` on PATH;
+  # remove this line if it isn't installed or cargo will fail to launch rustc.
+  RUSTC_WRAPPER: "sccache"
+
+permissions:
+  allow:
+    # `cargo *` covers build/test/clippy/fmt; the clippy hook below relies on it.
+    - { tool: Bash, pattern: "cargo *" }
+    - { tool: Bash, pattern: "rustc --version" }
+    # Read the cargo home (registry/config) so the agent can resolve crate
+    # sources and the active toolchain without prompting.
+    - { tool: Bash, pattern: "cat ~/.cargo/*" }
+    - { tool: Read, paths: ["~/.cargo/**"] }
+
+hooks:
+  # Auto-clippy on every Rust edit. Quiet + head-truncated so the hook
+  # doesn't spam terminal output; warnings still surface to the agent.
+  - event: PostToolUse
+    matcher: "*.rs"
+    handler:
+      type: command
+      command: "cargo clippy --quiet 2>&1 | head -20"
