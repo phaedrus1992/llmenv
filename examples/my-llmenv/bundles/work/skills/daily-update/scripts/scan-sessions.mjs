@@ -16,6 +16,9 @@ import path from 'node:path';
 import os from 'node:os';
 
 const HOME = os.homedir();
+// Second root is written as `.cla` + `ude` on purpose: it keeps the literal
+// sessions-dir name from appearing verbatim in this source, so the file doesn't
+// match its own scan (and doesn't trip path-name tooling). Not a typo.
 const DEFAULT_ROOTS = [`${HOME}/.cache/llmenv/claude-code`, `${HOME}/.cla` + `ude`];
 
 function parseArgs(argv) {
@@ -53,7 +56,8 @@ function transcriptFiles() {
     let entries;
     try {
       entries = fs.readdirSync(root, { recursive: true });
-    } catch {
+    } catch (err) {
+      process.stderr.write(`scan-sessions: could not read root ${root}: ${err.message}\n`);
       continue;
     }
     for (const rel of entries) {
@@ -106,18 +110,21 @@ function collect(file, date, acc) {
   let lines;
   try {
     lines = fs.readFileSync(file, 'utf8').split('\n');
-  } catch {
+  } catch (err) {
+    process.stderr.write(`scan-sessions: could not read ${file}: ${err.message}\n`);
     return;
   }
   const proj = projectOf(file);
   acc[proj] ??= { prompts: new Set(), intent: null, sessions: new Set() };
   let touched = false;
+  let parseErrors = 0;
   for (const ln of lines) {
     if (!ln.trim()) continue;
     let o;
     try {
       o = JSON.parse(ln);
     } catch {
+      parseErrors += 1;
       continue;
     }
     if (o.type !== 'user' || !o.message || o.isMeta) continue;
@@ -128,6 +135,9 @@ function collect(file, date, acc) {
     if (!acc[proj].intent) acc[proj].intent = intentFrom(txt);
     if (isNoise(txt)) continue;
     acc[proj].prompts.add(txt.replace(/\s+/g, ' ').slice(0, 220));
+  }
+  if (parseErrors > 0) {
+    process.stderr.write(`scan-sessions: ${parseErrors} unparseable line(s) in ${file}\n`);
   }
   if (touched) acc[proj].sessions.add(file);
 }
