@@ -27,4 +27,7 @@ echo "refresh prompt complete"
 
 # merge.py refuses to overwrite data.json if the scan came back empty, so a
 # failed scan leaves yesterday's living list intact rather than blanking it.
-python3 merge.py data/scan.json data/data.json
+# Pipe through refresh.log so a merge failure (or the regex-fallback warning)
+# is captured next to the scan output instead of vanishing; pipefail propagates
+# a non-zero merge exit so the job is marked failed.
+python3 merge.py data/scan.json data/data.json 2>&1 | tee -a data/refresh.log
