@@ -21,11 +21,13 @@ PORT = int(os.environ.get("MT_PORT", "8787"))
 
 _lock = threading.Lock()
 _proc = None  # the running refresh subprocess, if any
+_NOT_FOUND = b'{"error":"not found"}'
+_MAX_BODY = 1_048_576  # 1 MiB cap on request bodies (localhost tool, tiny POSTs)
 
 
 def _read_data():
     try:
-        with open(DATA) as f:
+        with open(DATA, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {"date": None, "lastScan": None, "items": []}
@@ -34,7 +36,7 @@ def _read_data():
 def _write_data(d):
     os.makedirs(os.path.dirname(DATA), exist_ok=True)
     tmp = DATA + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(d, f, indent=2)
     os.replace(tmp, DATA)  # atomic; never leaves a half-written file
 
@@ -67,12 +69,12 @@ class Handler(BaseHTTPRequestHandler):
                                         "date": d.get("date"),
                                         "refreshing": _refreshing()}))
         else:
-            self._send(404, b'{"error":"not found"}')
+            self._send(404, _NOT_FOUND)
 
     def do_POST(self):
         global _proc
-        n = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(n) if n else b""
+        n = min(int(self.headers.get("Content-Length") or 0), _MAX_BODY)
+        raw = self.rfile.read(n)
         if self.path == "/api/toggle":
             try:
                 body = json.loads(raw or b"{}")
@@ -92,10 +94,14 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 if _refreshing():
                     return self._send(409, b'{"error":"already refreshing"}')
-                _proc = subprocess.Popen(["bash", REFRESH], cwd=ROOT)
+                try:
+                    _proc = subprocess.Popen(["bash", REFRESH], cwd=ROOT)
+                except OSError as e:
+                    return self._send(
+                        500, json.dumps({"error": f"could not start refresh: {e}"}))
             self._send(200, b'{"started":true}')
         else:
-            self._send(404, b'{"error":"not found"}')
+            self._send(404, _NOT_FOUND)
 
     def log_message(self, *_a):
         pass  # quiet — this is a personal localhost tool
