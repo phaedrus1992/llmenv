@@ -115,19 +115,19 @@ for milestone in milestones:
     print(f"{'=' * 60}")
     print(f"Count: {len(issues)} issue(s)\n")
     for issue in issues:
-        if issue["body"]:
-            body = issue["body"] if full_body else (issue["body"][:100] + "...")
-        else:
-            body = "(no description)"
         labels = ", ".join(label["name"] for label in issue["labels"]) if issue["labels"] else "(no labels)"
         print(f"  #{issue['number']} — {issue['title']}")
         print(f"      Labels: {labels}")
         print(f"      Created: {issue['createdAt']}")
+        # full_body decides the format in one place: full prints every line
+        # indented; otherwise a 100-char inline snippet (or the no-body marker).
         if full_body:
             print("      Body:")
-            for line in body.splitlines():
+            for line in (issue["body"] or "(no description)").splitlines():
                 print(f"        {line}")
             print()
+        elif issue["body"]:
+            print(f"      {issue['body'][:100]}...\n")
         else:
-            print(f"      {body}\n")
+            print("      (no description)\n")
 EOF
