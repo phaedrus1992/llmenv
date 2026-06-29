@@ -5,10 +5,12 @@
 # that script asks "what happened on day X"; this asks "what is still open".
 #
 # Usage:  gh-open-work.sh [owner]
-#   owner  optional org to scope to (default: phaedrus1992). Pass "" for all.
+#   owner  optional org to scope results to. Default: empty = all your PRs
+#          across every org. Set this to your own GitHub org/username to narrow
+#          (don't hardcode someone else's — you'd silently query the wrong account).
 set -euo pipefail
 
-OWNER="${1-phaedrus1992}"
+OWNER="${1:-}"
 
 owner_flag=()
 [[ -n "$OWNER" ]] && owner_flag=(--owner="$OWNER")
