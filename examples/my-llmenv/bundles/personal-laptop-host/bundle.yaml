@@ -1,0 +1,54 @@
+env:
+  HOST_KIND: "macos-laptop"
+  HOMEBREW_PREFIX: "/opt/homebrew"
+
+permissions:
+  allow:
+    # macOS system tooling.
+    - { tool: Bash, pattern: "security find-identity:*" }
+    - { tool: Bash, pattern: "plutil:*" }
+    # Locally-installed dev tooling.
+    - { tool: Bash, pattern: "plexctl *" }
+    - { tool: Bash, pattern: "replicated *" }
+    - { tool: Bash, pattern: "prek *" }
+    - { tool: Bash, pattern: "uv run:*" }
+    - { tool: Bash, pattern: "dart pub:*" }
+    - { tool: Bash, pattern: "dart format:*" }
+    - { tool: Bash, pattern: "dart run:*" }
+    - { tool: Bash, pattern: "flutter analyze:*" }
+    - { tool: Bash, pattern: "flutter test:*" }
+    - { tool: Bash, pattern: "flutter build:*" }
+
+# Capability fragment for the `personal-laptop-host` bundle.
+#
+# Host-specific hooks: rely on absolute paths to tools installed on this host
+# (icm, rtk, claude-control). Won't be portable to other hosts; fork or
+# split this bundle per host as needed.
+
+hooks:
+  # rtk (Rust Token Killer) — rewrites Bash invocations to the rtk proxy.
+  - event: PreToolUse
+    matcher: Bash
+    handler:
+      type: command
+      command: "rtk hook claude"
+
+  # claude-control status dashboard. Async, short timeout — best-effort
+  # status emit for the external monitor.
+  - event: SessionStart
+    handler:
+      type: command
+      command: "${HOME}/.claude-control/hooks/status-hook.sh"
+  - event: SessionEnd
+    handler:
+      type: command
+      command: "${HOME}/.claude-control/hooks/status-hook.sh"
+  - event: Stop
+    handler:
+      type: command
+      command: "${HOME}/.claude-control/hooks/status-hook.sh"
+  - event: UserPromptSubmit
+    handler:
+      type: command
+      command: "${HOME}/.claude-control/hooks/status-hook.sh"
+

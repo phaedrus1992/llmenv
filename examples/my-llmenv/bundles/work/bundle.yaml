@@ -1,46 +1,122 @@
-# Capability fragment for the `work` bundle.
+# Capability fragment for the `work` bundle. Fires on the `work` tag emitted by
+# the work-laptop host scope. Pairs with the `work` plugin-collection,
+# which wires up the official Slack MCP plugin (claude-plugins-official:slack).
 #
-# Fires on the `work` tag, which is emitted by the `work-laptop` host scope
-# in config.yaml. This bundle is only active on the employer-issued machine.
+# Read-only MCP tools allowed by default so work-host sessions don't prompt on
+# every query. Write tools (send/create/update/delete/schedule/react) are
+# deliberately omitted — they stay prompt-gated.
 #
-# It pairs with the `work` plugin-collection in config.yaml, which wires up
-# the official Slack MCP plugin (claude-plugins-official:slack). The plugin
-# contributes its own MCP server config via its bundled .mcp.json; no separate
-# `mcp:` entry is needed here.
-#
-# PERMISSIONS DESIGN:
-#   The Slack MCP plugin exposes many tools. This bundle grants read-only
-#   tools without prompting (useful for ambient context: "what did my team
-#   discuss while I was in this meeting?"). Write tools (send, create,
-#   schedule, react) remain prompt-gated so messages are never sent without
-#   explicit confirmation.
-#
-#   These are raw Claude Code permission strings under `native_permissions`
-#   because the neutral permission vocabulary (allow/deny in config.yaml)
-#   can't represent MCP tool grants — those require the `mcp__<server>__<tool>`
-#   format which is engine-specific.
-#
-# NOTE ON MCP TOOL NAMES:
-#   The tool prefix `mcp__slack_slack__` comes from the plugin's server name
-#   ("slack") combined with Claude Code's MCP tool naming convention:
-#   mcp__<plugin-name>_<server-name>__<tool-name>. Inspect the plugin's
-#   .mcp.json to find the server name if you add other plugins.
+# These are raw Claude permission strings under `native_permissions` because the
+# neutral permission vocabulary can't represent MCP tool grants (see the
+# `native_permissions` note in config.yaml).
 
 native_permissions:
   claude_code:
     allow:
-      # Read-only Slack tools — no prompt required.
-      # These let the agent fetch context (messages, user info, channel lists)
-      # without interrupting the user for approval on every call.
-      - "mcp__slack_slack__slack_get_channel_history"
-      - "mcp__slack_slack__slack_get_thread_replies"
-      - "mcp__slack_slack__slack_list_channels"
-      - "mcp__slack_slack__slack_list_users"
-      - "mcp__slack_slack__slack_search_messages"
-      - "mcp__slack_slack__slack_get_user_profile"
-      - "mcp__slack_slack__slack_get_users_conversations"
+      # --- grid MCP (company-wide index) — read-only tools ----------------
+      # fathom (call recordings / transcripts)
+      - "mcp__grid__fathom_list_calls"
+      - "mcp__grid__fathom_read_call"
+      - "mcp__grid__fathom_read_transcript"
+      - "mcp__grid__fathom_search_calls"
+      - "mcp__grid__fathom_search_transcripts"
+      # google drive
+      - "mcp__grid__gdrive_list_files"
+      - "mcp__grid__gdrive_list_folders"
+      - "mcp__grid__gdrive_list_shared_drives"
+      - "mcp__grid__gdrive_read_file"
+      - "mcp__grid__gdrive_search"
+      # github
+      - "mcp__grid__github_get_issue_comments"
+      - "mcp__grid__github_list_deployments"
+      - "mcp__grid__github_list_discussions"
+      - "mcp__grid__github_list_issues"
+      - "mcp__grid__github_list_prs"
+      - "mcp__grid__github_list_releases"
+      - "mcp__grid__github_list_repos"
+      - "mcp__grid__github_list_workflow_runs"
+      - "mcp__grid__github_read_discussion"
+      - "mcp__grid__github_read_file"
+      - "mcp__grid__github_read_issue"
+      - "mcp__grid__github_read_pr"
+      - "mcp__grid__github_read_release"
+      - "mcp__grid__github_search"
+      - "mcp__grid__github_search_code"
+      # grid meta
+      - "mcp__grid__grid_find_similar_tool"
+      - "mcp__grid__grid_get_context"
+      - "mcp__grid__grid_list_integrations_tool"
+      - "mcp__grid__grid_query"
+      - "mcp__grid__grid_search_tool"
+      # hubspot
+      - "mcp__grid__hubspot_list_activities"
+      - "mcp__grid__hubspot_list_companies"
+      - "mcp__grid__hubspot_list_contacts"
+      - "mcp__grid__hubspot_list_deals"
+      - "mcp__grid__hubspot_read_activity"
+      - "mcp__grid__hubspot_read_company"
+      - "mcp__grid__hubspot_read_contact"
+      - "mcp__grid__hubspot_read_deal"
+      - "mcp__grid__hubspot_search_activities"
+      # linear
+      - "mcp__grid__linear_get_issue_comments"
+      - "mcp__grid__linear_list_initiatives"
+      - "mcp__grid__linear_list_issues"
+      - "mcp__grid__linear_list_projects"
+      - "mcp__grid__linear_list_teams"
+      - "mcp__grid__linear_read_issue"
+      - "mcp__grid__linear_search_issues"
+      # notion
+      - "mcp__grid__notion_get_page_blocks"
+      - "mcp__grid__notion_get_recent_changes"
+      - "mcp__grid__notion_list_databases"
+      - "mcp__grid__notion_list_pages"
+      - "mcp__grid__notion_query_database"
+      - "mcp__grid__notion_read_page"
+      - "mcp__grid__notion_search"
+      # pylon
+      - "mcp__grid__pylon_list_accounts"
+      - "mcp__grid__pylon_list_contacts"
+      - "mcp__grid__pylon_list_issues"
+      - "mcp__grid__pylon_list_threads"
+      - "mcp__grid__pylon_read_account"
+      - "mcp__grid__pylon_read_issue"
+      - "mcp__grid__pylon_read_thread"
+      - "mcp__grid__pylon_search_issues"
+      # slack (via grid index)
+      - "mcp__grid__slack_list_channels"
+      - "mcp__grid__slack_read_channel_history"
+      - "mcp__grid__slack_search_messages"
+      # vitally
+      - "mcp__grid__vitally_get_at_risk_accounts"
+      - "mcp__grid__vitally_get_custom_object_instance"
+      - "mcp__grid__vitally_get_health_score"
+      - "mcp__grid__vitally_get_health_trend"
+      - "mcp__grid__vitally_get_project"
+      - "mcp__grid__vitally_list_accounts"
+      - "mcp__grid__vitally_list_custom_object_instances"
+      - "mcp__grid__vitally_list_custom_object_types"
+      - "mcp__grid__vitally_list_custom_traits"
+      - "mcp__grid__vitally_list_notes"
+      - "mcp__grid__vitally_list_nps"
+      - "mcp__grid__vitally_list_projects"
+      - "mcp__grid__vitally_list_tasks"
+      - "mcp__grid__vitally_read_account"
+      - "mcp__grid__vitally_read_note"
+      - "mcp__grid__vitally_read_task"
+      - "mcp__grid__vitally_search_accounts"
+      - "mcp__grid__vitally_search_custom_object_instances"
 
-      # Write tools are deliberately omitted from this allow list.
-      # slack_post_message, slack_reply_to_thread, slack_add_reaction,
-      # slack_schedule_message, slack_set_status — all remain prompt-gated.
-      # This prevents accidental sends during automated agentic runs.
+      # --- official Slack MCP plugin — read-only tools --------------------
+      - "mcp__plugin_slack_slack__slack_get_reactions"
+      - "mcp__plugin_slack_slack__slack_list_channel_members"
+      - "mcp__plugin_slack_slack__slack_read_canvas"
+      - "mcp__plugin_slack_slack__slack_read_channel"
+      - "mcp__plugin_slack_slack__slack_read_file"
+      - "mcp__plugin_slack_slack__slack_read_thread"
+      - "mcp__plugin_slack_slack__slack_read_user_profile"
+      - "mcp__plugin_slack_slack__slack_search_channels"
+      - "mcp__plugin_slack_slack__slack_search_emojis"
+      - "mcp__plugin_slack_slack__slack_search_public"
+      - "mcp__plugin_slack_slack__slack_search_public_and_private"
+      - "mcp__plugin_slack_slack__slack_search_users"

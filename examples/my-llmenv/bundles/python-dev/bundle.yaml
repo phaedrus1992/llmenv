@@ -1,0 +1,14 @@
+# Capability fragment for the `python-dev` bundle. Fires for the `python` tag.
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  UV_LINK_MODE: "copy"
+
+hooks:
+  # Auto-ruff on every Python edit, scoped to the enclosing git repo so
+  # rules and excludes from that repo's pyproject.toml apply.
+  - event: PostToolUse
+    matcher: "*.py"
+    handler:
+      type: command
+      command: "cd $(git rev-parse --show-toplevel) && ruff check --fix --quiet"
