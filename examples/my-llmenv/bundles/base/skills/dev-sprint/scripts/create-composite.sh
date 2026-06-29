@@ -57,15 +57,23 @@ declare -a GH_ARGS=(
 # Attach each requested label that actually exists in this repo. Don't reject
 # unknown labels — just warn and skip them. Labels are comma-separated.
 if [[ -n "$LABELS_ARG" ]]; then
-  # Fetch repo labels once.
-  REPO_LABELS="$(gh label list --limit 200 --json name --jq '.[].name' 2>/dev/null || true)"
+  # Fetch repo labels once so we can warn-and-skip unknown ones. If the fetch
+  # itself fails (network/auth), don't silently drop every label with a
+  # misleading "not found" — warn once and attach them unvalidated, letting
+  # `gh issue create` surface any genuinely bad label.
+  if REPO_LABELS="$(gh label list --limit 200 --json name --jq '.[].name')"; then
+    labels_ok=1
+  else
+    echo "Warning: could not fetch repo labels (gh label list failed); attaching requested labels unvalidated." >&2
+    labels_ok=0
+  fi
   IFS=',' read -ra REQUESTED <<< "$LABELS_ARG"
   for raw in "${REQUESTED[@]}"; do
     # Trim surrounding whitespace.
     label="${raw#"${raw%%[![:space:]]*}"}"
     label="${label%"${label##*[![:space:]]}"}"
     [[ -z "$label" ]] && continue
-    if grep -Fxq "$label" <<< "$REPO_LABELS"; then
+    if [[ "$labels_ok" -eq 0 ]] || grep -Fxq "$label" <<< "$REPO_LABELS"; then
       GH_ARGS+=("--label" "$label")
     else
       echo "Warning: label '$label' not found in this repo; skipping it." >&2
