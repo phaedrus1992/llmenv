@@ -5,6 +5,7 @@
 pub mod event;
 pub mod file_sink;
 pub mod scope_header;
+pub mod state;
 pub mod transcript;
 
 pub use event::{EventKind, EventScope, SessionLogEvent};
