@@ -142,7 +142,7 @@ git commit -m "feat: add features.context_mode schema and constants (#490)"
 
 **Interfaces:**
 - Consumes: `ContextMode`, `CONTEXT_MODE_MARKETPLACE`, `CONTEXT_MODE_SOURCE`, `CONTEXT_MODE_PLUGIN` from Task 1; existing `ResolvedPlugin`, `ResolvedMarketplace`, `ResolvedPlugins`.
-- Produces: when `config.features.context_mode.enabled`, the returned `ResolvedPlugins` contains the context-mode plugin + marketplace (deduped vs user-declared).
+- Produces: when `config.features.context_mode.enabled`, the returned `ResolvedPlugins` contains the context-mode plugin + marketplace (deduped vs user-declared). When the feature is enabled **and** the user has also manually declared the context-mode plugin in a `plugin-collection`, emit a `tracing::warn!` flagging the redundant manual declaration (the built-in feature already wires it).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -203,6 +203,40 @@ fn context_mode_dedups_user_declared() {
 
 Note: verify `Marketplace` and `PluginCollection` field names/defaults against `schema.rs` while writing — if `Marketplace` lacks `#[derive(Default)]`, construct it fully instead of `..Default::default()`.
 
+Add a test that the redundant-declaration warning path is exercised (the dedup
+branch is taken). Since `tracing::warn!` output isn't easily asserted without a
+subscriber, assert the observable proxy — the dedup still yields exactly one
+entry — and add a focused boolean helper so the warn condition is unit-testable:
+
+```rust
+#[test]
+fn context_mode_user_declared_triggers_dedup_branch() {
+    // Same setup as the dedup test: feature on + user-declared plugin. The
+    // warn fires on the dedup branch; we assert the branch was taken (one entry)
+    // which is the same observable the warn guards.
+    let mut cfg = Config::default();
+    cfg.marketplace = vec![Marketplace {
+        name: "context-mode".into(),
+        source: "https://github.com/mksglu/context-mode".into(),
+        ..Default::default()
+    }];
+    cfg.plugin_collection = vec![crate::config::PluginCollection {
+        name: "core".into(),
+        when: vec!["t".into()],
+        plugins: vec!["context-mode:context-mode".into()],
+    }];
+    cfg.features = Some(crate::config::Features {
+        context_mode: Some(crate::config::ContextMode { enabled: true }),
+        ..Default::default()
+    });
+    let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+    assert_eq!(
+        resolved.plugins.iter().filter(|p| p.marketplace == "context-mode").count(),
+        1
+    );
+}
+```
+
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p llmenv plugins::resolve::tests::context_mode`
@@ -238,6 +272,17 @@ In `resolve_plugins`, after the collection loop (after the `for collection in ..
                 install_path: None,
                 git_commit_sha: None,
             });
+        } else {
+            // The user manually declared context-mode:context-mode in a
+            // plugin-collection AND enabled features.context_mode. The built-in
+            // already wires it — the manual entry is redundant. Warn so the user
+            // can drop it (harmless, but confusing config drift otherwise).
+            tracing::warn!(
+                "features.context_mode is enabled and you also declared \
+                 'context-mode:context-mode' in a plugin-collection — the \
+                 built-in feature wires context-mode automatically, so the manual \
+                 plugin-collection entry is redundant and can be removed."
+            );
         }
         // The built-in marketplace is emitted from config.marketplace below only
         // if the user declared it. If they didn't, we must add it ourselves.
