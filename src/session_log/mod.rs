@@ -3,5 +3,7 @@
 //! ICM MCP. See `docs/superpowers/specs/2026-06-30-icm-transcript-session-logging-design.md`.
 
 pub mod event;
+pub mod file_sink;
 
 pub use event::{EventKind, EventScope, SessionLogEvent};
+pub use file_sink::{FileSink, default_file_path, default_file_path_string};
