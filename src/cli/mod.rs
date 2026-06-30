@@ -249,13 +249,11 @@ enum Command {
     /// Internal plumbing: this is the detached-child entrypoint
     /// `session_log::detached::spawn_record` launches so a hook process can
     /// return immediately instead of blocking on the transcript MCP call. Not
-    /// meant to be invoked directly. Reads the event JSON from stdin.
+    /// meant to be invoked directly. Reads the `{session_id, event}` JSON
+    /// payload from stdin (the session id travels in the payload rather than
+    /// as a CLI argument so it isn't visible in the process table).
     #[command(name = "session-log-record", hide = true)]
-    SessionLogRecord {
-        /// The ICM transcript session id to record into.
-        #[arg(long)]
-        session: String,
-    },
+    SessionLogRecord,
     /// Manage auth credentials for materialized folders (#172)
     Login {
         /// Apply to the global auth cache (all future materializations) rather
@@ -381,11 +379,11 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::HookRun { event }) => {
             crate::hook_run::run(&event)?;
         }
-        Some(Command::SessionLogRecord { session }) => {
+        Some(Command::SessionLogRecord) => {
             use std::io::Read;
-            let mut event_json = String::new();
-            std::io::stdin().read_to_string(&mut event_json)?;
-            crate::session_log::detached::run_record(&session, &event_json)?;
+            let mut payload_json = String::new();
+            std::io::stdin().read_to_string(&mut payload_json)?;
+            crate::session_log::detached::run_record(&payload_json)?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
