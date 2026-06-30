@@ -350,6 +350,14 @@ Two layers, gated by `verbose`:
   after), notification, stop, subagent stop, and pre-compact event, each
   tagged with its role and (for tool events) the tool name.
 
+> **Privacy note:** `verbose: true` captures the *raw* text of every prompt
+> you submit and every tool call's input/output — including any secrets,
+> credentials, or personal data that text happens to contain. That content is
+> written to disk (`file: true`) and/or sent to ICM (`transcript: true`)
+> unredacted, capped only by `max_content_bytes` (default 16 KiB, not a
+> sensitivity filter). Treat a `session-log.jsonl` with `verbose: true` enabled
+> the same way you'd treat shell history that might contain pasted secrets.
+
 ### Finding a session later
 
 The scope-header event embeds the same `llmenv-tag:<tag>` / `llmenv-bundle:<bundle>`

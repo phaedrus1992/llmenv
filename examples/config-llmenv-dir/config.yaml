@@ -48,7 +48,9 @@ cache:
 #                      via `icm_transcript_search "llmenv-tag:<tag>"`.
 #   file: false        Mirror the same stream to a local JSONL file.
 #   verbose: false     Also capture per-hook prompts and tool use, not just the
-#                      scope header + lifecycle.
+#                      scope header + lifecycle. WARNING: captures raw prompt
+#                      and tool content unredacted, including any secrets you
+#                      paste — treat the resulting log like shell history.
 #
 # Omitting this block entirely is equivalent to `transcript: true` (ICM only).
 # This is NOT the same thing as the `bundles/base/hooks/session-log.sh` example
