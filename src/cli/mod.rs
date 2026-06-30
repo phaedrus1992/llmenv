@@ -870,12 +870,19 @@ fn build_and_materialize(
     // config folders (`<adapter_root>/state`), so it survives every hash change.
     // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and
     // create the dirs so tools find them on first run.
+    // When context-mode is enabled (#490) inject CONTEXT_MODE_DATA_DIR as a
+    // synthetic StateTool so the store lands in the durable dir automatically.
+    let cm_enabled = config
+        .features
+        .as_ref()
+        .and_then(|f| f.context_mode.as_ref())
+        .is_some_and(|c| c.enabled);
+    let state_cfg = crate::materialize::state::effective_state_config(&config.state, cm_enabled);
     let state_dir = crate::materialize::state::state_dir(&adapter_root);
-    crate::materialize::state::ensure_state_dirs(&config.state, &state_dir)
+    crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
         .context("creating durable state directories")?;
     env_vars.extend(crate::materialize::state::state_env_vars(
-        &config.state,
-        &state_dir,
+        &state_cfg, &state_dir,
     ));
 
     // Defense-in-depth (#67): validate var names at the source, not only at the
