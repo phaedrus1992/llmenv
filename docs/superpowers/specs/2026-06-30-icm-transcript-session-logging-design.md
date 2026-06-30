@@ -137,27 +137,48 @@ prompt text / tool input / tool result, **truncated to `max_content_bytes`**
 
 ## Configuration
 
-This is a **3.0 major release**, so we take the breaking change cleanly: the
-2.1.0 `session_log = "<path>"` string form (raw `tracing` JSONL dump) is
-**removed and replaced** by a table. No back-compat shim.
+llmenv config is **YAML**. This is a **3.0 major release**, so we take the
+breaking change cleanly: the 2.1.0 `session_log: "<path>"` string form (raw
+`tracing` JSONL dump) is **removed and replaced** by a mapping. No back-compat
+shim.
 
-```toml
-[session_log]
-file = false        # write the session-event stream as JSONL (default off)
-transcript = false  # write the same stream to ICM transcripts (default off)
-verbose = false     # include per-hook prompt/tool detail in the stream
-# path = "..."             # override file-sink path (default <state_dir>/session-log.jsonl)
-# max_content_bytes = 16384
+```yaml
+session_log:
+  file: false        # write the session-event stream as JSONL (default off)
+  transcript: true   # write the same stream to ICM transcripts (DEFAULT ON)
+  verbose: false     # include per-hook prompt/tool detail (default off)
+  # path: "..."             # override file-sink path (default <state_dir>/session-log.jsonl)
+  # max_content_bytes: 16384
 ```
 
-`session_log` now parses **only** as a table. A bare-string value is a config
-error (the validator reports the migration: use `[session_log] file = true`).
-The old "raw llmenv tracing → file" behavior is gone; internal `tracing`
-diagnostics remain available on stderr as before. The table's `file` sink now
-emits the **session-event stream** (same events the transcript sink gets).
+**Defaults — ICM transcript is on, verbose off.** With **no `session_log`
+block at all**, the effective config is `{file: false, transcript: true,
+verbose: false}`: every launch opens an ICM transcript session and records the
+scope-header + lifecycle baseline. `Config.session_log` therefore uses a
+`Default` impl returning `transcript = true` (not `Default::default()` zeros).
 
-Whole feature is **disabled by default** (no `session_log`, or all flags
-false → nothing written, no session started, no hooks injected).
+To disable entirely, set `transcript: false` (and `file: false`). When `icm`
+is unavailable the baseline degrades to a no-op regardless (see Degradation).
+
+`session_log` now parses **only** as a mapping. A bare-string value is a config
+error (the validator reports the migration: use `session_log: { file: true }`).
+The old "raw llmenv tracing → file" behavior is gone; internal `tracing`
+diagnostics remain available on stderr as before. The `file` sink now emits the
+**session-event stream** (the same events the transcript sink gets).
+
+## Examples
+
+Update the in-repo example config to demonstrate the new setting (examples are
+illustrative configuration, the correct place to show user-facing config —
+per `AGENTS.md`):
+
+- `examples/config-llmenv-dir/config.yaml`: add a documented `session_log:`
+  block in the house style (heavy explanatory comments), showing the three
+  flags and stating the default (transcript on, verbose off). Make explicit
+  that omitting the block still yields ICM-only logging.
+- Note: the unrelated `bundles/base/hooks/session-log.sh` example hook is a
+  user-authored bundle hook, not this feature — leave it, but the new block's
+  comment should avoid implying they are the same thing.
 
 ## Degradation & safety
 
@@ -185,7 +206,8 @@ Four handles, documented with recipes in user docs:
 
 ## Testing
 
-- Config: table-form parses with correct defaults (all false); round-trip; a
+- Config: an absent `session_log` block yields `{file: false, transcript:
+  true, verbose: false}`; explicit mapping parses and round-trips; a
   bare-string `session_log` is rejected with the migration message.
 - Scope-header token formatting — property test reusing the `llmenv-tag` /
   `llmenv-bundle` convention and the `validate_*` guards.
