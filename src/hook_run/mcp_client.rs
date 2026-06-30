@@ -173,7 +173,7 @@ fn is_unique_local_v6(v6: &std::net::Ipv6Addr) -> bool {
 /// Returns an error for an unparseable URL, an unsupported scheme, a missing
 /// host, a DNS resolution failure, or any resolved/literal address that falls in
 /// a private, loopback, link-local, unspecified, or unique-local range.
-fn validate_url_production(url: &str) -> anyhow::Result<(String, Vec<SocketAddr>)> {
+pub(crate) fn validate_url_production(url: &str) -> anyhow::Result<(String, Vec<SocketAddr>)> {
     let parsed = Url::parse(url).with_context(|| format!("invalid URL: {url}"))?;
 
     if !matches!(parsed.scheme(), "http" | "https") {

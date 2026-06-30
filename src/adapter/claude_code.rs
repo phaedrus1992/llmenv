@@ -28,6 +28,11 @@ const CONFIG_CONTEXT_COMMAND: &str = "llmenv config-context";
 /// (fail-soft) so the write still proceeds; the hint keeps agents oriented.
 const CONFIG_GUARD_COMMAND: &str = "llmenv config-guard";
 
+/// Command the auto-emitted throttle hooks run. Throttle hooks fire on
+/// PreToolUse and UserPromptSubmit to poll the usage backend and sleep a
+/// capped adaptive delay to avoid rate limits.
+const THROTTLE_COMMAND: &str = "llmenv throttle";
+
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
 /// `out` as its config root.
@@ -665,6 +670,22 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             "matcher": "^(Write|Edit|MultiEdit)$",
             "hooks": [{ "type": "command", "command": CONFIG_GUARD_COMMAND }],
         }));
+
+    // Throttle hooks: poll usage backend and sleep adaptive delay to avoid rate limits.
+    if manifest.throttle.is_some() {
+        hooks_by_event
+            .entry("PreToolUse".to_string())
+            .or_default()
+            .push(json!({
+                "hooks": [{ "type": "command", "command": format!("{THROTTLE_COMMAND} pre-tool") }],
+            }));
+        hooks_by_event
+            .entry("UserPromptSubmit".to_string())
+            .or_default()
+            .push(json!({
+                "hooks": [{ "type": "command", "command": format!("{THROTTLE_COMMAND} prompt") }],
+            }));
+    }
 
     let mut hooks_obj = serde_json::Map::new();
     for (event, entries) in hooks_by_event {

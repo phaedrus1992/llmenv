@@ -28,6 +28,10 @@ pub struct Features {
     /// scope).
     #[serde(default)]
     pub memory: Vec<Memory>,
+    /// Tag-scoped usage throttle entries. At most one entry is active per scope
+    /// (same model as memory). Zero active entries means throttling is disabled.
+    #[serde(default)]
+    pub throttle: Vec<Throttle>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
@@ -457,6 +461,40 @@ pub struct Memory {
     /// by rendering today but preserved so config round-trips.
     #[serde(default)]
     pub default_topics: Vec<String>,
+}
+
+fn default_throttle_cache_ttl() -> u64 {
+    30
+}
+fn default_throttle_max_wait() -> u64 {
+    300
+}
+fn default_throttle_soft_threshold() -> u64 {
+    20
+}
+
+/// Usage throttling configuration. A tag-scoped entry that injects PreToolUse
+/// and UserPromptSubmit hooks which poll the named backend and sleep a capped
+/// adaptive delay to avoid hitting rate limits.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Throttle {
+    /// Backend name that supplies usage data. Currently `"umans"` is the only
+    /// supported value. An unknown backend is a no-op (with a stderr warning).
+    pub backend: String,
+    /// Tags that activate this throttle entry, intersected with active scope
+    /// tags (same selection model as bundles, MCP servers, and memory).
+    #[serde(default)]
+    pub when: Vec<String>,
+    /// How long (seconds) a fetched usage snapshot is cached on disk before
+    /// the backend is polled again.
+    #[serde(default = "default_throttle_cache_ttl")]
+    pub cache_ttl: u64,
+    /// Hard cap (seconds) on any single per-hook sleep.
+    #[serde(default = "default_throttle_max_wait")]
+    pub max_wait: u64,
+    /// Remaining-request level at which adaptive delays begin.
+    #[serde(default = "default_throttle_soft_threshold")]
+    pub soft_threshold: u64,
 }
 
 /// An MCP server definition. Selected onto a scope when any of its `tags`

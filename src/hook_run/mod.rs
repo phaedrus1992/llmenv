@@ -7,7 +7,7 @@
 //! path and must never block it.
 
 mod action;
-mod mcp_client;
+pub(crate) mod mcp_client;
 
 use std::io::Write;
 use std::str::FromStr;

@@ -1,5 +1,17 @@
 # llmenv — Agent Rules
 
+## Where new development happens
+
+**New features go in the `llmenv` core (the Rust crates under `src/` and
+`crates/`) unless explicitly told otherwise.** Built-in capabilities (hooks,
+env injection, MCP wiring) are implemented in core and ship with the binary —
+see ICM (`src/icm.rs`) and the adapter-injected hooks in
+`src/adapter/claude_code.rs` for the reference pattern.
+
+`examples/` (notably `examples/my-llmenv/`) is **illustrative configuration
+only — never a target for new feature development.** It demonstrates how a user
+configures llmenv; it does not house product code. Do not add features there.
+
 ## Versioning, Changelog & Releases
 
 Before doing **anything** that touches the version number, `CHANGELOG.md`, or a

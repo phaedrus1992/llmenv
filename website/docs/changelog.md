@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add `features.throttle`: keep an LLM backend within its rate limits by polling usage and
+  inserting a capped, adaptive delay as the request budget runs low, instead of hitting a hard
+  429. Tag-scoped like `features.memory`; currently supports the `umans` backend (#487)
+
+### Fixed
+
+- Fix `forward-merge-release` workflow: add branch-exists guard to protected-branch fallback to prevent
+  overwriting in-progress conflict resolution when a human is working on the merge branch (#476)
+- Fix `forward-merge-release` workflow: add error handling on protected-branch fallback push to emit
+  structured `::error::` annotation on push failure instead of silent fall-through (#475)
+
 ## [2.2.1] - 2026-06-24
 
 ### Fixed

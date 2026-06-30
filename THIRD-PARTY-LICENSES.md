@@ -2922,6 +2922,7 @@ Used by:
 - [tracing-attributes 0.1.31](https://github.com/tokio-rs/tracing)
 - [tracing-core 0.1.36](https://github.com/tokio-rs/tracing)
 - [tracing-log 0.2.0](https://github.com/tokio-rs/tracing)
+- [tracing-serde 0.2.0](https://github.com/tokio-rs/tracing)
 - [tracing-subscriber 0.3.23](https://github.com/tokio-rs/tracing)
 - [tracing 0.1.44](https://github.com/tokio-rs/tracing)
 
@@ -3328,7 +3329,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 2.0.4](https://github.com/phaedrus1992/llmenv)
+- [llmenv 2.2.1](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3790,10 +3791,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 2.0.4](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 2.0.4](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 2.0.4](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 2.0.4](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 2.2.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 2.2.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 2.2.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 2.2.1](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
@@ -3952,7 +3953,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [anyhow 1.0.102](https://github.com/dtolnay/anyhow)
+- [anyhow 1.0.103](https://github.com/dtolnay/anyhow)
 - [atomic-waker 1.1.2](https://github.com/smol-rs/atomic-waker)
 - [displaydoc 0.2.6](https://github.com/yaahc/displaydoc)
 - [fastrand 2.4.1](https://github.com/smol-rs/fastrand)
@@ -3961,6 +3962,8 @@ Used by:
 - [linux-raw-sys 0.12.1](https://github.com/sunfishcode/linux-raw-sys)
 - [once_cell 1.21.4](https://github.com/matklad/once_cell)
 - [pin-project-lite 0.2.17](https://github.com/taiki-e/pin-project-lite)
+- [portable-atomic-util 0.2.7](https://github.com/taiki-e/portable-atomic-util)
+- [portable-atomic 1.13.1](https://github.com/taiki-e/portable-atomic)
 - [proc-macro2 1.0.106](https://github.com/dtolnay/proc-macro2)
 - [quote 1.0.45](https://github.com/dtolnay/quote)
 - [rustix 1.1.4](https://github.com/bytecodealliance/rustix)
@@ -4100,6 +4103,7 @@ THE SOFTWARE.
 
 Used by:
 - [aho-corasick 1.1.4](https://github.com/BurntSushi/aho-corasick)
+- [jiff 0.2.30](https://github.com/BurntSushi/jiff)
 - [memchr 2.8.0](https://github.com/BurntSushi/memchr)
 - [walkdir 2.5.0](https://github.com/BurntSushi/walkdir)
 

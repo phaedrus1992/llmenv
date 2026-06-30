@@ -7,7 +7,7 @@ use super::{
     Bundle, Cache, Capabilities, Features, Hook, HookHandler, HookHandlerKind, HostEntry,
     HostMatch, HostScope, Marketplace, McpServer, McpTransport, Memory, NativePermissionRules,
     NetworkMatch, NetworkScope, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    Scopes, UserMatch, UserScope,
+    Scopes, Throttle, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -48,6 +48,10 @@ pub enum ValidateError {
         "memory: listen_host '{0}' is not a valid IP address literal (hostnames not supported)"
     )]
     MemoryInvalidListenHost(String),
+    #[error("throttle entry for '{0}' has no when: tags")]
+    ThrottleNoTags(String),
+    #[error("throttle entry has an empty 'backend' field")]
+    ThrottleEmptyBackend,
     #[error("duplicate marketplace name: {0}")]
     DuplicateMarketplaceName(String),
     #[error(
@@ -487,6 +491,14 @@ impl Config {
                     ));
                 }
             }
+            for th in &features.throttle {
+                if th.when.is_empty() {
+                    return Err(ValidateError::ThrottleNoTags(th.backend.clone()));
+                }
+                if th.backend.is_empty() {
+                    return Err(ValidateError::ThrottleEmptyBackend);
+                }
+            }
         }
         Ok(())
     }
@@ -677,6 +689,25 @@ mod tests {
             })
     }
 
+    fn arb_throttle() -> impl Strategy<Value = Throttle> {
+        (
+            prop_oneof![Just("umans".to_string())], // only known backends
+            prop::collection::vec(arb_string(), 1..3), // at least 1 tag (valid)
+            1u64..120,
+            1u64..300,
+            1u64..50,
+        )
+            .prop_map(
+                |(backend, when, cache_ttl, max_wait, soft_threshold)| Throttle {
+                    backend,
+                    when,
+                    cache_ttl,
+                    max_wait,
+                    soft_threshold,
+                },
+            )
+    }
+
     fn arb_memory() -> impl Strategy<Value = Memory> {
         (
             arb_string(),
@@ -778,6 +809,7 @@ mod tests {
                     .collect()
             }),
             prop::collection::vec(arb_memory(), 0..3),
+            prop::collection::vec(arb_throttle(), 0..2),
             prop::collection::btree_map(
                 arb_string(),
                 arb_string().prop_map(|addr| HostEntry { addr }),
@@ -815,6 +847,7 @@ mod tests {
                     bundle,
                     mcp,
                     memory,
+                    throttle,
                     host,
                     capabilities,
                     marketplace,
@@ -832,10 +865,10 @@ mod tests {
                         native: Default::default(),
                         bundle,
                         mcp,
-                        features: if memory.is_empty() {
+                        features: if memory.is_empty() && throttle.is_empty() {
                             None
                         } else {
-                            Some(Features { memory })
+                            Some(Features { memory, throttle })
                         },
                         marketplace,
                         plugin_collection,
@@ -1083,6 +1116,59 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(ValidateError::McpReservedName(_))
+        ));
+    }
+
+    fn config_with_throttle(throttle: Vec<crate::Throttle>) -> Config {
+        Config {
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![],
+            features: Some(crate::Features {
+                memory: vec![],
+                throttle,
+            }),
+            marketplace: vec![],
+            plugin_collection: vec![],
+            state: Default::default(),
+            host: Default::default(),
+            init: Default::default(),
+            session_log: None,
+        }
+    }
+
+    #[test]
+    fn throttle_without_when_tags_is_rejected() {
+        // An entry with no when: tags can never activate — reject it rather than
+        // silently materializing a dead throttle (parity with memory).
+        let config = config_with_throttle(vec![crate::Throttle {
+            backend: "umans".to_string(),
+            when: vec![],
+            cache_ttl: 30,
+            max_wait: 300,
+            soft_threshold: 20,
+        }]);
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::ThrottleNoTags(_))
+        ));
+    }
+
+    #[test]
+    fn throttle_with_empty_backend_is_rejected() {
+        let config = config_with_throttle(vec![crate::Throttle {
+            backend: String::new(),
+            when: vec!["tag1".to_string()],
+            cache_ttl: 30,
+            max_wait: 300,
+            soft_threshold: 20,
+        }]);
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::ThrottleEmptyBackend)
         ));
     }
 

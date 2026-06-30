@@ -231,6 +231,11 @@ enum Command {
     /// Reads the tool call from stdin, checks whether the target path is inside
     /// the llmenv cache, and prints a redirection hint. Always exits 0 (fail-soft).
     ConfigGuard,
+    /// Poll the usage backend and sleep an adaptive delay. See `crate::throttle`.
+    Throttle {
+        /// Hook event: pre-tool or prompt
+        event: String,
+    },
     /// Run an agent lifecycle hook (injects ICM memory context over MCP).
     ///
     /// Invoked by the agent runtime, not by users directly. `event` is an
@@ -357,6 +362,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::ConfigGuard) => {
             run_config_guard();
+        }
+        Some(Command::Throttle { event }) => {
+            crate::throttle::run_throttle_hook(&event);
         }
         Some(Command::HookRun { event }) => {
             crate::hook_run::run(&event)?;
@@ -785,8 +793,18 @@ fn build_and_materialize(
     let Some((mut manifest, cache_root)) =
         build_manifest(config, config_dir, active, firing, false)?
     else {
+        // No content dirs — clear any stale throttle state so a since-removed
+        // throttle config doesn't keep throttling.
+        if let Err(e) = crate::throttle::store_active_throttle(None) {
+            tracing::debug!("failed to clear throttle state (non-fatal): {e}");
+        }
         return Ok(None);
     };
+
+    // Store resolved throttle (top-level + bundle) for hook retrieval.
+    if let Err(e) = crate::throttle::store_active_throttle(manifest.throttle.as_ref()) {
+        tracing::debug!("failed to store throttle state (non-fatal): {e}");
+    }
 
     // Apply compression if requested: strip trailing whitespace and collapse triple blank lines.
     if compress {
@@ -1028,6 +1046,27 @@ fn build_manifest(
         resolved.marketplaces,
         refresh_marketplaces,
     )?;
+
+    // Resolve the active throttle entry (tag intersection, single-active).
+    let top_throttle = config
+        .features
+        .as_ref()
+        .map(|f| f.throttle.as_slice())
+        .unwrap_or_default();
+    let bundle_throttle = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .map(|f| f.throttle.as_slice())
+        .unwrap_or_default();
+    let mut all_throttle: Vec<crate::config::Throttle> = top_throttle
+        .iter()
+        .chain(bundle_throttle.iter())
+        .cloned()
+        .collect();
+    crate::util::dedup(&mut all_throttle);
+    manifest.throttle = crate::throttle::resolve_active_throttle(&all_throttle, &active.tags)
+        .context("resolving throttle config")?;
 
     Ok(Some((manifest, cache_root)))
 }
@@ -2772,6 +2811,7 @@ mod tests {
                     when: vec!["mem".to_string()],
                     default_topics: vec![],
                 }],
+                throttle: vec![],
             }),
             host,
             ..Config::default()
