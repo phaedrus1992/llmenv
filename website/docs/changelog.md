@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.3.0] - 2026-06-30
+
 ### Added
 
 - Add `features.throttle`: keep an LLM backend within its rate limits by polling usage and
