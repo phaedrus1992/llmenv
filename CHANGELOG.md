@@ -11,10 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Add `features.throttle` config field: tag-scoped usage throttling via external backends
-  (currently `umans`); injects `PreToolUse` and `UserPromptSubmit` hooks that poll the
-  backend's request budget and sleep an adaptive, capped delay to avoid rate limits; budget
-  remaining is surfaced as `additionalContext` on each prompt (#487)
+- Add `features.throttle`: keep an LLM backend within its rate limits by polling usage and
+  inserting a capped, adaptive delay as the request budget runs low, instead of hitting a hard
+  429. Tag-scoped like `features.memory`; currently supports the `umans` backend (#487)
 
 ### Fixed
 
