@@ -1710,6 +1710,24 @@ mod tests {
     }
 
     #[test]
+    fn context_mode_absent_no_mcp_grant() {
+        // #490: no context-mode plugin in manifest → MCP grant must NOT appear.
+        let manifest = crate::merge::MergedManifest::default();
+        let settings = render_settings_for_test(&manifest);
+        let allow = settings
+            .get("permissions")
+            .and_then(|p| p.get("allow"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let prefix = format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX);
+        assert!(
+            !allow.iter().any(|v| v == &prefix),
+            "context-mode MCP grant must be absent when plugin is absent; got {allow:?}"
+        );
+    }
+
+    #[test]
     fn bash_ban_env_no_longer_adds_deny_rules() {
         // Regression guard (#490 / #464): LLMENV_BASH_BAN wiring was removed; a
         // default manifest with no deny config must produce no Bash deny rules.
