@@ -10,6 +10,7 @@
 //! into it: `LLMENV_STATE_DIR` (always) plus one var per configured
 //! [`StateTool`], each pointed at a per-tool subdirectory.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::config::StateConfig;
@@ -56,6 +57,29 @@ pub fn ensure_state_dirs(cfg: &StateConfig, state_dir: &Path) -> std::io::Result
         std::fs::create_dir_all(state_dir.join(&tool.subdir))?;
     }
     Ok(())
+}
+
+/// Compute the effective state config, injecting context-mode's durable-dir
+/// relocation (#490) when the built-in feature is enabled.
+///
+/// Returns `cfg` borrowed unchanged when the feature is off or the user already
+/// declared a `CONTEXT_MODE_DATA_DIR` tool (user config wins); otherwise returns
+/// a clone with the synthetic tool appended.
+#[must_use]
+pub fn effective_state_config(
+    cfg: &StateConfig,
+    context_mode_enabled: bool,
+) -> Cow<'_, StateConfig> {
+    use crate::config::{CONTEXT_MODE_DATA_ENV, CONTEXT_MODE_STATE_SUBDIR, StateTool};
+    if !context_mode_enabled || cfg.tools.iter().any(|t| t.env == CONTEXT_MODE_DATA_ENV) {
+        return Cow::Borrowed(cfg);
+    }
+    let mut owned = cfg.clone();
+    owned.tools.push(StateTool {
+        env: CONTEXT_MODE_DATA_ENV.to_string(),
+        subdir: CONTEXT_MODE_STATE_SUBDIR.to_string(),
+    });
+    Cow::Owned(owned)
 }
 
 #[cfg(test)]
@@ -129,5 +153,49 @@ mod tests {
         // Second call over existing dirs must not error.
         ensure_state_dirs(&c, &dir).unwrap();
         assert!(dir.join("a").is_dir());
+    }
+
+    #[test]
+    fn context_mode_injects_state_tool() {
+        let base = StateConfig::default();
+        let eff = effective_state_config(&base, true);
+        assert!(
+            eff.tools
+                .iter()
+                .any(|t| t.env == "CONTEXT_MODE_DATA_DIR" && t.subdir == "context-mode"),
+            "expected CONTEXT_MODE_DATA_DIR tool to be injected"
+        );
+    }
+
+    #[test]
+    fn context_mode_disabled_no_injection() {
+        let base = StateConfig::default();
+        let eff = effective_state_config(&base, false);
+        assert!(eff.tools.is_empty(), "no tools when feature disabled");
+    }
+
+    #[test]
+    fn context_mode_dedups_user_state_tool() {
+        let base = StateConfig {
+            tools: vec![StateTool {
+                env: "CONTEXT_MODE_DATA_DIR".into(),
+                subdir: "my-custom-dir".into(),
+            }],
+        };
+        let eff = effective_state_config(&base, true);
+        let cm: Vec<_> = eff
+            .tools
+            .iter()
+            .filter(|t| t.env == "CONTEXT_MODE_DATA_DIR")
+            .collect();
+        assert_eq!(
+            cm.len(),
+            1,
+            "no duplicate entries for CONTEXT_MODE_DATA_DIR"
+        );
+        assert_eq!(
+            cm[0].subdir, "my-custom-dir",
+            "user entry preserved, not overwritten"
+        );
     }
 }

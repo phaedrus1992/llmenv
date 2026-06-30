@@ -868,7 +868,11 @@ mod tests {
                         features: if memory.is_empty() && throttle.is_empty() {
                             None
                         } else {
-                            Some(Features { memory, throttle })
+                            Some(Features {
+                                memory,
+                                throttle,
+                                context_mode: None,
+                            })
                         },
                         marketplace,
                         plugin_collection,
@@ -1130,6 +1134,7 @@ mod tests {
             features: Some(crate::Features {
                 memory: vec![],
                 throttle,
+                context_mode: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],

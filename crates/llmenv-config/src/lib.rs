@@ -5,14 +5,27 @@ mod validate;
 pub const STATE_DIR_ENV: &str = "LLMENV_STATE_DIR";
 pub const RESERVED_STATE_ENV_VARS: &[&str] = &[STATE_DIR_ENV, "CLAUDE_CONFIG_DIR"];
 pub const MEMORY_MCP_NAME: &str = "icm";
+/// Marketplace registration name for the built-in context-mode plugin.
+pub const CONTEXT_MODE_MARKETPLACE: &str = "context-mode";
+/// Canonical git source for the built-in context-mode plugin.
+pub const CONTEXT_MODE_SOURCE: &str = "https://github.com/mksglu/context-mode";
+/// Plugin name inside the context-mode marketplace.
+pub const CONTEXT_MODE_PLUGIN: &str = "context-mode";
+/// MCP tool-name prefix Claude Code assigns the context-mode plugin's server.
+pub const CONTEXT_MODE_MCP_PREFIX: &str = "mcp__plugin_context-mode_context-mode__";
+/// Env var context-mode honors to relocate its FTS5 store (#175 durable dir).
+pub const CONTEXT_MODE_DATA_ENV: &str = "CONTEXT_MODE_DATA_DIR";
+/// Durable-state subdir name for context-mode's store.
+pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
 pub use schema::{
-    Bundle, Cache, Capabilities, Config, EnvVar, Features, HashingMode, Hook, HookHandler,
-    HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, Marketplace, MarketplaceSource,
-    McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch, NetworkScope,
-    OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    RESERVED_OFFICIAL_MARKETPLACES, Scopes, StateConfig, StateTool, Throttle, UserMatch, UserScope,
-    classify_source, github_owner_repo, is_reserved_official_marketplace, split_plugin_ref,
+    Bundle, Cache, Capabilities, Config, ContextMode, EnvVar, Features, HashingMode, Hook,
+    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, Marketplace,
+    MarketplaceSource, McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch,
+    NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions,
+    PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes, StateConfig, StateTool, Throttle,
+    UserMatch, UserScope, classify_source, github_owner_repo, is_reserved_official_marketplace,
+    split_plugin_ref,
 };
 pub use template::generate_template;
 pub use validate::{ValidateError, validate_capabilities_env_key};
@@ -21,6 +34,14 @@ use anyhow::Context;
 use std::path::Path;
 
 impl Config {
+    /// Returns `true` when `features.context_mode.enabled` is set.
+    pub fn context_mode_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.context_mode.as_ref())
+            .is_some_and(|c| c.enabled)
+    }
+
     /// Load and validate a config from an **already-expanded** path.
     ///
     /// `load` does not perform tilde (`~`) expansion — the caller is

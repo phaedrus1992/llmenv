@@ -870,12 +870,17 @@ fn build_and_materialize(
     // config folders (`<adapter_root>/state`), so it survives every hash change.
     // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and
     // create the dirs so tools find them on first run.
+    // When context-mode is enabled (#490) inject CONTEXT_MODE_DATA_DIR as a
+    // synthetic StateTool so the store lands in the durable dir automatically.
+    let state_cfg = crate::materialize::state::effective_state_config(
+        &config.state,
+        config.context_mode_enabled(),
+    );
     let state_dir = crate::materialize::state::state_dir(&adapter_root);
-    crate::materialize::state::ensure_state_dirs(&config.state, &state_dir)
+    crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
         .context("creating durable state directories")?;
     env_vars.extend(crate::materialize::state::state_env_vars(
-        &config.state,
-        &state_dir,
+        &state_cfg, &state_dir,
     ));
 
     // Defense-in-depth (#67): validate var names at the source, not only at the
@@ -1304,9 +1309,45 @@ fn run_config_guard() {
     }
 }
 
+/// Sync one marketplace and fill `rm.install_location` + `rm.head`.
+/// Returns `Some(rm)` on success, `None` when the marketplace isn't cloned
+/// yet and `refresh` is false (warn-and-skip, #282).
+fn sync_one_marketplace(
+    cache_root: &Path,
+    market: &crate::config::Marketplace,
+    mut rm: crate::plugins::resolve::ResolvedMarketplace,
+    refresh: bool,
+) -> anyhow::Result<Option<crate::plugins::resolve::ResolvedMarketplace>> {
+    match crate::plugins::cache::sync_marketplace(cache_root, market, refresh) {
+        Ok(state) => {
+            rm.install_location = Some(state.install_location.to_string_lossy().into_owned());
+            rm.head = state.head;
+            Ok(Some(rm))
+        }
+        // (#282) During export (refresh=false), a marketplace that isn't cloned
+        // locally should not abort materialization — warn and skip so
+        // CLAUDE_CONFIG_DIR can still be emitted. run_plugin_sync (refresh=true)
+        // still propagates: an explicit sync that can't reach the remote is a
+        // real failure the user needs to see.
+        Err(crate::plugins::cache::SyncError::NotCloned { .. }) => {
+            eprintln!(
+                "warning: marketplace '{}' not yet cloned\n  → plugins from this marketplace \
+                 are excluded; run `llmenv plugin-sync` to fetch it",
+                rm.name
+            );
+            Ok(None)
+        }
+        Err(e) => Err(anyhow::anyhow!("syncing marketplace '{}': {e}", rm.name)),
+    }
+}
+
 /// Sync each resolved marketplace into the shared cache and fill in its
 /// `install_location` + `head`. `refresh` controls whether git sources are
 /// network-refreshed (`plugin sync`) or used as-is (`export`).
+///
+/// Resolved marketplaces not present in `config.marketplace` are built-in
+/// injections (e.g. context-mode when `features.context_mode.enabled`). They
+/// carry their own source URL and are synced via the same logic as declared ones.
 fn sync_marketplaces(
     config: &Config,
     cache_root: &Path,
@@ -1319,32 +1360,23 @@ fn sync_marketplaces(
         .map(|m| (m.name.as_str(), m))
         .collect();
     let mut out = Vec::with_capacity(resolved.len());
-    for mut rm in resolved {
-        let Some(market) = by_name.get(rm.name.as_str()) else {
-            // resolve_plugins only emits declared marketplaces, so this is
-            // unreachable; skip rather than panic if config mutated mid-flight.
-            out.push(rm);
-            continue;
+    for rm in resolved {
+        // For declared marketplaces use the config entry; for built-in injected
+        // ones (e.g. context-mode) build a transient Marketplace from the
+        // resolved source so they are synced rather than silently passed through.
+        let transient;
+        let market: &crate::config::Marketplace = match by_name.get(rm.name.as_str()) {
+            Some(m) => m,
+            None => {
+                transient = crate::config::Marketplace {
+                    name: rm.name.clone(),
+                    source: rm.source.clone(),
+                };
+                &transient
+            }
         };
-        let sync_result = crate::plugins::cache::sync_marketplace(cache_root, market, refresh);
-        match sync_result {
-            Ok(state) => {
-                rm.install_location = Some(state.install_location.to_string_lossy().into_owned());
-                rm.head = state.head;
-                out.push(rm);
-            }
-            // (#282) During export (refresh=false), a marketplace that isn't cloned
-            // locally should not abort materialization — warn and skip so
-            // CLAUDE_CONFIG_DIR can still be emitted. run_plugin_sync (refresh=true)
-            // still propagates: an explicit sync that can't reach the remote is a
-            // real failure the user needs to see.
-            Err(crate::plugins::cache::SyncError::NotCloned { .. }) => {
-                eprintln!(
-                    "warning: marketplace '{}' not yet cloned\n  → plugins from this marketplace are excluded; run `llmenv plugin-sync` to fetch it",
-                    rm.name
-                );
-            }
-            Err(e) => return Err(anyhow::anyhow!("syncing marketplace '{}': {e}", rm.name)),
+        if let Some(synced) = sync_one_marketplace(cache_root, market, rm, refresh)? {
+            out.push(synced);
         }
     }
     Ok(out)
@@ -2205,7 +2237,9 @@ fn run_plugin_sync() -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
     let cache_root = expand_tilde(&config.cache.cache_dir)?;
 
-    if config.marketplace.is_empty() {
+    let context_mode_enabled = config.context_mode_enabled();
+
+    if config.marketplace.is_empty() && !context_mode_enabled {
         eprintln!("No marketplaces configured.");
         return Ok(());
     }
@@ -2217,6 +2251,29 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         println!(
             "✓ {} → {} [{}]",
             m.name,
+            state.install_location.display(),
+            head
+        );
+    }
+
+    // Sync the built-in context-mode marketplace when the feature is enabled
+    // and the user has not already declared a context-mode marketplace entry
+    // (which would have been handled by the loop above).
+    let user_declared_context_mode = config
+        .marketplace
+        .iter()
+        .any(|m| m.name == crate::config::CONTEXT_MODE_MARKETPLACE);
+    if context_mode_enabled && !user_declared_context_mode {
+        let builtin = crate::config::Marketplace {
+            name: crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
+            source: crate::config::CONTEXT_MODE_SOURCE.to_string(),
+        };
+        let state = crate::plugins::cache::sync_marketplace(&cache_root, &builtin, true)
+            .with_context(|| format!("syncing built-in marketplace '{}'", builtin.name))?;
+        let head = state.head.as_deref().unwrap_or("(local path)");
+        println!(
+            "✓ {} → {} [{}]",
+            builtin.name,
             state.install_location.display(),
             head
         );
@@ -2812,6 +2869,7 @@ mod tests {
                     default_topics: vec![],
                 }],
                 throttle: vec![],
+                context_mode: None,
             }),
             host,
             ..Config::default()
@@ -2932,6 +2990,44 @@ mod tests {
                 "install_location filled in"
             );
         }
+    }
+
+    #[test]
+    fn sync_marketplaces_injected_builtin_is_synced_not_silently_skipped() {
+        // Regression test for #490: a resolved marketplace that is NOT in
+        // config.marketplace (i.e. the injected context-mode built-in) must be
+        // synced — not silently passed through with install_location=None.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("context-mode");
+        std::fs::create_dir(&src).unwrap();
+
+        // config.marketplace is empty — simulates user having only
+        // features.context_mode.enabled: true without a manual marketplace entry.
+        let config = Config {
+            marketplace: vec![],
+            ..Config::default()
+        };
+        let cache = tempfile::tempdir().unwrap();
+
+        // The resolved entry carries the source (as inject_context_mode sets it).
+        let rm = crate::plugins::resolve::ResolvedMarketplace {
+            name: "context-mode".into(),
+            source: src.to_string_lossy().into_owned(),
+            install_location: None,
+            head: None,
+        };
+
+        let result = sync_marketplaces(&config, cache.path(), vec![rm], false);
+        assert!(
+            result.is_ok(),
+            "injected built-in should sync without error"
+        );
+        let out = result.unwrap();
+        assert_eq!(out.len(), 1, "injected marketplace must appear in output");
+        assert!(
+            out[0].install_location.is_some(),
+            "install_location must be filled in for injected built-in (was None before fix)"
+        );
     }
 }
 

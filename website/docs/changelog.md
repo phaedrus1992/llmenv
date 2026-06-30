@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `features.context_mode` built-in feature: enabling `features.context_mode.enabled`
+  auto-wires the context-mode plugin (marketplace, plugin, durable
+  `CONTEXT_MODE_DATA_DIR`, and MCP permission) — the token-efficiency counterpart
+  to the built-in ICM memory feature. Warns when the plugin is also declared manually
+  in a plugin-collection. (#490)
+
+### Removed
+
+- `LLMENV_BASH_BAN` env var and its deny-rule wiring. It was broken as shipped
+  (read from llmenv's process env before bundle-declared values landed) and is
+  superseded by the built-in context-mode feature. (#490, removes #464)
+
 ## [2.3.0] - 2026-06-30
 
 ### Added

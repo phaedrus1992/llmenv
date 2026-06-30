@@ -6,10 +6,10 @@ use anyhow::Context;
 use std::collections::{BTreeSet, HashSet};
 
 pub(super) fn run_doctor_token_efficiency(
-    config: &Config,
     use_color: bool,
     pass: &str,
     warn: &str,
+    cm_enabled: bool,
 ) {
     let info = super::doctor_info(use_color);
     eprintln!();
@@ -59,12 +59,13 @@ pub(super) fn run_doctor_token_efficiency(
         }
     }
 
-    let has_context_mode = config.mcp.iter().any(|m| m.name.contains("context-mode"));
-    if has_context_mode {
-        eprintln!("{pass} context-mode MCP server is configured");
+    if cm_enabled {
+        eprintln!("{pass} context-mode built-in feature enabled (token-efficiency)");
     } else {
-        eprintln!("{warn} context-mode MCP not configured (load-bearing for token efficiency)");
-        eprintln!("{warn}   → Install context-mode plugin and add to mcp: section in config.yaml");
+        eprintln!(
+            "{info} context-mode not enabled \
+             (set features.context_mode.enabled: true for built-in context saving)"
+        );
     }
 }
 
@@ -76,6 +77,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
+    let cm_enabled = config.context_mode_enabled();
     eprintln!("{pass} Configuration loaded from {}", config_path.display());
 
     // Check that config parses
@@ -332,7 +334,12 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                 }
             }
             for m in &config.marketplace {
-                if !referenceable.contains(m.name.as_str()) {
+                // When context-mode is enabled as a built-in feature the user
+                // need not declare it in a plugin-collection — the built-in
+                // injection covers it. Suppress the false orphan warning.
+                let builtin_exempt =
+                    cm_enabled && m.name == crate::config::CONTEXT_MODE_MARKETPLACE;
+                if !builtin_exempt && !referenceable.contains(m.name.as_str()) {
                     eprintln!(
                         "{warn} orphan marketplace {}: no selectable plugin references it",
                         m.name
@@ -394,7 +401,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
-    run_doctor_token_efficiency(&config, use_color, &pass, &warn);
+    run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled);
 
     eprintln!("{pass} Doctor check complete.");
 
