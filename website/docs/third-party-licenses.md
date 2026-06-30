@@ -3959,7 +3959,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [anyhow 1.0.102](https://github.com/dtolnay/anyhow)
+- [anyhow 1.0.103](https://github.com/dtolnay/anyhow)
 - [atomic-waker 1.1.2](https://github.com/smol-rs/atomic-waker)
 - [displaydoc 0.2.6](https://github.com/yaahc/displaydoc)
 - [fastrand 2.4.1](https://github.com/smol-rs/fastrand)
