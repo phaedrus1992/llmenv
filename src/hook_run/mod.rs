@@ -595,11 +595,11 @@ fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id: Option<&s
     let max = cfg.max_content_bytes.unwrap_or(16_384);
     let ev = ev.truncated(max);
     if cfg.file {
-        let path = cfg
-            .path
-            .clone()
-            .map(std::path::PathBuf::from)
-            .or_else(|| crate::session_log::default_file_path().ok());
+        let path = cfg.path.clone().map(std::path::PathBuf::from).or_else(|| {
+            crate::session_log::default_file_path()
+                .inspect_err(|e| debug!("session_log: file sink disabled, no path resolved: {e}"))
+                .ok()
+        });
         if let Some(p) = path {
             crate::session_log::FileSink::new(p).append(&ev.to_jsonl());
         }

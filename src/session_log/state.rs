@@ -19,11 +19,21 @@ pub fn state_path() -> anyhow::Result<PathBuf> {
     Ok(state_dir()?.join("transcript-sessions.json"))
 }
 
+/// Load the correlation map at `path`. A missing file is the normal
+/// first-run case and returns an empty map silently. A file that exists but
+/// fails to parse (truncated by a crash, hand-edited, corrupted) is **not**
+/// the same situation — that's data loss waiting to happen on the next write
+/// (`record_at` round-trips through this), so it's logged at `warn!` even
+/// though the map still degrades to empty (fail-soft: a corrupt correlation
+/// file must not break session logging).
 fn load_at(path: &Path) -> BTreeMap<String, String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return BTreeMap::default();
+    };
+    serde_json::from_str(&s).unwrap_or_else(|e| {
+        tracing::warn!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
+        BTreeMap::default()
+    })
 }
 
 fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
@@ -91,6 +101,14 @@ mod tests {
         assert_eq!(map.get("claude-1").map(String::as_str), Some("icm-aaa"));
         assert_eq!(map.get("claude-2").map(String::as_str), Some("icm-bbb"));
         assert_eq!(map.get("missing"), None);
+    }
+
+    #[test]
+    fn load_at_degrades_to_empty_on_corrupt_json_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        std::fs::write(&path, "{not valid json").unwrap();
+        assert!(load_at(&path).is_empty());
     }
 
     use proptest::prelude::*;
