@@ -166,22 +166,40 @@ freshly-computed one and prints a restart hint on drift. Safe to run manually.
 ## `hook-run`
 
 ```
-llmenv hook-run <session_start|turn_start|session_end>
+llmenv hook-run <event>
 ```
 
-Engine-neutral lifecycle hooks that inject ICM memory context over MCP. Invoked by
-the agent runtime (not by users directly) in response to three neutral events:
+Engine-neutral lifecycle hooks that inject ICM memory context over MCP and
+drive [`session_log:`](configuration.md#session_log). Invoked by the agent
+runtime (not by users directly).
 
-- `session_start` — injects the session wake-up pack (`icm_wake_up`)
+Lifecycle/memory events (`session_start`, `session_end` are auto-registered by
+the Claude Code adapter; `turn_start` is not yet wired in, see
+[#499](https://github.com/phaedrus1992/llmenv/issues/499)):
+
+- `session_start` — injects the session wake-up pack (`icm_wake_up`); also
+  creates the correlated ICM transcript session and emits the baseline
+  `lifecycle_start` + scope-header session-log events
 - `turn_start` — injects recalled context (`icm_memory_recall`): a project-scoped
   recall for the active tags, plus one project-unfiltered recall per active tag
   keyed on `llmenv-tag:<tag>` and one per active bundle keyed on
   `llmenv-bundle:<bundle>`, so tag and bundle memory crosses project boundaries
-- `session_end` — best-effort store of the active scope context (`icm_memory_store`)
+- `session_end` — best-effort store of the active scope context
+  (`icm_memory_store`); also emits the baseline `lifecycle_end` session-log event
 
-Each hook talks to the configured ICM memory MCP over HTTP. Failures degrade
+Verbose events (auto-registered only when `session_log.verbose: true`):
+`user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `notification`, `stop`,
+`subagent_stop`, `pre_compact` — each captures the corresponding Claude Code
+hook payload (prompt text, tool name + input/response, notification message,
+etc.) as a session-log event.
+
+Each hook talks to the configured ICM MCP over HTTP. Failures degrade
 gracefully: a missing or unreachable backend logs a warning and exits cleanly
-(exit code 0) so lifecycle hooks never block the agent.
+(exit code 0) so lifecycle hooks never block the agent. The session-log file
+sink is independent of MCP reachability — it still writes even when ICM is
+down. Per-event transcript records dispatch via a short-lived detached child
+(`llmenv session-log-record`, internal plumbing) so `hook-run` itself never
+blocks on the network round trip.
 
 ## `prune`
 

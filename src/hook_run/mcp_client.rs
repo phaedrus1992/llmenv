@@ -41,7 +41,7 @@ impl McpHttpClient {
 
     #[cfg(test)]
     /// Build a client for testing, skipping SSRF validation.
-    fn test_new(url: String, timeout: Duration) -> anyhow::Result<Self> {
+    pub(crate) fn test_new(url: String, timeout: Duration) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()

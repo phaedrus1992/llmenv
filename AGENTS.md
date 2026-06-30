@@ -12,6 +12,16 @@ see ICM (`src/icm.rs`) and the adapter-injected hooks in
 only — never a target for new feature development.** It demonstrates how a user
 configures llmenv; it does not house product code. Do not add features there.
 
+## ICM interaction: MCP only, never the CLI
+
+**All runtime ICM interaction must go through the ICM MCP, not the `icm` CLI.**
+llmenv may run on a machine that is **not** the primary ICM host (the resolved
+`icm` MCP endpoint can be a remote `icm serve` — see `src/mcp/resolve.rs`). The
+`icm` CLI writes to the *local* sqlite store, which on a non-host machine is the
+wrong store and silently diverges. Always issue `icm_*` MCP tool calls against
+the resolved endpoint. The only non-MCP use of the `icm` binary is launching
+`icm serve` itself (the server the MCP talks to).
+
 ## Versioning, Changelog & Releases
 
 Before doing **anything** that touches the version number, `CHANGELOG.md`, or a

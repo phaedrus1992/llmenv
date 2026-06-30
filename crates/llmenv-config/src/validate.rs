@@ -522,6 +522,27 @@ mod tests {
         prop::option::of(arb_string())
     }
 
+    // Arbitrary SessionLog so the round-trip exercises the custom Deserialize
+    // (mapping form) and every flag combination.
+    fn arb_session_log() -> impl Strategy<Value = crate::SessionLog> {
+        (
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            arb_opt_string(),
+            prop::option::of(0usize..65_536),
+        )
+            .prop_map(|(file, transcript, verbose, path, max_content_bytes)| {
+                crate::SessionLog {
+                    file,
+                    transcript,
+                    verbose,
+                    path,
+                    max_content_bytes,
+                }
+            })
+    }
+
     fn arb_hashing_mode() -> impl Strategy<Value = HashingMode> {
         prop_oneof![
             Just(HashingMode::Loose),
@@ -838,7 +859,7 @@ mod tests {
                         .collect()
                 },
             ),
-            arb_opt_string(),
+            prop::option::of(arb_session_log()),
         )
             .prop_map(
                 |(

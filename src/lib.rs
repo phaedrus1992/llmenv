@@ -12,6 +12,7 @@ pub mod merge;
 pub mod paths;
 pub mod plugins;
 pub mod scope;
+pub mod session_log;
 pub mod sync;
 pub mod throttle;
 pub mod util;

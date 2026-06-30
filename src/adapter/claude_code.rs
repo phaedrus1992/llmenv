@@ -33,6 +33,36 @@ const CONFIG_GUARD_COMMAND: &str = "llmenv config-guard";
 /// capped adaptive delay to avoid rate limits.
 const THROTTLE_COMMAND: &str = "llmenv throttle";
 
+/// Command the auto-emitted lifecycle/session-log hooks run, followed by the
+/// engine-neutral event name (`llmenv hook-run session_start`, etc). Dispatches
+/// ICM memory wake-up/store (#197/#228) and, per `session_log` config, the
+/// session-log file/transcript sinks (#382). Always fail-soft (exit 0).
+const HOOK_RUN_COMMAND: &str = "llmenv hook-run";
+
+/// `(engine-neutral event, native Claude event)` pairs for the always-on
+/// baseline hooks. Registered unconditionally — `hook-run` itself no-ops
+/// cheaply when neither memory nor session logging is configured — so this
+/// also closes the long-standing gap where `hook-run` existed but was never
+/// wired into settings.json (memory wake-up/store never fired). Continuous
+/// per-prompt memory recall (`turn_start` / `UserPromptSubmit`) is a separate,
+/// not-yet-wired follow-up (performance-sensitive: would run on every prompt).
+const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("session_start", "SessionStart"),
+    ("session_end", "SessionEnd"),
+];
+
+/// `(engine-neutral event, native Claude event)` pairs registered only when
+/// `session_log.verbose` is set — per-hook prompt/tool-use capture (#382).
+const VERBOSE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("user_prompt_submit", "UserPromptSubmit"),
+    ("pre_tool_use", "PreToolUse"),
+    ("post_tool_use", "PostToolUse"),
+    ("notification", "Notification"),
+    ("stop", "Stop"),
+    ("subagent_stop", "SubagentStop"),
+    ("pre_compact", "PreCompact"),
+];
+
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
 /// `out` as its config root.
@@ -687,6 +717,31 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             }));
     }
 
+    // Baseline lifecycle hooks: ICM memory wake-up/store + session-log
+    // lifecycle/scope events (#382). Always registered; `hook-run` itself
+    // no-ops cheaply when nothing is configured for either.
+    for (neutral_event, native_event) in BASELINE_HOOK_EVENTS {
+        hooks_by_event
+            .entry((*native_event).to_string())
+            .or_default()
+            .push(json!({
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
+            }));
+    }
+
+    // Verbose session-log hooks: per-prompt/tool-use capture, opt-in via
+    // `session_log.verbose` (#382).
+    if manifest.session_log.verbose {
+        for (neutral_event, native_event) in VERBOSE_HOOK_EVENTS {
+            hooks_by_event
+                .entry((*native_event).to_string())
+                .or_default()
+                .push(json!({
+                    "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
+                }));
+        }
+    }
+
     let mut hooks_obj = serde_json::Map::new();
     for (event, entries) in hooks_by_event {
         hooks_obj.insert(event, json!(entries));
@@ -1227,10 +1282,10 @@ enum PermissionAction {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        CLAUDE_JSON_FILE, MODELED_SETTINGS_KEYS, classify_claude_path, generate_settings_json,
-        is_hook_json, merge_mcp_into_claude_json, overlay_native, reconcile_settings,
-        reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, seed_install_method, validate_skills,
+        CLAUDE_JSON_FILE, HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS, classify_claude_path,
+        generate_settings_json, is_hook_json, merge_mcp_into_claude_json, overlay_native,
+        reconcile_settings, reject_hardcoded_config_path, reject_modeled_keys_in_catch_all,
+        render_marketplace_source, render_permission_rule, seed_install_method, validate_skills,
     };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -1684,6 +1739,89 @@ mod tests {
         generate_settings_json(tmp.path(), manifest).unwrap();
         let bytes = std::fs::read(tmp.path().join("settings.json")).unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Every `command` string registered for a native hook event (across all
+    /// matcher-group entries), flattened for easy `contains`/`any` assertions.
+    fn hook_commands_for(settings: &serde_json::Value, event: &str) -> Vec<String> {
+        settings["hooks"][event]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .flat_map(|e| e["hooks"].as_array().cloned().unwrap_or_default())
+                    .filter_map(|h| h["command"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn baseline_injects_sessionstart_sessionend_only() {
+        // #382: default SessionLog (transcript on, verbose off) — the baseline
+        // hook-run hooks are always present, the verbose ones never appear.
+        let manifest = crate::merge::MergedManifest::default();
+        let settings = render_settings_for_test(&manifest);
+
+        assert!(
+            hook_commands_for(&settings, "SessionStart")
+                .contains(&"llmenv hook-run session_start".to_string())
+        );
+        assert!(
+            hook_commands_for(&settings, "SessionEnd")
+                .contains(&"llmenv hook-run session_end".to_string())
+        );
+        for event in [
+            "PreToolUse",
+            "PostToolUse",
+            "UserPromptSubmit",
+            "Stop",
+            "SubagentStop",
+            "Notification",
+            "PreCompact",
+        ] {
+            assert!(
+                hook_commands_for(&settings, event)
+                    .iter()
+                    .all(|c| !c.starts_with(HOOK_RUN_COMMAND)),
+                "{event} must not carry a hook-run command when verbose is off; got {:?}",
+                hook_commands_for(&settings, event)
+            );
+        }
+    }
+
+    #[test]
+    fn verbose_injects_all_turn_hooks() {
+        let manifest = crate::merge::MergedManifest {
+            session_log: crate::config::SessionLog {
+                verbose: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+
+        for (event, neutral) in [
+            ("UserPromptSubmit", "user_prompt_submit"),
+            ("PreToolUse", "pre_tool_use"),
+            ("PostToolUse", "post_tool_use"),
+            ("Notification", "notification"),
+            ("Stop", "stop"),
+            ("SubagentStop", "subagent_stop"),
+            ("PreCompact", "pre_compact"),
+        ] {
+            let expected = format!("{HOOK_RUN_COMMAND} {neutral}");
+            assert!(
+                hook_commands_for(&settings, event).contains(&expected),
+                "{event} missing {expected:?}; got {:?}",
+                hook_commands_for(&settings, event)
+            );
+        }
+        // Baseline hooks remain present too.
+        assert!(
+            hook_commands_for(&settings, "SessionStart")
+                .contains(&"llmenv hook-run session_start".to_string())
+        );
     }
 
     #[test]
