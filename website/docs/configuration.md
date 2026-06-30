@@ -19,7 +19,7 @@ The config directory is resolved in this order:
 | `native:` | map (per engine) | Opaque per-engine passthrough for keys no feature models |
 | `bundle:` | list | Environment-variable + file bundles |
 | `mcp:` | list | MCP server declarations |
-| `features:` | map | Feature flags; currently holds `memory:` (ICM backend topology) |
+| `features:` | map | Feature flags; holds `memory:` (ICM backend topology) and `throttle:` (usage throttling) |
 | `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
 | `marketplace:` | list | Plugin marketplaces (git URL or local path) |
 | `plugin-collection:` | list | Named bags of plugins, selected by tag |
@@ -223,8 +223,8 @@ See [MCP & Memory](mcp.md) for the full model.
 
 ## `features:`
 
-Feature flags. Currently holds one entry: `memory:`, which configures llmenv's
-ICM memory backend. Additional feature flags may be nested here in future versions.
+Feature flags. Holds `memory:` (llmenv's ICM memory backend) and `throttle:`
+(usage throttling). Additional feature flags may be nested here in future versions.
 
 ### `features.memory:`
 
@@ -262,6 +262,40 @@ features:
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
+
+### `features.throttle:`
+
+Usage throttling for an LLM backend. A list of tag-scoped entries (same
+selection model as `memory:` — at most one active per scope, resolver errors on
+two simultaneously active). When an entry is active, llmenv injects `PreToolUse`
+and `UserPromptSubmit` hooks that poll the backend's request budget and sleep a
+capped, adaptive delay as the budget runs low — keeping the session under the
+backend's rate limit instead of hitting a hard 429. Each entry names a
+`backend` that supplies usage data; `umans` is the only backend today.
+
+```yaml
+features:
+  throttle:
+    - backend: umans                  # backend that supplies usage data
+      when: [host-personal-laptop]    # activation tags (same model as bundles)
+      cache_ttl: 30                   # seconds a polled snapshot is cached
+      max_wait: 300                   # hard cap (seconds) on any single delay
+      soft_threshold: 20              # remaining-request level where delays begin
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `backend` | yes | Usage-data backend; currently only `umans` |
+| `when` | no | Activation tags (an entry with none never activates) |
+| `cache_ttl` | no | Seconds a polled usage snapshot is cached; default `30` |
+| `max_wait` | no | Hard cap in seconds on any single delay; default `300` |
+| `soft_threshold` | no | Remaining-request level where adaptive delays start; default `20` |
+
+The delay is always capped at `max_wait`; the throttle never blocks for a
+backend-reported penalty window that could be hours long. The `umans` backend
+reads `~/.umans/config.json` for its endpoint and token. Throttling is
+fail-soft: any error (missing config, network failure) skips the delay rather
+than blocking the session.
 
 ## `state:`
 

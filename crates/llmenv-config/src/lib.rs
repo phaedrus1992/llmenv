@@ -11,7 +11,7 @@ pub use schema::{
     HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, Marketplace, MarketplaceSource,
     McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch, NetworkScope,
     OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    RESERVED_OFFICIAL_MARKETPLACES, Scopes, StateConfig, StateTool, UserMatch, UserScope,
+    RESERVED_OFFICIAL_MARKETPLACES, Scopes, StateConfig, StateTool, Throttle, UserMatch, UserScope,
     classify_source, github_owner_repo, is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
