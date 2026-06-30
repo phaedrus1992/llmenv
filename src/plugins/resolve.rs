@@ -79,6 +79,62 @@ pub enum ResolveError {
     },
 }
 
+/// Inject the built-in context-mode marketplace + plugin into the resolved set
+/// when `features.context_mode.enabled` (#490). Mutates `plugins`/`seen_plugin`/
+/// `referenced` in place; returns whether the synthetic marketplace must be
+/// appended (true only when the user did not declare a `context-mode` marketplace).
+/// Warns when the user also declared the plugin manually (redundant).
+fn inject_context_mode(
+    config: &Config,
+    plugins: &mut Vec<ResolvedPlugin>,
+    seen_plugin: &mut HashSet<(String, String)>,
+    referenced: &mut HashSet<String>,
+) -> bool {
+    // Built-in context-mode feature (#490): inject the canonical marketplace +
+    // plugin when enabled, unless the user already declared it (user wins on
+    // source). context-mode is a *plugin* (its hooks need ${CLAUDE_PLUGIN_ROOT}),
+    // so it rides the normal plugin path — not ICM's remote-MCP mechanism.
+    let cm_enabled = config
+        .features
+        .as_ref()
+        .and_then(|f| f.context_mode.as_ref())
+        .is_some_and(|c| c.enabled);
+    if !cm_enabled {
+        return false;
+    }
+    let key = (
+        crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
+        crate::config::CONTEXT_MODE_PLUGIN.to_string(),
+    );
+    if seen_plugin.insert(key) {
+        referenced.insert(crate::config::CONTEXT_MODE_MARKETPLACE.to_string());
+        plugins.push(ResolvedPlugin {
+            marketplace: crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
+            plugin: crate::config::CONTEXT_MODE_PLUGIN.to_string(),
+            collection: "context_mode (built-in)".to_string(),
+            install_path: None,
+            git_commit_sha: None,
+        });
+    } else {
+        // The user manually declared context-mode:context-mode in a
+        // plugin-collection AND enabled features.context_mode. The built-in
+        // already wires it — the manual entry is redundant. Warn so the user
+        // can drop it (harmless, but confusing config drift otherwise).
+        tracing::warn!(
+            "features.context_mode is enabled and you also declared \
+             'context-mode:context-mode' in a plugin-collection — the \
+             built-in feature wires context-mode automatically, so the manual \
+             plugin-collection entry is redundant and can be removed."
+        );
+    }
+    // The built-in marketplace is emitted from config.marketplace below only
+    // if the user declared it. If they didn't, we must add it ourselves.
+    !config
+        .marketplace
+        .iter()
+        .any(|m| m.name == crate::config::CONTEXT_MODE_MARKETPLACE)
+}
+
 /// Select and resolve all plugin collections for the active host.
 ///
 /// `active_tags` is the union of tags emitted by matching scopes. Collections
@@ -140,49 +196,8 @@ pub fn resolve_plugins(
         }
     }
 
-    // Built-in context-mode feature (#490): inject the canonical marketplace +
-    // plugin when enabled, unless the user already declared it (user wins on
-    // source). context-mode is a *plugin* (its hooks need ${CLAUDE_PLUGIN_ROOT}),
-    // so it rides the normal plugin path — not ICM's remote-MCP mechanism.
-    let cm_enabled = config
-        .features
-        .as_ref()
-        .and_then(|f| f.context_mode.as_ref())
-        .is_some_and(|c| c.enabled);
-    let mut inject_builtin_marketplace = false;
-    if cm_enabled {
-        let key = (
-            crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
-            crate::config::CONTEXT_MODE_PLUGIN.to_string(),
-        );
-        if seen_plugin.insert(key) {
-            referenced.insert(crate::config::CONTEXT_MODE_MARKETPLACE.to_string());
-            plugins.push(ResolvedPlugin {
-                marketplace: crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
-                plugin: crate::config::CONTEXT_MODE_PLUGIN.to_string(),
-                collection: "context_mode (built-in)".to_string(),
-                install_path: None,
-                git_commit_sha: None,
-            });
-        } else {
-            // The user manually declared context-mode:context-mode in a
-            // plugin-collection AND enabled features.context_mode. The built-in
-            // already wires it — the manual entry is redundant. Warn so the user
-            // can drop it (harmless, but confusing config drift otherwise).
-            tracing::warn!(
-                "features.context_mode is enabled and you also declared \
-                 'context-mode:context-mode' in a plugin-collection — the \
-                 built-in feature wires context-mode automatically, so the manual \
-                 plugin-collection entry is redundant and can be removed."
-            );
-        }
-        // The built-in marketplace is emitted from config.marketplace below only
-        // if the user declared it. If they didn't, we must add it ourselves.
-        inject_builtin_marketplace = !config
-            .marketplace
-            .iter()
-            .any(|m| m.name == crate::config::CONTEXT_MODE_MARKETPLACE);
-    }
+    let inject_builtin_marketplace =
+        inject_context_mode(config, &mut plugins, &mut seen_plugin, &mut referenced);
 
     // Emit referenced marketplaces in config declaration order so output is
     // stable and diff-friendly regardless of plugin discovery order.
@@ -454,6 +469,44 @@ mod tests {
                 .filter(|p| p.marketplace == "context-mode")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn context_mode_user_marketplace_only_preserves_source() {
+        // User declares the context-mode marketplace (fork source) but NO
+        // plugin-collection entry, feature enabled: plugin is injected AND the
+        // user's marketplace source is preserved (exactly one of each).
+        let cfg = Config {
+            marketplace: vec![Marketplace {
+                name: "context-mode".into(),
+                source: "https://github.com/myfork/context-mode".into(),
+            }],
+            features: Some(crate::config::Features {
+                context_mode: Some(crate::config::ContextMode { enabled: true }),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let resolved = resolve_plugins(&cfg, &tags(&[])).unwrap();
+        assert_eq!(
+            resolved
+                .plugins
+                .iter()
+                .filter(|p| p.marketplace == "context-mode")
+                .count(),
+            1,
+            "plugin injected exactly once"
+        );
+        let mk: Vec<_> = resolved
+            .marketplaces
+            .iter()
+            .filter(|m| m.name == "context-mode")
+            .collect();
+        assert_eq!(mk.len(), 1, "exactly one marketplace entry");
+        assert_eq!(
+            mk[0].source, "https://github.com/myfork/context-mode",
+            "user-declared source preserved"
         );
     }
 
