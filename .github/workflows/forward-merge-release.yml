@@ -106,20 +106,36 @@ jobs:
             git ls-remote --exit-code --heads origin "$merge_branch" >/dev/null 2>&1
             local rc=$?
             if [[ $rc -eq 0 ]]; then
+              # In-progress resolution exists — a handled state, halt cleanly.
               echo "::warning::$merge_branch already exists; not overwriting in-progress resolution"
-              return
+              return 0
             elif [[ $rc -ne 2 ]]; then
               echo "::error::Network error checking if $merge_branch exists (exit $rc); halting cascade"
               return 1
             fi
             git checkout -B "$merge_branch" "origin/$tgt"
-            git merge "origin/$src" || true
-            git push origin "$merge_branch" --force-with-lease
+            # A conflict (exit 1) is the expected outcome here; a fatal error
+            # (bad ref, corrupt objects → exit >=128) must not be swallowed.
+            # `|| merge_rc=$?` keeps the expected conflict exit from tripping
+            # `set -e` while still capturing the code for the fatal-error check.
+            local merge_rc=0
+            git merge "origin/$src" || merge_rc=$?
+            if [[ $merge_rc -ge 128 ]]; then
+              echo "::error::Fatal error merging origin/$src into $merge_branch (exit $merge_rc)"
+              return 1
+            fi
+            if ! git push origin "$merge_branch" --force-with-lease; then
+              echo "::error::Failed to push $merge_branch; cannot open conflict PR"
+              return 1
+            fi
             local body="Forward-merge conflict between $src and $tgt. Resolve and merge."
-            gh pr create --base "$tgt" --head "$merge_branch" \
+            if ! gh pr create --base "$tgt" --head "$merge_branch" \
               --title "Merge $src into $tgt (conflicts)" \
               --body "$body" \
-              --label "forward-merge-conflict" || true
+              --label "forward-merge-conflict"; then
+              echo "::error::Failed to create conflict PR for $merge_branch"
+              return 1
+            fi
           }
 
           for TARGET in "${TARGETS[@]}"; do
@@ -177,7 +193,15 @@ jobs:
             fi
 
             git checkout -q "origin/$TARGET"
-            git merge --no-edit "origin/$CURRENT"
+            # The dry-run above proved this merges cleanly, but guard it anyway:
+            # an unchecked failure here trips `set -e` and crashes the shell,
+            # bypassing HALTED tracking and the ::endgroup:: marker.
+            if ! git merge --no-edit "origin/$CURRENT"; then
+              echo "::error::Failed to merge $CURRENT into $TARGET"
+              echo "::endgroup::"
+              HALTED="merge failed at $TARGET"
+              break
+            fi
 
             # Land the merge directly so the fix propagates automatically — main
             # is the final target and is forward-merged the same way as every
@@ -219,9 +243,11 @@ jobs:
                 break
               fi
 
-              gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
+              if ! gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
                 --title "Forward-merge $CURRENT into $TARGET" \
-                --body "Direct push to $TARGET blocked by branch protection; opening PR." || true
+                --body "Direct push to $TARGET blocked by branch protection; opening PR."; then
+                echo "::error::Failed to create PR for $MERGE_BRANCH after protected-branch push was rejected"
+              fi
 
               echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
               echo "::endgroup::"
