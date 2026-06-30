@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.3.0] - 2026-06-30
+
 ### Added
 
 - Add `features.throttle`: keep an LLM backend within its rate limits by polling usage and
@@ -546,7 +548,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.2.1...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/phaedrus1992/llmenv/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/phaedrus1992/llmenv/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/phaedrus1992/llmenv/compare/v2.0.5...v2.1.0
