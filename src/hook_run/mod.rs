@@ -377,7 +377,12 @@ fn run_inner(
         .map(|u| McpHttpClient::new(u, HOOK_TIMEOUT))
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
-    let state_path = state::state_path().ok();
+    let state_path = state::state_path()
+        .inspect_err(|e| {
+            debug!("session_log: cannot resolve state path, correlation disabled: {e}")
+        })
+        .ok();
+    let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd);
 
     // Current-thread runtime: lifecycle hooks run on the agent's hot path (session
     // start + every prompt turn) and only need to `block_on` a short sequence of
@@ -386,56 +391,93 @@ fn run_inner(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    let session_log = SessionLogCall {
+        log_cfg: &log_cfg,
+        client: client.as_ref(),
+        claude_session_id,
+        ctx: &ctx,
+        state_path: state_path.as_deref(),
+    };
     rt.block_on(async {
         let mut out = String::new();
         if let Some(client) = &client {
-            for action in dispatch(event, &tag_queries, &bundle_queries) {
-                let text = action.run(client, &query, &chunk).await?;
-                if !text.is_empty() {
-                    if !out.is_empty() {
-                        out.push_str("\n\n");
-                    }
-                    out.push_str(&text);
-                }
-            }
+            let actions = dispatch(event, &tag_queries, &bundle_queries);
+            out = run_memory_actions(client, actions, &query, &chunk).await?;
         }
-        if matches!(event, HookEvent::SessionStart | HookEvent::SessionEnd) {
-            let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd);
-            handle_session_log(
-                event,
-                &log_cfg,
-                client.as_ref(),
-                claude_session_id,
-                &ctx,
-                state_path.as_deref(),
-            )
-            .await;
-        } else if log_cfg.verbose
-            && let Some((kind, role)) = event_to_log_kind(event)
-        {
-            let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd);
-            let session_id = match claude_session_id {
-                Some(csid) => {
-                    ensure_transcript_session(
-                        &log_cfg,
-                        client.as_ref(),
-                        csid,
-                        &ctx,
-                        state_path.as_deref(),
-                    )
-                    .await
-                }
-                None => None,
-            };
-            let (tool_name, content) = verbose_content(event, stdin_payload);
-            emit_session_log(
-                verbose_session_event(kind, role, tool_name, content),
-                &log_cfg,
-                session_id.as_deref(),
-            );
-        }
+        run_session_log(event, &session_log, stdin_payload).await;
         Ok::<String, anyhow::Error>(out)
     })
+}
+
+/// Run one event's ordered memory actions and concatenate their text output.
+async fn run_memory_actions(
+    client: &McpHttpClient,
+    actions: Vec<Action>,
+    query: &str,
+    chunk: &str,
+) -> anyhow::Result<String> {
+    let mut out = String::new();
+    for action in actions {
+        let text = action.run(client, query, chunk).await?;
+        if !text.is_empty() {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(&text);
+        }
+    }
+    Ok(out)
+}
+
+/// Borrowed inputs `run_session_log` needs, grouped to keep the function under
+/// the project's positional-parameter limit.
+struct SessionLogCall<'a> {
+    log_cfg: &'a SessionLog,
+    client: Option<&'a McpHttpClient>,
+    claude_session_id: Option<&'a str>,
+    ctx: &'a ScopeContext,
+    state_path: Option<&'a std::path::Path>,
+}
+
+/// Dispatch the event's session-log handling: baseline lifecycle/scope events
+/// for `SessionStart`/`SessionEnd`, or (when `verbose`) the per-hook capture
+/// event for every other mapped event. No-op for unmapped events.
+async fn run_session_log(
+    event: HookEvent,
+    call: &SessionLogCall<'_>,
+    stdin_payload: &serde_json::Value,
+) {
+    if matches!(event, HookEvent::SessionStart | HookEvent::SessionEnd) {
+        handle_session_log(
+            event,
+            call.log_cfg,
+            call.client,
+            call.claude_session_id,
+            call.ctx,
+            call.state_path,
+        )
+        .await;
+        return;
+    }
+    let (true, Some((kind, role))) = (call.log_cfg.verbose, event_to_log_kind(event)) else {
+        return;
+    };
+    let session_id = match call.claude_session_id {
+        Some(csid) => {
+            ensure_transcript_session(call.log_cfg, call.client, csid, call.ctx, call.state_path)
+                .await
+        }
+        None => {
+            debug!("verbose event captured without claude_session_id — transcript record skipped");
+            None
+        }
+    };
+    let (tool_name, content) = verbose_content(event, stdin_payload);
+    emit_session_log(
+        verbose_session_event(kind, role, tool_name, content),
+        call.log_cfg,
+        session_id.as_deref(),
+    );
 }
 
 /// Build the active-scope context a session's lifecycle/scope-header events
