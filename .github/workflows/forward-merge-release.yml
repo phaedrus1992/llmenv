@@ -103,9 +103,14 @@ jobs:
           # resolution work).
           open_conflict_pr() {
             local src="$1" tgt="$2" merge_branch="$3"
-            if git ls-remote --exit-code --heads origin "$merge_branch" >/dev/null 2>&1; then
+            git ls-remote --exit-code --heads origin "$merge_branch" >/dev/null 2>&1
+            local rc=$?
+            if [[ $rc -eq 0 ]]; then
               echo "::warning::$merge_branch already exists; not overwriting in-progress resolution"
               return
+            elif [[ $rc -ne 2 ]]; then
+              echo "::error::Network error checking if $merge_branch exists (exit $rc); halting cascade"
+              return 1
             fi
             git checkout -B "$merge_branch" "origin/$tgt"
             git merge "origin/$src" || true
@@ -146,15 +151,30 @@ jobs:
             MERGE_BRANCH="forward-merge/$CURRENT-to-$TARGET"
 
             if ! git merge --no-commit --no-ff "origin/$CURRENT" 2>/dev/null; then
-              git merge --abort || true
-              open_conflict_pr "$CURRENT" "$TARGET" "$MERGE_BRANCH"
+              if ! git merge --abort; then
+                echo "::error::Failed to abort merge; working tree may be inconsistent"
+                echo "::endgroup::"
+                HALTED="merge abort failed at $TARGET"
+                break
+              fi
+              if ! open_conflict_pr "$CURRENT" "$TARGET" "$MERGE_BRANCH"; then
+                echo "::error::Failed to open conflict PR"
+                echo "::endgroup::"
+                HALTED="conflict PR creation failed at $TARGET"
+                break
+              fi
               echo "::error::Cascade halted: conflict merging $CURRENT into $TARGET"
               echo "::endgroup::"
               HALTED="conflict at $TARGET"
               break
             fi
 
-            git merge --abort || true
+            if ! git merge --abort; then
+              echo "::error::Failed to abort merge; working tree may be inconsistent"
+              echo "::endgroup::"
+              HALTED="merge abort failed at $TARGET"
+              break
+            fi
 
             git checkout -q "origin/$TARGET"
             git merge --no-edit "origin/$CURRENT"
@@ -176,11 +196,18 @@ jobs:
               else
                 echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
               fi
-              if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
+              git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1
+              ls_rc=$?
+              if [[ $ls_rc -eq 0 ]]; then
                 echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
                 echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
                 echo "::endgroup::"
                 HALTED="protected branch $TARGET"
+                break
+              elif [[ $ls_rc -ne 2 ]]; then
+                echo "::error::Network error checking if $MERGE_BRANCH exists (exit $ls_rc); halting cascade"
+                echo "::endgroup::"
+                HALTED="network error at $TARGET"
                 break
               fi
 
