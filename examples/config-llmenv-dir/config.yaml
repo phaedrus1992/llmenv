@@ -38,6 +38,28 @@ cache:
   hashing: normal
 
 ################################################################################
+# Session logging.
+#
+# llmenv records session activity into a single event stream that fans out to
+# two independent sinks: a local JSONL file and ICM's transcript store (via the
+# ICM MCP — works even when this host is not the primary ICM host).
+#
+#   transcript: true   ICM transcript (default ON). Discoverable later by tag
+#                      via `icm_transcript_search "llmenv-tag:<tag>"`.
+#   file: false        Mirror the same stream to a local JSONL file.
+#   verbose: false     Also capture per-hook prompts and tool use, not just the
+#                      scope header + lifecycle.
+#
+# Omitting this block entirely is equivalent to `transcript: true` (ICM only).
+# This is NOT the same thing as the `bundles/base/hooks/session-log.sh` example
+# hook, which is a user-authored bundle hook unrelated to this built-in feature.
+################################################################################
+session_log:
+  transcript: true
+  file: false
+  verbose: false
+
+################################################################################
 # Engine-agnostic capabilities.
 #
 # This block defines permissions, native-permission passthrough, hooks, and
