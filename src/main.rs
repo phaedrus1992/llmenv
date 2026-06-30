@@ -1,48 +1,28 @@
-use std::{fs::OpenOptions, io::BufWriter, sync::Mutex};
+use std::path::PathBuf;
+
+use llmenv::session_log::{FileLogLayer, FileSink, default_file_path};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
-fn open_session_log(path: &str) -> Option<std::fs::File> {
-    let mut opts = OpenOptions::new();
-    opts.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    match opts.open(path) {
-        Ok(f) => Some(f),
-        Err(e) => {
-            eprintln!("llmenv: session_log: cannot open {path:?}: {e}");
-            None
-        }
+/// Resolve the session-log file sink's path: explicit `path:` override
+/// (tilde-expanded) or `<state_dir>/session-log.jsonl`.
+fn session_log_file_path(configured: Option<&str>) -> PathBuf {
+    match configured {
+        Some(raw) => PathBuf::from(llmenv_paths::expand_tilde(raw)),
+        None => default_file_path().unwrap_or_else(|_| PathBuf::from("session-log.jsonl")),
     }
 }
 
 fn main() {
     // Resolved session-logging config (absent block → transcript on, file off).
-    // Task 9 replaces this stop-gap with the session_log module's sink wiring;
-    // here we only keep the file path working so the build compiles.
     let resolved = llmenv_paths::config_path()
         .ok()
         .and_then(|p| llmenv_config::Config::load(&p).ok())
         .map(|c| c.session_log_resolved())
         .unwrap_or_default();
-    let session_log = resolved.file.then(|| {
-        resolved.path.clone().unwrap_or_else(|| {
-            llmenv_paths::state_dir()
-                .map(|d| d.join("session-log.jsonl").to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "session-log.jsonl".to_string())
-        })
-    });
 
-    let file_layer = session_log.and_then(|raw| {
-        let path = llmenv_paths::expand_tilde(&raw);
-        open_session_log(&path).map(|file| {
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_writer(Mutex::new(BufWriter::new(file)))
-                .with_filter(EnvFilter::from_default_env())
-        })
+    let file_layer = resolved.file.then(|| {
+        let path = session_log_file_path(resolved.path.as_deref());
+        FileLogLayer::new(FileSink::new(path)).with_filter(EnvFilter::from_default_env())
     });
 
     tracing_subscriber::registry()
