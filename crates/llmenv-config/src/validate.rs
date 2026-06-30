@@ -7,7 +7,7 @@ use super::{
     Bundle, Cache, Capabilities, Features, Hook, HookHandler, HookHandlerKind, HostEntry,
     HostMatch, HostScope, Marketplace, McpServer, McpTransport, Memory, NativePermissionRules,
     NetworkMatch, NetworkScope, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    Scopes, UserMatch, UserScope,
+    Scopes, Throttle, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
