@@ -1091,6 +1091,8 @@ fn build_manifest(
     manifest.throttle = crate::throttle::resolve_active_throttle(&all_throttle, &active.tags)
         .context("resolving throttle config")?;
 
+    manifest.session_log = config.session_log_resolved();
+
     Ok(Some((manifest, cache_root)))
 }
 

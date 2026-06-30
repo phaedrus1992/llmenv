@@ -18,12 +18,19 @@ hooks:
         - command: llmenv config-guard
           type: command
       matcher: ^(Write|Edit|MultiEdit)$
+  SessionEnd:
+    - hooks:
+        - command: llmenv hook-run session_end
+          type: command
   SessionStart:
     - hooks:
         - command: llmenv check-stale
           type: command
     - hooks:
         - command: llmenv config-context
+          type: command
+    - hooks:
+        - command: llmenv hook-run session_start
           type: command
 permissions:
   allow:

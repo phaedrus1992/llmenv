@@ -58,6 +58,10 @@ pub struct MergedManifest {
     /// The single active throttle entry after tag-intersection resolution, or
     /// `None` when no throttle entry is active for this scope.
     pub throttle: Option<crate::config::Throttle>,
+    /// Resolved `session_log` config (see `Config::session_log_resolved`),
+    /// gating which session-log hooks adapters auto-emit. Defaults to
+    /// `SessionLog::default()` (transcript on, file/verbose off).
+    pub session_log: crate::config::SessionLog,
 }
 
 const COPIED_SUBDIRS: &[&str] = &["skills", "plugins", "hooks"];
