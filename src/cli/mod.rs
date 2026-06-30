@@ -2812,6 +2812,7 @@ mod tests {
                     default_topics: vec![],
                 }],
                 throttle: vec![],
+                context_mode: None,
             }),
             host,
             ..Config::default()

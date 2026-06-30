@@ -32,6 +32,10 @@ pub struct Features {
     /// (same model as memory). Zero active entries means throttling is disabled.
     #[serde(default)]
     pub throttle: Vec<Throttle>,
+    /// context-mode built-in (token-efficiency). The counterpart to `memory`
+    /// (ICM). A simple enable/disable toggle; absent means disabled.
+    #[serde(default)]
+    pub context_mode: Option<ContextMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
@@ -433,6 +437,19 @@ pub enum McpTransport {
 /// Default bind host for the memory server proxy.
 fn default_listen_host() -> String {
     "127.0.0.1".to_string()
+}
+
+/// context-mode built-in feature toggle. Loaded as a Claude Code *plugin*
+/// (not an MCP) because its hooks reference `${CLAUDE_PLUGIN_ROOT}`, which only
+/// resolves inside the plugin system. When enabled, llmenv auto-injects the
+/// context-mode marketplace + plugin, a durable `CONTEXT_MODE_DATA_DIR`, and the
+/// MCP permission grant. Unlike `memory`, this is a simple toggle — context-mode
+/// is a local FTS5 store with no host topology, so there is nothing to tag-scope.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct ContextMode {
+    /// Whether the built-in context-mode plugin is wired up.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// llmenv's memory backend topology. One host (`server_host`) runs the daemon
@@ -892,5 +909,26 @@ mod tests {
             let back: StateConfig = serde_yaml::from_str(&yaml).expect("deserialize StateConfig");
             prop_assert_eq!(cfg, back);
         }
+    }
+
+    #[test]
+    fn context_mode_parses_enabled() {
+        let yaml = "features:\n  context_mode:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let cm = cfg.features.unwrap().context_mode.unwrap();
+        assert!(cm.enabled);
+    }
+
+    #[test]
+    fn context_mode_absent_is_none() {
+        let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
+        assert!(cfg.features.unwrap().context_mode.is_none());
+    }
+
+    #[test]
+    fn context_mode_default_disabled() {
+        let yaml = "features:\n  context_mode: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.features.unwrap().context_mode.unwrap().enabled);
     }
 }

@@ -117,7 +117,11 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let features = if memory.is_empty() && throttle.is_empty() {
         None
     } else {
-        Some(Features { memory, throttle })
+        Some(Features {
+            memory,
+            throttle,
+            context_mode: None,
+        })
     };
 
     Ok(Capabilities {
@@ -1188,6 +1192,7 @@ mod tests {
                         default_topics: vec![],
                     }],
                     throttle: vec![],
+                    context_mode: None,
                 }),
                 ..Default::default()
             }
@@ -1214,6 +1219,7 @@ mod tests {
                         default_topics: vec![],
                     }],
                     throttle: vec![],
+                    context_mode: None,
                 }),
                 ..Default::default()
             }
