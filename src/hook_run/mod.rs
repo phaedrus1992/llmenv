@@ -122,6 +122,14 @@ const HOOK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// An engine-neutral lifecycle event. Adapters translate these to native hook
 /// names when wiring them into agent config.
+///
+/// `SessionStart`/`TurnStart`/`SessionEnd` drive ICM memory recall/store (see
+/// `dispatch`) and the baseline session log (see `handle_session_log`). The
+/// rest exist purely for `session_log.verbose` capture (see
+/// `event_to_log_kind`); they carry no memory actions of their own — Claude's
+/// `UserPromptSubmit` native hook fires both `TurnStart` (memory recall) and
+/// `UserPromptSubmit` (verbose prompt capture) as two separate handlers on the
+/// same event (see adapter wiring, #382 Task 13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
     /// Session begins (Claude Code: `SessionStart`).
@@ -130,6 +138,20 @@ pub enum HookEvent {
     TurnStart,
     /// Session ends (Claude Code: `SessionEnd`).
     SessionEnd,
+    /// Verbose: the raw prompt submission (Claude Code: `UserPromptSubmit`).
+    UserPromptSubmit,
+    /// Verbose: before a tool call (Claude Code: `PreToolUse`).
+    PreToolUse,
+    /// Verbose: after a tool call (Claude Code: `PostToolUse`).
+    PostToolUse,
+    /// Verbose: a UI notification fired (Claude Code: `Notification`).
+    Notification,
+    /// Verbose: the main agent finished responding (Claude Code: `Stop`).
+    Stop,
+    /// Verbose: a subagent finished responding (Claude Code: `SubagentStop`).
+    SubagentStop,
+    /// Verbose: about to compact the transcript (Claude Code: `PreCompact`).
+    PreCompact,
 }
 
 impl FromStr for HookEvent {
@@ -139,8 +161,17 @@ impl FromStr for HookEvent {
             "session_start" => Ok(HookEvent::SessionStart),
             "turn_start" => Ok(HookEvent::TurnStart),
             "session_end" => Ok(HookEvent::SessionEnd),
+            "user_prompt_submit" => Ok(HookEvent::UserPromptSubmit),
+            "pre_tool_use" => Ok(HookEvent::PreToolUse),
+            "post_tool_use" => Ok(HookEvent::PostToolUse),
+            "notification" => Ok(HookEvent::Notification),
+            "stop" => Ok(HookEvent::Stop),
+            "subagent_stop" => Ok(HookEvent::SubagentStop),
+            "pre_compact" => Ok(HookEvent::PreCompact),
             other => Err(anyhow::anyhow!(
-                "unknown hook event '{other}' (expected session_start|turn_start|session_end)"
+                "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
+                 user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
+                 subagent_stop|pre_compact)"
             )),
         }
     }
@@ -152,6 +183,13 @@ impl std::fmt::Display for HookEvent {
             HookEvent::SessionStart => "session_start",
             HookEvent::TurnStart => "turn_start",
             HookEvent::SessionEnd => "session_end",
+            HookEvent::UserPromptSubmit => "user_prompt_submit",
+            HookEvent::PreToolUse => "pre_tool_use",
+            HookEvent::PostToolUse => "post_tool_use",
+            HookEvent::Notification => "notification",
+            HookEvent::Stop => "stop",
+            HookEvent::SubagentStop => "subagent_stop",
+            HookEvent::PreCompact => "pre_compact",
         };
         f.write_str(s)
     }
@@ -163,7 +201,8 @@ impl std::fmt::Display for HookEvent {
 ///
 /// `TurnStart` runs the project-scoped natural-language `Recall` first, then one
 /// project-unfiltered `RecallTag` per active tag (#197), then one
-/// project-unfiltered `RecallBundle` per active bundle (#228).
+/// project-unfiltered `RecallBundle` per active bundle (#228). The verbose-only
+/// events carry no memory actions.
 fn dispatch(
     event: HookEvent,
     tag_queries: &[TagRecallQuery],
@@ -178,6 +217,67 @@ fn dispatch(
             actions
         }
         HookEvent::SessionEnd => vec![Action::Store],
+        HookEvent::UserPromptSubmit
+        | HookEvent::PreToolUse
+        | HookEvent::PostToolUse
+        | HookEvent::Notification
+        | HookEvent::Stop
+        | HookEvent::SubagentStop
+        | HookEvent::PreCompact => vec![],
+    }
+}
+
+/// Maps a verbose `HookEvent` to its session-log `(kind, role)`. `None` for
+/// the lifecycle/memory events (`SessionStart`/`TurnStart`/`SessionEnd`),
+/// which `handle_session_log` handles separately.
+fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
+    match event {
+        HookEvent::UserPromptSubmit => Some((EventKind::Prompt, "user")),
+        HookEvent::PreToolUse => Some((EventKind::ToolUse, "tool")),
+        HookEvent::PostToolUse => Some((EventKind::ToolResult, "tool")),
+        HookEvent::Notification => Some((EventKind::Notification, "system")),
+        HookEvent::Stop | HookEvent::SubagentStop => Some((EventKind::Stop, "assistant")),
+        HookEvent::PreCompact => Some((EventKind::Notification, "system")),
+        HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => None,
+    }
+}
+
+/// Extract `(tool_name, content)` for a verbose event from Claude's hook
+/// stdin payload. Field names per the Claude Code hooks reference: prompt
+/// text on `UserPromptSubmit` is `prompt`; tool calls carry `tool_name` +
+/// `tool_input` (`PreToolUse`) or `tool_input` + `tool_response`
+/// (`PostToolUse`); `Notification` carries `message`; `Stop`/`SubagentStop`
+/// carry `last_assistant_message`; `PreCompact` carries `trigger`.
+fn verbose_content(event: HookEvent, payload: &serde_json::Value) -> (Option<String>, String) {
+    // String-typed fields (prompt text, messages): "" when absent/non-string.
+    let as_str_field =
+        |v: &serde_json::Value| -> String { v.as_str().map(str::to_owned).unwrap_or_default() };
+    // Object-typed fields (tool input/response): compact JSON, "" when absent.
+    let as_json_text = |v: &serde_json::Value| -> String {
+        if v.is_null() {
+            String::new()
+        } else {
+            v.to_string()
+        }
+    };
+    match event {
+        HookEvent::UserPromptSubmit => (None, as_str_field(&payload["prompt"])),
+        HookEvent::PreToolUse => (
+            payload["tool_name"].as_str().map(str::to_owned),
+            as_json_text(&payload["tool_input"]),
+        ),
+        HookEvent::PostToolUse => (
+            payload["tool_name"].as_str().map(str::to_owned),
+            as_json_text(&payload["tool_response"]),
+        ),
+        HookEvent::Notification => (None, as_str_field(&payload["message"])),
+        HookEvent::Stop | HookEvent::SubagentStop => {
+            (None, as_str_field(&payload["last_assistant_message"]))
+        }
+        HookEvent::PreCompact => (None, as_str_field(&payload["trigger"])),
+        HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => {
+            (None, String::new())
+        }
     }
 }
 
@@ -206,7 +306,9 @@ pub fn run(event: &str) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    match run_inner(parsed, claude_session_id.as_deref()) {
+    let null_payload = serde_json::Value::Null;
+    let payload = stdin_json.as_ref().unwrap_or(&null_payload);
+    match run_inner(parsed, claude_session_id.as_deref(), payload) {
         Ok(text) => {
             let out = ClaudeCodeAdapter.emit_hook_context(&hook_event_name, &text);
             if !out.is_empty()
@@ -229,7 +331,11 @@ pub fn run(event: &str) -> anyhow::Result<()> {
 /// The memory backend (recall/store) and session logging are independent: a
 /// missing/unreachable memory MCP skips memory actions but must not prevent
 /// the file-sink session log from being written (see `handle_session_log`).
-fn run_inner(event: HookEvent, claude_session_id: Option<&str>) -> anyhow::Result<String> {
+fn run_inner(
+    event: HookEvent,
+    claude_session_id: Option<&str>,
+    stdin_payload: &serde_json::Value,
+) -> anyhow::Result<String> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
@@ -304,6 +410,29 @@ fn run_inner(event: HookEvent, claude_session_id: Option<&str>) -> anyhow::Resul
                 state_path.as_deref(),
             )
             .await;
+        } else if log_cfg.verbose
+            && let Some((kind, role)) = event_to_log_kind(event)
+        {
+            let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd);
+            let session_id = match claude_session_id {
+                Some(csid) => {
+                    ensure_transcript_session(
+                        &log_cfg,
+                        client.as_ref(),
+                        csid,
+                        &ctx,
+                        state_path.as_deref(),
+                    )
+                    .await
+                }
+                None => None,
+            };
+            let (tool_name, content) = verbose_content(event, stdin_payload);
+            emit_session_log(
+                verbose_session_event(kind, role, tool_name, content),
+                &log_cfg,
+                session_id.as_deref(),
+            );
         }
         Ok::<String, anyhow::Error>(out)
     })
@@ -469,6 +598,27 @@ fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
     }
 }
 
+/// Build a verbose-capture event (`session_log.verbose`) from a Claude hook
+/// payload, as extracted by `verbose_content`.
+fn verbose_session_event(
+    kind: EventKind,
+    role: &str,
+    tool_name: Option<String>,
+    content: String,
+) -> SessionLogEvent {
+    SessionLogEvent {
+        ts: now_rfc3339(),
+        kind,
+        scope: EventScope::AgentSession,
+        role: role.to_string(),
+        tool_name,
+        tokens: None,
+        level: None,
+        content,
+        fields: serde_json::json!({}),
+    }
+}
+
 /// Find the resolved memory backend's HTTP URL for the active tags, if any.
 ///
 /// Mirrors the `build_manifest` merge strategy: top-level config memory is
@@ -620,6 +770,169 @@ mod tests {
     #[test]
     fn rejects_unknown_event() {
         assert!("nope".parse::<HookEvent>().is_err());
+    }
+
+    #[test]
+    fn parses_verbose_event_names() {
+        assert_eq!(
+            "user_prompt_submit".parse::<HookEvent>().unwrap(),
+            HookEvent::UserPromptSubmit
+        );
+        assert_eq!(
+            "pre_tool_use".parse::<HookEvent>().unwrap(),
+            HookEvent::PreToolUse
+        );
+        assert_eq!(
+            "post_tool_use".parse::<HookEvent>().unwrap(),
+            HookEvent::PostToolUse
+        );
+        assert_eq!(
+            "notification".parse::<HookEvent>().unwrap(),
+            HookEvent::Notification
+        );
+        assert_eq!("stop".parse::<HookEvent>().unwrap(), HookEvent::Stop);
+        assert_eq!(
+            "subagent_stop".parse::<HookEvent>().unwrap(),
+            HookEvent::SubagentStop
+        );
+        assert_eq!(
+            "pre_compact".parse::<HookEvent>().unwrap(),
+            HookEvent::PreCompact
+        );
+    }
+
+    #[test]
+    fn verbose_event_display_round_trips_through_from_str() {
+        for ev in [
+            HookEvent::SessionStart,
+            HookEvent::TurnStart,
+            HookEvent::SessionEnd,
+            HookEvent::UserPromptSubmit,
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::Notification,
+            HookEvent::Stop,
+            HookEvent::SubagentStop,
+            HookEvent::PreCompact,
+        ] {
+            assert_eq!(ev.to_string().parse::<HookEvent>().unwrap(), ev);
+        }
+    }
+
+    #[test]
+    fn verbose_events_map_to_log_kinds() {
+        assert_eq!(
+            event_to_log_kind(HookEvent::UserPromptSubmit).unwrap(),
+            (EventKind::Prompt, "user")
+        );
+        assert_eq!(
+            event_to_log_kind(HookEvent::PreToolUse).unwrap(),
+            (EventKind::ToolUse, "tool")
+        );
+        assert_eq!(
+            event_to_log_kind(HookEvent::PostToolUse).unwrap(),
+            (EventKind::ToolResult, "tool")
+        );
+        assert_eq!(
+            event_to_log_kind(HookEvent::Notification).unwrap(),
+            (EventKind::Notification, "system")
+        );
+        assert_eq!(
+            event_to_log_kind(HookEvent::Stop).unwrap(),
+            (EventKind::Stop, "assistant")
+        );
+        assert_eq!(
+            event_to_log_kind(HookEvent::SubagentStop).unwrap(),
+            (EventKind::Stop, "assistant")
+        );
+        assert_eq!(
+            event_to_log_kind(HookEvent::PreCompact).unwrap(),
+            (EventKind::Notification, "system")
+        );
+    }
+
+    #[test]
+    fn lifecycle_and_memory_events_have_no_log_kind() {
+        assert_eq!(event_to_log_kind(HookEvent::SessionStart), None);
+        assert_eq!(event_to_log_kind(HookEvent::TurnStart), None);
+        assert_eq!(event_to_log_kind(HookEvent::SessionEnd), None);
+    }
+
+    #[test]
+    fn dispatch_emits_no_memory_actions_for_verbose_events() {
+        for ev in [
+            HookEvent::UserPromptSubmit,
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::Notification,
+            HookEvent::Stop,
+            HookEvent::SubagentStop,
+            HookEvent::PreCompact,
+        ] {
+            assert_eq!(dispatch(ev, &[], &[]), Vec::<Action>::new());
+        }
+    }
+
+    #[test]
+    fn verbose_content_extracts_prompt_text() {
+        let payload = serde_json::json!({"prompt": "fix the bug"});
+        let (tool_name, content) = verbose_content(HookEvent::UserPromptSubmit, &payload);
+        assert_eq!(tool_name, None);
+        assert_eq!(content, "fix the bug");
+    }
+
+    #[test]
+    fn verbose_content_extracts_pre_tool_use_name_and_input() {
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        });
+        let (tool_name, content) = verbose_content(HookEvent::PreToolUse, &payload);
+        assert_eq!(tool_name.as_deref(), Some("Bash"));
+        assert!(content.contains("\"command\":\"ls\""));
+    }
+
+    #[test]
+    fn verbose_content_extracts_post_tool_use_response() {
+        let payload = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x"},
+            "tool_response": {"filePath": "/tmp/x"},
+        });
+        let (tool_name, content) = verbose_content(HookEvent::PostToolUse, &payload);
+        assert_eq!(tool_name.as_deref(), Some("Write"));
+        assert!(content.contains("filePath"));
+    }
+
+    #[test]
+    fn verbose_content_extracts_notification_message() {
+        let payload = serde_json::json!({"message": "needs your attention"});
+        let (_, content) = verbose_content(HookEvent::Notification, &payload);
+        assert_eq!(content, "needs your attention");
+    }
+
+    #[test]
+    fn verbose_content_extracts_stop_last_assistant_message() {
+        let payload = serde_json::json!({"last_assistant_message": "done"});
+        let (_, content) = verbose_content(HookEvent::Stop, &payload);
+        assert_eq!(content, "done");
+        let (_, content) = verbose_content(HookEvent::SubagentStop, &payload);
+        assert_eq!(content, "done");
+    }
+
+    #[test]
+    fn verbose_content_extracts_pre_compact_trigger() {
+        let payload = serde_json::json!({"trigger": "manual", "custom_instructions": ""});
+        let (_, content) = verbose_content(HookEvent::PreCompact, &payload);
+        assert_eq!(content, "manual");
+    }
+
+    #[test]
+    fn verbose_content_is_empty_for_missing_fields() {
+        let (tool_name, content) =
+            verbose_content(HookEvent::UserPromptSubmit, &serde_json::Value::Null);
+        assert_eq!(tool_name, None);
+        assert_eq!(content, "");
     }
 
     #[test]
