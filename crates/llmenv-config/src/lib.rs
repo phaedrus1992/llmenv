@@ -34,6 +34,14 @@ use anyhow::Context;
 use std::path::Path;
 
 impl Config {
+    /// Returns `true` when `features.context_mode.enabled` is set.
+    pub fn context_mode_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.context_mode.as_ref())
+            .is_some_and(|c| c.enabled)
+    }
+
     /// Load and validate a config from an **already-expanded** path.
     ///
     /// `load` does not perform tilde (`~`) expansion — the caller is

@@ -872,12 +872,10 @@ fn build_and_materialize(
     // create the dirs so tools find them on first run.
     // When context-mode is enabled (#490) inject CONTEXT_MODE_DATA_DIR as a
     // synthetic StateTool so the store lands in the durable dir automatically.
-    let cm_enabled = config
-        .features
-        .as_ref()
-        .and_then(|f| f.context_mode.as_ref())
-        .is_some_and(|c| c.enabled);
-    let state_cfg = crate::materialize::state::effective_state_config(&config.state, cm_enabled);
+    let state_cfg = crate::materialize::state::effective_state_config(
+        &config.state,
+        config.context_mode_enabled(),
+    );
     let state_dir = crate::materialize::state::state_dir(&adapter_root);
     crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
         .context("creating durable state directories")?;
@@ -2239,11 +2237,7 @@ fn run_plugin_sync() -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
     let cache_root = expand_tilde(&config.cache.cache_dir)?;
 
-    let context_mode_enabled = config
-        .features
-        .as_ref()
-        .and_then(|f| f.context_mode.as_ref())
-        .is_some_and(|cm| cm.enabled);
+    let context_mode_enabled = config.context_mode_enabled();
 
     if config.marketplace.is_empty() && !context_mode_enabled {
         eprintln!("No marketplaces configured.");

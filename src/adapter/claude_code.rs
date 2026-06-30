@@ -2237,7 +2237,7 @@ mod tests {
             "permissions": { "allow": [], "ask": [], "deny": [] }
         });
 
-        let merged = reconcile_settings(&path, fresh).unwrap();
+        let merged = reconcile_settings(&path, fresh).expect("reconcile_settings should succeed");
         let ss = merged["hooks"]["SessionStart"].as_array().unwrap();
         let commands: Vec<&str> = ss
             .iter()

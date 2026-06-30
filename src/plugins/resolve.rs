@@ -539,6 +539,19 @@ mod tests {
             })
         }
 
+        fn arb_config_tags_cm() -> impl Strategy<Value = (Config, BTreeSet<String>, bool)> {
+            (arb_config_and_tags(), proptest::bool::ANY).prop_map(
+                |((mut cfg, active), cm_enabled)| {
+                    if cm_enabled {
+                        use crate::config::{ContextMode, Features};
+                        let features = cfg.features.get_or_insert_with(Features::default);
+                        features.context_mode = Some(ContextMode { enabled: true });
+                    }
+                    (cfg, active, cm_enabled)
+                },
+            )
+        }
+
         proptest! {
             // Every resolved plugin comes from a collection whose tags intersect
             // the active set.
@@ -558,6 +571,19 @@ mod tests {
             // No duplicate (marketplace, plugin) pairs in the output.
             #[test]
             fn output_has_no_duplicate_plugins((cfg, active) in arb_config_and_tags()) {
+                let resolved = resolve_plugins(&cfg, &active).expect("resolve");
+                let mut seen = HashSet::new();
+                for p in &resolved.plugins {
+                    prop_assert!(seen.insert((p.marketplace.clone(), p.plugin.clone())));
+                }
+            }
+
+            // Injection branch: no duplicate (marketplace, plugin) pairs even when
+            // context-mode is enabled and the built-in is injected automatically.
+            #[test]
+            fn no_duplicate_plugins_with_cm_injection(
+                (cfg, active, _cm) in arb_config_tags_cm()
+            ) {
                 let resolved = resolve_plugins(&cfg, &active).expect("resolve");
                 let mut seen = HashSet::new();
                 for p in &resolved.plugins {
