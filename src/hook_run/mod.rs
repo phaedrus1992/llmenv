@@ -337,7 +337,8 @@ fn build_scope_context(
 /// reuses the correlated transcript session, then emits `lifecycle_start` and
 /// the scope-header `scope` event; `SessionEnd` emits `lifecycle_end` against
 /// the previously-correlated session. No-op when both sinks are disabled, or
-/// for any event other than session start/end. Fully fail-soft.
+/// for any event other than session start/end. Fully fail-soft. Returns the
+/// transcript session id this call resolved/used, if any (mainly for tests).
 async fn handle_session_log(
     event: HookEvent,
     cfg: &SessionLog,
@@ -345,9 +346,9 @@ async fn handle_session_log(
     claude_session_id: Option<&str>,
     ctx: &ScopeContext,
     state_path: Option<&std::path::Path>,
-) {
+) -> Option<String> {
     if !(cfg.file || cfg.transcript) {
-        return;
+        return None;
     }
     let session_id = match (event, claude_session_id) {
         (HookEvent::SessionStart, Some(csid)) => {
@@ -361,18 +362,17 @@ async fn handle_session_log(
         HookEvent::SessionEnd => Some(EventKind::LifecycleEnd),
         _ => None,
     }) else {
-        return;
+        return session_id;
     };
     emit_session_log(
         lifecycle_session_event(lifecycle_kind, &event.to_string()),
         cfg,
-        client,
         session_id.as_deref(),
-    )
-    .await;
+    );
     if event == HookEvent::SessionStart {
-        emit_session_log(scope_session_event(ctx), cfg, client, session_id.as_deref()).await;
+        emit_session_log(scope_session_event(ctx), cfg, session_id.as_deref());
     }
+    session_id
 }
 
 /// Reuse a previously-recorded transcript session for `csid`, or — when
@@ -415,15 +415,12 @@ async fn ensure_transcript_session(
     }
 }
 
-/// Append `ev` to the configured sinks: the JSONL file (if `cfg.file`) and,
-/// for agent-session-scoped events, the ICM transcript (if `cfg.transcript`, a
-/// client is available, and a transcript session id is known). Fail-soft.
-async fn emit_session_log(
-    ev: SessionLogEvent,
-    cfg: &SessionLog,
-    client: Option<&McpHttpClient>,
-    session_id: Option<&str>,
-) {
+/// Append `ev` to the configured sinks: the JSONL file (if `cfg.file`,
+/// written synchronously) and, for agent-session-scoped events, the ICM
+/// transcript (if `cfg.transcript` and a transcript session id is known —
+/// dispatched via a detached child, see `session_log::detached`, so this
+/// never blocks on the network). Fail-soft.
+fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id: Option<&str>) {
     let max = cfg.max_content_bytes.unwrap_or(16_384);
     let ev = ev.truncated(max);
     if cfg.file {
@@ -438,10 +435,9 @@ async fn emit_session_log(
     }
     if cfg.transcript
         && ev.scope == EventScope::AgentSession
-        && let (Some(client), Some(sid)) = (client, session_id)
-        && let Err(e) = transcript_dispatch::record(client, sid, &ev).await
+        && let Some(sid) = session_id
     {
-        warn!(error = %e, "failed to record session-log transcript event");
+        crate::session_log::detached::spawn_record(sid, &ev);
     }
 }
 
@@ -478,7 +474,11 @@ fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
 /// Mirrors the `build_manifest` merge strategy: top-level config memory is
 /// combined with bundle-contributed memory entries so a daemon declared only
 /// in a `bundle.yaml` is reachable from lifecycle hooks.
-fn memory_url(
+///
+/// `pub(crate)`: also called by `session_log::detached::run_record`, the
+/// detached transcript-record child, which re-resolves the same MCP endpoint
+/// independently rather than receiving it as a (process-list-visible) CLI arg.
+pub(crate) fn memory_url(
     config: &crate::config::Config,
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
@@ -905,13 +905,18 @@ mod session_log_tests {
             "result":{"content":[{"type":"text","text":text}]}})
     }
 
+    // These two test `ensure_transcript_session` directly rather than through
+    // `handle_session_log`/`emit_session_log`: since T11, the transcript
+    // *record* path dispatches via a detached child process
+    // (`session_log::detached::spawn_record`), which a unit test must not
+    // trigger (the test binary is not the `llmenv` binary `spawn_record`
+    // expects to re-invoke). `start_session` stays synchronous/inline
+    // (`ensure_transcript_session`), so it remains directly unit-testable.
+
     #[tokio::test]
-    async fn session_start_with_transcript_creates_and_correlates_session() {
+    async fn ensure_transcript_session_creates_and_correlates_when_none_recorded() {
         let state_dir = tempfile::tempdir().unwrap();
         let state_path = state_dir.path().join("transcript-sessions.json");
-
-        let log_dir = tempfile::tempdir().unwrap();
-        let path = log_dir.path().join("session-log.jsonl");
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(
@@ -922,55 +927,69 @@ mod session_log_tests {
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let cfg = SessionLog {
             transcript: true,
-            ..file_only_cfg(&path)
+            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
 
-        handle_session_log(
-            HookEvent::SessionStart,
-            &cfg,
-            Some(&client),
-            Some("claude-1"),
-            &ctx(),
-            Some(&state_path),
-        )
-        .await;
+        let id =
+            ensure_transcript_session(&cfg, Some(&client), "claude-1", &ctx(), Some(&state_path))
+                .await;
 
+        assert_eq!(id.as_deref(), Some("icm-sess-1"));
         assert_eq!(
             state::lookup_session_at(&state_path, "claude-1").as_deref(),
             Some("icm-sess-1")
         );
-        assert_eq!(jsonl_lines(&path).len(), 2);
     }
 
     #[tokio::test]
-    async fn session_end_reuses_correlated_session_without_starting_a_new_one() {
+    async fn ensure_transcript_session_reuses_existing_without_calling_start_session() {
         let state_dir = tempfile::tempdir().unwrap();
         let state_path = state_dir.path().join("transcript-sessions.json");
         state::record_session_at(&state_path, "claude-2", "icm-sess-2").unwrap();
-
-        let log_dir = tempfile::tempdir().unwrap();
-        let path = log_dir.path().join("session-log.jsonl");
+        // No mock mounted: a `start_session` call here would 404 and the
+        // function would have to handle/propagate that, which the assertion
+        // below would catch via a mismatched id.
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("ok")))
-            .mount(&server)
-            .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let cfg = SessionLog {
             transcript: true,
-            ..file_only_cfg(&path)
+            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
 
-        handle_session_log(
+        let id =
+            ensure_transcript_session(&cfg, Some(&client), "claude-2", &ctx(), Some(&state_path))
+                .await;
+
+        assert_eq!(id.as_deref(), Some("icm-sess-2"));
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "reusing a correlated session must not call start_session"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_session_log_session_end_reuses_correlated_session_id() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+        state::record_session_at(&state_path, "claude-3", "icm-sess-3").unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+        let path = log_dir.path().join("session-log.jsonl");
+        // transcript: false here only to avoid the detached-spawn side effect
+        // in emit_session_log; the lookup itself (asserted via the return
+        // value) doesn't depend on cfg.transcript.
+        let cfg = file_only_cfg(&path);
+
+        let id = handle_session_log(
             HookEvent::SessionEnd,
             &cfg,
-            Some(&client),
-            Some("claude-2"),
+            None,
+            Some("claude-3"),
             &ctx(),
             Some(&state_path),
         )
         .await;
 
+        assert_eq!(id.as_deref(), Some("icm-sess-3"));
         let lines = jsonl_lines(&path);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["kind"], "lifecycle_end");

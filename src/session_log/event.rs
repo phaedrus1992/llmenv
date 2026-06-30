@@ -1,11 +1,11 @@
 //! The single event type session logging produces, and how it renders to a
 //! JSONL line. The transcript-record mapping lives in `transcript.rs`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Whether an event belongs to a correlated agent transcript session or is a
 /// process-level llmenv diagnostic (no session to attach to).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventScope {
     /// Part of a correlated agent session (created in the SessionStart hook).
@@ -15,7 +15,7 @@ pub enum EventScope {
 }
 
 /// The kind of session event. Drives transcript `role`/`kind` labelling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     LifecycleStart,
@@ -31,7 +31,9 @@ pub enum EventKind {
 
 /// One session-logging event. Both sinks consume this; the file sink writes
 /// `to_jsonl`, the transcript sink maps it via `transcript::record_args`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Also round-trips through JSON when a hook process hands an event off to
+/// the detached transcript-record child (`session_log::detached`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionLogEvent {
     /// RFC 3339 timestamp.
     pub ts: String,

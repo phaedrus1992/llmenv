@@ -244,6 +244,18 @@ enum Command {
         /// Lifecycle event: session_start, turn_start, or session_end
         event: String,
     },
+    /// Record one session-log event into an ICM transcript session.
+    ///
+    /// Internal plumbing: this is the detached-child entrypoint
+    /// `session_log::detached::spawn_record` launches so a hook process can
+    /// return immediately instead of blocking on the transcript MCP call. Not
+    /// meant to be invoked directly. Reads the event JSON from stdin.
+    #[command(name = "session-log-record", hide = true)]
+    SessionLogRecord {
+        /// The ICM transcript session id to record into.
+        #[arg(long)]
+        session: String,
+    },
     /// Manage auth credentials for materialized folders (#172)
     Login {
         /// Apply to the global auth cache (all future materializations) rather
@@ -368,6 +380,12 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::HookRun { event }) => {
             crate::hook_run::run(&event)?;
+        }
+        Some(Command::SessionLogRecord { session }) => {
+            use std::io::Read;
+            let mut event_json = String::new();
+            std::io::stdin().read_to_string(&mut event_json)?;
+            crate::session_log::detached::run_record(&session, &event_json)?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
