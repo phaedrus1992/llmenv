@@ -759,7 +759,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         out
     };
 
-    let allow = render_action(
+    let mut allow = render_action(
         &perms.allow,
         native.map_or(&[], |n| &n.allow),
         PermissionAction::Allow,
@@ -769,50 +769,19 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         native.map_or(&[], |n| &n.ask),
         PermissionAction::Ask,
     );
-    let mut deny = render_action(
+    let deny = render_action(
         &perms.deny,
         native.map_or(&[], |n| &n.deny),
         PermissionAction::Deny,
     );
 
-    // #464: Wire LLMENV_BASH_BAN env var into tool dispatch path to reject banned bash commands.
-    // ponytail: simple prefix-based ban; enhance to support full regex patterns if needed.
-    match std::env::var("LLMENV_BASH_BAN") {
-        Ok(banned_patterns) => {
-            for pattern in banned_patterns.split(',') {
-                let pattern = pattern.trim();
-                if !pattern.is_empty() {
-                    // Validate pattern contains only safe characters for the Tool(pattern) grammar.
-                    if pattern
-                        .chars()
-                        .any(|c| matches!(c, ')' | '(' | '\n' | '\r'))
-                    {
-                        tracing::warn!(
-                            "LLMENV_BASH_BAN pattern {:?} contains unsafe characters, skipping",
-                            pattern
-                        );
-                        continue;
-                    }
-                    deny.push(format!("Bash({}*)", pattern));
-                }
-            }
-            if !deny.is_empty() {
-                tracing::debug!(
-                    "LLMENV_BASH_BAN: added {} deny rule(s) to adapter config",
-                    deny.len()
-                );
-            }
-            dedup(&mut deny);
-        }
-        Err(std::env::VarError::NotPresent) => {
-            // Expected: feature is opt-in via LLMENV_BASH_BAN env var.
-        }
-        Err(std::env::VarError::NotUnicode(_)) => {
-            tracing::warn!(
-                "LLMENV_BASH_BAN contains non-UTF-8 bytes and will not be applied; \
-                 ensure the env var contains only valid UTF-8"
-            );
-        }
+    // #490: Grant wildcard MCP permission for the context-mode built-in plugin.
+    if manifest.plugins.iter().any(|p| {
+        p.marketplace == crate::config::CONTEXT_MODE_MARKETPLACE
+            && p.plugin == crate::config::CONTEXT_MODE_PLUGIN
+    }) {
+        allow.push(format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX));
+        dedup(&mut allow);
     }
 
     let has_perms =
@@ -1258,8 +1227,8 @@ enum PermissionAction {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        CLAUDE_JSON_FILE, MODELED_SETTINGS_KEYS, classify_claude_path, is_hook_json,
-        merge_mcp_into_claude_json, overlay_native, reconcile_settings,
+        CLAUDE_JSON_FILE, MODELED_SETTINGS_KEYS, classify_claude_path, generate_settings_json,
+        is_hook_json, merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
         render_permission_rule, seed_install_method, validate_skills,
     };
@@ -1705,6 +1674,60 @@ mod tests {
                 }
             });
         prop_oneof![stdio, remote]
+    }
+
+    // ---- generate_settings_json: permission render ----
+
+    fn render_settings_for_test(manifest: &crate::merge::MergedManifest) -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        // generate_settings_json takes a directory and writes settings.json inside it.
+        generate_settings_json(tmp.path(), manifest).unwrap();
+        let bytes = std::fs::read(tmp.path().join("settings.json")).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn context_mode_plugin_grants_mcp_permission() {
+        // #490: context-mode plugin in manifest → permissions.allow must contain
+        // the wildcard for its MCP server.
+        let manifest = crate::merge::MergedManifest {
+            plugins: vec![crate::plugins::resolve::ResolvedPlugin {
+                marketplace: crate::config::CONTEXT_MODE_MARKETPLACE.into(),
+                plugin: crate::config::CONTEXT_MODE_PLUGIN.into(),
+                collection: "context_mode (built-in)".into(),
+                install_path: None,
+                git_commit_sha: None,
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let expected = format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX);
+        assert!(
+            allow.iter().any(|v| v == &expected),
+            "expected {expected:?} in allow, got {allow:?}"
+        );
+    }
+
+    #[test]
+    fn bash_ban_env_no_longer_adds_deny_rules() {
+        // Regression guard (#490 / #464): LLMENV_BASH_BAN wiring was removed; a
+        // default manifest with no deny config must produce no Bash deny rules.
+        // (Can't set the env var in tests — unsafe_code is forbidden project-wide.)
+        let manifest = crate::merge::MergedManifest::default();
+        let settings = render_settings_for_test(&manifest);
+        let deny = settings
+            .get("permissions")
+            .and_then(|p| p.get("deny"))
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !deny
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s.starts_with("Bash("))),
+            "no Bash deny rules expected from empty manifest; got {deny:?}"
+        );
     }
 
     // ---- reconcile_settings (#196 / #175): settings.json is shared, not owned ----
