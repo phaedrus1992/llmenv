@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `CONTEXT_MODE_DATA_DIR`, and MCP permission) — the token-efficiency counterpart
   to the built-in ICM memory feature. Warns when the plugin is also declared manually
   in a plugin-collection. (#490)
+- ICM-transcript session logging: llmenv records scope + lifecycle (and, with
+  `session_log.verbose`, prompts and tool use) into ICM's transcript store via
+  the ICM MCP, discoverable by `llmenv-tag:` / `llmenv-bundle:` tokens and
+  project. A local JSONL `file` sink mirrors the same stream, independent of
+  ICM reachability. (#382)
+- The Claude Code adapter now auto-registers `SessionStart`/`SessionEnd` hooks
+  running `llmenv hook-run`, fixing a gap where the ICM memory wake-up/store
+  dispatcher existed but was never wired into generated `settings.json` —
+  memory wake-up/store now actually fires. Continuous per-prompt recall
+  (`turn_start`) is still unwired; tracked in #499. (#382)
+
+### Changed
+
+- **BREAKING:** `session_log` is now a mapping (`{ file, transcript, verbose,
+  path, max_content_bytes }`), not a path string. ICM transcript logging is on
+  by default. The pre-3.0 `session_log: "<path>"` form is rejected with a
+  migration hint. (#382)
 
 ### Removed
 
