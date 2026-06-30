@@ -274,6 +274,16 @@ fn configure_detached(cmd: &mut Command) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    detach_process_group(cmd);
+}
+
+/// Joins `cmd`'s child to a new process group (Unix) so foreground job-control
+/// signals (^C) don't reach it; see `configure_detached`'s doc comment above
+/// for the full terminal-isolation rationale. Split out so callers that need
+/// different stdio wiring than `configure_detached`'s null-everything default
+/// (e.g. `session_log::detached`, which pipes a JSON payload over stdin) can
+/// still share the process-group isolation.
+pub(crate) fn detach_process_group(cmd: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -282,8 +292,9 @@ fn configure_detached(cmd: &mut Command) {
     }
     #[cfg(not(unix))]
     {
-        // No process-group API in std on non-Unix; only the stdio redirect
-        // above applies. Process-group isolation is unavailable here.
+        // No process-group API in std on non-Unix; only the caller's own
+        // stdio redirect applies. Process-group isolation is unavailable here.
+        let _ = cmd;
     }
 }
 

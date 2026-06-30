@@ -244,6 +244,16 @@ enum Command {
         /// Lifecycle event: session_start, turn_start, or session_end
         event: String,
     },
+    /// Record one session-log event into an ICM transcript session.
+    ///
+    /// Internal plumbing: this is the detached-child entrypoint
+    /// `session_log::detached::spawn_record` launches so a hook process can
+    /// return immediately instead of blocking on the transcript MCP call. Not
+    /// meant to be invoked directly. Reads the `{session_id, event}` JSON
+    /// payload from stdin (the session id travels in the payload rather than
+    /// as a CLI argument so it isn't visible in the process table).
+    #[command(name = "session-log-record", hide = true)]
+    SessionLogRecord,
     /// Manage auth credentials for materialized folders (#172)
     Login {
         /// Apply to the global auth cache (all future materializations) rather
@@ -368,6 +378,12 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::HookRun { event }) => {
             crate::hook_run::run(&event)?;
+        }
+        Some(Command::SessionLogRecord) => {
+            use std::io::Read;
+            let mut payload_json = String::new();
+            std::io::stdin().read_to_string(&mut payload_json)?;
+            crate::session_log::detached::run_record(&payload_json)?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
@@ -1072,6 +1088,8 @@ fn build_manifest(
     crate::util::dedup(&mut all_throttle);
     manifest.throttle = crate::throttle::resolve_active_throttle(&all_throttle, &active.tags)
         .context("resolving throttle config")?;
+
+    manifest.session_log = config.session_log_resolved();
 
     Ok(Some((manifest, cache_root)))
 }

@@ -93,11 +93,80 @@ pub struct Config {
     /// new materialized folders' `settings.json`, surviving every re-render.
     #[serde(default)]
     pub init: InitConfig,
-    /// Path to a `.jsonl` file for session logging. When set, llmenv appends one
-    /// JSON object per tracing event. Tilde-expanded at startup. Disabled by
-    /// default (`None` = no file written).
+    /// Session logging configuration. Absent → ICM transcript on, file + verbose
+    /// off (see `Config::session_log_resolved`). Was a bare path string before
+    /// 3.0; that form is now rejected with a migration hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_log: Option<String>,
+    pub session_log: Option<SessionLog>,
+}
+
+/// Where and how llmenv records session activity. `file` and `transcript` are
+/// independent sinks that receive the same event stream; `verbose` adds
+/// per-hook prompt/tool detail to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionLog {
+    /// Append the session-event stream as JSONL to `path` (or the default).
+    pub file: bool,
+    /// Record the same stream to ICM transcripts via the ICM MCP.
+    pub transcript: bool,
+    /// Include per-hook prompt/tool-use events in the stream.
+    pub verbose: bool,
+    /// Override the file-sink path (default `<state_dir>/session-log.jsonl`).
+    pub path: Option<String>,
+    /// Truncate event content to this many bytes (default 16384).
+    pub max_content_bytes: Option<usize>,
+}
+
+impl Default for SessionLog {
+    fn default() -> Self {
+        Self {
+            file: false,
+            transcript: true,
+            verbose: false,
+            path: None,
+            max_content_bytes: None,
+        }
+    }
+}
+
+/// Reject the pre-3.0 bare-string form with a clear migration message; otherwise
+/// parse a mapping, applying `transcript = true` as the field default.
+impl<'de> serde::Deserialize<'de> for SessionLog {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Shadow {
+            #[serde(default)]
+            file: bool,
+            #[serde(default = "default_true")]
+            transcript: bool,
+            #[serde(default)]
+            verbose: bool,
+            #[serde(default)]
+            path: Option<String>,
+            #[serde(default)]
+            max_content_bytes: Option<usize>,
+        }
+        let v = serde_yaml::Value::deserialize(d)?;
+        if v.is_string() {
+            return Err(serde::de::Error::custom(
+                "session_log is now a mapping, not a path string; use \
+                 `session_log: { file: true }` (file path overridable via `path:`)",
+            ));
+        }
+        let s: Shadow = serde_yaml::from_value(v).map_err(serde::de::Error::custom)?;
+        Ok(SessionLog {
+            file: s.file,
+            transcript: s.transcript,
+            verbose: s.verbose,
+            path: s.path,
+            max_content_bytes: s.max_content_bytes,
+        })
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// llmenv's own cache/sync behavior. Distinct from engine `capabilities` — this

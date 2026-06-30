@@ -20,6 +20,7 @@ The config directory is resolved in this order:
 | `bundle:` | list | Environment-variable + file bundles |
 | `mcp:` | list | MCP server declarations |
 | `features:` | map | Feature flags; holds `memory:` (ICM backend topology) and `throttle:` (usage throttling) |
+| `session_log:` | map | Session-activity logging: local JSONL file and/or ICM transcript |
 | `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
 | `marketplace:` | list | Plugin marketplaces (git URL or local path) |
 | `plugin-collection:` | list | Named bags of plugins, selected by tag |
@@ -296,6 +297,86 @@ backend-reported penalty window that could be hours long. The `umans` backend
 reads `~/.umans/config.json` for its endpoint and token. Throttling is
 fail-soft: any error (missing config, network failure) skips the delay rather
 than blocking the session.
+
+## `session_log:`
+
+llmenv records session activity — lifecycle events, the active scope, and
+(optionally) every prompt/tool call — into a single event stream that fans out
+to two **independent** sinks: a local JSONL file and ICM's transcript store,
+reached over the **ICM MCP** (never the `icm` CLI, so this works even when the
+machine running llmenv isn't the primary ICM host). Either sink can be on
+without the other; an unreachable ICM backend never blocks the file sink, and
+vice versa.
+
+```yaml
+session_log:
+  transcript: true    # ICM transcript sink (default ON)
+  file: false          # local JSONL file sink
+  verbose: false        # also capture per-hook prompts and tool use
+  # path: "~/.local/state/llmenv/session-log.jsonl"  # override the file path
+  # max_content_bytes: 16384                          # cap per-event content size
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `transcript` | no | Record into ICM's transcript store via the ICM MCP; default `true` |
+| `file` | no | Mirror the same event stream to a local JSONL file; default `false` |
+| `verbose` | no | Also capture `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop`/`SubagentStop`/`PreCompact` events, not just the lifecycle + scope header; default `false` |
+| `path` | no | Override the file sink's path; default `<state_dir>/session-log.jsonl` |
+| `max_content_bytes` | no | Cap each event's `content` field to this many bytes before it's written/recorded; default `16384` |
+
+Omitting the `session_log:` block entirely is equivalent to `transcript: true`
+(everything else off) — ICM transcript logging is **on by default**. To turn
+logging off entirely, set both flags to `false`:
+
+```yaml
+session_log:
+  transcript: false
+  file: false
+```
+
+> Breaking change in 3.0: `session_log:` used to be a bare path string (the
+> file sink only). That form is now rejected with a migration hint — wrap the
+> path in `path:` under the new table shape.
+
+### What gets logged
+
+Two layers, gated by `verbose`:
+
+- **Baseline** (always, when a sink is enabled): one `lifecycle_start` event at
+  session start, one `scope` event carrying the active tags/bundles/project,
+  and one `lifecycle_end` event at session end.
+- **Verbose** (`verbose: true`): every prompt submission, tool call (before and
+  after), notification, stop, subagent stop, and pre-compact event, each
+  tagged with its role and (for tool events) the tool name.
+
+> **Privacy note:** `verbose: true` captures the *raw* text of every prompt
+> you submit and every tool call's input/output — including any secrets,
+> credentials, or personal data that text happens to contain. That content is
+> written to disk (`file: true`) and/or sent to ICM (`transcript: true`)
+> unredacted, capped only by `max_content_bytes` (default 16 KiB, not a
+> sensitivity filter). Treat a `session-log.jsonl` with `verbose: true` enabled
+> the same way you'd treat shell history that might contain pasted secrets.
+
+### Finding a session later
+
+The scope-header event embeds the same `llmenv-tag:<tag>` / `llmenv-bundle:<bundle>`
+tokens the memory-recall hooks use, so a transcript is discoverable the same
+way stored memory is. From the ICM MCP:
+
+```
+icm_transcript_search { query: "llmenv-tag:rust" }                      # sessions scoped to the rust tag
+icm_transcript_search { query: "llmenv-bundle:base" }                   # sessions where the base bundle fired
+icm_transcript_search { query: "llmenv session", project: "my-project" } # sessions for one project
+icm_transcript_show { session_id: "..." }                                # full transcript for one session
+icm_transcript_stats {}                                                  # global session/message counts
+```
+
+`icm_transcript_search` matches message **content** only (ICM's FTS index
+doesn't cover session metadata), which is why the scope header embeds the
+tokens directly in its content rather than only in structured metadata. The
+structured metadata (tags/bundles/project/cwd/adapter/llmenv version) is still
+attached to the session for exact inspection via `icm_transcript_show`.
 
 ## `state:`
 
