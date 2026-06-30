@@ -4,6 +4,8 @@
 
 pub mod event;
 pub mod file_sink;
+pub mod scope_header;
 
 pub use event::{EventKind, EventScope, SessionLogEvent};
 pub use file_sink::{FileSink, default_file_path, default_file_path_string};
+pub use scope_header::{ScopeContext, scope_header_content, scope_metadata_json};

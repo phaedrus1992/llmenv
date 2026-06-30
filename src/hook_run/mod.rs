@@ -6,7 +6,7 @@
 //! one-line stderr warning and exit 0 — lifecycle hooks run on the agent's hot
 //! path and must never block it.
 
-mod action;
+pub(crate) mod action;
 pub(crate) mod mcp_client;
 
 use std::io::Write;
