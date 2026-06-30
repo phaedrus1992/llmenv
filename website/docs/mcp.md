@@ -234,9 +234,8 @@ follows the tag rather than the project.
 
 ### Lifecycle hooks
 
-llmenv provides engine-neutral lifecycle hooks (`hook-run` command) that
-automatically activate when a memory backend is configured and active. These hooks
-run in response to three neutral events:
+llmenv provides engine-neutral lifecycle hooks (`hook-run` command) for three
+neutral events:
 
 - **SessionStart** — `hook-run session_start` injects the session wake-up pack
   (`icm_wake_up`) containing your critical memories (by importance and recency)
@@ -249,10 +248,30 @@ run in response to three neutral events:
 - **SessionEnd** — `hook-run session_end` stores the active scope context
   (`icm_memory_store`) when the session closes
 
+The Claude Code adapter registers `SessionStart`/`SessionEnd` unconditionally —
+`hook-run` itself no-ops cheaply when no memory backend is configured, so this
+costs nothing for users who only want [session logging](configuration.md#session_log)
+and not ICM memory. **`TurnStart` is not yet wired into settings.json**
+(tracked in [#499](https://github.com/phaedrus1992/llmenv/issues/499)); running
+`hook-run turn_start` manually still works, but Claude Code doesn't call it
+automatically on every prompt today.
+
 Each hook talks to the memory backend over MCP. Failures degrade gracefully: a
 missing or unreachable backend logs a warning and exits cleanly (exit code 0) so
 hooks never block the agent. See [`docs/commands.md`](commands.md#hook-run) for
 details.
+
+### Session logging
+
+`hook-run session_start`/`hook-run session_end` also drive
+[`session_log:`](configuration.md#session_log) — llmenv's separate
+event-stream feature that records lifecycle/scope (and, with `verbose: true`,
+every prompt and tool call) to a local file and/or ICM's transcript store. It
+shares the same MCP-only-access rule as the memory backend above, but is
+otherwise independent: it has its own on/off switch, doesn't require
+`features.memory:` to be configured, and a down ICM never blocks its file
+sink. See the [`session_log:` reference](configuration.md#session_log) for the
+full field list and `icm_transcript_search` query recipes.
 
 ### SessionStart injection
 
