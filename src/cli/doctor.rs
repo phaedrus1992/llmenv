@@ -59,12 +59,18 @@ pub(super) fn run_doctor_token_efficiency(
         }
     }
 
-    let has_context_mode = config.mcp.iter().any(|m| m.name.contains("context-mode"));
-    if has_context_mode {
-        eprintln!("{pass} context-mode MCP server is configured");
+    let cm_enabled = config
+        .features
+        .as_ref()
+        .and_then(|f| f.context_mode.as_ref())
+        .is_some_and(|c| c.enabled);
+    if cm_enabled {
+        eprintln!("{pass} context-mode built-in feature enabled (token-efficiency)");
     } else {
-        eprintln!("{warn} context-mode MCP not configured (load-bearing for token efficiency)");
-        eprintln!("{warn}   → Install context-mode plugin and add to mcp: section in config.yaml");
+        eprintln!(
+            "{info} context-mode not enabled \
+             (set features.context_mode.enabled: true for built-in context saving)"
+        );
     }
 }
 
