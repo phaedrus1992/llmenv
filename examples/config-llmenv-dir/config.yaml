@@ -598,3 +598,11 @@ features:
       listen_host: 0.0.0.0
       port: 9092
       when: [user-phaedrus]
+
+  # Built-in context-saving (#490). Enabling this wires the context-mode plugin
+  # automatically: marketplace + plugin + durable CONTEXT_MODE_DATA_DIR + the MCP
+  # permission grant. Replaces the manual plugin-collection / state / permission
+  # boilerplate. context-mode is loaded as a *plugin* (not an MCP) so its hooks
+  # resolve ${CLAUDE_PLUGIN_ROOT}.
+  context_mode:
+    enabled: true

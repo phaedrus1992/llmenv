@@ -50,15 +50,15 @@ Variables that bundles define for their own use (e.g., token-efficiency bundle t
 Example:
 
 ```yaml
-# ✅ Recommended: LLMENV_ prefix for variables that affect llmenv behavior
-env:
-  LLMENV_BASH_BAN: "cat,find,grep"
-
 # ✅ OK: no prefix for variables that are just bundle configuration
 env:
   CBM_WARN_THRESHOLD: 50000
   CBM_AUTOINDEX: "true"
 ```
+
+> **Note:** Token-efficiency is now a built-in feature, not an env var. Enable
+> it with `features.context_mode.enabled: true` (wires the context-mode plugin
+> automatically). The former `LLMENV_BASH_BAN` env var was removed in #490.
 
 ## Validation & Enforcement
 
