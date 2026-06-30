@@ -6,12 +6,44 @@
 //! by tag intersection (same model as memory).
 
 mod backend;
-pub use backend::{ThrottleBackend, UmansBackend, UsageSnapshot, backend_for};
+pub use backend::{ThrottleBackend, UsageSnapshot, backend_for};
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::config::Throttle;
+use anyhow::Context;
+
+/// Store the resolved active throttle config for retrieval by hook invocations.
+/// Called during `llmenv export` / materialize after `build_manifest` resolves
+/// the merged throttle (top-level + bundle). Mirrors `icm::store_tag_memory`.
+///
+/// When `throttle` is `None`, removes any stale `throttle.json` so a
+/// since-removed config doesn't keep throttling.
+///
+/// # Errors
+/// Returns an error if writing the state file fails.
+pub fn store_active_throttle(throttle: Option<&Throttle>) -> anyhow::Result<()> {
+    let state_dir = crate::paths::state_dir()?;
+    let path = throttle_state_path(&state_dir);
+    match throttle {
+        Some(cfg) => {
+            let json = serde_json::to_string(cfg)?;
+            crate::paths::write_owner_only_atomic(&path, json.as_bytes())
+                .with_context(|| format!("writing throttle state: {}", path.display()))?;
+        }
+        None => {
+            // Remove stale file; missing file = throttling off.
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+fn throttle_state_path(state_dir: &Path) -> std::path::PathBuf {
+    state_dir.join("throttle.json")
+}
 
 /// Resolve the single active throttle entry by tag intersection.
 ///
@@ -84,10 +116,17 @@ pub fn run_throttle_hook(event: &str) {
     }
 
     // Parse hook_event_name for emit_hook_context (needed for prompt output).
-    let hook_event_name = serde_json::from_str::<serde_json::Value>(&stdin_buf)
-        .ok()
-        .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
-        .unwrap_or_default();
+    let hook_event_name = match serde_json::from_str::<serde_json::Value>(&stdin_buf) {
+        Ok(v) => v["hook_event_name"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default(),
+        Err(e) if !stdin_buf.trim().is_empty() => {
+            eprintln!("llmenv throttle: stdin is not valid JSON (budget note suppressed): {e}");
+            String::new()
+        }
+        Err(_) => String::new(),
+    };
 
     if let Err(e) = run_throttle_inner(event, &hook_event_name) {
         eprintln!("llmenv throttle: {e}");
@@ -98,27 +137,24 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
     use crate::adapter::AgentAdapter;
     use crate::adapter::claude_code::ClaudeCodeAdapter;
 
-    let config_path = crate::paths::config_path()?;
-    let config = crate::config::Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
+    let state_dir = crate::paths::state_dir()?;
+    let path = throttle_state_path(&state_dir);
 
-    // Only top-level throttle entries are used here (same pattern as memory proxy startup).
-    let top_throttle = config
-        .features
-        .as_ref()
-        .map(|f| f.throttle.as_slice())
-        .unwrap_or_default();
-
-    let Some(cfg) = resolve_active_throttle(top_throttle, &active.tags)? else {
-        return Ok(());
+    let cfg: Throttle = match std::fs::read(&path) {
+        Err(_) => return Ok(()), // No state file = throttling off.
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("llmenv throttle: failed to parse throttle.json (skipping): {e}");
+                return Ok(());
+            }
+        },
     };
 
     let Some(backend) = backend_for(&cfg) else {
         return Ok(());
     };
 
-    let state_dir = crate::paths::state_dir()?;
     let snapshot = backend::fetch_cached(backend.as_ref(), &state_dir, &cfg)?;
 
     let delay = compute_delay(&snapshot, &cfg);
@@ -149,11 +185,19 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
 fn budget_note(snapshot: &UsageSnapshot, cfg: &Throttle) -> String {
     match (snapshot.remaining, snapshot.limit) {
         (Some(remaining), Some(limit)) => {
-            let calls_before_soft = remaining.saturating_sub(cfg.soft_threshold);
-            format!(
-                "Throttle: {remaining}/{limit} requests remaining in window. \
-                 {calls_before_soft} call(s) before soft cap."
-            )
+            if remaining < cfg.soft_threshold {
+                format!(
+                    "Throttle: {remaining}/{limit} requests remaining \
+                     (below soft cap of {}; delays active).",
+                    cfg.soft_threshold
+                )
+            } else {
+                let calls_before_soft = remaining - cfg.soft_threshold;
+                format!(
+                    "Throttle: {remaining}/{limit} requests remaining in window. \
+                     {calls_before_soft} call(s) before soft cap."
+                )
+            }
         }
         (Some(remaining), None) => {
             format!("Throttle: {remaining} requests remaining in window.")
@@ -163,10 +207,11 @@ fn budget_note(snapshot: &UsageSnapshot, cfg: &Throttle) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::config::Throttle;
+    use proptest::prelude::*;
 
     fn cfg(max_wait: u64, soft_threshold: u64) -> Throttle {
         Throttle {
@@ -285,5 +330,39 @@ mod tests {
         assert_eq!(t.cache_ttl, 30);
         assert_eq!(t.max_wait, 300);
         assert_eq!(t.soft_threshold, 20);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_compute_delay_capped(
+            max_wait in 0u64..3600,
+            soft_threshold in 1u64..1000,
+            remaining in any::<Option<u64>>(),
+            penalized in any::<bool>(),
+        ) {
+            let c = cfg(max_wait, soft_threshold);
+            let s = snap(remaining, penalized);
+            let d = compute_delay(&s, &c);
+            prop_assert!(d <= Duration::from_secs(max_wait));
+        }
+
+        #[test]
+        fn prop_compute_delay_monotone(
+            max_wait in 1u64..3600,
+            soft_threshold in 1u64..1000,
+            r1 in 0u64..2000,
+            r2 in 0u64..2000,
+        ) {
+            // Higher remaining → smaller or equal delay (non-increasing).
+            let c = cfg(max_wait, soft_threshold);
+            let (lo, hi) = if r1 <= r2 { (r1, r2) } else { (r2, r1) };
+            let d_lo = compute_delay(&snap(Some(lo), false), &c);
+            let d_hi = compute_delay(&snap(Some(hi), false), &c);
+            prop_assert!(
+                d_lo >= d_hi,
+                "delay should be non-increasing as remaining increases: \
+                 lo={lo} d={d_lo:?} hi={hi} d={d_hi:?}"
+            );
+        }
     }
 }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Throttle;
 
 /// Normalized usage snapshot from any backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UsageSnapshot {
     /// Requests remaining in the current window, if known.
     pub remaining: Option<u64>,
@@ -27,6 +27,7 @@ pub struct UsageSnapshot {
 }
 
 /// Fetch fresh usage data from the backend.
+// ponytail: single backend impl; trait exists so a second backend (e.g. anthropic) can slot in via backend_for
 pub trait ThrottleBackend {
     /// Fetch a fresh `UsageSnapshot` from the backend.
     ///
@@ -45,33 +46,69 @@ pub fn fetch_cached(
     state_dir: &Path,
     cfg: &Throttle,
 ) -> anyhow::Result<UsageSnapshot> {
+    // Guard against path traversal via a malicious backend name.
+    if !cfg
+        .backend
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        anyhow::bail!(
+            "throttle: backend name '{}' contains disallowed characters (only [a-z0-9_-] permitted)",
+            cfg.backend
+        );
+    }
+
     let cache_dir = state_dir.join("throttle");
     let cache_file = cache_dir.join(format!("{}-usage.json", cfg.backend));
 
-    if let Ok(meta) = std::fs::metadata(&cache_file)
-        && let Ok(modified) = meta.modified()
-    {
-        let age = SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or(Duration::MAX);
-        if age < Duration::from_secs(cfg.cache_ttl)
-            && let Ok(bytes) = std::fs::read(&cache_file)
-            && let Ok(snap) = serde_json::from_slice::<UsageSnapshot>(&bytes)
-        {
-            return Ok(snap);
-        }
+    if let Some(snap) = try_read_cache(&cache_file, cfg.cache_ttl) {
+        return Ok(snap);
     }
 
     let snap = backend.fetch_usage()?;
 
     // Best-effort cache write — failure is not fatal.
-    if std::fs::create_dir_all(&cache_dir).is_ok()
-        && let Ok(bytes) = serde_json::to_vec(&snap)
-    {
-        let _ = std::fs::write(&cache_file, bytes);
+    if let Err(e) = write_cache(&cache_dir, &cache_file, &snap) {
+        eprintln!("llmenv throttle: cache write failed (non-fatal): {e}");
     }
 
     Ok(snap)
+}
+
+fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageSnapshot> {
+    let meta = std::fs::metadata(cache_file).ok()?;
+    let modified = meta.modified().ok()?;
+    let age = match SystemTime::now().duration_since(modified) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("llmenv throttle: cache clock skew detected, treating cache as stale");
+            return None;
+        }
+    };
+    if age >= Duration::from_secs(cache_ttl) {
+        return None;
+    }
+    let bytes = std::fs::read(cache_file).ok()?;
+    match serde_json::from_slice::<UsageSnapshot>(&bytes) {
+        Ok(snap) => Some(snap),
+        Err(e) => {
+            eprintln!("llmenv throttle: cache file corrupt (falling back to live fetch): {e}");
+            None
+        }
+    }
+}
+
+fn write_cache(
+    cache_dir: &std::path::Path,
+    cache_file: &std::path::Path,
+    snap: &UsageSnapshot,
+) -> anyhow::Result<()> {
+    if let Err(e) = std::fs::create_dir_all(cache_dir) {
+        anyhow::bail!("create_dir_all failed: {e}");
+    }
+    let bytes = serde_json::to_vec(snap)?;
+    crate::paths::write_owner_only(cache_file, &bytes).context("writing cache file")?;
+    Ok(())
 }
 
 /// Select the backend implementation for the given config.
@@ -141,6 +178,15 @@ impl ThrottleBackend for UmansBackend {
         let umans_cfg: UmansConfig = serde_json::from_str(&raw).context("parsing umans config")?;
 
         let url = format!("{}/v1/usage", umans_cfg.api_endpoint.trim_end_matches('/'));
+        // Require https to protect the Bearer token from cleartext exposure.
+        if !url.starts_with("https://") {
+            anyhow::bail!(
+                "umans api_endpoint must use https (got: {}); refusing to send Bearer token in cleartext",
+                umans_cfg.api_endpoint
+            );
+        }
+        let _ = crate::hook_run::mcp_client::validate_url_production(&url)
+            .context("umans api_endpoint SSRF check")?;
         let body = fetch_json_blocking(&url, &umans_cfg.api_token)?;
         map_umans_body(body)
     }
@@ -155,7 +201,10 @@ fn fetch_json_blocking(url: &str, token: &str) -> anyhow::Result<UmansUsageBody>
         .build()
         .context("building tokio runtime")?;
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .context("building reqwest client")?;
         let resp = client
             .get(&url)
             .header("Authorization", auth)
@@ -163,11 +212,25 @@ fn fetch_json_blocking(url: &str, token: &str) -> anyhow::Result<UmansUsageBody>
             .await
             .with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
-            anyhow::bail!("umans usage API returned {}", resp.status());
+            let status = resp.status();
+            let body = resp.bytes().await.unwrap_or_default();
+            let preview: String = String::from_utf8_lossy(&body).chars().take(512).collect();
+            anyhow::bail!("umans usage API returned {status}: {preview}");
         }
-        resp.json::<UmansUsageBody>()
-            .await
-            .context("parsing umans usage response")
+        const MAX_BODY: u64 = 65_536;
+        if let Some(len) = resp.content_length()
+            && len > MAX_BODY
+        {
+            anyhow::bail!("umans usage response too large: {len} bytes (limit {MAX_BODY})");
+        }
+        let bytes = resp.bytes().await.context("reading umans usage response")?;
+        if bytes.len() as u64 > MAX_BODY {
+            anyhow::bail!(
+                "umans usage response too large: {} bytes (limit {MAX_BODY})",
+                bytes.len()
+            );
+        }
+        serde_json::from_slice::<UmansUsageBody>(&bytes).context("parsing umans usage response")
     })
 }
 
@@ -185,15 +248,7 @@ fn map_umans_body(body: UmansUsageBody) -> anyhow::Result<UsageSnapshot> {
         .usage
         .as_ref()
         .and_then(|u| u.priority.as_ref())
-        .map(|p| {
-            let low = p.low.unwrap_or(false);
-            let boxed = p
-                .boxed_until
-                .as_deref()
-                .map(is_future_timestamp)
-                .unwrap_or(false);
-            low || boxed
-        })
+        .map(is_penalized)
         .unwrap_or(false);
 
     Ok(UsageSnapshot {
@@ -204,16 +259,37 @@ fn map_umans_body(body: UmansUsageBody) -> anyhow::Result<UsageSnapshot> {
     })
 }
 
+fn is_penalized(p: &UmansPriority) -> bool {
+    let low = p.low.unwrap_or(false);
+    let boxed = p
+        .boxed_until
+        .as_deref()
+        .map(is_future_timestamp)
+        .unwrap_or(false);
+    low || boxed
+}
+
 /// True if the RFC3339 timestamp string represents a time in the future.
 /// Returns false on parse errors (fail-safe). Parsing is delegated to `jiff`,
 /// which handles `Z`, numeric offsets (`+00:00`), and fractional seconds.
 fn is_future_timestamp(s: &str) -> bool {
-    s.parse::<jiff::Timestamp>()
-        .is_ok_and(|ts| ts > jiff::Timestamp::now())
+    if s.is_empty() {
+        return false;
+    }
+    match s.parse::<jiff::Timestamp>() {
+        Ok(ts) => ts > jiff::Timestamp::now(),
+        Err(e) => {
+            eprintln!(
+                "llmenv throttle: boxed_until '{s}' could not be parsed \
+                 (treating as not-penalized): {e}"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -311,5 +387,55 @@ mod tests {
         // Fail-safe: a garbage timestamp must not be treated as a future penalty.
         assert!(!is_future_timestamp("not-a-timestamp"));
         assert!(!is_future_timestamp(""));
+    }
+
+    #[test]
+    fn usage_snapshot_json_roundtrip() {
+        let snap = UsageSnapshot {
+            remaining: Some(133),
+            limit: Some(200),
+            resets_at: Some("2026-06-29T23:33:46.154428+00:00".to_string()),
+            penalized: true,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: UsageSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, decoded);
+    }
+
+    #[test]
+    fn penalized_cross_product() {
+        // low ∈ {None, false, true} × boxed_until ∈ {none, past, future}
+        let past = "2020-01-01T00:00:00Z";
+        let future = "2099-01-01T00:00:00Z";
+
+        let cases: &[(Option<bool>, Option<&str>, bool)] = &[
+            (None, None, false),
+            (None, Some(past), false),
+            (None, Some(future), true),
+            (Some(false), None, false),
+            (Some(false), Some(past), false),
+            (Some(false), Some(future), true),
+            (Some(true), None, true),
+            (Some(true), Some(past), true),
+            (Some(true), Some(future), true),
+        ];
+
+        for &(low, boxed_until, expected) in cases {
+            let raw = serde_json::json!({
+                "usage": {
+                    "remaining_requests": 50,
+                    "priority": {
+                        "low": low,
+                        "boxed_until": boxed_until
+                    }
+                }
+            });
+            let body: UmansUsageBody = serde_json::from_value(raw).unwrap();
+            let snap = map_umans_body(body).unwrap();
+            assert_eq!(
+                snap.penalized, expected,
+                "low={low:?} boxed_until={boxed_until:?}: expected penalized={expected}"
+            );
+        }
     }
 }

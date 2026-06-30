@@ -231,13 +231,7 @@ enum Command {
     /// Reads the tool call from stdin, checks whether the target path is inside
     /// the llmenv cache, and prints a redirection hint. Always exits 0 (fail-soft).
     ConfigGuard,
-    /// Poll the usage backend and sleep an adaptive delay to avoid rate limits.
-    ///
-    /// Invoked by the auto-registered PreToolUse and UserPromptSubmit hooks.
-    /// `event` is either `pre-tool` or `prompt`. Reads the hook JSON from stdin,
-    /// resolves the active throttle config, fetches a TTL-cached usage snapshot,
-    /// computes a capped delay, sleeps, and (for `prompt`) emits a budget note as
-    /// `additionalContext`. Always exits 0 (fail-soft).
+    /// Poll the usage backend and sleep an adaptive delay. See `crate::throttle`.
     Throttle {
         /// Hook event: pre-tool or prompt
         event: String,
@@ -799,8 +793,18 @@ fn build_and_materialize(
     let Some((mut manifest, cache_root)) =
         build_manifest(config, config_dir, active, firing, false)?
     else {
+        // No content dirs — clear any stale throttle state so a since-removed
+        // throttle config doesn't keep throttling.
+        if let Err(e) = crate::throttle::store_active_throttle(None) {
+            tracing::debug!("failed to clear throttle state (non-fatal): {e}");
+        }
         return Ok(None);
     };
+
+    // Store resolved throttle (top-level + bundle) for hook retrieval.
+    if let Err(e) = crate::throttle::store_active_throttle(manifest.throttle.as_ref()) {
+        tracing::debug!("failed to store throttle state (non-fatal): {e}");
+    }
 
     // Apply compression if requested: strip trailing whitespace and collapse triple blank lines.
     if compress {
