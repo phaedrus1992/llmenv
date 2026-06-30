@@ -49,6 +49,12 @@ the cross-listing rule below takes over.
 release branch. If it fails (conflict, skipped branch), resolve the conflict
 in the merge PR it opens — don't work around it by applying the change twice.
 
+**Docs-only edits on a `release/X.x` branch don't need a branch or PR.** The
+feature-branch + PR rule exists to gate *code* changes. A simple documentation
+update on a release branch — reconciling `CHANGELOG.md`, editing `RELEASING.md`,
+`docs/`, or `README.md` — can be edited, committed, and pushed **directly** to
+the `release/X.x` branch. Code changes still go through a branch + PR.
+
 ### Forward-merged fixes appear in every release that ships them
 
 A fix lands once (on the oldest branch) but **ships in a separate release on
@@ -100,6 +106,24 @@ git show origin/release/<older-major>.x:CHANGELOG.md
 Add any missing user-facing fix to the appropriate section with its
 `(originally fixed in X.Y.Z)` back-reference before finishing your edit. A
 changelog edit that ignores an unlisted forward-merged fix is incomplete.
+
+### Keep CI-only and internal changes out of the changelog
+
+The changelog is for **users of the released binary**, not contributors. Per
+[Keep a Changelog](https://keepachangelog.com/), omit anything with no
+user-facing effect:
+
+- CI/CD and GitHub Actions workflow changes (including the
+  `forward-merge-release` workflow itself)
+- test-only changes and internal refactors
+- `examples/` config tweaks (illustrative, not shipped in the binary)
+- dependency bumps that don't change behavior — a security bump for an advisory
+  that isn't reachable from llmenv's own code is still omitted; note it in the
+  PR description, not the changelog
+
+When in doubt, ask: *would someone running the released binary notice or care?*
+If not, leave it out. This applies retroactively to `[Unreleased]` — strip such
+entries before cutting a release rather than freezing them under a version.
 
 ### Creating a release branch
 
