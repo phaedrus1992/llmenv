@@ -18,12 +18,20 @@ durable, queryable, and discoverable by the llmenv scope that produced it.
 
 ## What ICM gives us (from the reference, `~/git/reference/icm`)
 
-CLI surface llmenv shells out to (mirrors the `icm_transcript_*` MCP tools):
+llmenv talks to ICM **only through the MCP** (see "Transport" for why — multi-host).
+The transcript MCP tools we call:
 
-- `icm transcript start-session --agent <a> --project <p> --metadata <json>`
-  → prints a `session_id`.
-- `icm transcript record --session <id> --role <user|assistant|system|tool>
-  --content <text> [--tool-name <n>] [--tokens <n>] [--metadata <json>]`.
+- `icm_transcript_start_session(agent, project, metadata)` → returns a
+  `session_id`.
+- `icm_transcript_record(session_id, role, content, tool_name?, tokens?,
+  metadata?)`.
+- (read side, for users) `icm_transcript_search(query, project?, session_id?,
+  limit?)`, `icm_transcript_show(session_id)`.
+
+These are the same operations the `icm transcript …` CLI exposes, but the CLI
+writes to a **local** sqlite store — wrong when the caller isn't the primary
+ICM host. The MCP endpoint (which may be a remote `icm serve` on the primary
+host) is the only correct runtime path.
 
 Store shape (`crates/icm-store/src/store.rs`):
 
@@ -44,41 +52,58 @@ transcript store, llmenv must record them explicitly.
 
 ## Model: one stream, two sinks
 
-Session logging is a single stream of `SessionLogEvent`s. Two independent sinks
-consume the **same** events:
+Session logging is a single stream of `SessionLogEvent`s. Two **fully
+independent** sinks consume the **same** events:
 
-1. **file** — append JSONL to a file (the durable, grep-able local copy).
-2. **transcript** — `icm transcript record` into ICM's store (queryable,
-   cross-session).
+1. **file** — append JSONL to a file (durable, grep-able, local; never depends
+   on ICM).
+2. **transcript** — `icm_transcript_record` via the ICM MCP (queryable,
+   cross-session; degrades to no-op when the MCP is unreachable).
 
 `verbose` controls *how much* enters the stream, not which sink receives it.
-Both sinks always get identical events.
+Both sinks always get identical events; either can be on without the other.
+
+### Event sources
+
+The stream is fed from three places, all converging on the same sinks:
+
+- **Lifecycle/scope** (in-process): explicit `lifecycle_start` / `scope` /
+  `lifecycle_end` emits at launch and teardown.
+- **Internal operations** (in-process): a `tracing_subscriber::Layer` that
+  maps llmenv's own `tracing` events at `info`+ into `internal` events —
+  materialization, change detection, cache sync, regenerate, auth detection,
+  hook firing, etc. This **keeps the useful internal logging** that 2.1.0's
+  file did, now flowing into both sinks. `level` is carried as a field.
+- **Agent turns** (out-of-process, verbose only): injected Claude hooks →
+  `llmenv hook-run …` → `prompt` / `tool_use` / `tool_result` / `stop` events.
 
 ### `SessionLogEvent`
 
 ```
 ts:        RFC 3339
-kind:      lifecycle_start | scope | prompt | tool_use | tool_result
-           | notification | stop | lifecycle_end
+kind:      lifecycle_start | scope | internal | prompt | tool_use
+           | tool_result | notification | stop | lifecycle_end
 role:      user | assistant | system | tool     # for the transcript mapping
 tool_name: Option<String>
 tokens:    Option<u64>
+level:     Option<String>                        # for internal events (info/warn/…)
 content:   String                                # rendered, FTS-searchable
-fields:    structured payload (tags, bundles, scopes, cwd, …) for the scope kind
+fields:    structured payload (tags, bundles, scopes, cwd, op name, …)
 ```
 
-- **File sink:** serialize the event to one JSON line.
-- **Transcript sink:** `icm transcript record --session <id> --role <role>
-  --content <content> [--tool-name ...] [--tokens ...] --metadata <fields-json>`.
+- **File sink:** serialize the event to one JSON line, append.
+- **Transcript sink:** `icm_transcript_record(session_id, role, content,
+  tool_name?, tokens?, metadata=fields)` via the MCP.
 
 ## Layers
 
 ### Baseline (feature enabled, `verbose = false`)
 
-1. At launch / `llmenv export`: `icm transcript start-session
-   --agent <adapter> --project <scope-project-or-cwd-basename>
-   --metadata <{tags, bundles, scopes, cwd, adapter, llmenv_version}>`.
-   Persist the returned `session_id` (see State).
+1. At launch / `llmenv export`: call `icm_transcript_start_session(agent=<adapter>,
+   project=<scope-project-or-cwd-basename>,
+   metadata={tags, bundles, scopes, cwd, adapter, llmenv_version})` via the MCP.
+   Persist the returned `session_id` (see State). When `file` is on, the same
+   scope/lifecycle events are written to the file regardless of MCP state.
 2. Emit a **scope-header** event (`kind=scope`, `role=system`) whose `content`
    embeds discoverability tokens reusing the existing convention in
    `src/icm.rs`:
@@ -111,18 +136,34 @@ prompt text / tool input / tool result, **truncated to `max_content_bytes`**
 
 ## Transport & wiring
 
-- llmenv core shells out to the `icm` CLI (matches the existing `icm serve`
-  launch). No direct `icm-store` sqlite coupling (version-fragile across the
-  external dependency); no MCP-from-core.
+- **All runtime ICM interaction goes through the MCP, never the `icm` CLI.**
+  Session logging may be collected on a machine that is **not** the primary ICM
+  host; the `icm` CLI would write to that machine's *local* sqlite store, which
+  is the wrong store. The MCP endpoint llmenv already resolves
+  (`src/mcp/resolve.rs`, possibly a remote http `icm serve` on the primary host)
+  is the single correct target. This rule is added to `AGENTS.md`.
+- The transcript sink uses a **minimal MCP client** (JSON-RPC `tools/call`) that
+  issues `icm_transcript_start_session` / `icm_transcript_record` against the
+  resolved `icm` server endpoint (stdio or http). No direct `icm-store` sqlite
+  coupling; no CLI shell-out.
+- **Timing — MCP calls are dispatched off the critical path.** An MCP round trip
+  (especially to a remote host) must not delay `llmenv` returning or a Claude
+  hook completing (Claude kills slow hooks). The transcript sink enqueues records
+  to a background worker (thread, or detached subprocess for hook processes that
+  exit immediately — the ICM `cmd_hook_end` `setsid` detach is the template) and
+  returns immediately. The **file** sink stays synchronous (a local append is
+  cheap and must not be lost).
 - Reuse the existing hook-injection machinery in
   `src/adapter/claude_code.rs` and the `llmenv hook-run` dispatcher
   (`src/hook_run/mod.rs`, `HookEvent` enum + `run(event)`): add the new events
-  and a transcript-record action. Injected hook commands call
-  `llmenv hook-run <event>` and read the hook payload (incl. Claude
-  `session_id`) from stdin, exactly like today's hooks.
-- New core module `src/session_log/` (emitter + the two sinks + event model).
-  `src/icm.rs` keeps its current tag/bundle context-chunk role; the
-  `llmenv-tag:` / `llmenv-bundle:` token format is shared between them.
+  and a session-log action. Injected hook commands call `llmenv hook-run <event>`
+  and read the hook payload (incl. Claude `session_id`) from stdin, exactly like
+  today's hooks. The `hook-run` process resolves the same MCP endpoint + session
+  map and dispatches the record in the background before exiting.
+- New core module `src/session_log/` (emitter + the two sinks + event model +
+  the `tracing` Layer for internal events). `src/icm.rs` keeps its current
+  tag/bundle context-chunk role; the `llmenv-tag:` / `llmenv-bundle:` token
+  format is shared between them.
 
 ## State & correlation
 
@@ -157,14 +198,16 @@ verbose: false}`: every launch opens an ICM transcript session and records the
 scope-header + lifecycle baseline. `Config.session_log` therefore uses a
 `Default` impl returning `transcript = true` (not `Default::default()` zeros).
 
-To disable entirely, set `transcript: false` (and `file: false`). When `icm`
-is unavailable the baseline degrades to a no-op regardless (see Degradation).
+To disable entirely, set `transcript: false` (and `file: false`). When the ICM
+MCP is unreachable, only the **transcript** sink no-ops; if `file: true` the
+file sink still records everything (see Degradation).
 
 `session_log` now parses **only** as a mapping. A bare-string value is a config
 error (the validator reports the migration: use `session_log: { file: true }`).
-The old "raw llmenv tracing → file" behavior is gone; internal `tracing`
-diagnostics remain available on stderr as before. The `file` sink now emits the
-**session-event stream** (the same events the transcript sink gets).
+The 2.1.0 `file` form dumped raw `tracing` lines; the new `file` sink emits the
+richer **session-event stream** — which still includes the useful internal
+operations (materialization, change detection, …) via the `tracing` Layer, plus
+scope/lifecycle and (when verbose) agent turns. stderr `tracing` is unchanged.
 
 ## Examples
 
@@ -182,25 +225,28 @@ per `AGENTS.md`):
 
 ## Degradation & safety
 
-- `icm` not on `PATH`, or any `start-session` / `record` failure → log at
-  `debug!` and continue. Session logging **never** fails a launch.
-- Hook handlers must return fast (Claude kills slow hooks). A `record` is a
-  single sqlite insert via the CLI — fast enough synchronously. If it proves
-  slow in practice, move the transcript sink to fire-and-forget (the ICM
-  `cmd_hook_end` detach pattern is the template). Start synchronous (YAGNI).
+- **Sinks are independent.** The MCP being unreachable, the endpoint
+  unresolved, or any `start_session` / `record` failure affects **only** the
+  transcript sink → logged at `debug!`, dropped. If `file: true`, the file sink
+  records the full stream regardless. Session logging **never** fails a launch
+  and **never** blocks on the network.
+- **Background dispatch** for transcript records (thread / detached subprocess)
+  so a slow or remote MCP never delays `llmenv` or a Claude hook. The file sink
+  is a synchronous local append (cheap, must not be lost).
 - Content size capped per event (`max_content_bytes`).
-- Token tokens like `llmenv-tag:<tag>` are validated with the existing
-  `validate_tag` / `validate_bundle` guards before being written, preventing
-  FTS/`content` injection.
+- Tokens like `llmenv-tag:<tag>` are validated with the existing `validate_tag`
+  / `validate_bundle` guards before being written, preventing FTS/`content`
+  injection.
 
 ## Discoverability / queryability (the explicit requirement)
 
-Four handles, documented with recipes in user docs:
+Four handles, documented with recipes in user docs (via `icm_transcript_search`
+MCP tool or the `icm transcript search` CLI when on the host):
 
-- **Project filter:** `icm transcript search "<q>" --project <name>`.
+- **Project filter:** search with `project = <name>`.
 - **Agent filter:** session `agent` = adapter name (returned in results).
-- **FTS tag/bundle tokens:** `icm transcript search "llmenv-tag:rust"` →
-  the scope-header message → its session.
+- **FTS tag/bundle tokens:** search `"llmenv-tag:rust"` → the scope-header
+  message → its session.
 - **Structured metadata:** full `{tags, bundles, scopes, cwd, adapter,
   llmenv_version}` JSON on the session for exact inspection/replay.
 
@@ -211,14 +257,19 @@ Four handles, documented with recipes in user docs:
   bare-string `session_log` is rejected with the migration message.
 - Scope-header token formatting — property test reusing the `llmenv-tag` /
   `llmenv-bundle` convention and the `validate_*` guards.
-- `SessionLogEvent` → file JSONL line and → `icm transcript record` arg vector
+- `SessionLogEvent` → file JSONL line and → `icm_transcript_record` call args
   are consistent (same content/role).
+- **Independence:** with `file: true` and the MCP unreachable, every event still
+  lands in the file (the key guarantee); with `transcript: true` only, an MCP
+  failure produces no file and no error.
+- Internal-op `tracing` Layer: an `info`+ event (e.g. a materialization log) is
+  captured as a `kind=internal` event with its `level`.
 - `claude_session_id → icm_session_id` map: store/recall round-trip, 0o600
   perms (property test, mirrors the existing `icm.rs` perms test).
-- Graceful skip when `icm` is absent (mock a missing binary → no error, no
-  output).
 - Hook payload (stdin JSON) → event mapping for each of the verbose events.
 - Content truncation at `max_content_bytes` boundary.
+- Background dispatch does not block: a stubbed slow MCP transport still returns
+  control promptly (assert the call path doesn't await the round trip).
 
 ## Milestone / branch
 
