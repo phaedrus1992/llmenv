@@ -52,6 +52,12 @@ pub struct SessionLogEvent {
     pub fields: serde_json::Value,
 }
 
+/// Current time as an RFC 3339 timestamp (e.g. `2026-06-30T00:00:00Z`).
+#[must_use]
+pub fn now_rfc3339() -> String {
+    jiff::Timestamp::now().to_string()
+}
+
 impl SessionLogEvent {
     /// Render to a single JSONL line (no trailing newline).
     #[must_use]

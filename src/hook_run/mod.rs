@@ -19,8 +19,12 @@ use tracing::{debug, warn};
 
 use crate::adapter::AgentAdapter;
 use crate::adapter::claude_code::ClaudeCodeAdapter;
+use crate::config::SessionLog;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, resolve_mcps};
+use crate::session_log::dispatch as transcript_dispatch;
+use crate::session_log::event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
+use crate::session_log::{ScopeContext, scope_header_content, scope_metadata_json, state};
 
 /// A single cross-project, tag-scoped recall the TurnStart hook issues against
 /// ICM. Exposes the recall contract (#197) so it is testable without a live
@@ -186,10 +190,14 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
         eprintln!("llmenv hook-run: failed to read stdin: {e}");
     }
-    let hook_event_name = serde_json::from_str::<serde_json::Value>(&stdin_buf)
-        .ok()
+    let stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf).ok();
+    let hook_event_name = stdin_json
+        .as_ref()
         .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
         .unwrap_or_default();
+    let claude_session_id = stdin_json
+        .as_ref()
+        .and_then(|v| v["session_id"].as_str().map(str::to_owned));
 
     let parsed = match HookEvent::from_str(event) {
         Ok(e) => e,
@@ -198,7 +206,7 @@ pub fn run(event: &str) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    match run_inner(parsed) {
+    match run_inner(parsed, claude_session_id.as_deref()) {
         Ok(text) => {
             let out = ClaudeCodeAdapter.emit_hook_context(&hook_event_name, &text);
             if !out.is_empty()
@@ -217,17 +225,20 @@ pub fn run(event: &str) -> anyhow::Result<()> {
 
 /// Resolve config, find the memory URL, run the event's actions, and return the
 /// concatenated result text. Errors here are caught and warned by `run`.
-fn run_inner(event: HookEvent) -> anyhow::Result<String> {
+///
+/// The memory backend (recall/store) and session logging are independent: a
+/// missing/unreachable memory MCP skips memory actions but must not prevent
+/// the file-sink session log from being written (see `handle_session_log`).
+fn run_inner(event: HookEvent, claude_session_id: Option<&str>) -> anyhow::Result<String> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
+    let log_cfg = config.session_log_resolved();
 
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let url = memory_url(&config, config_dir, &active)?
-        .ok_or_else(|| anyhow::anyhow!("no memory backend active for this scope"))?;
 
     // Recall query: the sorted active tags. Store content: the llmenv context
     // chunk (tags/bundles/project).
@@ -250,8 +261,18 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
     let query = tags.join(", ");
     let chunk = crate::icm::generate_context_chunk(&active, &bundles);
 
-    let client = McpHttpClient::new(url, HOOK_TIMEOUT)
+    let url = memory_url(&config, config_dir, &active)?;
+    if url.is_none() {
+        // Not fatal: memory actions are simply skipped below, but session
+        // logging (independent of the memory backend) still proceeds.
+        eprintln!("llmenv: memory {event} skipped: no memory backend active for this scope");
+    }
+    let client = url
+        .map(|u| McpHttpClient::new(u, HOOK_TIMEOUT))
+        .transpose()
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
+    let state_path = state::state_path().ok();
+
     // Current-thread runtime: lifecycle hooks run on the agent's hot path (session
     // start + every prompt turn) and only need to `block_on` a short sequence of
     // HTTP round-trips. A multi-threaded runtime would spin up a worker thread pool
@@ -261,17 +282,195 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
         .build()?;
     rt.block_on(async {
         let mut out = String::new();
-        for action in dispatch(event, &tag_queries, &bundle_queries) {
-            let text = action.run(&client, &query, &chunk).await?;
-            if !text.is_empty() {
-                if !out.is_empty() {
-                    out.push_str("\n\n");
+        if let Some(client) = &client {
+            for action in dispatch(event, &tag_queries, &bundle_queries) {
+                let text = action.run(client, &query, &chunk).await?;
+                if !text.is_empty() {
+                    if !out.is_empty() {
+                        out.push_str("\n\n");
+                    }
+                    out.push_str(&text);
                 }
-                out.push_str(&text);
             }
+        }
+        if matches!(event, HookEvent::SessionStart | HookEvent::SessionEnd) {
+            let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd);
+            handle_session_log(
+                event,
+                &log_cfg,
+                client.as_ref(),
+                claude_session_id,
+                &ctx,
+                state_path.as_deref(),
+            )
+            .await;
         }
         Ok::<String, anyhow::Error>(out)
     })
+}
+
+/// Build the active-scope context a session's lifecycle/scope-header events
+/// carry. `tags`/`bundles` are the already-sorted/deduplicated sets `run_inner`
+/// computed; the project name comes from the first project-kind active scope.
+fn build_scope_context(
+    active: &crate::scope::ActiveScopes,
+    tags: &[String],
+    bundles: &[String],
+    cwd: &str,
+) -> ScopeContext {
+    let project = active
+        .scopes
+        .iter()
+        .find(|s| s.kind == "project")
+        .and_then(|s| s.name.clone());
+    ScopeContext {
+        tags: tags.to_vec(),
+        bundles: bundles.to_vec(),
+        project,
+        cwd: cwd.to_string(),
+        adapter: ClaudeCodeAdapter.name().to_string(),
+        llmenv_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+/// Emit the baseline session-log events for `event`: `SessionStart` creates or
+/// reuses the correlated transcript session, then emits `lifecycle_start` and
+/// the scope-header `scope` event; `SessionEnd` emits `lifecycle_end` against
+/// the previously-correlated session. No-op when both sinks are disabled, or
+/// for any event other than session start/end. Fully fail-soft.
+async fn handle_session_log(
+    event: HookEvent,
+    cfg: &SessionLog,
+    client: Option<&McpHttpClient>,
+    claude_session_id: Option<&str>,
+    ctx: &ScopeContext,
+    state_path: Option<&std::path::Path>,
+) {
+    if !(cfg.file || cfg.transcript) {
+        return;
+    }
+    let session_id = match (event, claude_session_id) {
+        (HookEvent::SessionStart, Some(csid)) => {
+            ensure_transcript_session(cfg, client, csid, ctx, state_path).await
+        }
+        (_, Some(csid)) => state_path.and_then(|p| state::lookup_session_at(p, csid)),
+        (_, None) => None,
+    };
+    let Some(lifecycle_kind) = (match event {
+        HookEvent::SessionStart => Some(EventKind::LifecycleStart),
+        HookEvent::SessionEnd => Some(EventKind::LifecycleEnd),
+        _ => None,
+    }) else {
+        return;
+    };
+    emit_session_log(
+        lifecycle_session_event(lifecycle_kind, &event.to_string()),
+        cfg,
+        client,
+        session_id.as_deref(),
+    )
+    .await;
+    if event == HookEvent::SessionStart {
+        emit_session_log(scope_session_event(ctx), cfg, client, session_id.as_deref()).await;
+    }
+}
+
+/// Reuse a previously-recorded transcript session for `csid`, or — when
+/// `cfg.transcript` and a client is available — start a new one and persist
+/// the correlation. Returns `None` when transcript logging is unavailable and
+/// nothing was recorded before.
+async fn ensure_transcript_session(
+    cfg: &SessionLog,
+    client: Option<&McpHttpClient>,
+    csid: &str,
+    ctx: &ScopeContext,
+    state_path: Option<&std::path::Path>,
+) -> Option<String> {
+    let path = state_path?;
+    if let Some(existing) = state::lookup_session_at(path, csid) {
+        return Some(existing);
+    }
+    let (true, Some(client)) = (cfg.transcript, client) else {
+        return None;
+    };
+    let metadata = scope_metadata_json(ctx);
+    match transcript_dispatch::start_session(
+        client,
+        ClaudeCodeAdapter.name(),
+        ctx.project.as_deref(),
+        &metadata,
+    )
+    .await
+    {
+        Ok(id) => {
+            if let Err(e) = state::record_session_at(path, csid, &id) {
+                warn!(error = %e, "failed to persist transcript session correlation");
+            }
+            Some(id)
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to start ICM transcript session");
+            None
+        }
+    }
+}
+
+/// Append `ev` to the configured sinks: the JSONL file (if `cfg.file`) and,
+/// for agent-session-scoped events, the ICM transcript (if `cfg.transcript`, a
+/// client is available, and a transcript session id is known). Fail-soft.
+async fn emit_session_log(
+    ev: SessionLogEvent,
+    cfg: &SessionLog,
+    client: Option<&McpHttpClient>,
+    session_id: Option<&str>,
+) {
+    let max = cfg.max_content_bytes.unwrap_or(16_384);
+    let ev = ev.truncated(max);
+    if cfg.file {
+        let path = cfg
+            .path
+            .clone()
+            .map(std::path::PathBuf::from)
+            .or_else(|| crate::session_log::default_file_path().ok());
+        if let Some(p) = path {
+            crate::session_log::FileSink::new(p).append(&ev.to_jsonl());
+        }
+    }
+    if cfg.transcript
+        && ev.scope == EventScope::AgentSession
+        && let (Some(client), Some(sid)) = (client, session_id)
+        && let Err(e) = transcript_dispatch::record(client, sid, &ev).await
+    {
+        warn!(error = %e, "failed to record session-log transcript event");
+    }
+}
+
+fn lifecycle_session_event(kind: EventKind, content: &str) -> SessionLogEvent {
+    SessionLogEvent {
+        ts: now_rfc3339(),
+        kind,
+        scope: EventScope::AgentSession,
+        role: "system".into(),
+        tool_name: None,
+        tokens: None,
+        level: None,
+        content: content.to_string(),
+        fields: serde_json::json!({}),
+    }
+}
+
+fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
+    SessionLogEvent {
+        ts: now_rfc3339(),
+        kind: EventKind::Scope,
+        scope: EventScope::AgentSession,
+        role: "system".into(),
+        tool_name: None,
+        tokens: None,
+        level: None,
+        content: scope_header_content(ctx),
+        fields: scope_metadata_json(ctx),
+    }
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, if any.
@@ -605,5 +804,175 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod session_log_tests {
+    use super::*;
+    use std::time::Duration;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn ctx() -> ScopeContext {
+        ScopeContext {
+            tags: vec!["rust".into()],
+            bundles: vec![],
+            project: Some("llmenv".into()),
+            cwd: "/tmp".into(),
+            adapter: "claude-code".into(),
+            llmenv_version: "3.0.0".into(),
+        }
+    }
+
+    fn file_only_cfg(path: &std::path::Path) -> SessionLog {
+        SessionLog {
+            file: true,
+            transcript: false,
+            verbose: false,
+            path: Some(path.to_string_lossy().into_owned()),
+            max_content_bytes: None,
+        }
+    }
+
+    fn jsonl_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_start_file_only_writes_lifecycle_and_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        handle_session_log(
+            HookEvent::SessionStart,
+            &file_only_cfg(&path),
+            None,
+            None,
+            &ctx(),
+            None,
+        )
+        .await;
+        let lines = jsonl_lines(&path);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["kind"], "lifecycle_start");
+        assert_eq!(lines[1]["kind"], "scope");
+        assert!(
+            lines[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("llmenv-tag:rust")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_end_file_only_writes_lifecycle_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        handle_session_log(
+            HookEvent::SessionEnd,
+            &file_only_cfg(&path),
+            None,
+            None,
+            &ctx(),
+            None,
+        )
+        .await;
+        let lines = jsonl_lines(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["kind"], "lifecycle_end");
+    }
+
+    #[tokio::test]
+    async fn disabled_sinks_write_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        let cfg = SessionLog {
+            file: false,
+            transcript: false,
+            ..file_only_cfg(&path)
+        };
+        handle_session_log(HookEvent::SessionStart, &cfg, None, None, &ctx(), None).await;
+        assert!(!path.exists());
+    }
+
+    fn mock_text_response(text: &str) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","id":1,
+            "result":{"content":[{"type":"text","text":text}]}})
+    }
+
+    #[tokio::test]
+    async fn session_start_with_transcript_creates_and_correlates_session() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+
+        let log_dir = tempfile::tempdir().unwrap();
+        let path = log_dir.path().join("session-log.jsonl");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(mock_text_response("icm-sess-1")),
+            )
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let cfg = SessionLog {
+            transcript: true,
+            ..file_only_cfg(&path)
+        };
+
+        handle_session_log(
+            HookEvent::SessionStart,
+            &cfg,
+            Some(&client),
+            Some("claude-1"),
+            &ctx(),
+            Some(&state_path),
+        )
+        .await;
+
+        assert_eq!(
+            state::lookup_session_at(&state_path, "claude-1").as_deref(),
+            Some("icm-sess-1")
+        );
+        assert_eq!(jsonl_lines(&path).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn session_end_reuses_correlated_session_without_starting_a_new_one() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+        state::record_session_at(&state_path, "claude-2", "icm-sess-2").unwrap();
+
+        let log_dir = tempfile::tempdir().unwrap();
+        let path = log_dir.path().join("session-log.jsonl");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("ok")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let cfg = SessionLog {
+            transcript: true,
+            ..file_only_cfg(&path)
+        };
+
+        handle_session_log(
+            HookEvent::SessionEnd,
+            &cfg,
+            Some(&client),
+            Some("claude-2"),
+            &ctx(),
+            Some(&state_path),
+        )
+        .await;
+
+        let lines = jsonl_lines(&path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["kind"], "lifecycle_end");
     }
 }

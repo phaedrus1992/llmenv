@@ -8,7 +8,7 @@ use tracing::{Level, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 
-use crate::session_log::event::{EventKind, EventScope, SessionLogEvent};
+use crate::session_log::event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
 use crate::session_log::file_sink::FileSink;
 
 /// A `tracing_subscriber::Layer` that appends `info!`+ events to a `FileSink`.
@@ -35,10 +35,6 @@ impl Visit for MessageVisitor {
             self.message = format!("{value:?}");
         }
     }
-}
-
-fn now_rfc3339() -> String {
-    jiff::Timestamp::now().to_string()
 }
 
 impl<S: Subscriber> Layer<S> for FileLogLayer {

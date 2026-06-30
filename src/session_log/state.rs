@@ -37,11 +37,33 @@ fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyh
     Ok(())
 }
 
+/// The ICM session id for a Claude session, if recorded in the map at `path`.
+/// Crate-internal: lets callers that already resolved `state_path()` (e.g. one
+/// hook invocation handling several events) avoid re-resolving it, and lets
+/// tests exercise this without touching the global state-dir env var.
+#[must_use]
+pub(crate) fn lookup_session_at(path: &Path, claude_session_id: &str) -> Option<String> {
+    load_at(path).get(claude_session_id).cloned()
+}
+
+/// Record the correlation into the map at `path` (read-modify-write, atomic,
+/// 0o600). See [`lookup_session_at`] for why this takes an explicit path.
+///
+/// # Errors
+/// Directory creation or atomic-write failure.
+pub(crate) fn record_session_at(
+    path: &Path,
+    claude_session_id: &str,
+    icm_session_id: &str,
+) -> anyhow::Result<()> {
+    record_at(path, claude_session_id, icm_session_id)
+}
+
 /// The ICM session id for a Claude session, if recorded.
 #[must_use]
 pub fn lookup_session(claude_session_id: &str) -> Option<String> {
     let path = state_path().ok()?;
-    load_at(&path).get(claude_session_id).cloned()
+    lookup_session_at(&path, claude_session_id)
 }
 
 /// Record the correlation (read-modify-write, atomic, 0o600).
@@ -50,7 +72,7 @@ pub fn lookup_session(claude_session_id: &str) -> Option<String> {
 /// Path resolution or atomic-write failure.
 pub fn record_session(claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
     let path = state_path()?;
-    record_at(&path, claude_session_id, icm_session_id)
+    record_session_at(&path, claude_session_id, icm_session_id)
 }
 
 #[cfg(test)]
