@@ -140,9 +140,53 @@ pub fn resolve_plugins(
         }
     }
 
+    // Built-in context-mode feature (#490): inject the canonical marketplace +
+    // plugin when enabled, unless the user already declared it (user wins on
+    // source). context-mode is a *plugin* (its hooks need ${CLAUDE_PLUGIN_ROOT}),
+    // so it rides the normal plugin path — not ICM's remote-MCP mechanism.
+    let cm_enabled = config
+        .features
+        .as_ref()
+        .and_then(|f| f.context_mode.as_ref())
+        .is_some_and(|c| c.enabled);
+    let mut inject_builtin_marketplace = false;
+    if cm_enabled {
+        let key = (
+            crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
+            crate::config::CONTEXT_MODE_PLUGIN.to_string(),
+        );
+        if seen_plugin.insert(key) {
+            referenced.insert(crate::config::CONTEXT_MODE_MARKETPLACE.to_string());
+            plugins.push(ResolvedPlugin {
+                marketplace: crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
+                plugin: crate::config::CONTEXT_MODE_PLUGIN.to_string(),
+                collection: "context_mode (built-in)".to_string(),
+                install_path: None,
+                git_commit_sha: None,
+            });
+        } else {
+            // The user manually declared context-mode:context-mode in a
+            // plugin-collection AND enabled features.context_mode. The built-in
+            // already wires it — the manual entry is redundant. Warn so the user
+            // can drop it (harmless, but confusing config drift otherwise).
+            tracing::warn!(
+                "features.context_mode is enabled and you also declared \
+                 'context-mode:context-mode' in a plugin-collection — the \
+                 built-in feature wires context-mode automatically, so the manual \
+                 plugin-collection entry is redundant and can be removed."
+            );
+        }
+        // The built-in marketplace is emitted from config.marketplace below only
+        // if the user declared it. If they didn't, we must add it ourselves.
+        inject_builtin_marketplace = !config
+            .marketplace
+            .iter()
+            .any(|m| m.name == crate::config::CONTEXT_MODE_MARKETPLACE);
+    }
+
     // Emit referenced marketplaces in config declaration order so output is
     // stable and diff-friendly regardless of plugin discovery order.
-    let marketplaces = config
+    let mut marketplaces: Vec<ResolvedMarketplace> = config
         .marketplace
         .iter()
         .filter(|m| referenced.contains(&m.name))
@@ -153,6 +197,14 @@ pub fn resolve_plugins(
             head: None,
         })
         .collect();
+    if inject_builtin_marketplace {
+        marketplaces.push(ResolvedMarketplace {
+            name: crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
+            source: crate::config::CONTEXT_MODE_SOURCE.to_string(),
+            install_location: None,
+            head: None,
+        });
+    }
 
     Ok(ResolvedPlugins {
         plugins,
@@ -295,6 +347,114 @@ mod tests {
         let resolved = resolve_plugins(&cfg, &tags(&["other"])).unwrap();
         assert!(resolved.plugins.is_empty());
         assert!(resolved.marketplaces.is_empty());
+    }
+
+    #[test]
+    fn context_mode_feature_injects_plugin_and_marketplace() {
+        let cfg = Config {
+            features: Some(crate::config::Features {
+                context_mode: Some(crate::config::ContextMode { enabled: true }),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let resolved = resolve_plugins(&cfg, &tags(&[])).unwrap();
+        assert!(
+            resolved
+                .plugins
+                .iter()
+                .any(|p| p.marketplace == "context-mode" && p.plugin == "context-mode")
+        );
+        assert!(
+            resolved
+                .marketplaces
+                .iter()
+                .any(|m| m.name == "context-mode"
+                    && m.source == "https://github.com/mksglu/context-mode")
+        );
+    }
+
+    #[test]
+    fn context_mode_disabled_injects_nothing() {
+        let cfg = Config::default();
+        let resolved = resolve_plugins(&cfg, &tags(&[])).unwrap();
+        assert!(
+            !resolved
+                .plugins
+                .iter()
+                .any(|p| p.marketplace == "context-mode")
+        );
+    }
+
+    #[test]
+    fn context_mode_dedups_user_declared() {
+        // User declares context-mode via a marketplace + collection AND enables the
+        // feature: exactly one plugin entry, user's source preserved.
+        let cfg = Config {
+            marketplace: vec![Marketplace {
+                name: "context-mode".into(),
+                source: "https://github.com/myfork/context-mode".into(),
+            }],
+            plugin_collection: vec![crate::config::PluginCollection {
+                name: "core".into(),
+                when: vec!["t".into()],
+                plugins: vec!["context-mode:context-mode".into()],
+            }],
+            features: Some(crate::config::Features {
+                context_mode: Some(crate::config::ContextMode { enabled: true }),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+        let cm: Vec<_> = resolved
+            .plugins
+            .iter()
+            .filter(|p| p.marketplace == "context-mode")
+            .collect();
+        assert_eq!(cm.len(), 1, "no duplicate plugin entry");
+        let mk: Vec<_> = resolved
+            .marketplaces
+            .iter()
+            .filter(|m| m.name == "context-mode")
+            .collect();
+        assert_eq!(mk.len(), 1);
+        assert_eq!(
+            mk[0].source, "https://github.com/myfork/context-mode",
+            "user-declared source wins"
+        );
+    }
+
+    #[test]
+    fn context_mode_user_declared_triggers_dedup_branch() {
+        // Same setup as the dedup test: feature on + user-declared plugin. The
+        // warn fires on the dedup branch; we assert the branch was taken (one entry)
+        // which is the same observable the warn guards.
+        let cfg = Config {
+            marketplace: vec![Marketplace {
+                name: "context-mode".into(),
+                source: "https://github.com/mksglu/context-mode".into(),
+            }],
+            plugin_collection: vec![crate::config::PluginCollection {
+                name: "core".into(),
+                when: vec!["t".into()],
+                plugins: vec!["context-mode:context-mode".into()],
+            }],
+            features: Some(crate::config::Features {
+                context_mode: Some(crate::config::ContextMode { enabled: true }),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+        assert_eq!(
+            resolved
+                .plugins
+                .iter()
+                .filter(|p| p.marketplace == "context-mode")
+                .count(),
+            1
+        );
     }
 
     mod props {
