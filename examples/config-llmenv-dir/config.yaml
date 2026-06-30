@@ -456,8 +456,7 @@ marketplace:
 ################################################################################
 plugin-collection:
   # Core dev plugins. Tagged for `user-phaedrus` so they activate everywhere
-  # this user runs a session. context-mode is included here because its own
-  # hooks file is what wires SessionStart/PreToolUse support correctly.
+  # this user runs a session.
   - name: core
     when: [user-phaedrus]
     plugins:
@@ -469,7 +468,10 @@ plugin-collection:
       - "claude-plugins-official:plugin-dev"
       - "claude-plugins-official:pr-review-toolkit"
       - "claude-plugins-official:superpowers"
-      - "context-mode:context-mode"
+      # context-mode is now wired by the built-in `features.context_mode`
+      # toggle (see the features: block below), so it no longer needs a manual
+      # entry here. Declaring it both ways emits a redundant-declaration warning.
+      # - "context-mode:context-mode"
       - "i-have-adhd:i-have-adhd"
       - "ponytail:ponytail"
       - "trailofbits:gh-cli"
