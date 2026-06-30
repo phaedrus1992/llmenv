@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix forward-merge-release workflow silently ignoring `git merge --abort` errors, which could
+  leave the working tree in an inconsistent state during merge conflict resolution (#484)
+- Fix forward-merge-release workflow misinterpreting network/auth errors as "ref not found" in
+  `git ls-remote --exit-code` checks, causing the cascade to proceed unsafely when the remote
+  is unreachable (#485)
+
 ## [2.3.0] - 2026-06-30
 
 ### Added
