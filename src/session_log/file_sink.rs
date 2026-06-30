@@ -58,6 +58,17 @@ impl FileSink {
             opts.mode(0o600);
         }
         let mut f = opts.open(&self.path)?;
+        // `mode(0o600)` above only applies on creation (O_CREAT); a file that
+        // already existed (e.g. created with a looser umask before this sink
+        // ran, or by an older llmenv version) keeps its prior permissions. Set
+        // them explicitly on every open via the already-open fd so a
+        // pre-existing world-readable file gets locked down before this
+        // process appends potentially sensitive verbose-mode content to it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")
     }
@@ -91,5 +102,22 @@ mod tests {
         FileSink::new(path.clone()).append("{}");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "group/other bits must be unset: {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_re_protects_a_pre_existing_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        FileSink::new(path.clone()).append("{}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "append must lock down a pre-existing looser-permission file: {mode:o}"
+        );
     }
 }
