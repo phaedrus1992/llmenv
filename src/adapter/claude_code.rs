@@ -2209,4 +2209,54 @@ mod tests {
         let err = validate_skills(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("escapes"), "got: {err}");
     }
+
+    #[test]
+    fn reconcile_preserves_context_mode_self_registered_hook() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        // Simulate a prior render where context-mode's start.mjs added a cache-heal
+        // SessionStart hook into settings.json.
+        let on_disk = json!({
+            "hooks": {
+                "SessionStart": [
+                    { "hooks": [ { "type": "command",
+                      "command": "node /cfg/hooks/context-mode-cache-heal.mjs" } ] }
+                ]
+            },
+            "enabledPlugins": { "context-mode@context-mode": true }
+        });
+        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+
+        // llmenv re-renders: its own hooks + authoritative enabledPlugins.
+        let fresh = json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [ { "type": "command", "command": "node /cfg/llmenv-own.mjs" } ] }
+            ] },
+            "enabledPlugins": { "context-mode@context-mode": true },
+            "permissions": { "allow": [], "ask": [], "deny": [] }
+        });
+
+        let merged = reconcile_settings(&path, fresh).unwrap();
+        let ss = merged["hooks"]["SessionStart"].as_array().unwrap();
+        let commands: Vec<&str> = ss
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().unwrap())
+            .map(|h| h["command"].as_str().unwrap())
+            .collect();
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.contains("context-mode-cache-heal")),
+            "self-registered cache-heal hook must survive"
+        );
+        assert!(
+            commands.iter().any(|c| c.contains("llmenv-own")),
+            "llmenv's own rendered hook must be present"
+        );
+        assert_eq!(
+            merged["enabledPlugins"]["context-mode@context-mode"],
+            json!(true)
+        );
+    }
 }
