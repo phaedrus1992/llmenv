@@ -73,7 +73,12 @@ The stream is fed from three places, all converging on the same sinks:
   maps llmenv's own `tracing` events at `info`+ into `internal` events —
   materialization, change detection, cache sync, regenerate, auth detection,
   hook firing, etc. This **keeps the useful internal logging** that 2.1.0's
-  file did, now flowing into both sinks. `level` is carried as a field.
+  file did. `level` is carried as a field. These are **process-scoped**: in the
+  `export`/`regenerate` process there is no agent transcript session, so
+  internal events go to the **file sink** (the diagnostic log). When an internal
+  event fires inside a hook process that already has a resolved transcript
+  session, it is recorded to the transcript too. Event scope (`agent_session`
+  vs `process`) decides transcript eligibility; the file sink takes everything.
 - **Agent turns** (out-of-process, verbose only): injected Claude hooks →
   `llmenv hook-run …` → `prompt` / `tool_use` / `tool_result` / `stop` events.
 
@@ -99,21 +104,26 @@ fields:    structured payload (tags, bundles, scopes, cwd, op name, …)
 
 ### Baseline (feature enabled, `verbose = false`)
 
-1. At launch / `llmenv export`: call `icm_transcript_start_session(agent=<adapter>,
+The agent transcript session is created **in the `SessionStart` hook**, not at
+`export` time — only the hook has Claude's `session_id` to correlate against,
+and it runs when the real session begins.
+
+1. **SessionStart hook** (`llmenv hook-run session_start`): re-derive active
+   scopes (the hook already does this for memory recall), then call
+   `icm_transcript_start_session(agent=<adapter>,
    project=<scope-project-or-cwd-basename>,
    metadata={tags, bundles, scopes, cwd, adapter, llmenv_version})` via the MCP.
-   Persist the returned `session_id` (see State). When `file` is on, the same
-   scope/lifecycle events are written to the file regardless of MCP state.
+   Persist `claude_session_id → icm_session_id` (see State). Emit
+   `lifecycle_start`.
 2. Emit a **scope-header** event (`kind=scope`, `role=system`) whose `content`
-   embeds discoverability tokens reusing the existing convention in
-   `src/icm.rs`:
-   `llmenv-tag:<tag>` (one per active tag) and `llmenv-bundle:<bundle>`
-   (one per bundle), plus the project name. This is the FTS handle.
-3. Inject **minimal lifecycle hooks** — `SessionStart` and `SessionEnd`
-   (fall back to `Stop` if the adapter lacks `SessionEnd`) — so the recorded
-   session brackets the *real* agent session, not just the `export` call.
-   `SessionStart` emits `lifecycle_start`; `SessionEnd`/`Stop` emits
-   `lifecycle_end`.
+   embeds discoverability tokens reusing `tag_keyword` / `bundle_keyword`
+   (`src/hook_run/action.rs`): `llmenv-tag:<tag>` (one per active tag) and
+   `llmenv-bundle:<bundle>` (one per bundle), plus the project name. This is the
+   FTS handle.
+3. The minimal lifecycle hooks are `SessionStart` and `SessionEnd` (already
+   modeled in `HookEvent`); `SessionEnd` emits `lifecycle_end`. These bracket
+   the real agent session. With `file` on, scope/lifecycle events also append to
+   the file regardless of MCP state.
 
 ### Verbose (`verbose = true`)
 
@@ -167,14 +177,17 @@ prompt text / tool input / tool result, **truncated to `max_content_bytes`**
 
 ## State & correlation
 
-- llmenv owns **one transcript session per agent launch**.
+- llmenv owns **one transcript session per agent launch**, created in the
+  `SessionStart` hook.
 - Claude hooks deliver Claude's `session_id` on stdin. llmenv keeps a
-  `claude_session_id → {icm_session_id, file_path}` map under `state_dir()`
+  `claude_session_id → icm_session_id` map under `state_dir()`
   (`~/.local/state/llmenv`, or `$LLMENV_STATE_DIR`) — a **stable state path,
   not cache** (per the #382 follow-up note). Written owner-only (0o600) via the
   existing `write_owner_only_atomic` helper.
-- First hook for an unseen Claude session lazily creates the icm session if the
-  launch-time start was skipped (e.g. icm was briefly unavailable).
+- Later hooks look up the icm session id by Claude `session_id`. A hook that
+  finds no mapping (e.g. SessionStart's start failed because the MCP was down)
+  lazily retries `start_session` before recording, so a transient outage at
+  launch doesn't lose the rest of the session.
 
 ## Configuration
 
