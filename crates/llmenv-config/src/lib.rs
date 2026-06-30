@@ -23,9 +23,9 @@ pub use schema::{
     HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, Marketplace,
     MarketplaceSource, McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch,
     NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions,
-    PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes, StateConfig, StateTool, Throttle,
-    UserMatch, UserScope, classify_source, github_owner_repo, is_reserved_official_marketplace,
-    split_plugin_ref,
+    PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes, SessionLog, StateConfig, StateTool,
+    Throttle, UserMatch, UserScope, classify_source, github_owner_repo,
+    is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
 pub use validate::{ValidateError, validate_capabilities_env_key};
@@ -40,6 +40,13 @@ impl Config {
             .as_ref()
             .and_then(|f| f.context_mode.as_ref())
             .is_some_and(|c| c.enabled)
+    }
+
+    /// Effective session-logging config: an absent block means ICM transcript
+    /// on, file + verbose off.
+    #[must_use]
+    pub fn session_log_resolved(&self) -> SessionLog {
+        self.session_log.clone().unwrap_or_default()
     }
 
     /// Load and validate a config from an **already-expanded** path.
@@ -81,21 +88,45 @@ mod tests {
     }
 
     #[test]
-    fn session_log_defaults_to_none() {
+    fn session_log_absent_resolves_to_transcript_on() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("config.yaml");
         std::fs::write(&p, "cache: {}\n").unwrap();
         let cfg = Config::load(&p).unwrap();
         assert!(cfg.session_log.is_none());
+        let resolved = cfg.session_log_resolved();
+        assert!(resolved.transcript, "default must enable transcript");
+        assert!(!resolved.file);
+        assert!(!resolved.verbose);
     }
 
     #[test]
-    fn session_log_parses_path() {
+    fn session_log_table_parses_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        std::fs::write(
+            &p,
+            "session_log:\n  file: true\n  transcript: false\n  verbose: true\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&p).unwrap();
+        let r = cfg.session_log_resolved();
+        assert!(r.file && !r.transcript && r.verbose);
+    }
+
+    #[test]
+    fn session_log_bare_string_is_rejected_with_migration_hint() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("config.yaml");
         std::fs::write(&p, "session_log: /tmp/session.jsonl\n").unwrap();
-        let cfg = Config::load(&p).unwrap();
-        assert_eq!(cfg.session_log.as_deref(), Some("/tmp/session.jsonl"));
+        let err = Config::load(&p).unwrap_err().to_string();
+        // The full chain mentions the field path; the source carries the hint.
+        let chain = format!("{:#}", Config::load(&p).unwrap_err());
+        assert!(chain.contains("session_log") || err.contains("session_log"));
+        assert!(
+            chain.contains("file: true"),
+            "error shows the migration: {chain}"
+        );
     }
 
     #[test]

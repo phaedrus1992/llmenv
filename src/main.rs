@@ -19,10 +19,21 @@ fn open_session_log(path: &str) -> Option<std::fs::File> {
 }
 
 fn main() {
-    let session_log = llmenv_paths::config_path()
+    // Resolved session-logging config (absent block → transcript on, file off).
+    // Task 9 replaces this stop-gap with the session_log module's sink wiring;
+    // here we only keep the file path working so the build compiles.
+    let resolved = llmenv_paths::config_path()
         .ok()
         .and_then(|p| llmenv_config::Config::load(&p).ok())
-        .and_then(|c| c.session_log);
+        .map(|c| c.session_log_resolved())
+        .unwrap_or_default();
+    let session_log = resolved.file.then(|| {
+        resolved.path.clone().unwrap_or_else(|| {
+            llmenv_paths::state_dir()
+                .map(|d| d.join("session-log.jsonl").to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "session-log.jsonl".to_string())
+        })
+    });
 
     let file_layer = session_log.and_then(|raw| {
         let path = llmenv_paths::expand_tilde(&raw);
