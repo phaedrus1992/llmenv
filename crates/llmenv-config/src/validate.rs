@@ -2568,7 +2568,7 @@ mod tests {
     fn skill_valid_entry_is_accepted() {
         let cfg = config_with_skills(vec![crate::SkillSource {
             name: "my-skill".into(),
-            path: "/some/path".into(),
+            path: "./skills/my-skill".into(),
             when: vec![],
         }]);
         assert!(cfg.validate().is_ok());
