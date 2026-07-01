@@ -1,4 +1,5 @@
 pub mod claude_code;
+pub mod crush;
 
 use std::path::{Path, PathBuf};
 
