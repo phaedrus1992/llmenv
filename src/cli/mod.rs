@@ -849,19 +849,25 @@ fn tag_active(when: &[String], active: &std::collections::BTreeSet<String>) -> b
     when.is_empty() || when.iter().any(|t| active.contains(t))
 }
 
-/// Emit a warning when `engine` is not the name of any registered adapter.
+/// Emit a warning when `engine` is not the identity of any registered adapter.
 /// Defensive: the set of adapters is small and static today; this surfaces
 /// stale or mis-typed `--engine` flags before they silently produce wrong output.
+///
+/// The `--engine` flag uses the underscore form of an adapter's name (the same
+/// convention as the `native_<engine>` keys, e.g. `claude_code`), while
+/// [`crate::adapter::AgentAdapter::name`] is the hyphenated cache-dir form
+/// (`claude-code`). Normalise before comparing so the baked-in default matches.
 fn warn_if_unknown_engine(engine: &str) {
     let known = crate::adapter::registered_adapters();
-    if !known.iter().any(|a| a.name() == engine) {
+    let engine_id = |a: &dyn crate::adapter::AgentAdapter| a.name().replace('-', "_");
+    if !known.iter().any(|a| engine_id(a.as_ref()) == engine) {
         tracing::warn!(
             engine,
             "unrecognised engine name — no registered adapter matches; \
              did you mean one of: {}?",
             known
                 .iter()
-                .map(|a| a.name())
+                .map(|a| engine_id(a.as_ref()))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
