@@ -208,7 +208,7 @@ impl AgentAdapter for CrushAdapter {
             let mut mcp_obj = serde_json::Map::new();
             for mcp in &manifest.mcps {
                 use crate::mcp::resolve::ResolvedKind;
-                let entry = match &mcp.kind {
+                let mut e = match &mcp.kind {
                     ResolvedKind::Stdio { command, args, env } => {
                         let mut e = serde_json::Map::new();
                         e.insert("command".into(), json!(command));
@@ -216,34 +216,26 @@ impl AgentAdapter for CrushAdapter {
                         if !env.is_empty() {
                             e.insert("env".into(), json!(env));
                         }
-                        if !mcp.headers.is_empty() {
-                            e.insert("headers".into(), json!(mcp.headers));
-                        }
-                        if let Some(t) = mcp.timeout {
-                            e.insert("timeout".into(), json!(t));
-                        }
-                        if !mcp.disabled_tools.is_empty() {
-                            e.insert("disabled_tools".into(), json!(mcp.disabled_tools));
-                        }
-                        serde_json::Value::Object(e)
+                        e
                     }
                     ResolvedKind::Remote { url, .. } => {
                         let mut e = serde_json::Map::new();
                         e.insert("type".into(), json!("remote"));
                         e.insert("url".into(), json!(url));
-                        if !mcp.headers.is_empty() {
-                            e.insert("headers".into(), json!(mcp.headers));
-                        }
-                        if let Some(t) = mcp.timeout {
-                            e.insert("timeout".into(), json!(t));
-                        }
-                        if !mcp.disabled_tools.is_empty() {
-                            e.insert("disabled_tools".into(), json!(mcp.disabled_tools));
-                        }
-                        serde_json::Value::Object(e)
+                        e
                     }
                 };
-                mcp_obj.insert(mcp.name.clone(), entry);
+                // Fields common to both transports (fix 6: parity).
+                if !mcp.headers.is_empty() {
+                    e.insert("headers".into(), json!(mcp.headers));
+                }
+                if let Some(t) = mcp.timeout {
+                    e.insert("timeout".into(), json!(t));
+                }
+                if !mcp.disabled_tools.is_empty() {
+                    e.insert("disabled_tools".into(), json!(mcp.disabled_tools));
+                }
+                mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
             }
             // fix 7: overlay native_mcp.crush into the mcp object
             let mut mcp_value = serde_json::Value::Object(mcp_obj);
