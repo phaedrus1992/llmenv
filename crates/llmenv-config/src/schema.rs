@@ -159,11 +159,21 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
             max_content_bytes: Option<usize>,
         }
         let v = serde_yaml::Value::deserialize(d)?;
-        if v.is_string() {
-            return Err(serde::de::Error::custom(
-                "session_log is now a mapping, not a path string; use \
-                 `session_log: { file: true }` (file path overridable via `path:`)",
-            ));
+        if !v.is_mapping() {
+            let got = match &v {
+                serde_yaml::Value::String(_) => {
+                    "a string (the pre-3.0 bare path-string form is no longer supported)"
+                        .to_string()
+                }
+                serde_yaml::Value::Bool(_) => "a boolean".to_string(),
+                serde_yaml::Value::Number(_) => "a number".to_string(),
+                serde_yaml::Value::Sequence(_) => "a sequence".to_string(),
+                other => format!("{other:?}"),
+            };
+            return Err(serde::de::Error::custom(format!(
+                "session_log must be a mapping, not {got}; use \
+                 `session_log: {{ file: true }}` (file path overridable via `path:`)",
+            )));
         }
         let s: Shadow = serde_yaml::from_value(v).map_err(serde::de::Error::custom)?;
         Ok(SessionLog {
@@ -903,6 +913,69 @@ mod tests {
             .expect("parse explicit cache");
             assert_eq!(cache.hashing, expected, "hashing: {text}");
         }
+    }
+
+    #[test]
+    fn session_log_serialize_deserialize_roundtrips() {
+        // #509 item 4: no round-trip test existed for the custom Deserialize impl.
+        let original = SessionLog {
+            file: true,
+            transcript: false,
+            verbose: true,
+            path: Some("/tmp/log.jsonl".into()),
+            max_content_bytes: Some(1024),
+        };
+        let yaml = serde_yaml::to_string(&original).expect("serialize");
+        let back: SessionLog = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(original, back);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_session_log_yaml_roundtrip(
+            file in proptest::bool::ANY,
+            transcript in proptest::bool::ANY,
+            verbose in proptest::bool::ANY,
+            path in prop::option::of("[a-zA-Z0-9/_.-]{1,32}"),
+            max_content_bytes in prop::option::of(0usize..1_000_000),
+        ) {
+            let original = SessionLog { file, transcript, verbose, path, max_content_bytes };
+            let yaml = serde_yaml::to_string(&original).expect("serialize");
+            let back: SessionLog = serde_yaml::from_str(&yaml).expect("deserialize");
+            prop_assert_eq!(original, back);
+        }
+    }
+
+    #[test]
+    fn session_log_rejects_bare_string_with_migration_hint() {
+        let err = serde_yaml::from_str::<SessionLog>("some/path.jsonl").unwrap_err();
+        assert!(err.to_string().contains("pre-3.0 bare path-string form"));
+    }
+
+    #[test]
+    fn session_log_rejects_non_mapping_with_type_specific_message() {
+        // #509 item 4: a bool/number value must not be described as "not a path
+        // string" — that message is misleading when the value isn't a string.
+        let bool_err = serde_yaml::from_str::<SessionLog>("true").unwrap_err();
+        assert!(bool_err.to_string().contains("a boolean"));
+        assert!(!bool_err.to_string().contains("path string"));
+
+        let num_err = serde_yaml::from_str::<SessionLog>("5").unwrap_err();
+        assert!(num_err.to_string().contains("a number"));
+        assert!(!num_err.to_string().contains("path string"));
+    }
+
+    #[test]
+    fn session_log_error_carries_config_file_path() {
+        // #509 item 6: the migration-hint error must be locatable in a
+        // multi-file setup. Config::load already wraps every parse error with
+        // the file path (crates/llmenv-config/src/lib.rs); confirm that wrap
+        // covers this custom Deserialize impl's error too.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "session_log: true\n").unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(err.to_string().contains(&path.display().to_string()));
     }
 
     #[test]
