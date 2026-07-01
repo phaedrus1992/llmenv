@@ -166,11 +166,12 @@ pub(crate) fn write_first_class_skills(
     }
     let skills_dir = out.join("skills");
     for skill in skills {
-        if crate::paths::is_unsafe_join_target(&skill.name) {
-            anyhow::bail!(
-                "unsafe skill name '{}': contains path-traversal components",
-                skill.name
-            );
+        // #534: an allowlist (ASCII alphanumeric + '.'/'_'/'-') closes the gap
+        // a traversal-only check leaves — no path separators, no control
+        // characters, no Unicode formatting characters (zero-width space, RTL
+        // override) — rather than enumerating what to reject.
+        if !crate::paths::is_valid_short_name(&skill.name) {
+            anyhow::bail!("unsafe skill name '{}': not a valid skill name", skill.name);
         }
         let src = Path::new(&skill.path);
         if !src.is_dir() {

@@ -440,9 +440,14 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
             "marketplace source uses a disallowed git transport: {source}"
         ));
     }
-    if let Some(ch) = source.chars().find(|c| matches!(c, '\0' | '\n' | '\r')) {
+    // #534: every valid git URL (https/ssh/scp-style) is pure ASCII, so
+    // rejecting any non-ASCII character — not just enumerating '\0'/'\n'/'\r'
+    // — closes the gap by construction: it also catches every ASCII control
+    // character and every Unicode formatting character (zero-width space,
+    // RTL override) that a narrower blocklist would miss.
+    if let Some(ch) = source.chars().find(|c| !c.is_ascii() || c.is_control()) {
         return Err(anyhow::anyhow!(
-            "marketplace source contains disallowed control character {:?}: {source}",
+            "marketplace source contains disallowed character {:?}: {source}",
             ch
         ));
     }
@@ -1131,6 +1136,19 @@ mod tests {
         assert!(reject_unsafe_source("file:/path").is_err());
         assert!(reject_unsafe_source("http://insecure.example.com").is_err());
         assert!(reject_unsafe_source("HTTP://INSECURE.COM").is_err());
+    }
+
+    #[test]
+    fn reject_unsafe_source_rejects_non_ascii_and_all_control_characters() {
+        // #534: the previous check only blocked '\0'/'\n'/'\r' — every valid
+        // git URL is pure ASCII, so rejecting non-ASCII (which subsumes every
+        // Unicode formatting character: zero-width space, RTL override, etc.)
+        // and every ASCII control character (not just three of them) closes
+        // the gap with no false positives.
+        assert!(reject_unsafe_source("https://github.com/example/repo\t.git").is_err());
+        assert!(reject_unsafe_source("https://github.com/example/repo\x7f.git").is_err());
+        assert!(reject_unsafe_source("https://github.com/example/repo\u{200B}.git").is_err());
+        assert!(reject_unsafe_source("https://github.com/exämple/repo.git").is_err());
     }
 
     /// git_head, git_clone, and git_pull must never block waiting for credential

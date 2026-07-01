@@ -2573,6 +2573,25 @@ mod tests {
     }
 
     #[test]
+    fn write_first_class_skills_rejects_control_character_name() {
+        // #534: closes the gap a traversal-only check leaves for names that
+        // contain no `..`/absolute-path component but are still unsafe as a
+        // filesystem/JSON-key identifier.
+        let out_tmp = tempfile::tempdir().unwrap();
+        let skill = crate::config::SkillSource {
+            name: "foo\0bar".into(),
+            path: "/some/path".into(),
+            when: Vec::new(),
+        };
+        let err = crate::adapter::skills::write_first_class_skills(
+            out_tmp.path(),
+            std::slice::from_ref(&skill),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsafe skill name"), "got: {err}");
+    }
+
+    #[test]
     fn write_first_class_skills_empty_is_noop() {
         let out_tmp = tempfile::tempdir().unwrap();
         let owned = crate::adapter::skills::write_first_class_skills(out_tmp.path(), &[]).unwrap();

@@ -46,6 +46,22 @@ pub fn is_unsafe_join_target(path: &str) -> bool {
     p.is_absolute() || has_parent_component(path)
 }
 
+/// True if `name` is safe to use as a single path component (a marketplace,
+/// skill, or plugin-collection name) and as a JSON key — ASCII
+/// alphanumeric plus `.`/`_`/`-`, not empty, not `.`/`..`, not leading with
+/// `-` (git/CLI arg-parsing hazard). Rejects everything a component-based
+/// blocklist could miss (control characters, Unicode formatting characters
+/// like zero-width space or RTL override, path separators) by construction,
+/// rather than by enumerating what to reject (#534).
+#[must_use]
+pub fn is_valid_short_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." || name.starts_with('-') {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Return true if `cwd` is at or below `prefix`, treating both as filesystem
 /// paths (component-wise) rather than raw strings. This avoids the
 /// `/home/alice/git/xyz` matches prefix `/home/alice/git/x` bug.
@@ -226,6 +242,36 @@ fn write_owner_only_atomic_in_dir(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_valid_short_name_accepts_alphanumeric_dot_underscore_dash() {
+        for name in ["superpowers", "context-mode", "v1.2.3", "foo_bar", "a"] {
+            assert!(is_valid_short_name(name), "{name} should be valid");
+        }
+    }
+
+    #[test]
+    fn is_valid_short_name_rejects_empty_dot_dotdot_and_leading_dash() {
+        for name in ["", ".", "..", "-evil"] {
+            assert!(!is_valid_short_name(name), "{name} should be rejected");
+        }
+    }
+
+    #[test]
+    fn is_valid_short_name_rejects_path_separator() {
+        assert!(!is_valid_short_name("foo/bar"));
+        assert!(!is_valid_short_name("foo\\bar"));
+    }
+
+    #[test]
+    fn is_valid_short_name_rejects_control_and_non_ascii_characters() {
+        // #534: a blocklist-style check misses Unicode formatting characters
+        // (zero-width space, RTL override) that an allowlist closes by construction.
+        assert!(!is_valid_short_name("foo\0bar"));
+        assert!(!is_valid_short_name("foo\u{200B}bar"));
+        assert!(!is_valid_short_name("foo\u{202E}bar"));
+        assert!(!is_valid_short_name("café"));
+    }
 
     #[test]
     fn cwd_under_prefix_respects_component_boundary() {
