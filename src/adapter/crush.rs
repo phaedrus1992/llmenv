@@ -55,6 +55,14 @@ impl AgentAdapter for CrushAdapter {
         // data from other tools' state dirs. Allows future Crush-specific state cleanup
         // without touching unrelated stores.
         let crush_data_dir = format!("{data_dir}/crush");
+        // ponytail: env_vars() does I/O here (breaking the "query-only" trait shape)
+        // because it's the only place that knows both the exact path and that it
+        // must exist — nothing else in the export pipeline creates this adapter's
+        // state subdir. Single call site today (cli/mod.rs run_export). If a second
+        // caller needs env_vars() without the mkdir side effect (e.g. a dry-run
+        // command), split dir creation into materialize() and thread state_dir
+        // through its signature instead.
+        super::skills::create_dir_owner_only(Path::new(&crush_data_dir))?;
         Ok(vec![
             (
                 "CRUSH_GLOBAL_CONFIG".into(),
@@ -471,6 +479,7 @@ mod tests {
         overlay_native_crush, reject_modeled_keys_in_native_crush, render_permission_rule,
     };
     use crate::adapter::AgentAdapter;
+    use crate::adapter::skills::arb_yaml_value;
     use crate::config::{
         Capabilities, Hook, HookHandler, HookHandlerKind, NativePermissionRules, PermissionRule,
     };
@@ -557,30 +566,14 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_data_survives_config_hash_change() {
+    fn env_vars_creates_data_dir_on_disk() {
+        let cache = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        // Simulate two different config renders (different content hashes)
-        let cache1 = tempfile::tempdir().unwrap();
-        let cache2 = tempfile::tempdir().unwrap();
-
-        // First render: cache1 + state
-        let vars1 = CrushAdapter.env_vars(cache1.path(), state.path()).unwrap();
-        let (_, data1) = vars1
-            .iter()
-            .find(|(k, _)| k == "CRUSH_GLOBAL_DATA")
-            .unwrap();
-
-        // Second render with different cache dir: cache2 + same state
-        let vars2 = CrushAdapter.env_vars(cache2.path(), state.path()).unwrap();
-        let (_, data2) = vars2
-            .iter()
-            .find(|(k, _)| k == "CRUSH_GLOBAL_DATA")
-            .unwrap();
-
-        // Both renders point to the same stable state dir, so session data is not lost
-        assert_eq!(
-            data1, data2,
-            "CRUSH_GLOBAL_DATA must point to the same dir despite config hash changes"
+        let vars = CrushAdapter.env_vars(cache.path(), state.path()).unwrap();
+        let (_, data) = vars.iter().find(|(k, _)| k == "CRUSH_GLOBAL_DATA").unwrap();
+        assert!(
+            std::path::Path::new(data).is_dir(),
+            "CRUSH_GLOBAL_DATA dir '{data}' must exist on disk after env_vars() runs"
         );
     }
 
@@ -931,6 +924,41 @@ mod tests {
     #[test]
     fn supported_hook_events_contains_pretooluse() {
         assert!(SUPPORTED_HOOK_EVENTS.contains(&"PreToolUse"));
+    }
+
+    // ── crush_permission_mode ─────────────────────────────────────────────────
+
+    #[test]
+    fn crush_permission_mode_all_variants() {
+        use crate::config::PermissionMode;
+        assert_eq!(
+            super::crush_permission_mode(PermissionMode::AcceptEdits),
+            "accept_edits"
+        );
+        assert_eq!(super::crush_permission_mode(PermissionMode::Plan), "plan");
+        assert_eq!(
+            super::crush_permission_mode(PermissionMode::Default),
+            "default"
+        );
+        assert_eq!(
+            super::crush_permission_mode(PermissionMode::BypassPermissions),
+            "bypass_permissions"
+        );
+
+        // Distinctness: no two variants render to the same string.
+        let outputs: std::collections::HashSet<&str> = [
+            super::crush_permission_mode(PermissionMode::AcceptEdits),
+            super::crush_permission_mode(PermissionMode::Plan),
+            super::crush_permission_mode(PermissionMode::Default),
+            super::crush_permission_mode(PermissionMode::BypassPermissions),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            outputs.len(),
+            4,
+            "all 4 PermissionMode variants must render distinctly"
+        );
     }
 
     // ── materialize: LSP (fix 1) ──────────────────────────────────────────────
@@ -1496,6 +1524,63 @@ mod tests {
             event in "[A-Za-z]{1,20}",
         ) {
             prop_assert_eq!(CrushAdapter.emit_hook_context(&event, ""), "");
+        }
+
+        // ── P2: render_permission_rule ────────────────────────────────────────
+
+        #[test]
+        fn prop_render_permission_rule_pattern_wins_over_paths(
+            tool in "[A-Za-z]{1,15}",
+            pattern in "[a-z*]{1,15}",
+            paths in prop::collection::vec("[a-z/]{1,15}", 0..5),
+        ) {
+            let rule = crate::config::PermissionRule {
+                tool: tool.clone(),
+                pattern: Some(pattern.clone()),
+                paths,
+            };
+            // When `pattern` is Some, `paths` is ignored — output is exactly one
+            // entry built from tool+pattern, regardless of how many paths exist.
+            prop_assert_eq!(
+                render_permission_rule(&rule),
+                vec![format!("{tool}({pattern})")]
+            );
+        }
+
+        #[test]
+        fn prop_render_permission_rule_no_panic(
+            tool in ".*",
+            pattern in prop::option::of(".*"),
+            paths in prop::collection::vec(".*", 0..5),
+        ) {
+            let rule = crate::config::PermissionRule { tool, pattern, paths };
+            let _ = render_permission_rule(&rule);
+        }
+
+        // ── P2: overlay_native_crush ─────────────────────────────────────────
+
+        #[test]
+        fn prop_overlay_native_crush_idempotent(
+            fragment in prop::collection::hash_map("[a-z]{1,8}", 0i64..1000, 0..5),
+        ) {
+            let frag_yaml: serde_yaml::Value = serde_yaml::to_value(&fragment).unwrap();
+
+            let mut once = serde_json::json!({});
+            overlay_native_crush(&mut once, Some(&frag_yaml)).unwrap();
+
+            let mut twice = serde_json::json!({});
+            overlay_native_crush(&mut twice, Some(&frag_yaml)).unwrap();
+            overlay_native_crush(&mut twice, Some(&frag_yaml)).unwrap();
+
+            prop_assert_eq!(once, twice, "applying the same fragment twice must equal applying it once");
+        }
+
+        #[test]
+        fn prop_overlay_native_crush_no_panic(
+            fragment in arb_yaml_value(3),
+        ) {
+            let mut dst = serde_json::json!({"existing": "value"});
+            let _ = overlay_native_crush(&mut dst, Some(&fragment));
         }
     }
 }

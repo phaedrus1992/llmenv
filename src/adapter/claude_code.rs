@@ -552,6 +552,10 @@ pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec
 /// Only called when at least one plugin has a non-None `install_path`; first-party
 /// plugins (served from the marketplace clone via `directory` source) are excluded.
 /// The file follows Claude Code's v2 schema exactly.
+///
+/// A present-but-unparseable existing file is a hard error — matches
+/// [`read_claude_json`]'s convention: llmenv must never destroy plugin version
+/// pins by silently overwriting corrupt JSON with a fresh doc.
 fn generate_installed_plugins_json(
     out: &Path,
     plugins: &[&crate::plugins::resolve::ResolvedPlugin],
@@ -564,20 +568,16 @@ fn generate_installed_plugins_json(
     // for display only, not for any functional decision.
     let now = "1970-01-01T00:00:00.000Z";
 
-    let mut existing: serde_json::Map<String, serde_json::Value> = if path.exists() {
-        let raw = std::fs::read(&path)?;
-        match serde_json::from_slice(&raw) {
-            Ok(map) => map,
-            Err(e) => {
-                tracing::warn!(
-                    "installed_plugins.json at {} is not valid JSON ({e}); overwriting",
-                    path.display()
-                );
-                serde_json::Map::new()
-            }
-        }
-    } else {
-        serde_json::Map::new()
+    let mut existing: serde_json::Map<String, serde_json::Value> = match std::fs::read(&path) {
+        Ok(raw) => serde_json::from_slice(&raw).with_context(|| {
+            format!(
+                "existing {} is not valid JSON; refusing to overwrite (would \
+                 destroy plugin version pins). Fix or remove the file and re-run.",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => anyhow::bail!("reading {}: {e}", path.display()),
     };
 
     let entries = existing.entry("plugins").or_insert_with(|| json!({}));
@@ -1294,15 +1294,16 @@ enum PermissionAction {
 mod tests {
     use super::{
         CLAUDE_JSON_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND, HOOK_RUN_COMMAND,
-        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path, generate_settings_json,
-        is_hook_json, merge_mcp_into_claude_json, overlay_native, reconcile_settings,
+        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
+        generate_installed_plugins_json, generate_settings_json, is_hook_json,
+        merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
         render_permission_rule, seed_install_method,
     };
-    use crate::adapter::skills::validate_skills;
+    use crate::adapter::skills::{arb_yaml_value, validate_skills};
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
-    use crate::plugins::resolve::ResolvedMarketplace;
+    use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
     use proptest::prelude::*;
     use std::path::PathBuf;
 
@@ -1667,30 +1668,6 @@ mod tests {
             let doc2: serde_json::Value = serde_json::from_str(&reserialized).expect("reparse");
             prop_assert_eq!(doc, doc2);
         }
-    }
-
-    // Recursively-shaped arbitrary YAML for fragment fuzzing. Bounded depth keeps
-    // generation cheap while still exercising nested mappings/sequences.
-    fn arb_yaml_value(depth: u32) -> impl Strategy<Value = serde_yaml::Value> {
-        let leaf = prop_oneof![
-            Just(serde_yaml::Value::Null),
-            any::<bool>().prop_map(serde_yaml::Value::Bool),
-            any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
-            "[a-z]{0,8}".prop_map(serde_yaml::Value::String),
-        ];
-        leaf.prop_recursive(depth, 16, 4, |inner| {
-            prop_oneof![
-                proptest::collection::vec(inner.clone(), 0..4)
-                    .prop_map(serde_yaml::Value::Sequence),
-                proptest::collection::vec(("[a-z]{1,6}", inner), 0..4).prop_map(|pairs| {
-                    let mut m = serde_yaml::Mapping::new();
-                    for (k, v) in pairs {
-                        m.insert(serde_yaml::Value::String(k), v);
-                    }
-                    serde_yaml::Value::Mapping(m)
-                }),
-            ]
-        })
     }
 
     // Arbitrary YAML that is never a top-level mapping (the early-return path of
@@ -2545,6 +2522,42 @@ mod tests {
         assert!(!out_tmp.path().join("skills").exists());
     }
 
+    // Biased generator: mixes absolute paths and embedded `..` components (both
+    // unsafe) with plain relative segments, so enough unsafe cases surface without
+    // relying on prop_assume to filter a mostly-safe ".*" generator to death.
+    fn arb_unsafe_join_target() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[a-z0-9]{0,10}".prop_map(|s| format!("/{s}")),
+            "[a-z0-9]{0,10}".prop_map(|s| format!("../{s}")),
+            "[a-z0-9]{0,10}".prop_map(|s| format!("{s}/../evil")),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn prop_write_first_class_skills_rejects_unsafe_names(name in arb_unsafe_join_target()) {
+            prop_assert!(
+                llmenv_paths::is_unsafe_join_target(&name),
+                "generator produced a name is_unsafe_join_target disagrees with: {name:?}"
+            );
+            let out_tmp = tempfile::tempdir().unwrap();
+            let skill = crate::config::SkillSource {
+                name,
+                path: "/some/path".into(),
+                when: Vec::new(),
+            };
+            let result = crate::adapter::skills::write_first_class_skills(
+                out_tmp.path(),
+                std::slice::from_ref(&skill),
+            );
+            prop_assert!(
+                result.is_err(),
+                "unsafe join target name {:?} must be rejected",
+                skill.name
+            );
+        }
+    }
+
     #[test]
     fn project_plugin_skills_copies_skill_from_plugin_dir() {
         let plugin_tmp = tempfile::tempdir().unwrap();
@@ -2581,5 +2594,72 @@ mod tests {
             crate::adapter::skills::project_plugin_skills(plugin_tmp.path(), out_tmp.path())
                 .unwrap();
         assert!(owned.is_empty());
+    }
+
+    fn external_plugin(marketplace: &str, plugin: &str, install_path: &str) -> ResolvedPlugin {
+        ResolvedPlugin {
+            marketplace: marketplace.to_string(),
+            plugin: plugin.to_string(),
+            collection: "test-collection".to_string(),
+            install_path: Some(install_path.to_string()),
+            git_commit_sha: Some("deadbeef".to_string()),
+        }
+    }
+
+    #[test]
+    fn generate_installed_plugins_json_errors_on_corrupt_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(
+            plugins_dir.join("installed_plugins.json"),
+            "{not valid json",
+        )
+        .unwrap();
+
+        let plugin = external_plugin("mp", "my-plugin", "/tmp/payload");
+        let err = generate_installed_plugins_json(tmp.path(), &[&plugin]).unwrap_err();
+        assert!(
+            err.to_string().contains("not valid JSON"),
+            "expected 'not valid JSON' in error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("refusing to overwrite"),
+            "expected 'refusing to overwrite' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn generate_installed_plugins_json_succeeds_on_absent_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = external_plugin("mp", "my-plugin", "/tmp/payload");
+        generate_installed_plugins_json(tmp.path(), &[&plugin]).unwrap();
+        assert!(tmp.path().join("plugins/installed_plugins.json").exists());
+    }
+
+    proptest! {
+        #[test]
+        fn prop_generate_installed_plugins_json_merge_is_idempotent(
+            names in prop::collection::vec("[a-z][a-z0-9-]{0,10}", 1..5),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let plugins: Vec<ResolvedPlugin> = names
+                .iter()
+                .map(|n| external_plugin("mp", n, "/tmp/payload"))
+                .collect();
+            let refs: Vec<&ResolvedPlugin> = plugins.iter().collect();
+
+            generate_installed_plugins_json(tmp.path(), &refs).unwrap();
+            let path = tmp.path().join("plugins/installed_plugins.json");
+            let first = std::fs::read_to_string(&path).unwrap();
+
+            generate_installed_plugins_json(tmp.path(), &refs).unwrap();
+            let second = std::fs::read_to_string(&path).unwrap();
+
+            prop_assert_eq!(
+                first, second,
+                "calling with the same plugin set twice must not duplicate entries or change output"
+            );
+        }
     }
 }

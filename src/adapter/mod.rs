@@ -39,6 +39,11 @@ pub trait AgentAdapter {
     /// Environment variables the shell hook should `export` so the agent
     /// discovers `cache_dir` as its config root and `state_dir` for durable state.
     ///
+    /// Implementations may create adapter-specific subdirectories under
+    /// `state_dir` as a side effect (e.g. so a directory referenced by an emitted
+    /// env var exists on disk before the agent launches) — this is the only place
+    /// that knows both the exact path and that it must exist.
+    ///
     /// # Arguments
     /// * `cache_dir` — hashed config directory (garbage-collected on content change)
     /// * `state_dir` — stable state directory (persists across config changes)
@@ -47,7 +52,8 @@ pub trait AgentAdapter {
     /// Returns an error if either path is not valid UTF-8 — env vars cannot
     /// carry arbitrary bytes on all platforms, so callers that surface a
     /// non-UTF-8 path should fail loudly rather than emit a lossy path the agent
-    /// will silently mis-parse.
+    /// will silently mis-parse. Also returns an error if creating a required
+    /// subdirectory fails.
     fn env_vars(&self, cache_dir: &Path, state_dir: &Path)
     -> anyhow::Result<Vec<(String, String)>>;
 

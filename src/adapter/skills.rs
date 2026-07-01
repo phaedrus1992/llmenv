@@ -251,3 +251,32 @@ pub(crate) fn project_plugin_skills(plugin_dir: &Path, out: &Path) -> anyhow::Re
     }
     write_first_class_skills(out, &skills)
 }
+
+/// Recursively-shaped arbitrary YAML for fragment fuzzing, shared by adapter test
+/// modules (`claude_code.rs`, `crush.rs`) that need to fuzz native-fragment merging.
+/// Bounded depth keeps generation cheap while still exercising nested
+/// mappings/sequences.
+#[cfg(test)]
+pub(crate) fn arb_yaml_value(
+    depth: u32,
+) -> impl proptest::prelude::Strategy<Value = serde_yaml::Value> {
+    use proptest::prelude::*;
+    let leaf = prop_oneof![
+        Just(serde_yaml::Value::Null),
+        any::<bool>().prop_map(serde_yaml::Value::Bool),
+        any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
+        "[a-z]{0,8}".prop_map(serde_yaml::Value::String),
+    ];
+    leaf.prop_recursive(depth, 16, 4, |inner| {
+        prop_oneof![
+            proptest::collection::vec(inner.clone(), 0..4).prop_map(serde_yaml::Value::Sequence),
+            proptest::collection::vec(("[a-z]{1,6}", inner), 0..4).prop_map(|pairs| {
+                let mut m = serde_yaml::Mapping::new();
+                for (k, v) in pairs {
+                    m.insert(serde_yaml::Value::String(k), v);
+                }
+                serde_yaml::Value::Mapping(m)
+            }),
+        ]
+    })
+}
