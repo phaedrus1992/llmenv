@@ -600,26 +600,10 @@ fn run_export(
     // A bundle fires when either:
     //   - one of its tags is in the active tag set (normal tag-based firing), OR
     //   - an active scope manually enables it by name via `enable_bundles`
-    //     in a marker file.
-    // The optional --tag filter still gates either path.
-    let manually_enabled: BTreeSet<&str> = active
-        .scopes
-        .iter()
-        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-        .collect();
-    let firing: Vec<&Bundle> = config
-        .bundle
-        .iter()
-        .filter(|b| {
-            if let Some(t) = &tag
-                && !b.when.contains(t)
-            {
-                return false;
-            }
-            b.when.iter().any(|bt| active.tags.contains(bt))
-                || manually_enabled.contains(b.name.as_str())
-        })
-        .collect();
+    //     in a marker file,
+    // minus anything a scope disables via `disable_bundles` (#194). The
+    // optional --tag filter still gates the tag/enable path.
+    let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, tag.as_deref());
 
     let mut vars = std::collections::BTreeMap::new();
 
@@ -776,19 +760,7 @@ fn run_regenerate() -> anyhow::Result<()> {
     let active = crate::scope::evaluate(&config, &env);
 
     // Collect firing bundles (same logic as run_export)
-    let manually_enabled: BTreeSet<&str> = active
-        .scopes
-        .iter()
-        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-        .collect();
-    let firing: Vec<&Bundle> = config
-        .bundle
-        .iter()
-        .filter(|b| {
-            b.when.iter().any(|bt| active.tags.contains(bt))
-                || manually_enabled.contains(b.name.as_str())
-        })
-        .collect();
+    let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, None);
 
     // Materialize the config
     match build_and_materialize(&config, &config_dir, &active, &firing, false) {
@@ -920,12 +892,17 @@ fn build_and_materialize(
 
     // The selection *shape* (#246) addresses the folder in loose/normal mode:
     // active tags ∪ directly-enabled bundles. Bundles come from active scopes'
-    // `enable_bundles` (the manually-forced selection), kept separate from tags
-    // so the two namespaces can't alias into one shape.
+    // `enable_bundles` (the manually-forced selection), minus anything a scope
+    // disables via `disable_bundles` (#194) — a disabled name isn't actually
+    // selected, so it must not alias two different disable states into one
+    // cache folder. Kept separate from tags so the two namespaces can't alias
+    // into one shape.
+    let disabled_for_shape = marker_disabled_bundle_names(active);
     let bundles: BTreeSet<String> = active
         .scopes
         .iter()
         .flat_map(|s| s.enable_bundles.iter().cloned())
+        .filter(|name| !disabled_for_shape.contains(name))
         .collect();
     let shape = crate::materialize::cache::shape(tags, &bundles);
 
@@ -1218,19 +1195,7 @@ fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
 
-    let manually_enabled: BTreeSet<&str> = active
-        .scopes
-        .iter()
-        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-        .collect();
-    let firing: Vec<&Bundle> = config
-        .bundle
-        .iter()
-        .filter(|b| {
-            b.when.iter().any(|bt| active.tags.contains(bt))
-                || manually_enabled.contains(b.name.as_str())
-        })
-        .collect();
+    let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, None);
 
     let current = match build_manifest(&config, &config_dir, &active, &firing, false)? {
         Some((manifest, _)) => crate::materialize::cache::hash_manifest(&manifest)?,
@@ -2157,10 +2122,17 @@ fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyho
         config.bundle.iter().collect()
     };
 
+    // #194: reflects the full firing rule (tags OR enable_bundles, minus
+    // disable_bundles) rather than tags alone, so both the per-bundle marker
+    // and the merged-manifest preview below agree with what actually
+    // materializes.
+    let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, None);
+    let firing_names: HashSet<&str> = firing.iter().map(|b| b.name.as_str()).collect();
+
     if !bundles_to_show.is_empty() {
         println!("\nBundles");
         for b in &bundles_to_show {
-            let is_active = b.when.iter().any(|tag| active.tags.contains(tag));
+            let is_active = firing_names.contains(b.name.as_str());
             let mark = if is_active {
                 active_marker(use_color)
             } else {
@@ -2173,7 +2145,11 @@ fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyho
                     .filter(|t| active.tags.contains(*t))
                     .map(String::as_str)
                     .collect();
-                format!(" [why: tags={}]", matched.join(","))
+                if matched.is_empty() {
+                    " [why: enable_bundles]".to_string()
+                } else {
+                    format!(" [why: tags={}]", matched.join(","))
+                }
             } else {
                 String::new()
             };
@@ -2181,11 +2157,6 @@ fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyho
         }
     }
 
-    let firing: Vec<&Bundle> = config
-        .bundle
-        .iter()
-        .filter(|b| b.when.iter().any(|tag| active.tags.contains(tag)))
-        .collect();
     let bundle_refs = build_bundle_refs(config_dir, &active, &firing);
     let manifest = crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)?;
 
@@ -2258,6 +2229,50 @@ fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
         .scopes
         .iter()
         .flat_map(|s| s.enable_bundles.iter().cloned())
+        .collect()
+}
+
+/// Bundle names any active scope disables via marker `disable_bundles`
+/// (#194). Currently populated only by the project marker; see
+/// `ActiveScope::disable_bundles`.
+fn marker_disabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
+    active
+        .scopes
+        .iter()
+        .flat_map(|s| s.disable_bundles.iter().cloned())
+        .collect()
+}
+
+/// Compute the bundles that fire for `active`: tag intersection OR
+/// `enable_bundles`, minus anything any scope disables via `disable_bundles`
+/// (#194) — disable always wins, including within the same scope that also
+/// enables it (there's no cross-scope precedence question today since
+/// `enable_bundles`/`disable_bundles` are only populated for project scopes,
+/// the highest-precedence scope kind; a disable from project always beats a
+/// lower scope's tag-firing or enable simply by being the final subtraction).
+/// `tag_filter` (the CLI `--tag` flag) additionally gates a bundle's `when`
+/// list when present. Shared by every call site that needs "what bundles are
+/// actually selected" so the suppression rule can't drift between them.
+fn firing_bundles<'a>(
+    bundles: &'a [Bundle],
+    active: &ActiveScopes,
+    tag_filter: Option<&str>,
+) -> Vec<&'a Bundle> {
+    let manually_enabled = marker_enabled_bundle_names(active);
+    let disabled = marker_disabled_bundle_names(active);
+    bundles
+        .iter()
+        .filter(|b| {
+            if disabled.contains(&b.name) {
+                return false;
+            }
+            if let Some(t) = tag_filter
+                && !b.when.iter().any(|w| w == t)
+            {
+                return false;
+            }
+            b.when.iter().any(|bt| active.tags.contains(bt)) || manually_enabled.contains(&b.name)
+        })
         .collect()
 }
 
@@ -2478,6 +2493,7 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
     let pass = doctor_pass(use_color);
     let fail = doctor_fail(use_color);
+    let warn = doctor_warning(use_color);
     let mut valid = true;
     let mut seen_names = HashSet::new();
     for bundle in &config.bundle {
@@ -2498,6 +2514,22 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
                     "{fail} .llmenv.yaml enable_bundles references unknown bundle: {bundle_name}"
                 );
                 valid = false;
+            }
+        }
+        for bundle_name in &scope.disable_bundles {
+            if !seen_names.contains(bundle_name.as_str()) {
+                eprintln!(
+                    "{fail} .llmenv.yaml disable_bundles references unknown bundle: {bundle_name}"
+                );
+                valid = false;
+            }
+            // Advisory, not a hard failure: disable deterministically wins,
+            // so this is redundant config, not an invalid one.
+            if scope.enable_bundles.contains(bundle_name) {
+                eprintln!(
+                    "{warn} .llmenv.yaml enables and disables the same bundle: {bundle_name} \
+                     (disable wins; the enable_bundles entry has no effect)"
+                );
             }
         }
     }
@@ -2653,6 +2685,114 @@ mod tests {
         let input = "text\n\n\n\nmore\n";
         let expected = "text\n\nmore\n";
         assert_eq!(compress_agents_md(input), expected);
+    }
+
+    fn bundle(name: &str, when: &[&str]) -> Bundle {
+        Bundle {
+            name: name.to_string(),
+            when: when.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn active_scope(
+        kind: &'static str,
+        tags: &[&str],
+        enable_bundles: &[&str],
+        disable_bundles: &[&str],
+    ) -> crate::scope::ActiveScope {
+        crate::scope::ActiveScope {
+            id: kind.to_string(),
+            kind,
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            project_root: None,
+            enable_bundles: enable_bundles.iter().map(|s| s.to_string()).collect(),
+            disable_bundles: disable_bundles.iter().map(|s| s.to_string()).collect(),
+            name: None,
+            description: None,
+            unknown_fields: vec![],
+        }
+    }
+
+    fn active(scopes: Vec<crate::scope::ActiveScope>) -> ActiveScopes {
+        let tags = scopes.iter().flat_map(|s| s.tags.iter().cloned()).collect();
+        ActiveScopes { scopes, tags }
+    }
+
+    #[test]
+    fn firing_bundles_tag_matched_bundle_fires() {
+        let bundles = vec![bundle("rust-dev", &["rust"])];
+        let active = active(vec![active_scope("user", &["rust"], &[], &[])]);
+        let firing = firing_bundles(&bundles, &active, None);
+        assert_eq!(
+            firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["rust-dev"]
+        );
+    }
+
+    #[test]
+    fn firing_bundles_manually_enabled_bundle_fires_without_matching_tag() {
+        let bundles = vec![bundle("github-issues", &[])];
+        let active = active(vec![active_scope("project", &[], &["github-issues"], &[])]);
+        let firing = firing_bundles(&bundles, &active, None);
+        assert_eq!(
+            firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["github-issues"]
+        );
+    }
+
+    #[test]
+    fn firing_bundles_disable_suppresses_tag_matched_bundle() {
+        // #194 motivating example: a lower-precedence scope's tag turns on
+        // "yaks"; the project scope disables it.
+        let bundles = vec![bundle("yaks", &["task-tracking"])];
+        let active = active(vec![
+            active_scope("user", &["task-tracking"], &[], &[]),
+            active_scope("project", &[], &[], &["yaks"]),
+        ]);
+        let firing = firing_bundles(&bundles, &active, None);
+        assert!(
+            firing.is_empty(),
+            "disable must suppress tag-firing: {firing:?}"
+        );
+    }
+
+    #[test]
+    fn firing_bundles_disable_suppresses_manually_enabled_bundle() {
+        let bundles = vec![bundle("yaks", &[])];
+        let active = active(vec![active_scope("project", &[], &["yaks"], &["yaks"])]);
+        let firing = firing_bundles(&bundles, &active, None);
+        assert!(
+            firing.is_empty(),
+            "same-scope disable must beat same-scope enable: {firing:?}"
+        );
+    }
+
+    #[test]
+    fn firing_bundles_disable_does_not_affect_unrelated_bundles() {
+        let bundles = vec![
+            bundle("yaks", &["task-tracking"]),
+            bundle("rust-dev", &["rust"]),
+        ];
+        let active = active(vec![
+            active_scope("user", &["task-tracking", "rust"], &[], &[]),
+            active_scope("project", &[], &[], &["yaks"]),
+        ]);
+        let firing = firing_bundles(&bundles, &active, None);
+        assert_eq!(
+            firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["rust-dev"]
+        );
+    }
+
+    #[test]
+    fn firing_bundles_tag_filter_still_applies_alongside_disable() {
+        let bundles = vec![bundle("a", &["x"]), bundle("b", &["y"])];
+        let active = active(vec![active_scope("user", &["x", "y"], &[], &[])]);
+        let firing = firing_bundles(&bundles, &active, Some("x"));
+        assert_eq!(
+            firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
     }
 
     #[test]
@@ -2996,6 +3136,7 @@ mod tests {
                 tags: vec!["mem".to_string()],
                 project_root: None,
                 enable_bundles: vec![],
+                disable_bundles: vec![],
                 name: None,
                 description: None,
                 unknown_fields: vec![],
@@ -3019,6 +3160,7 @@ mod tests {
                 tags: vec!["mem".to_string()],
                 project_root: None,
                 enable_bundles: vec![],
+                disable_bundles: vec![],
                 name: None,
                 description: None,
                 unknown_fields: vec![],

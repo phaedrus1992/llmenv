@@ -57,7 +57,9 @@ semantics:
 
 A bundle can also be force-enabled by name through a project marker's
 `enable_bundles` list, independent of its tags — the escape hatch for "always
-load this bundle in this repo".
+load this bundle in this repo". The negative counterpart, `disable_bundles`,
+removes a bundle a broader scope's tag turned on — "never load this bundle in
+this repo", even though a user- or network-scope tag would otherwise fire it.
 
 ## Materialize
 
@@ -134,6 +136,13 @@ flowchart LR
 List-shaped values (permission allow/ask/deny lists, hooks, plugins) concatenate
 and de-duplicate across all contributors rather than overriding.
 
+Bundle firing is the exception to pure list-concatenation: a project marker's
+`disable_bundles` always wins over any scope's tag-firing or `enable_bundles`
+for the named bundle — including that same project marker's own
+`enable_bundles`, if it lists the same name. Project is already the
+highest-precedence scope, so this falls out of the same least-to-most-specific
+order above; there is no separate precedence rule to remember.
+
 ## Introspection
 
 After resolution, `llmenv export` emits the active context as environment
@@ -159,7 +168,19 @@ name: MyApp                     # defaults to the folder basename
 description: "Customer API"     # capped at 1024 bytes; surfaced into agent context
 tags: [myapp, rust]             # joined into the active tag set
 enable_bundles: [base]          # force-enable bundles regardless of their tags
+disable_bundles: [yaks]         # force-disable bundles even if a scope's tag enables them
 ```
+
+**Worked example:** a user-scope tag enables the `yaks` bundle (task tracking)
+globally, since most projects use it. One project uses GitHub Issues instead:
+
+```yaml
+enable_bundles: [github-issues]
+disable_bundles: [yaks]
+```
+
+This project now loads `github-issues` and never loads `yaks`, regardless of
+what the user scope's tags would otherwise fire.
 
 Discovery rules:
 
