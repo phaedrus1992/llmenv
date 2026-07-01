@@ -49,9 +49,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add MCP server field parity: `headers`, `disabled`, `disabled_tools`, and
   `timeout` on MCP server entries. All optional — existing configs parse
   unchanged. (#505)
+- `CrushAdapter`: Crush is now a supported engine. `export`/`hook`/`regenerate`
+  render `crush.json` when `crush` is on `PATH`. What maps: permissions →
+  `allowed_tools`/`denied_tools` (lossy, fail-closed — `ask` rules collapse to
+  `denied_tools`, never silently allowed; Crush has no ask concept); hooks →
+  `PreToolUse` only (`mcp_tool`-kind hooks and unsupported hook events hard-error
+  with an actionable message); MCP servers (including `headers`, `disabled_tools`,
+  `timeout`); LSP servers → `lsp.<name>`; first-class skills and plugin-projected
+  skills → `options.skills_paths`. Non-skill plugin content (`agents/`, `commands/`)
+  hard-errors naming the offending plugin. `native.crush` / `native_permissions.crush`
+  / `native_hooks.crush` / `native_mcp.crush` merge verbatim — provider/model config
+  lives here until first-class provider config ships (#508). Docs in #507. (#506)
 
 ### Changed
 
+- **Behavior change (dual-engine export):** `export`, `hook`, and `regenerate`
+  now iterate all registered engine adapters. If `crush` is on `PATH`, a new
+  `crush/` cache subtree is materialized and `CRUSH_GLOBAL_CONFIG` /
+  `CRUSH_GLOBAL_DATA` are exported alongside the existing Claude Code env vars.
+  Claude-only users (no `crush` binary on PATH) see no change. (#502, #506)
 - **BREAKING:** `session_log` is now a mapping (`{ file, transcript, verbose,
   path, max_content_bytes }`), not a path string. ICM transcript logging is on
   by default. The pre-3.0 `session_log: "<path>"` form is rejected with a
