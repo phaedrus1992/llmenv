@@ -206,6 +206,10 @@ enum Command {
         /// Re-export automatically when drift is detected
         #[arg(long)]
         auto_fix: bool,
+        /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
+        /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
     },
     /// Validate configuration syntax and wiring without running diagnostics
     Validate,
@@ -224,13 +228,23 @@ enum Command {
     /// Invoked by the auto-registered SessionStart hook. Outputs a JSON
     /// `hookSpecificOutput.additionalContext` payload so the agent always knows
     /// where its source config lives and won't edit the managed cache directory.
-    ConfigContext,
+    ConfigContext {
+        /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
+        /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
+    },
     /// Warn when the agent tries to write a managed cache path (#289).
     ///
     /// Invoked by the auto-registered PreToolUse hook (matcher: Write|Edit|MultiEdit).
     /// Reads the tool call from stdin, checks whether the target path is inside
     /// the llmenv cache, and prints a redirection hint. Always exits 0 (fail-soft).
-    ConfigGuard,
+    ConfigGuard {
+        /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
+        /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
+    },
     /// Poll the usage backend and sleep an adaptive delay. See `crate::throttle`.
     Throttle {
         /// Hook event: pre-tool or prompt
@@ -243,6 +257,10 @@ enum Command {
     HookRun {
         /// Lifecycle event: session_start, turn_start, or session_end
         event: String,
+        /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
+        /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
     },
     /// Record one session-log event into an ICM transcript session.
     ///
@@ -364,19 +382,27 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Sync { dry_run }) => {
             run_sync(dry_run)?;
         }
-        Some(Command::CheckStale { auto_fix }) => {
+        Some(Command::CheckStale { auto_fix, engine }) => {
+            tracing::debug!(engine, "check-stale invoked by engine");
+            warn_if_unknown_engine(&engine);
             run_check_stale(use_color, auto_fix)?;
         }
-        Some(Command::ConfigContext) => {
+        Some(Command::ConfigContext { engine }) => {
+            tracing::debug!(engine, "config-context invoked by engine");
+            warn_if_unknown_engine(&engine);
             run_config_context();
         }
-        Some(Command::ConfigGuard) => {
+        Some(Command::ConfigGuard { engine }) => {
+            tracing::debug!(engine, "config-guard invoked by engine");
+            warn_if_unknown_engine(&engine);
             run_config_guard();
         }
         Some(Command::Throttle { event }) => {
             crate::throttle::run_throttle_hook(&event);
         }
-        Some(Command::HookRun { event }) => {
+        Some(Command::HookRun { event, engine }) => {
+            tracing::debug!(engine, "hook-run invoked by engine");
+            warn_if_unknown_engine(&engine);
             crate::hook_run::run(&event)?;
         }
         Some(Command::SessionLogRecord) => {
@@ -604,41 +630,63 @@ fn run_export(
         eprintln!("warning: scope filtering not yet implemented, exporting all matching tags");
     }
 
-    // Merge + materialize the agent config directory and let the adapter
-    // emit env vars pointing the agent at it. Failure here exits non-zero
-    // so callers (shell hooks, CI) can detect it — silently continuing
-    // without CLAUDE_CONFIG_DIR violates the export contract. (#281)
-    match build_and_materialize(&config, &config_dir, &active, &firing, compress) {
-        Ok(Some((ref cache_path, ref extra_vars))) => {
-            tracing::debug!("materialized agent config at {}", cache_path.display());
-            for (k, v) in extra_vars {
-                vars.insert(k.clone(), v.clone());
-            }
-            // Auth sync: detect in-session login changes and refresh the
-            // stable cache. Non-fatal — export must not fail on auth errors.
-            let adapter_root =
-                expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
-            match crate::materialize::manifest::CacheManifest::read(cache_path) {
-                Ok(Some(mut manifest)) => {
-                    crate::auth::detect::sync_auth_on_export(
-                        cache_path,
-                        &adapter_root,
-                        &mut manifest,
-                    );
-                }
-                Ok(None) => {} // absent/corrupt: already logged inside CacheManifest::read
-                Err(e) => {
-                    tracing::warn!(
-                        "auth sync skipped: could not read cache manifest at {}: {e}",
-                        cache_path.display()
-                    );
-                }
-            }
+    // Merge + materialize the agent config directory for each installed adapter
+    // and collect env vars. PATH-gating skips adapters whose binary is absent so
+    // a machine without a given tool sees zero behavior change. (#502)
+    // NOTE: build_and_materialize is still Claude Code–specific; #506 wires Crush.
+    let cache_dir_root = expand_tilde(&config.cache.cache_dir)?;
+    for adapter in crate::adapter::registered_adapters() {
+        debug_assert_eq!(
+            adapter.name(),
+            "claude-code",
+            "build_and_materialize is Claude-specific until #506 threads the adapter"
+        );
+        if !crate::adapter::binary_on_path(adapter.binary_name()) {
+            tracing::debug!(
+                adapter = adapter.name(),
+                binary = adapter.binary_name(),
+                "adapter binary not on PATH — skipping"
+            );
+            continue;
         }
-        Ok(None) => {
-            tracing::debug!("no bundle content directories — skipping materialize");
+        match build_and_materialize(&config, &config_dir, &active, &firing, compress) {
+            Ok(Some((ref cache_path, ref extra_vars))) => {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    "materialized agent config at {}",
+                    cache_path.display()
+                );
+                for (k, v) in extra_vars {
+                    vars.insert(k.clone(), v.clone());
+                }
+                // Auth sync: detect in-session login changes and refresh the
+                // stable cache. Non-fatal — export must not fail on auth errors.
+                let adapter_root = cache_dir_root.join(adapter.name());
+                match crate::materialize::manifest::CacheManifest::read(cache_path) {
+                    Ok(Some(mut manifest)) => {
+                        crate::auth::detect::sync_auth_on_export(
+                            cache_path,
+                            &adapter_root,
+                            &mut manifest,
+                        );
+                    }
+                    Ok(None) => {} // absent/corrupt: already logged inside CacheManifest::read
+                    Err(e) => {
+                        tracing::warn!(
+                            "auth sync skipped: could not read cache manifest at {}: {e}",
+                            cache_path.display()
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    "no bundle content directories — skipping materialize"
+                );
+            }
+            Err(e) => return Err(e).context("agent materialization failed"),
         }
-        Err(e) => return Err(e).context("agent materialization failed"),
     }
 
     // Introspection env: comma-separated, deterministic order. Scopes get
@@ -795,6 +843,37 @@ fn compress_agents_md(text: &str) -> String {
     result
 }
 
+/// Returns `true` when an entry with the given `when` tags should be active
+/// for the current scope. Empty `when` = always active (no filtering).
+fn tag_active(when: &[String], active: &std::collections::BTreeSet<String>) -> bool {
+    when.is_empty() || when.iter().any(|t| active.contains(t))
+}
+
+/// Emit a warning when `engine` is not the identity of any registered adapter.
+/// Defensive: the set of adapters is small and static today; this surfaces
+/// stale or mis-typed `--engine` flags before they silently produce wrong output.
+///
+/// The `--engine` flag uses the underscore form of an adapter's name (the same
+/// convention as the `native_<engine>` keys, e.g. `claude_code`), while
+/// [`crate::adapter::AgentAdapter::name`] is the hyphenated cache-dir form
+/// (`claude-code`). Normalise before comparing so the baked-in default matches.
+fn warn_if_unknown_engine(engine: &str) {
+    let known = crate::adapter::registered_adapters();
+    let engine_id = |a: &dyn crate::adapter::AgentAdapter| a.name().replace('-', "_");
+    if !known.iter().any(|a| engine_id(a.as_ref()) == engine) {
+        tracing::warn!(
+            engine,
+            "unrecognised engine name — no registered adapter matches; \
+             did you mean one of: {}?",
+            known
+                .iter()
+                .map(|a| engine_id(a.as_ref()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+
 /// Build BundleRefs for firing bundles in scope-precedence order, merge them
 /// into a manifest, materialize through the Claude Code adapter, and return
 /// the env vars the adapter wants exported. Returns `Ok(None)` when no
@@ -817,6 +896,18 @@ fn build_and_materialize(
         return Ok(None);
     };
 
+    // Filter skills and lsp entries by active tags — mirror the mcp resolution
+    // model: empty `when` means always active; non-empty must intersect active.tags.
+    let tags = &active.tags;
+    manifest
+        .capabilities
+        .skills
+        .retain(|s| tag_active(&s.when, tags));
+    manifest
+        .capabilities
+        .lsp
+        .retain(|l| tag_active(&l.when, tags));
+
     // Store resolved throttle (top-level + bundle) for hook retrieval.
     if let Err(e) = crate::throttle::store_active_throttle(manifest.throttle.as_ref()) {
         tracing::debug!("failed to store throttle state (non-fatal): {e}");
@@ -831,7 +922,6 @@ fn build_and_materialize(
     // active tags ∪ directly-enabled bundles. Bundles come from active scopes'
     // `enable_bundles` (the manually-forced selection), kept separate from tags
     // so the two namespaces can't alias into one shape.
-    let tags = &active.tags;
     let bundles: BTreeSet<String> = active
         .scopes
         .iter()

@@ -44,6 +44,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let mut hooks = Vec::new();
     let mut plugins = Vec::new();
     let mut mcp = Vec::new();
+    let mut lsp = Vec::new();
+    let mut skills = Vec::new();
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -58,6 +60,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         hooks.extend(caps.hooks.iter().cloned());
         plugins.extend(caps.plugins.iter().cloned());
         mcp.extend(caps.mcp.iter().cloned());
+        lsp.extend(caps.lsp.iter().cloned());
+        skills.extend(caps.skills.iter().cloned());
         allow.extend(caps.permissions.allow.iter().cloned());
         ask.extend(caps.permissions.ask.iter().cloned());
         deny.extend(caps.permissions.deny.iter().cloned());
@@ -74,6 +78,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     dedup(&mut hooks);
     dedup(&mut plugins);
     dedup(&mut mcp);
+    dedup(&mut lsp);
+    dedup(&mut skills);
     dedup(&mut allow);
     dedup(&mut ask);
     dedup(&mut deny);
@@ -134,6 +140,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         hooks,
         plugins,
         mcp,
+        lsp,
+        skills,
         env,
         auto_memory_enabled,
         effort_level: None,
@@ -611,6 +619,86 @@ mod tests {
         assert!(err.contains("CONFLICT"), "got: {err}");
     }
 
+    // #503: lsp entries from bundle.yaml must concatenate and dedup.
+    #[test]
+    fn lsp_entries_concatenate_across_contributors() {
+        use crate::config::LspServer;
+        let server = |name: &str| LspServer {
+            name: name.into(),
+            command: "cmd".into(),
+            ..Default::default()
+        };
+        let caps_a = Capabilities {
+            lsp: vec![server("rust-analyzer")],
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            lsp: vec![server("clangd")],
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        assert_eq!(out.lsp.len(), 2, "both lsp entries must survive");
+    }
+
+    #[test]
+    fn lsp_entries_are_deduped() {
+        use crate::config::LspServer;
+        let server = LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            filetypes: vec!["rust".into()],
+            ..Default::default()
+        };
+        let caps_a = Capabilities {
+            lsp: vec![server.clone()],
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            lsp: vec![server],
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        assert_eq!(
+            out.lsp.len(),
+            1,
+            "identical lsp entries must be deduped to one"
+        );
+    }
+
+    // #503: tag selection — lsp entries with non-matching `when` must be excluded.
+    // This exercises that `when` is preserved through merge so the adapter can
+    // filter by active tags; the merge itself does NOT filter (it is tag-agnostic).
+    #[test]
+    fn lsp_when_tags_preserved_through_merge() {
+        use crate::config::LspServer;
+        let tagged = LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            when: vec!["rust".into()],
+            ..Default::default()
+        };
+        let untagged = LspServer {
+            name: "clangd".into(),
+            command: "clangd".into(),
+            when: vec![],
+            ..Default::default()
+        };
+        let caps = Capabilities {
+            lsp: vec![tagged, untagged],
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps)]).unwrap();
+        // Both survive merge; callers filter by active_tags.
+        assert_eq!(out.lsp.len(), 2, "both lsp entries must survive merge");
+        // Verify when tags are intact.
+        let ra = out.lsp.iter().find(|s| s.name == "rust-analyzer").unwrap();
+        assert_eq!(ra.when, vec!["rust".to_string()]);
+        let cl = out.lsp.iter().find(|s| s.name == "clangd").unwrap();
+        assert!(cl.when.is_empty());
+    }
+
     // #329: mcp entries from bundle.yaml must concatenate and dedup.
     #[test]
     fn mcp_entries_concatenate_across_contributors() {
@@ -623,6 +711,7 @@ mod tests {
             args: vec![],
             env: std::collections::BTreeMap::new(),
             url: None,
+            ..Default::default()
         };
         let caps_a = Capabilities {
             mcp: vec![server("ctx")],
@@ -648,6 +737,7 @@ mod tests {
             args: vec![],
             env: std::collections::BTreeMap::new(),
             url: None,
+            ..Default::default()
         };
         let caps_a = Capabilities {
             mcp: vec![server.clone()],
@@ -716,7 +806,7 @@ mod tests {
 
     mod props {
         use super::*;
-        use crate::config::{McpServer, McpTransport};
+        use crate::config::{LspServer, McpServer, McpTransport, SkillSource};
         use proptest::prelude::*;
         use std::collections::BTreeSet;
 
@@ -729,20 +819,53 @@ mod tests {
         }
 
         fn arb_mcp_server() -> impl Strategy<Value = McpServer> {
+            (
+                "[a-z]{1,6}",
+                prop::collection::vec("[a-z]{1,4}", 0..3),
+                proptest::option::of(0u32..3600u32),
+                prop::collection::btree_map("[a-z]{1,6}", "[a-z]{1,8}", 0..3),
+                prop::collection::vec("[a-z]{1,6}", 0..3),
+                proptest::bool::ANY,
+            )
+                .prop_map(
+                    |(name, tags, timeout, headers, disabled_tools, disabled)| McpServer {
+                        name,
+                        when: tags,
+                        transport: McpTransport::Stdio,
+                        command: Some("cmd".into()),
+                        args: vec![],
+                        env: BTreeMap::new(),
+                        url: None,
+                        headers,
+                        disabled,
+                        disabled_tools,
+                        timeout,
+                    },
+                )
+        }
+
+        fn arb_lsp_server() -> impl Strategy<Value = LspServer> {
             ("[a-z]{1,6}", prop::collection::vec("[a-z]{1,4}", 0..3)).prop_map(|(name, tags)| {
-                McpServer {
+                LspServer {
                     name,
                     when: tags,
-                    transport: McpTransport::Stdio,
-                    command: Some("cmd".into()),
-                    args: vec![],
-                    env: BTreeMap::new(),
-                    url: None,
+                    command: "lsp-cmd".into(),
+                    ..Default::default()
                 }
             })
         }
 
-        // Contributors carrying only list fields (allow rules + plugins + mcp)
+        fn arb_skill_source() -> impl Strategy<Value = SkillSource> {
+            ("[a-z]{1,6}", prop::collection::vec("[a-z]{1,4}", 0..3)).prop_map(|(name, tags)| {
+                SkillSource {
+                    name,
+                    path: "/tmp/skill".into(),
+                    when: tags,
+                }
+            })
+        }
+
+        // Contributors carrying only list fields (allow rules + plugins + mcp/lsp/skills)
         // plus a small native: map, so the scalar default_mode never forces a
         // same-precedence conflict.
         //
@@ -760,30 +883,40 @@ mod tests {
                     (engine, serde_yaml::Value::Mapping(m))
                 });
             (
-                "[a-z]{1,4}",
-                1u8..=10,
-                prop::collection::vec(arb_rule(), 0..4),
-                prop::collection::vec("[a-z:]{1,6}", 0..4),
-                prop::collection::vec(arb_mcp_server(), 0..3),
-                prop::collection::vec(arb_engine_entry, 0..3),
+                (
+                    "[a-z]{1,4}",
+                    1u8..=10,
+                    prop::collection::vec(arb_rule(), 0..4),
+                    prop::collection::vec("[a-z:]{1,6}", 0..4),
+                ),
+                (
+                    prop::collection::vec(arb_mcp_server(), 0..3),
+                    prop::collection::vec(arb_lsp_server(), 0..3),
+                    prop::collection::vec(arb_skill_source(), 0..3),
+                    prop::collection::vec(arb_engine_entry, 0..3),
+                ),
             )
-                .prop_map(|(name, precedence, allow, plugins, mcp, engine_entries)| {
-                    let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
-                    CapabilityContributor {
-                        name,
-                        precedence,
-                        capabilities: Capabilities {
-                            permissions: Permissions {
-                                allow,
+                .prop_map(
+                    |((name, precedence, allow, plugins), (mcp, lsp, skills, engine_entries))| {
+                        let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
+                        CapabilityContributor {
+                            name,
+                            precedence,
+                            capabilities: Capabilities {
+                                permissions: Permissions {
+                                    allow,
+                                    ..Default::default()
+                                },
+                                plugins,
+                                mcp,
+                                lsp,
+                                skills,
+                                native,
                                 ..Default::default()
                             },
-                            plugins,
-                            mcp,
-                            native,
-                            ..Default::default()
-                        },
-                    }
-                })
+                        }
+                    },
+                )
         }
 
         fn allow_set(caps: &Capabilities) -> BTreeSet<PermissionRule> {
@@ -1068,6 +1201,22 @@ mod tests {
                     Some("winner.local"),
                     "highest-precedence contributor must win"
                 );
+            }
+
+            // SkillSource serde roundtrip: serialize → deserialize must be identity.
+            #[test]
+            fn skill_source_serde_roundtrip(skill in arb_skill_source()) {
+                let yaml = serde_yaml::to_string(&skill).unwrap();
+                let back: SkillSource = serde_yaml::from_str(&yaml).unwrap();
+                prop_assert_eq!(skill, back);
+            }
+
+            // LspServer serde roundtrip: serialize → deserialize must be identity.
+            #[test]
+            fn lsp_server_serde_roundtrip(lsp in arb_lsp_server()) {
+                let yaml = serde_yaml::to_string(&lsp).unwrap();
+                let back: LspServer = serde_yaml::from_str(&yaml).unwrap();
+                prop_assert_eq!(lsp, back);
             }
         }
     }
