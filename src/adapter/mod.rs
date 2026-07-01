@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod crush;
+pub(crate) mod skills;
 
 use std::path::{Path, PathBuf};
 

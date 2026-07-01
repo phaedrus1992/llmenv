@@ -54,8 +54,10 @@ impl AgentAdapter for CrushAdapter {
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        // 1. Create output dir
         std::fs::create_dir_all(out)?;
 
+        // 2. Validate hook events + hard-error on mcp_tool hooks (fix 5)
         for hook in &manifest.capabilities.hooks {
             if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
                 anyhow::bail!(
@@ -66,8 +68,43 @@ impl AgentAdapter for CrushAdapter {
                     SUPPORTED_HOOK_EVENTS.join(", ")
                 );
             }
+            if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
+                anyhow::bail!(
+                    "Crush adapter does not support mcp_tool hooks (hook event '{}', tool '{}'). \
+                     Use a command hook instead.",
+                    hook.event,
+                    hook.handler.tool.as_deref().unwrap_or("<unknown>")
+                );
+            }
         }
 
+        // 3. Write first-class skills (fix 2)
+        let skill_paths =
+            crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
+
+        // 4. Project plugin skills + hard-error on non-skill content (fix 4)
+        let mut owned: Vec<PathBuf> = vec![PathBuf::from(CRUSH_JSON_FILE)];
+        owned.extend(skill_paths.iter().cloned());
+
+        let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
+        for plugin in &manifest.plugins {
+            let payload = resolve_plugin_payload(plugin, &manifest.marketplaces)?;
+            for bad_dir in &["agents", "commands"] {
+                if payload.join(bad_dir).is_dir() {
+                    anyhow::bail!(
+                        "plugin '{}' contains unsupported Crush content: '{}' directory \
+                         — Crush does not support agents/commands",
+                        plugin.plugin,
+                        bad_dir
+                    );
+                }
+            }
+            let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
+            plugin_skill_paths.extend(paths);
+        }
+        owned.extend(plugin_skill_paths);
+
+        // 5. Build doc
         let mut doc = serde_json::Map::new();
 
         // Hooks
@@ -146,8 +183,8 @@ impl AgentAdapter for CrushAdapter {
             doc.insert("permissions".into(), serde_json::Value::Object(perm_obj));
         }
 
-        // MCP servers
-        if !manifest.mcps.is_empty() {
+        // MCP servers (fix 6: headers/timeout/disabled_tools)
+        if !manifest.mcps.is_empty() || manifest.capabilities.native_mcp.contains_key("crush") {
             let mut mcp_obj = serde_json::Map::new();
             for mcp in &manifest.mcps {
                 use crate::mcp::resolve::ResolvedKind;
@@ -159,26 +196,81 @@ impl AgentAdapter for CrushAdapter {
                         if !env.is_empty() {
                             e.insert("env".into(), json!(env));
                         }
+                        if !mcp.headers.is_empty() {
+                            e.insert("headers".into(), json!(mcp.headers));
+                        }
+                        if let Some(t) = mcp.timeout {
+                            e.insert("timeout".into(), json!(t));
+                        }
+                        if !mcp.disabled_tools.is_empty() {
+                            e.insert("disabled_tools".into(), json!(mcp.disabled_tools));
+                        }
                         serde_json::Value::Object(e)
                     }
                     ResolvedKind::Remote { url, .. } => {
-                        json!({ "type": "remote", "url": url })
+                        let mut e = serde_json::Map::new();
+                        e.insert("type".into(), json!("remote"));
+                        e.insert("url".into(), json!(url));
+                        if !mcp.headers.is_empty() {
+                            e.insert("headers".into(), json!(mcp.headers));
+                        }
+                        if let Some(t) = mcp.timeout {
+                            e.insert("timeout".into(), json!(t));
+                        }
+                        if !mcp.disabled_tools.is_empty() {
+                            e.insert("disabled_tools".into(), json!(mcp.disabled_tools));
+                        }
+                        serde_json::Value::Object(e)
                     }
                 };
                 mcp_obj.insert(mcp.name.clone(), entry);
             }
-            doc.insert("mcp".into(), serde_json::Value::Object(mcp_obj));
+            // fix 7: overlay native_mcp.crush into the mcp object
+            let mut mcp_value = serde_json::Value::Object(mcp_obj);
+            overlay_native_crush(
+                &mut mcp_value,
+                manifest.capabilities.native_mcp.get("crush"),
+            )?;
+            if !mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
+                doc.insert("mcp".into(), mcp_value);
+            }
         }
 
-        // native.crush passthrough — highest-precedence layer
+        // LSP servers (fix 1): skip disabled servers; omit "lsp" key if none remain.
+        if !manifest.capabilities.lsp.is_empty() {
+            let lsp_value = render_lsp(&manifest.capabilities.lsp)?;
+            if lsp_value.as_object().is_some_and(|o| !o.is_empty()) {
+                doc.insert("lsp".into(), lsp_value);
+            }
+        }
+
+        // options.skills_paths (fix 2): only if skills were written
+        if !skill_paths.is_empty() {
+            let skills_out = out
+                .join("skills")
+                .into_os_string()
+                .into_string()
+                .map_err(|p| {
+                    anyhow::anyhow!(
+                        "skills output path is not valid UTF-8: {}",
+                        PathBuf::from(p).display()
+                    )
+                })?;
+            let mut options_obj = serde_json::Map::new();
+            options_obj.insert("skills_paths".into(), json!([skills_out]));
+            doc.insert("options".into(), serde_json::Value::Object(options_obj));
+        }
+
+        // 6. native.crush passthrough — highest-precedence layer
         let mut doc_value = serde_json::Value::Object(doc);
         overlay_native_crush(&mut doc_value, manifest.native.get("crush"))?;
 
+        // 7. Write crush.json
         let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
         let out_path = out.join(CRUSH_JSON_FILE);
         crate::paths::write_owner_only(&out_path, &json_bytes)?;
 
-        Ok(vec![PathBuf::from(CRUSH_JSON_FILE)])
+        Ok(owned)
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
@@ -194,6 +286,78 @@ impl AgentAdapter for CrushAdapter {
         })
         .to_string()
     }
+}
+
+/// Resolve the on-disk payload directory for a plugin.
+///
+/// External plugins (`install_path = Some`) use that path directly.
+/// First-party plugins look up their marketplace `install_location`.
+fn resolve_plugin_payload(
+    plugin: &crate::plugins::resolve::ResolvedPlugin,
+    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
+) -> anyhow::Result<PathBuf> {
+    if let Some(p) = &plugin.install_path {
+        return Ok(PathBuf::from(p));
+    }
+    let mkt = marketplaces
+        .iter()
+        .find(|m| m.name == plugin.marketplace)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
+                plugin.plugin,
+                plugin.marketplace
+            )
+        })?;
+    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
+            plugin.plugin,
+            plugin.marketplace
+        )
+    })?;
+    Ok(PathBuf::from(install_location).join(&plugin.plugin))
+}
+
+/// Build the `lsp` JSON object (keyed by server name) from a slice of LSP servers.
+///
+/// Disabled servers (`disabled == true`) are skipped entirely — Crush has no
+/// way to model a conditionally-disabled server at runtime.
+fn render_lsp(servers: &[llmenv_config::LspServer]) -> anyhow::Result<serde_json::Value> {
+    let mut lsp_obj = serde_json::Map::new();
+    for srv in servers {
+        if srv.disabled {
+            continue;
+        }
+        let mut e = serde_json::Map::new();
+        e.insert("command".into(), json!(srv.command));
+        if !srv.args.is_empty() {
+            e.insert("args".into(), json!(srv.args));
+        }
+        if !srv.env.is_empty() {
+            e.insert("env".into(), json!(srv.env));
+        }
+        if !srv.filetypes.is_empty() {
+            e.insert("filetypes".into(), json!(srv.filetypes));
+        }
+        if !srv.root_markers.is_empty() {
+            e.insert("root_markers".into(), json!(srv.root_markers));
+        }
+        if let Some(t) = srv.timeout {
+            e.insert("timeout".into(), json!(t));
+        }
+        if let Some(opts) = &srv.init_options {
+            let as_json = serde_json::to_value(opts).map_err(|err| {
+                anyhow::anyhow!(
+                    "LSP server '{}': failed to convert initializationOptions to JSON: {err}",
+                    srv.name
+                )
+            })?;
+            e.insert("initializationOptions".into(), as_json);
+        }
+        lsp_obj.insert(srv.name.clone(), serde_json::Value::Object(e));
+    }
+    Ok(serde_json::Value::Object(lsp_obj))
 }
 
 fn overlay_native_crush(
@@ -247,6 +411,7 @@ mod tests {
     use crate::config::{
         Capabilities, Hook, HookHandler, HookHandlerKind, NativePermissionRules, PermissionRule,
     };
+    use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use crate::merge::MergedManifest;
 
     fn empty_manifest() -> MergedManifest {
@@ -270,6 +435,20 @@ mod tests {
                 tool: None,
             },
             bundle_origin: None,
+        }
+    }
+
+    fn stdio_mcp(name: &str) -> ResolvedMcp {
+        ResolvedMcp {
+            name: name.into(),
+            kind: ResolvedKind::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "some-mcp".into()],
+                env: std::collections::BTreeMap::new(),
+            },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
         }
     }
 
@@ -653,5 +832,294 @@ mod tests {
     #[test]
     fn supported_hook_events_contains_pretooluse() {
         assert!(SUPPORTED_HOOK_EVENTS.contains(&"PreToolUse"));
+    }
+
+    // ── materialize: LSP (fix 1) ──────────────────────────────────────────────
+
+    #[test]
+    fn materialize_lsp_server_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.lsp.push(llmenv_config::LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            args: vec!["--quiet".into()],
+            ..Default::default()
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["lsp"]["rust-analyzer"]["command"],
+            serde_json::json!("rust-analyzer"),
+            "LSP server command must be written"
+        );
+    }
+
+    #[test]
+    fn materialize_lsp_empty_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        CrushAdapter
+            .materialize(&empty_manifest(), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("lsp").is_none(),
+            "\"lsp\" key must be absent when no LSP servers configured"
+        );
+    }
+
+    #[test]
+    fn materialize_lsp_optional_fields_omitted_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.lsp.push(llmenv_config::LspServer {
+            name: "tsserver".into(),
+            command: "typescript-language-server".into(),
+            // disabled=false, empty filetypes/root_markers/env, timeout=None
+            ..Default::default()
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let srv = &doc["lsp"]["tsserver"];
+        assert!(
+            srv.get("disabled").is_none(),
+            "disabled=false must be omitted"
+        );
+        assert!(srv.get("env").is_none(), "empty env must be omitted");
+        assert!(
+            srv.get("filetypes").is_none(),
+            "empty filetypes must be omitted"
+        );
+        assert!(
+            srv.get("root_markers").is_none(),
+            "empty root_markers must be omitted"
+        );
+        assert!(srv.get("timeout").is_none(), "None timeout must be omitted");
+        assert!(
+            srv.get("initializationOptions").is_none(),
+            "None init_options must be omitted"
+        );
+    }
+
+    // ── materialize: mcp_tool hook hard-errors (fix 5) ───────────────────────
+
+    #[test]
+    fn materialize_mcp_tool_hook_hard_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::McpTool,
+                command: None,
+                tool: Some("my_tool".into()),
+            },
+            bundle_origin: None,
+        });
+        let err = CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("mcp_tool"),
+            "error must mention mcp_tool: {err}"
+        );
+    }
+
+    // ── materialize: MCP headers/timeout/disabled_tools (fix 6) ─────────────
+
+    #[test]
+    fn materialize_mcp_headers_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mcp = stdio_mcp("srv");
+        mcp.headers
+            .insert("Authorization".into(), "Bearer tok".into());
+        let mut manifest = empty_manifest();
+        manifest.mcps.push(mcp);
+        CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["mcp"]["srv"]["headers"]["Authorization"],
+            serde_json::json!("Bearer tok"),
+            "headers must be written into MCP entry"
+        );
+    }
+
+    #[test]
+    fn materialize_mcp_timeout_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mcp = stdio_mcp("srv");
+        mcp.timeout = Some(30);
+        let mut manifest = empty_manifest();
+        manifest.mcps.push(mcp);
+        CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["mcp"]["srv"]["timeout"],
+            serde_json::json!(30),
+            "timeout must be written into MCP entry"
+        );
+    }
+
+    #[test]
+    fn materialize_mcp_disabled_tools_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mcp = stdio_mcp("srv");
+        mcp.disabled_tools = vec!["dangerous_tool".into()];
+        let mut manifest = empty_manifest();
+        manifest.mcps.push(mcp);
+        CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let dt = doc["mcp"]["srv"]["disabled_tools"].as_array().unwrap();
+        assert!(
+            dt.contains(&serde_json::json!("dangerous_tool")),
+            "disabled_tools must be written into MCP entry"
+        );
+    }
+
+    // ── materialize: LSP disabled server omitted (fix 1) ─────────────────────
+
+    #[test]
+    fn materialize_lsp_disabled_server_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.lsp.push(llmenv_config::LspServer {
+            name: "disabled-srv".into(),
+            command: "some-ls".into(),
+            disabled: true,
+            ..Default::default()
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("lsp").is_none(),
+            "\"lsp\" key must be absent when all servers are disabled"
+        );
+    }
+
+    // ── materialize: first-class skills (fix 2) ───────────────────────────────
+
+    #[test]
+    fn materialize_skills_written_and_paths_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Set up a minimal skill source dir with a SKILL.md file.
+        let skill_src = tempfile::tempdir().unwrap();
+        std::fs::write(skill_src.path().join("SKILL.md"), "# MySkill\n").unwrap();
+
+        let mut caps = Capabilities::default();
+        caps.skills.push(crate::config::SkillSource {
+            name: "my-skill".into(),
+            path: skill_src.path().to_string_lossy().into_owned(),
+            when: Vec::new(),
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        // SKILL.md must be projected.
+        assert!(
+            tmp.path().join("skills/my-skill/SKILL.md").exists(),
+            "SKILL.md must be written under out/skills/my-skill/"
+        );
+        // options.skills_paths must reference the skills dir.
+        let skills_paths = doc["options"]["skills_paths"].as_array().unwrap();
+        assert_eq!(skills_paths.len(), 1);
+        let recorded = skills_paths[0].as_str().unwrap();
+        assert!(
+            recorded.ends_with("skills"),
+            "skills_paths entry must end with 'skills', got: {recorded}"
+        );
+    }
+
+    // ── materialize: plugin skill projection + agents/ hard-error (fix 3) ────
+
+    #[test]
+    fn materialize_plugin_skills_projected() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Build a fake plugin dir with a skills sub-directory.
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("skills/foo")).unwrap();
+        std::fs::write(plugin_dir.path().join("skills/foo/SKILL.md"), "# Foo\n").unwrap();
+
+        let mut manifest = empty_manifest();
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "my-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            });
+        CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+        assert!(
+            tmp.path().join("skills/foo/SKILL.md").exists(),
+            "plugin skill must be projected into out/skills/foo/"
+        );
+    }
+
+    #[test]
+    fn materialize_plugin_with_agents_hard_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Plugin dir that contains an agents/ subdirectory.
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("agents")).unwrap();
+
+        let mut manifest = empty_manifest();
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "bad-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            });
+        let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("agents"),
+            "error must name the unsupported 'agents' directory: {err}"
+        );
+        assert!(
+            err.to_string().contains("bad-plugin"),
+            "error must name the plugin: {err}"
+        );
+    }
+
+    // ── materialize: native_mcp.crush merged into mcp (fix 6) ────────────────
+
+    #[test]
+    fn materialize_native_mcp_crush_merged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        let frag: serde_yaml::Value =
+            serde_yaml::from_str("injected-srv:\n  command: injected\n  args: []\n").unwrap();
+        caps.native_mcp.insert("crush".into(), frag);
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["mcp"]["injected-srv"]["command"],
+            serde_json::json!("injected"),
+            "native_mcp.crush must be merged into the mcp section"
+        );
     }
 }
