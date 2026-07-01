@@ -102,7 +102,10 @@ impl AgentAdapter for CrushAdapter {
             let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
             plugin_skill_paths.extend(paths);
         }
-        owned.extend(plugin_skill_paths);
+        owned.extend(plugin_skill_paths.iter().cloned());
+
+        // P1-1: validate skills (frontmatter + hardcoded-path scan), same gate as ClaudeCodeAdapter
+        crate::adapter::skills::validate_skills(out)?;
 
         // 5. Build doc
         let mut doc = serde_json::Map::new();
@@ -114,7 +117,10 @@ impl AgentAdapter for CrushAdapter {
             let handler = json!({
                 "type": match hook.handler.kind {
                     crate::config::HookHandlerKind::Command => "command",
-                    crate::config::HookHandlerKind::McpTool => "mcp_tool",
+                    // P2-6: mcp_tool hooks are rejected at the validation gate above.
+                    crate::config::HookHandlerKind::McpTool => unreachable!(
+                        "mcp_tool hooks are rejected at the validation gate above"
+                    ),
                 },
                 "command": hook.handler.command,
                 "tool": hook.handler.tool,
@@ -140,6 +146,20 @@ impl AgentAdapter for CrushAdapter {
             &mut hooks_value,
             manifest.capabilities.native_hooks.get("crush"),
         )?;
+        // P1-4: validate every event key in the merged hooks object — native_hooks.crush can
+        // inject unsupported events (e.g. PostToolUse) that bypass the earlier manifest gate.
+        if let Some(obj) = hooks_value.as_object() {
+            for event in obj.keys() {
+                if !SUPPORTED_HOOK_EVENTS.contains(&event.as_str()) {
+                    anyhow::bail!(
+                        "native_hooks.crush contains unsupported hook event '{}'. \
+                         Supported events: {}. Remove or move this hook.",
+                        event,
+                        SUPPORTED_HOOK_EVENTS.join(", ")
+                    );
+                }
+            }
+        }
         if !hooks_value
             .as_object()
             .is_none_or(serde_json::Map::is_empty)
@@ -244,8 +264,9 @@ impl AgentAdapter for CrushAdapter {
             }
         }
 
-        // options.skills_paths (fix 2): only if skills were written
-        if !skill_paths.is_empty() {
+        // options.skills_paths: emit whenever any skills exist (first-class or plugin-projected).
+        // P1-2: must include plugin_skill_paths — plugin-only skill sets omit this key otherwise.
+        if !skill_paths.is_empty() || !plugin_skill_paths.is_empty() {
             let skills_out = out
                 .join("skills")
                 .into_os_string()
@@ -262,6 +283,12 @@ impl AgentAdapter for CrushAdapter {
         }
 
         // 6. native.crush passthrough — highest-precedence layer
+        // P1-3: reject modeled keys in the catch-all fragment before overlaying — these
+        // keys have dedicated rendering paths and must not clobber the security output.
+        // Use native_permissions.crush / native_hooks.crush / native_mcp.crush instead.
+        if let Some(native) = manifest.native.get("crush") {
+            reject_modeled_keys_in_native_crush(native)?;
+        }
         let mut doc_value = serde_json::Value::Object(doc);
         overlay_native_crush(&mut doc_value, manifest.native.get("crush"))?;
 
@@ -296,6 +323,10 @@ fn resolve_plugin_payload(
     plugin: &crate::plugins::resolve::ResolvedPlugin,
     marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
 ) -> anyhow::Result<PathBuf> {
+    // P2-5: guard traversal before any path join, regardless of which path is taken.
+    if crate::paths::is_unsafe_join_target(&plugin.plugin) {
+        anyhow::bail!("plugin name '{}' is unsafe (path traversal)", plugin.plugin);
+    }
     if let Some(p) = &plugin.install_path {
         return Ok(PathBuf::from(p));
     }
@@ -360,6 +391,34 @@ fn render_lsp(servers: &[llmenv_config::LspServer]) -> anyhow::Result<serde_json
     Ok(serde_json::Value::Object(lsp_obj))
 }
 
+/// Keys that are fully modeled by CrushAdapter and must not appear in the `native.crush`
+/// catch-all fragment. Overlaying them last would silently clobber the security-rendered
+/// output (permissions, hooks) or the structured rendering (mcp, lsp).
+///
+/// Use the dedicated `native_permissions.crush` / `native_hooks.crush` / `native_mcp.crush`
+/// channels instead, which merge in the safe direction.
+const CRUSH_MODELED_KEYS: &[&str] = &["permissions", "hooks", "mcp", "lsp"];
+
+/// P1-3: Reject `native.crush` fragments that carry modeled-feature keys.
+fn reject_modeled_keys_in_native_crush(fragment: &serde_yaml::Value) -> anyhow::Result<()> {
+    let Some(map) = fragment.as_mapping() else {
+        return Ok(());
+    };
+    for key in CRUSH_MODELED_KEYS {
+        if map.contains_key(serde_yaml::Value::String((*key).into())) {
+            anyhow::bail!(
+                "top-level `native.crush` carries the modeled-feature key `{key}`, \
+                 which would silently clobber the rendered `{key}` \
+                 (a security regression for permissions). \
+                 Use `native_{key}.crush` (or `native_permissions.crush` / \
+                 `native_hooks.crush` / `native_mcp.crush`) instead, \
+                 which merges in the safe direction."
+            );
+        }
+    }
+    Ok(())
+}
+
 fn overlay_native_crush(
     dst: &mut serde_json::Value,
     fragment: Option<&serde_yaml::Value>,
@@ -404,8 +463,8 @@ fn crush_permission_mode(mode: crate::config::PermissionMode) -> &'static str {
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
     use super::{
-        CRUSH_JSON_FILE, CrushAdapter, SUPPORTED_HOOK_EVENTS, overlay_native_crush,
-        render_permission_rule,
+        CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter, SUPPORTED_HOOK_EVENTS,
+        overlay_native_crush, reject_modeled_keys_in_native_crush, render_permission_rule,
     };
     use crate::adapter::AgentAdapter;
     use crate::config::{
@@ -413,6 +472,7 @@ mod tests {
     };
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use crate::merge::MergedManifest;
+    use proptest::prelude::*;
 
     fn empty_manifest() -> MergedManifest {
         MergedManifest::default()
@@ -1017,7 +1077,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Set up a minimal skill source dir with a SKILL.md file.
         let skill_src = tempfile::tempdir().unwrap();
-        std::fs::write(skill_src.path().join("SKILL.md"), "# MySkill\n").unwrap();
+        std::fs::write(
+            skill_src.path().join("SKILL.md"),
+            "---\nname: my-skill\ndescription: A test skill.\n---\n# MySkill\n",
+        )
+        .unwrap();
 
         let mut caps = Capabilities::default();
         caps.skills.push(crate::config::SkillSource {
@@ -1055,7 +1119,11 @@ mod tests {
         // Build a fake plugin dir with a skills sub-directory.
         let plugin_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(plugin_dir.path().join("skills/foo")).unwrap();
-        std::fs::write(plugin_dir.path().join("skills/foo/SKILL.md"), "# Foo\n").unwrap();
+        std::fs::write(
+            plugin_dir.path().join("skills/foo/SKILL.md"),
+            "---\nname: foo\ndescription: A foo skill.\n---\n# Foo\n",
+        )
+        .unwrap();
 
         let mut manifest = empty_manifest();
         manifest
@@ -1121,5 +1189,245 @@ mod tests {
             serde_json::json!("injected"),
             "native_mcp.crush must be merged into the mcp section"
         );
+    }
+
+    // ── P1-1: validate_skills called by CrushAdapter ──────────────────────────
+
+    #[test]
+    fn materialize_skill_with_missing_skill_md_errors() {
+        // A skill directory without SKILL.md must fail validate_skills.
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_src = tempfile::tempdir().unwrap();
+        // Write a file (not SKILL.md) to make it a non-empty dir.
+        std::fs::write(skill_src.path().join("helper.sh"), "echo hi\n").unwrap();
+
+        let mut caps = Capabilities::default();
+        caps.skills.push(crate::config::SkillSource {
+            name: "bad-skill".into(),
+            path: skill_src.path().to_string_lossy().into_owned(),
+            when: Vec::new(),
+        });
+        let err = CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("SKILL.md"),
+            "error must mention SKILL.md: {err}"
+        );
+    }
+
+    // ── P1-2: plugin-only skills → skills_paths emitted ──────────────────────
+
+    #[test]
+    fn materialize_plugin_only_skills_emits_skills_paths() {
+        // No first-class skills, only a plugin with a skills/ dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("skills/my-skill")).unwrap();
+        // Write a valid SKILL.md so validate_skills passes.
+        std::fs::write(
+            plugin_dir.path().join("skills/my-skill/SKILL.md"),
+            "---\nname: my-skill\ndescription: A test skill.\n---\n# My Skill\n",
+        )
+        .unwrap();
+
+        let mut manifest = empty_manifest();
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "my-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            });
+        CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc["options"]["skills_paths"].is_array(),
+            "options.skills_paths must be present when plugin-only skills exist: {doc}"
+        );
+    }
+
+    // ── P1-3: native.crush modeled-key rejection ──────────────────────────────
+
+    #[test]
+    fn materialize_native_crush_with_permissions_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = empty_manifest();
+        let frag: serde_yaml::Value =
+            serde_yaml::from_str("permissions:\n  allowed_tools: [Bash]\n").unwrap();
+        manifest.native.insert("crush".into(), frag);
+        let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("permissions"),
+            "error must name the offending key: {err}"
+        );
+        assert!(
+            err.to_string().contains("native_permissions"),
+            "error must point at the correct channel: {err}"
+        );
+    }
+
+    #[test]
+    fn materialize_native_crush_with_hooks_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = empty_manifest();
+        let frag: serde_yaml::Value = serde_yaml::from_str("hooks:\n  PreToolUse: []\n").unwrap();
+        manifest.native.insert("crush".into(), frag);
+        let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("hooks"),
+            "error must name the offending key: {err}"
+        );
+    }
+
+    #[test]
+    fn materialize_native_crush_custom_key_passes() {
+        // Keys not in CRUSH_MODELED_KEYS must pass through unmolested.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = empty_manifest();
+        let frag: serde_yaml::Value =
+            serde_yaml::from_str("telemetry:\n  enabled: false\n").unwrap();
+        manifest.native.insert("crush".into(), frag);
+        CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["telemetry"]["enabled"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn reject_modeled_keys_in_native_crush_all_modeled_keys_rejected() {
+        for key in CRUSH_MODELED_KEYS {
+            let frag: serde_yaml::Value =
+                serde_yaml::from_str(&format!("{key}: anything")).unwrap();
+            let err = reject_modeled_keys_in_native_crush(&frag).unwrap_err();
+            assert!(
+                err.to_string().contains(key),
+                "error must name the offending key '{key}': {err}"
+            );
+        }
+    }
+
+    // ── P1-4: native_hooks.crush unsupported event rejection ─────────────────
+
+    #[test]
+    fn materialize_native_hooks_unsupported_event_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        // native_hooks.crush injects PostToolUse, which is unsupported.
+        let frag: serde_yaml::Value =
+            serde_yaml::from_str("PostToolUse:\n  - command: echo bad\n").unwrap();
+        caps.native_hooks.insert("crush".into(), frag);
+        let err = CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("PostToolUse"),
+            "error must name the offending event: {err}"
+        );
+        assert!(
+            err.to_string().contains("PreToolUse"),
+            "error must list supported events: {err}"
+        );
+    }
+
+    #[test]
+    fn materialize_native_hooks_supported_event_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        let frag: serde_yaml::Value = serde_yaml::from_str(
+            "PreToolUse:\n  - hooks:\n      - type: command\n        command: echo ok\n",
+        )
+        .unwrap();
+        caps.native_hooks.insert("crush".into(), frag);
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+    }
+
+    // ── P2-5: resolve_plugin_payload traversal guard ──────────────────────────
+
+    #[test]
+    fn materialize_plugin_traversal_name_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = empty_manifest();
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "../escape".into(),
+                collection: String::new(),
+                // install_path=None forces the marketplace lookup path.
+                // Use install_path=Some to test the join guard directly.
+                install_path: None,
+                git_commit_sha: None,
+            });
+        // We expect either a "marketplace not found" or a traversal error,
+        // but NOT a silent success that would escape the install dir.
+        // The traversal guard fires before the marketplace lookup when install_path=None
+        // is not present — test with a fake marketplace to reach the join.
+        // Easier: use install_path=Some with a traversal plugin name to verify the guard.
+        let base = tempfile::tempdir().unwrap();
+        manifest.plugins[0].install_path = Some(base.path().to_string_lossy().into_owned());
+        // The join guard must fire before the plugin is resolved as a path.
+        let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe") || err.to_string().contains("traversal"),
+            "error must name path traversal: {err}"
+        );
+    }
+
+    // ── P2-7: proptest — render_lsp and emit_hook_context ────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_render_lsp_keys_match_non_disabled_servers(
+            names in prop::collection::vec("[a-z][a-z0-9-]{0,15}", 0..6),
+            disabled_flags in prop::collection::vec(proptest::bool::ANY, 0..6),
+        ) {
+            // Build LspServer list; zip names/flags (shortest wins).
+            let servers: Vec<llmenv_config::LspServer> = names
+                .iter()
+                .zip(disabled_flags.iter())
+                .map(|(n, &d)| llmenv_config::LspServer {
+                    name: n.clone(),
+                    command: "lang-server".into(),
+                    disabled: d,
+                    ..Default::default()
+                })
+                .collect();
+            let expected: std::collections::BTreeSet<String> = servers
+                .iter()
+                .filter(|s| !s.disabled)
+                .map(|s| s.name.clone())
+                .collect();
+            let result = super::render_lsp(&servers).unwrap();
+            let got: std::collections::BTreeSet<String> = result
+                .as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn prop_emit_hook_context_non_empty_is_valid_json(
+            event in "[A-Za-z]{1,20}",
+            text in ".{1,200}",
+        ) {
+            let out = CrushAdapter.emit_hook_context(&event, &text);
+            prop_assert!(
+                serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+                "non-empty text must produce valid JSON; event={event}, text={text}, got={out}"
+            );
+        }
+
+        #[test]
+        fn prop_emit_hook_context_empty_text_is_empty_string(
+            event in "[A-Za-z]{1,20}",
+        ) {
+            prop_assert_eq!(CrushAdapter.emit_hook_context(&event, ""), "");
+        }
     }
 }
