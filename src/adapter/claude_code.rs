@@ -527,9 +527,6 @@ pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec
     Ok(written)
 }
 
-/// Create `dir` (and all parents) with mode 0o700 on Unix so directory
-/// listings are owner-only from creation, not after a chmod race.
-
 // write_first_class_skills, validate_skills, validate_skill_frontmatter, and
 // scan_skill_files_for_hardcoded_paths live in crate::adapter::skills — shared with CrushAdapter.
 
