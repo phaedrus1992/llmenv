@@ -930,6 +930,22 @@ mod tests {
         assert_eq!(original, back);
     }
 
+    proptest! {
+        #[test]
+        fn prop_session_log_yaml_roundtrip(
+            file in proptest::bool::ANY,
+            transcript in proptest::bool::ANY,
+            verbose in proptest::bool::ANY,
+            path in prop::option::of("[a-zA-Z0-9/_.-]{1,32}"),
+            max_content_bytes in prop::option::of(0usize..1_000_000),
+        ) {
+            let original = SessionLog { file, transcript, verbose, path, max_content_bytes };
+            let yaml = serde_yaml::to_string(&original).expect("serialize");
+            let back: SessionLog = serde_yaml::from_str(&yaml).expect("deserialize");
+            prop_assert_eq!(original, back);
+        }
+    }
+
     #[test]
     fn session_log_rejects_bare_string_with_migration_hint() {
         let err = serde_yaml::from_str::<SessionLog>("some/path.jsonl").unwrap_err();

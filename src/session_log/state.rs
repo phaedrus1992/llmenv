@@ -11,9 +11,12 @@ use std::path::{Path, PathBuf};
 
 use llmenv_paths::{state_dir, write_owner_only_atomic};
 
-/// Cap on the correlation map's entry count (#509 item 2). Realistic usage is
-/// small (one UUID per dev session), but nothing ever removes an entry, so a
-/// long-lived install accumulates them forever without a bound.
+/// Cap on the correlation map's entry count (#509 item 2). Nothing ever
+/// removes an entry, so a long-lived install accumulates them forever
+/// without a bound. This caps *concurrently open* sessions, not lifetime
+/// session count — a session whose `SessionEnd` hasn't fired yet is still
+/// evictable (see the eviction-order comment in `record_at`). 1000
+/// simultaneously open sessions is unrealistic for a single install.
 const MAX_CORRELATION_ENTRIES: usize = 1000;
 
 /// Path to the correlation map file.
