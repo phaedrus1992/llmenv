@@ -180,6 +180,7 @@ fn sync_git(
 
     let dest = marketplace_path(cache_dir, &m.name);
     let pinned = split_source_ref(&m.source).1.is_some();
+    let mut cloned = false;
 
     if dest.join(".git").exists() {
         if refresh {
@@ -216,6 +217,7 @@ fn sync_git(
                         dest.display()
                     ))
                 })?;
+                cloned = true;
             } else {
                 git.pull(&dest).map_err(SyncError::Other)?;
             }
@@ -237,9 +239,20 @@ fn sync_git(
                 name: m.name.clone(),
                 source: e,
             })?;
+        cloned = true;
     }
 
     let head = git.head(&dest);
+    // After a successful clone, HEAD must be resolvable. If it isn't, the clone
+    // is broken and we shouldn't silently cache it with an unstable hash.
+    if cloned && head.is_none() {
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "marketplace '{}': git rev-parse HEAD failed after successful clone \
+             (cache will have unstable hash until this is resolved)",
+            m.name
+        )));
+    }
+
     Ok(MarketplaceState {
         install_location: dest,
         head,
@@ -918,6 +931,43 @@ mod tests {
         sync_marketplace_with(cache.path(), &m, true, &git).unwrap();
         assert_eq!(clone_calls.get(), 1, "unpinned source must not re-clone");
         assert_eq!(pull_calls.get(), 1, "unpinned source must pull on refresh");
+    }
+
+    #[test]
+    fn git_clone_succeeds_but_head_unresolvable_returns_error() {
+        // Fixes #537: if clone succeeds but we can't resolve HEAD, the clone is
+        // broken and shouldn't be cached with an unstable hash. Return an error
+        // to force the user to address the broken clone.
+        struct SuccessfulCloneNoHead;
+        impl GitBackend for SuccessfulCloneNoHead {
+            fn clone(&self, _: &str, dest: &std::path::Path) -> Result<()> {
+                std::fs::create_dir_all(dest.join(".git"))?;
+                Ok(())
+            }
+            fn pull(&self, _: &std::path::Path) -> Result<()> {
+                unreachable!()
+            }
+            fn head(&self, _: &std::path::Path) -> Option<String> {
+                None
+            }
+        }
+
+        let m = Marketplace {
+            name: "corrupted".into(),
+            source: "https://github.com/example/plugins".into(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let result = sync_marketplace_with(cache.path(), &m, true, &SuccessfulCloneNoHead);
+        assert!(
+            matches!(result, Err(SyncError::Other(_))),
+            "expected error when clone succeeds but HEAD is unresolvable, got {result:?}"
+        );
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("git rev-parse HEAD failed after successful clone"),
+            "error message should explain HEAD resolution failure, got: {msg}"
+        );
     }
 
     #[test]
