@@ -10,11 +10,14 @@ use crate::session_log::transcript::{RECORD_TOOL, START_TOOL, record_args, start
 /// Start a transcript session; returns its id (the tool's text result, trimmed).
 ///
 /// # Errors
-/// Any `call_tool` failure, an empty id, or an id containing whitespace/control
-/// characters (#509 item 1: defense-in-depth — the id is persisted to
-/// `transcript-sessions.json` and later passed as a CLI/process argument
-/// elsewhere, so a well-formed id matters even though ICM is a trusted
-/// boundary today).
+/// Any `call_tool` failure, an empty id, or a non-ASCII id (#509 item 1:
+/// defense-in-depth — the id is persisted to `transcript-sessions.json` and
+/// later passed as a CLI/process argument elsewhere, so a well-formed id
+/// matters even though ICM is a trusted boundary today). Every valid session
+/// id (UUID, ULID) is pure ASCII, so rejecting anything else — not just
+/// `is_whitespace()`/`is_control()`, which miss Unicode formatting characters
+/// like zero-width space or RTL override — closes the gap with no false
+/// positives.
 pub async fn start_session(
     client: &McpHttpClient,
     agent: &str,
@@ -28,10 +31,8 @@ pub async fn start_session(
     if id.is_empty() {
         anyhow::bail!("{START_TOOL} returned an empty session id");
     }
-    if id.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        anyhow::bail!(
-            "{START_TOOL} returned a session id with whitespace/control characters: {id:?}"
-        );
+    if !id.is_ascii() || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        anyhow::bail!("{START_TOOL} returned a malformed session id: {id:?}");
     }
     Ok(id)
 }
@@ -100,7 +101,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("whitespace/control"));
+        assert!(err.to_string().contains("malformed session id"));
     }
 
     #[tokio::test]
@@ -119,7 +120,28 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("whitespace/control"));
+        assert!(err.to_string().contains("malformed session id"));
+    }
+
+    #[tokio::test]
+    async fn start_session_rejects_non_ascii_id() {
+        // Zero-width space (U+200B): not caught by is_whitespace()/is_control(),
+        // but is_ascii() rejects it.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text_result("sess\u{200B}42")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let err = start_session(
+            &client,
+            "claude_code",
+            Some("llmenv"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("malformed session id"));
     }
 
     #[tokio::test]
