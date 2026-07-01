@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   dispatcher existed but was never wired into generated `settings.json` —
   memory wake-up/store now actually fires. Continuous per-prompt recall
   (`turn_start`) is still unwired; tracked in #499. (#382)
+- Multi-engine foundation for a second agent engine (Crush): `export`, `hook`,
+  and `regenerate` now iterate a registry of engine adapters, materializing each
+  into its own per-engine cache subtree and skipping any whose binary isn't on
+  `PATH`. Claude-only users see no behavior change. Groundwork for the Crush
+  adapter (#506); no Crush support ships yet. (#502)
+- Add first-class `lsp:` capability: declare language servers (`name`, `when`,
+  `command`, `args`, `env`, `disabled`, `filetypes`, `root_markers`,
+  `init_options`, `timeout`) at the top level or inside a bundle, tag-scoped like
+  `mcp`. Engines with no LSP concept (Claude Code) silently ignore them. (#503)
+- Add first-class `skills:` capability, decoupled from plugins: declare a skill
+  (`name`, `path`, `when`) directly in config or a bundle, tag-scoped, validated
+  with the same frontmatter and path checks as plugin-bundled skills. (#504)
+- Add MCP server field parity: `headers`, `disabled`, `disabled_tools`, and
+  `timeout` on MCP server entries. All optional — existing configs parse
+  unchanged. (#505)
 
 ### Changed
 

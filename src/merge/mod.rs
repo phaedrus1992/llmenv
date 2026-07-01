@@ -145,6 +145,8 @@ const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
     "hooks",
     "plugins",
     "mcp",
+    "lsp",
+    "skills",
     "env",
     "auto_memory_enabled",
     "effort_level",

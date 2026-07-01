@@ -142,6 +142,14 @@ pub enum ValidateError {
          llmenv-internal variables. Fix: rename the key."
     )]
     McpLlmenvPrefixEnvKey { mcp: String, key: String },
+    #[error("lsp server '{0}' has an empty name")]
+    LspEmptyName(String),
+    #[error("lsp server '{0}' has an empty command")]
+    LspEmptyCommand(String),
+    #[error("skill '{0}' has an empty name")]
+    SkillEmptyName(String),
+    #[error("skill '{0}' has an empty path")]
+    SkillEmptyPath(String),
 }
 
 /// A marketplace name is safe to use as a single filesystem path component and
@@ -319,6 +327,8 @@ impl Config {
             validate_capabilities_env_key("config.yaml: capabilities", key)?;
         }
         self.validate_mcps()?;
+        self.validate_lsp()?;
+        self.validate_skills()?;
         self.validate_plugins()?;
         self.validate_state()?;
         Ok(())
@@ -498,6 +508,30 @@ impl Config {
                 if th.backend.is_empty() {
                     return Err(ValidateError::ThrottleEmptyBackend);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_lsp(&self) -> Result<(), ValidateError> {
+        for l in &self.lsp {
+            if l.name.is_empty() {
+                return Err(ValidateError::LspEmptyName(l.name.clone()));
+            }
+            if l.command.is_empty() {
+                return Err(ValidateError::LspEmptyCommand(l.name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_skills(&self) -> Result<(), ValidateError> {
+        for s in &self.skills {
+            if s.name.is_empty() {
+                return Err(ValidateError::SkillEmptyName(s.name.clone()));
+            }
+            if s.path.is_empty() {
+                return Err(ValidateError::SkillEmptyPath(s.name.clone()));
             }
         }
         Ok(())
@@ -686,6 +720,7 @@ mod tests {
                     args,
                     env,
                     url,
+                    ..Default::default()
                 },
             )
     }
@@ -901,6 +936,8 @@ mod tests {
                         host,
                         init: Default::default(),
                         session_log,
+                        lsp: vec![],
+                        skills: vec![],
                     }
                 },
             )
@@ -945,6 +982,8 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                lsp: vec![],
+                skills: vec![],
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -976,6 +1015,8 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                lsp: vec![],
+                skills: vec![],
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -1004,6 +1045,8 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                lsp: vec![],
+                skills: vec![],
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -1043,6 +1086,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -1075,6 +1120,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1107,6 +1154,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1129,6 +1178,7 @@ mod tests {
                 args: vec![],
                 env: Default::default(),
                 url: None,
+                ..Default::default()
             }],
             features: None,
             marketplace: vec![],
@@ -1137,6 +1187,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(matches!(
             config.validate(),
@@ -1163,6 +1215,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         }
     }
 
@@ -1216,6 +1270,7 @@ mod tests {
                 args: vec![],
                 env,
                 url: None,
+                ..Default::default()
             }],
             features: None,
             marketplace: vec![],
@@ -1224,6 +1279,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(matches!(
             config.validate(),
@@ -1250,6 +1307,7 @@ mod tests {
                 args: vec![],
                 env,
                 url: None,
+                ..Default::default()
             }],
             features: None,
             marketplace: vec![],
@@ -1258,6 +1316,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(matches!(
             config.validate(),
@@ -1284,6 +1344,7 @@ mod tests {
                 args: vec![],
                 env,
                 url: None,
+                ..Default::default()
             }],
             features: None,
             marketplace: vec![],
@@ -1292,6 +1353,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(matches!(
             config.validate(),
@@ -1328,6 +1391,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1360,6 +1425,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1390,6 +1457,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1420,6 +1489,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1450,6 +1521,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1482,6 +1555,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1515,6 +1590,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1545,6 +1622,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1575,6 +1654,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1600,6 +1681,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1627,6 +1710,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1652,6 +1737,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1672,6 +1759,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -1697,6 +1786,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1722,6 +1813,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -1747,6 +1840,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -1769,6 +1864,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         }
     }
 
@@ -2371,5 +2468,91 @@ mod tests {
             !is_valid_var_name("ñame"),
             "non-ASCII leading char must be rejected"
         );
+    }
+
+    fn config_with_lsp(lsp: Vec<crate::LspServer>) -> Config {
+        Config {
+            lsp,
+            ..Default::default()
+        }
+    }
+
+    fn config_with_skills(skills: Vec<crate::SkillSource>) -> Config {
+        Config {
+            skills,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lsp_empty_name_is_rejected() {
+        let cfg = config_with_lsp(vec![crate::LspServer {
+            name: String::new(),
+            command: "rust-analyzer".into(),
+            ..Default::default()
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::LspEmptyName(_))
+        ));
+    }
+
+    #[test]
+    fn lsp_empty_command_is_rejected() {
+        let cfg = config_with_lsp(vec![crate::LspServer {
+            name: "rust-analyzer".into(),
+            command: String::new(),
+            ..Default::default()
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::LspEmptyCommand(_))
+        ));
+    }
+
+    #[test]
+    fn lsp_valid_entry_is_accepted() {
+        let cfg = config_with_lsp(vec![crate::LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            ..Default::default()
+        }]);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn skill_empty_name_is_rejected() {
+        let cfg = config_with_skills(vec![crate::SkillSource {
+            name: String::new(),
+            path: "/some/path".into(),
+            when: vec![],
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::SkillEmptyName(_))
+        ));
+    }
+
+    #[test]
+    fn skill_empty_path_is_rejected() {
+        let cfg = config_with_skills(vec![crate::SkillSource {
+            name: "my-skill".into(),
+            path: String::new(),
+            when: vec![],
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::SkillEmptyPath(_))
+        ));
+    }
+
+    #[test]
+    fn skill_valid_entry_is_accepted() {
+        let cfg = config_with_skills(vec![crate::SkillSource {
+            name: "my-skill".into(),
+            path: "/some/path".into(),
+            when: vec![],
+        }]);
+        assert!(cfg.validate().is_ok());
     }
 }

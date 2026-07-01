@@ -806,6 +806,9 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
                     args: vec!["playwright".into()],
                     env: BTreeMap::new(),
                 },
+                headers: BTreeMap::new(),
+                timeout: None,
+                disabled_tools: vec![],
             },
             ResolvedMcp {
                 name: "icm".into(),
@@ -813,6 +816,9 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
                     url: "http://still.local:9100/mcp".into(),
                     transport: llmenv::config::McpTransport::Http,
                 },
+                headers: BTreeMap::new(),
+                timeout: None,
+                disabled_tools: vec![],
             },
         ],
         ..Default::default()
@@ -952,6 +958,9 @@ fn global_and_bundle_mcps_both_render() {
             args: vec![],
             env: BTreeMap::new(),
         },
+        headers: BTreeMap::new(),
+        timeout: None,
+        disabled_tools: vec![],
     });
     manifest.mcps.extend(
         resolve_bundle_mcps(&manifest.capabilities.mcp, &BTreeSet::new())
@@ -1003,6 +1012,9 @@ fn native_mcp_enabled_list_is_dropped() {
                 args: vec![],
                 env: BTreeMap::new(),
             },
+            headers: BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
         }],
         capabilities: llmenv::config::Capabilities {
             native_mcp,
@@ -1042,6 +1054,9 @@ fn auto_memory_disabled_when_icm_active() {
                 url: "http://still.local:9100/mcp".into(),
                 transport: llmenv::config::McpTransport::Http,
             },
+            headers: BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
         }],
         ..Default::default()
     };
@@ -1108,6 +1123,9 @@ fn user_native_auto_memory_overrides_icm_default() {
                 url: "http://still.local:9100/mcp".into(),
                 transport: llmenv::config::McpTransport::Http,
             },
+            headers: BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
         }],
         native,
         ..Default::default()
@@ -1527,4 +1545,55 @@ fn materialize_writes_installed_plugins_json_for_external_plugins() {
     assert_eq!(entry["installPath"], payload_dir.to_string_lossy().as_ref());
     assert_eq!(entry["gitCommitSha"], "deadbeef1234567890abcdef");
     assert_eq!(entry["scope"], "user");
+}
+
+/// LSP entries in the manifest capabilities are silently ignored by Claude Code.
+/// `materialize()` must succeed and produce no `lsp` key anywhere in its outputs.
+#[test]
+fn lsp_entries_in_manifest_are_not_rendered_by_claude() {
+    use llmenv::config::LspServer;
+
+    let tmp = tempdir().unwrap();
+    let out = tmp.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let caps = llmenv::config::Capabilities {
+        lsp: vec![LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            filetypes: vec!["rust".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    // Ensure the lsp entry actually made it into the merged manifest.
+    assert_eq!(
+        manifest.capabilities.lsp.len(),
+        1,
+        "lsp entry must be in manifest"
+    );
+
+    ClaudeCodeAdapter.materialize(&manifest, &out).unwrap();
+
+    // settings.json must not contain an "lsp" key.
+    let settings_path = out.join("settings.json");
+    if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(
+            !content.contains("\"lsp\""),
+            "settings.json must not contain an lsp key; got: {content}"
+        );
+    }
+
+    // .claude.json (if written) must not contain an "lsp" key.
+    let claude_json = out.join(".claude.json");
+    if claude_json.exists() {
+        let content = std::fs::read_to_string(&claude_json).unwrap();
+        assert!(
+            !content.contains("\"lsp\""),
+            ".claude.json must not contain an lsp key; got: {content}"
+        );
+    }
 }

@@ -25,6 +25,16 @@ pub struct ResolvedMcp {
     /// Registration name in the agent's MCP config.
     pub name: String,
     pub kind: ResolvedKind,
+    /// HTTP request headers for `http`/`sse` transport (e.g. auth tokens).
+    /// Empty for `stdio` servers; Claude Code renders these into `mcpServers`.
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Per-server request timeout in seconds (`None` = engine default).
+    /// Claude Code renders this into `mcpServers` for remote entries.
+    /// #506: consumed by CrushAdapter for all transport types.
+    pub timeout: Option<u32>,
+    /// Tool names the engine should hide for this server.
+    /// #506: consumed by CrushAdapter when it renders its MCP config.
+    pub disabled_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +99,10 @@ pub fn resolve_mcps(
 ) -> Result<Vec<ResolvedMcp>, ResolveError> {
     let mut out = Vec::new();
     for m in mcp {
+        if m.disabled {
+            debug!(name = %m.name, "mcp server skipped (disabled: true)");
+            continue;
+        }
         if !m.when.iter().any(|t| active_tags.contains(t)) {
             continue;
         }
@@ -132,6 +146,10 @@ pub fn resolve_bundle_mcps(
         if !is_valid_mcp_name(&m.name) {
             return Err(ResolveError::BundleMcpInvalidName(m.name.clone()));
         }
+        if m.disabled {
+            debug!(name = %m.name, "bundle mcp server skipped (disabled: true)");
+            continue;
+        }
         let active = m.when.is_empty() || m.when.iter().any(|t| active_tags.contains(t));
         if active {
             if m.when.is_empty() {
@@ -159,6 +177,9 @@ fn resolve_static(m: &McpServer) -> Result<ResolvedMcp, ResolveError> {
     Ok(ResolvedMcp {
         name: m.name.clone(),
         kind,
+        headers: m.headers.clone(),
+        timeout: m.timeout,
+        disabled_tools: m.disabled_tools.clone(),
     })
 }
 
@@ -179,6 +200,10 @@ fn resolve_memory(
             url: format!("http://{}:{}/mcp", entry.addr, mem.port),
             transport: McpTransport::Http,
         },
+        // Memory backend is an llmenv-internal server; no user-supplied headers/timeout.
+        headers: std::collections::BTreeMap::new(),
+        timeout: None,
+        disabled_tools: vec![],
     })
 }
 
@@ -235,6 +260,7 @@ mod tests {
             args: vec![],
             env: BTreeMap::new(),
             url: None,
+            ..Default::default()
         }
     }
 
@@ -246,6 +272,33 @@ mod tests {
             when: vec!["network-home".into()],
             default_topics: vec![],
         }
+    }
+
+    // #505: disabled server is excluded even when its tags match.
+    #[test]
+    fn disabled_server_is_excluded() {
+        let mut s = stdio_server("playwright", &["user-ranger"], "npx");
+        s.disabled = true;
+        let resolved = resolve_mcps(&[s], &[], &base_host(), &tags(&["user-ranger"])).unwrap();
+        assert!(resolved.is_empty(), "disabled server must be excluded");
+    }
+
+    // #505: headers and timeout survive resolution onto ResolvedMcp.
+    #[test]
+    fn headers_and_timeout_flow_through_resolution() {
+        let mut s = stdio_server("ctx7", &["t"], "ctx-mcp");
+        s.transport = McpTransport::Http;
+        s.command = None;
+        s.url = Some("https://ctx7.example/mcp".to_string());
+        s.headers
+            .insert("Authorization".to_string(), "Bearer tok".to_string());
+        s.timeout = Some(30);
+        let resolved = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
+        assert_eq!(
+            resolved[0].headers.get("Authorization").map(String::as_str),
+            Some("Bearer tok")
+        );
+        assert_eq!(resolved[0].timeout, Some(30));
     }
 
     #[test]
@@ -423,6 +476,7 @@ mod tests {
                 args: vec![],
                 env: BTreeMap::new(),
                 url: None,
+                ..Default::default()
             })
         }
 
@@ -568,6 +622,7 @@ mod tests {
                     args: vec![],
                     env: BTreeMap::new(),
                     url: None,
+                    ..Default::default()
                 })
             }
 
