@@ -259,18 +259,48 @@ mod tests {
 
     #[test]
     fn is_valid_short_name_rejects_path_separator() {
-        assert!(!is_valid_short_name("foo/bar"));
-        assert!(!is_valid_short_name("foo\\bar"));
+        for name in ["foo/bar", "foo\\bar"] {
+            assert!(!is_valid_short_name(name), "{name} should be rejected");
+        }
     }
 
     #[test]
     fn is_valid_short_name_rejects_control_and_non_ascii_characters() {
         // #534: a blocklist-style check misses Unicode formatting characters
         // (zero-width space, RTL override) that an allowlist closes by construction.
-        assert!(!is_valid_short_name("foo\0bar"));
-        assert!(!is_valid_short_name("foo\u{200B}bar"));
-        assert!(!is_valid_short_name("foo\u{202E}bar"));
-        assert!(!is_valid_short_name("café"));
+        for name in ["foo\0bar", "foo\u{200B}bar", "foo\u{202E}bar", "café"] {
+            assert!(!is_valid_short_name(name), "{name} should be rejected");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_is_valid_short_name_no_panic(s in ".*") {
+            let _ = is_valid_short_name(&s);
+        }
+
+        #[test]
+        fn prop_valid_names_are_ascii_alphanumeric_subset(
+            name in "[a-zA-Z][a-zA-Z0-9._-]{0,30}",
+        ) {
+            if name != "." && name != ".." && !name.starts_with('-') {
+                proptest::prop_assert!(is_valid_short_name(&name));
+            }
+        }
+
+        #[test]
+        fn prop_non_ascii_always_rejected(s in "[^\x00-\x7F]+") {
+            proptest::prop_assert!(!is_valid_short_name(&s));
+        }
+
+        #[test]
+        fn prop_valid_short_name_is_never_an_unsafe_join_target(
+            name in "[a-zA-Z][a-zA-Z0-9._-]{0,30}",
+        ) {
+            if is_valid_short_name(&name) {
+                proptest::prop_assert!(!is_unsafe_join_target(&name));
+            }
+        }
     }
 
     #[test]

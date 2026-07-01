@@ -239,10 +239,8 @@ pub(crate) fn project_plugin_skills(plugin_dir: &Path, out: &Path) -> anyhow::Re
             )
         })?;
         // Fail loud rather than silently drop — matches write_first_class_skills.
-        if name.is_empty() || crate::paths::is_unsafe_join_target(name) {
-            anyhow::bail!(
-                "plugin skill '{name}': unsafe name (contains path-traversal components)"
-            );
+        if !crate::paths::is_valid_short_name(name) {
+            anyhow::bail!("plugin skill '{name}': not a valid skill name");
         }
         skills.push(crate::config::SkillSource {
             name: name.to_string(),

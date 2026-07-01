@@ -90,8 +90,10 @@ mod tests {
         // unpinned floating HEAD ref — every regenerate would otherwise pull
         // whatever the upstream repo currently has, breaking reproducibility.
         assert!(
-            CONTEXT_MODE_SOURCE.contains('#'),
-            "CONTEXT_MODE_SOURCE must carry a pinned #<tag> suffix: {CONTEXT_MODE_SOURCE}"
+            CONTEXT_MODE_SOURCE
+                .split_once('#')
+                .is_some_and(|(_, r#ref)| !r#ref.is_empty()),
+            "CONTEXT_MODE_SOURCE must carry a non-empty pinned #<tag> suffix: {CONTEXT_MODE_SOURCE}"
         );
     }
 
