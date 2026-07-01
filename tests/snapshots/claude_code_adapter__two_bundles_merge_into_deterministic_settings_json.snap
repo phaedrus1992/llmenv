@@ -15,22 +15,22 @@ hooks:
           type: command
       matcher: Edit
     - hooks:
-        - command: llmenv config-guard
+        - command: llmenv config-guard --engine claude_code
           type: command
       matcher: ^(Write|Edit|MultiEdit)$
   SessionEnd:
     - hooks:
-        - command: llmenv hook-run session_end
+        - command: llmenv hook-run --engine claude_code session_end
           type: command
   SessionStart:
     - hooks:
-        - command: llmenv check-stale
+        - command: llmenv check-stale --engine claude_code
           type: command
     - hooks:
-        - command: llmenv config-context
+        - command: llmenv config-context --engine claude_code
           type: command
     - hooks:
-        - command: llmenv hook-run session_start
+        - command: llmenv hook-run --engine claude_code session_start
           type: command
 permissions:
   allow:

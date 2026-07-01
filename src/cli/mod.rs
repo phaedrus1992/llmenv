@@ -206,6 +206,10 @@ enum Command {
         /// Re-export automatically when drift is detected
         #[arg(long)]
         auto_fix: bool,
+        /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
+        /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
     },
     /// Validate configuration syntax and wiring without running diagnostics
     Validate,
@@ -224,13 +228,23 @@ enum Command {
     /// Invoked by the auto-registered SessionStart hook. Outputs a JSON
     /// `hookSpecificOutput.additionalContext` payload so the agent always knows
     /// where its source config lives and won't edit the managed cache directory.
-    ConfigContext,
+    ConfigContext {
+        /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
+        /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
+    },
     /// Warn when the agent tries to write a managed cache path (#289).
     ///
     /// Invoked by the auto-registered PreToolUse hook (matcher: Write|Edit|MultiEdit).
     /// Reads the tool call from stdin, checks whether the target path is inside
     /// the llmenv cache, and prints a redirection hint. Always exits 0 (fail-soft).
-    ConfigGuard,
+    ConfigGuard {
+        /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
+        /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
+    },
     /// Poll the usage backend and sleep an adaptive delay. See `crate::throttle`.
     Throttle {
         /// Hook event: pre-tool or prompt
@@ -243,6 +257,10 @@ enum Command {
     HookRun {
         /// Lifecycle event: session_start, turn_start, or session_end
         event: String,
+        /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
+        /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
     },
     /// Record one session-log event into an ICM transcript session.
     ///
@@ -364,19 +382,23 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Sync { dry_run }) => {
             run_sync(dry_run)?;
         }
-        Some(Command::CheckStale { auto_fix }) => {
+        Some(Command::CheckStale { auto_fix, engine }) => {
+            tracing::debug!(engine, "check-stale invoked by engine");
             run_check_stale(use_color, auto_fix)?;
         }
-        Some(Command::ConfigContext) => {
+        Some(Command::ConfigContext { engine }) => {
+            tracing::debug!(engine, "config-context invoked by engine");
             run_config_context();
         }
-        Some(Command::ConfigGuard) => {
+        Some(Command::ConfigGuard { engine }) => {
+            tracing::debug!(engine, "config-guard invoked by engine");
             run_config_guard();
         }
         Some(Command::Throttle { event }) => {
             crate::throttle::run_throttle_hook(&event);
         }
-        Some(Command::HookRun { event }) => {
+        Some(Command::HookRun { event, engine }) => {
+            tracing::debug!(engine, "hook-run invoked by engine");
             crate::hook_run::run(&event)?;
         }
         Some(Command::SessionLogRecord) => {
@@ -604,41 +626,58 @@ fn run_export(
         eprintln!("warning: scope filtering not yet implemented, exporting all matching tags");
     }
 
-    // Merge + materialize the agent config directory and let the adapter
-    // emit env vars pointing the agent at it. Failure here exits non-zero
-    // so callers (shell hooks, CI) can detect it — silently continuing
-    // without CLAUDE_CONFIG_DIR violates the export contract. (#281)
-    match build_and_materialize(&config, &config_dir, &active, &firing, compress) {
-        Ok(Some((ref cache_path, ref extra_vars))) => {
-            tracing::debug!("materialized agent config at {}", cache_path.display());
-            for (k, v) in extra_vars {
-                vars.insert(k.clone(), v.clone());
-            }
-            // Auth sync: detect in-session login changes and refresh the
-            // stable cache. Non-fatal — export must not fail on auth errors.
-            let adapter_root =
-                expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
-            match crate::materialize::manifest::CacheManifest::read(cache_path) {
-                Ok(Some(mut manifest)) => {
-                    crate::auth::detect::sync_auth_on_export(
-                        cache_path,
-                        &adapter_root,
-                        &mut manifest,
-                    );
-                }
-                Ok(None) => {} // absent/corrupt: already logged inside CacheManifest::read
-                Err(e) => {
-                    tracing::warn!(
-                        "auth sync skipped: could not read cache manifest at {}: {e}",
-                        cache_path.display()
-                    );
-                }
-            }
+    // Merge + materialize the agent config directory for each installed adapter
+    // and collect env vars. PATH-gating skips adapters whose binary is absent so
+    // a machine without a given tool sees zero behavior change. (#502)
+    // NOTE: build_and_materialize is still Claude Code–specific; #506 wires Crush.
+    let cache_dir_root = expand_tilde(&config.cache.cache_dir)?;
+    for adapter in crate::adapter::registered_adapters() {
+        if !crate::adapter::binary_on_path(adapter.binary_name()) {
+            tracing::debug!(
+                adapter = adapter.name(),
+                binary = adapter.binary_name(),
+                "adapter binary not on PATH — skipping"
+            );
+            continue;
         }
-        Ok(None) => {
-            tracing::debug!("no bundle content directories — skipping materialize");
+        match build_and_materialize(&config, &config_dir, &active, &firing, compress) {
+            Ok(Some((ref cache_path, ref extra_vars))) => {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    "materialized agent config at {}",
+                    cache_path.display()
+                );
+                for (k, v) in extra_vars {
+                    vars.insert(k.clone(), v.clone());
+                }
+                // Auth sync: detect in-session login changes and refresh the
+                // stable cache. Non-fatal — export must not fail on auth errors.
+                let adapter_root = cache_dir_root.join(adapter.name());
+                match crate::materialize::manifest::CacheManifest::read(cache_path) {
+                    Ok(Some(mut manifest)) => {
+                        crate::auth::detect::sync_auth_on_export(
+                            cache_path,
+                            &adapter_root,
+                            &mut manifest,
+                        );
+                    }
+                    Ok(None) => {} // absent/corrupt: already logged inside CacheManifest::read
+                    Err(e) => {
+                        tracing::warn!(
+                            "auth sync skipped: could not read cache manifest at {}: {e}",
+                            cache_path.display()
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    "no bundle content directories — skipping materialize"
+                );
+            }
+            Err(e) => return Err(e).context("agent materialization failed"),
         }
-        Err(e) => return Err(e).context("agent materialization failed"),
     }
 
     // Introspection env: comma-separated, deterministic order. Scopes get

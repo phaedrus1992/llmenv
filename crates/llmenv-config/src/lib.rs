@@ -20,11 +20,11 @@ pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
 pub use schema::{
     Bundle, Cache, Capabilities, Config, ContextMode, EnvVar, Features, HashingMode, Hook,
-    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, Marketplace,
-    MarketplaceSource, McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch,
-    NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions,
-    PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes, SessionLog, StateConfig, StateTool,
-    Throttle, UserMatch, UserScope, classify_source, github_owner_repo,
+    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, LspServer,
+    Marketplace, MarketplaceSource, McpServer, McpTransport, Memory, NativePermissionRules,
+    NetworkMatch, NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule,
+    Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes, SessionLog, SkillSource,
+    StateConfig, StateTool, Throttle, UserMatch, UserScope, classify_source, github_owner_repo,
     is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;

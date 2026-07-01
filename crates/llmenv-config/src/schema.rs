@@ -63,6 +63,17 @@ pub struct Config {
     /// llmenv's own memory backend is configured separately under `memory`.
     #[serde(default)]
     pub mcp: Vec<McpServer>,
+    /// LSP servers, selected onto scopes by tag intersection (same model as
+    /// `mcp`). Engines that do not support LSP (`supports_lsp() == false`)
+    /// silently ignore these entries — declaring an LSP server in a shared
+    /// bundle is not an error for such engines.
+    #[serde(default)]
+    pub lsp: Vec<LspServer>,
+    /// First-class skills declared at the top level, selected by tag intersection
+    /// (same model as `mcp`/`lsp`). Engines with `supports_skills() == false`
+    /// silently ignore these entries.
+    #[serde(default)]
+    pub skills: Vec<SkillSource>,
     /// Feature toggles and experimental configuration.
     #[serde(default)]
     pub features: Option<Features>,
@@ -241,6 +252,16 @@ pub struct Capabilities {
     /// further filtered by scope tag intersection. Neutral counterpart to `native_mcp`.
     #[serde(default)]
     pub mcp: Vec<McpServer>,
+    /// LSP servers declared inside a bundle. A list — concatenates across contributors.
+    /// Selected by tag intersection like `mcp`. Engines with `supports_lsp() == false`
+    /// silently skip these entries (not an error).
+    #[serde(default)]
+    pub lsp: Vec<LspServer>,
+    /// First-class skills contributed directly by this capability source, independent
+    /// of any plugin. A list — concatenates across contributors. Engines with
+    /// `supports_skills() == false` silently skip these entries.
+    #[serde(default)]
+    pub skills: Vec<SkillSource>,
     /// Environment variables declared inside a bundle. Merged into the agent's env.
     /// A map — later contributors override earlier ones (same precedence model as
     /// the top-level config merging).
@@ -306,6 +327,8 @@ impl Capabilities {
             && self.hooks.is_empty()
             && self.plugins.is_empty()
             && self.mcp.is_empty()
+            && self.lsp.is_empty()
+            && self.skills.is_empty()
             && self.env.is_empty()
             && self.auto_memory_enabled.is_none()
             && self.effort_level.is_none()
@@ -585,7 +608,7 @@ pub struct Throttle {
 
 /// An MCP server definition. Selected onto a scope when any of its `tags`
 /// intersect the active scope tag set (identical to bundle selection).
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct McpServer {
     /// Registration name in the agent's MCP config (e.g. `"playwright"`).
     pub name: String,
@@ -602,6 +625,79 @@ pub struct McpServer {
     pub env: std::collections::BTreeMap<String, String>,
     /// Endpoint URL for `http`/`sse` transport.
     pub url: Option<String>,
+    /// HTTP request headers injected for `http`/`sse` transport (e.g. auth tokens).
+    /// Silently ignored for `stdio` servers.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// When `true` the server is excluded from the resolved set for all engines.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Tool names the engine should hide from the model for this server.
+    /// #506: consumed by CrushAdapter when it renders its MCP config.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
+    /// Per-server request timeout in seconds. `None` means use the engine default.
+    /// #506: consumed by CrushAdapter when it renders its MCP config.
+    pub timeout: Option<u32>,
+}
+
+/// An LSP server definition. Selected onto a scope when any of its `when` tags
+/// intersect the active scope tag set (identical to `McpServer` selection).
+/// A first-class skill contributed directly by config or bundle, independent of
+/// any plugin. Claude Code loads skills from its `skills/` directory; this entry
+/// declares one skill's source directory and the scope tags that activate it.
+///
+/// Engines that report `supports_skills() == false` silently skip these entries —
+/// declaring a skill in a shared bundle is legitimate; it is a no-op for such engines.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct SkillSource {
+    /// Registration name for the skill (written as the directory name under `skills/`).
+    pub name: String,
+    /// Absolute path to the skill's source directory (must contain `SKILL.md`).
+    pub path: String,
+    /// Scope tags that activate this skill, intersected with active scope tags.
+    /// An empty list means the entry is always active when selected.
+    #[serde(default)]
+    pub when: Vec<String>,
+}
+
+/// Engines that report `supports_lsp() == false` silently ignore these entries —
+/// declaring an LSP server in a shared bundle is legitimate; it is simply a
+/// no-op for engines that have no LSP concept.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct LspServer {
+    /// Registration name for the language server (e.g. `"rust-analyzer"`).
+    pub name: String,
+    /// Tags that activate this server, intersected with active scope tags.
+    /// An empty list means the entry is never active (use `when: []` to stage
+    /// a server definition without enabling it).
+    #[serde(default)]
+    pub when: Vec<String>,
+    /// Executable to launch (absolute path or name resolved via `PATH`).
+    pub command: String,
+    /// Arguments passed to `command`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables injected into the server process.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// When `true` the server is excluded from the resolved set for all engines.
+    #[serde(default)]
+    pub disabled: bool,
+    /// File-type / language identifiers this server handles (e.g. `["rust"]`).
+    /// Engines use these to associate the server with open buffers.
+    #[serde(default)]
+    pub filetypes: Vec<String>,
+    /// Filenames or patterns that mark the root of a workspace (e.g.
+    /// `["Cargo.toml", ".git"]`). Engines use these to anchor the project root.
+    #[serde(default)]
+    pub root_markers: Vec<String>,
+    /// Opaque `initializationOptions` passed verbatim to the language server
+    /// during the LSP `initialize` handshake. Engine adapters forward this as-is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_options: Option<serde_yaml::Value>,
+    /// Per-server request timeout in seconds. `None` means use the engine default.
+    pub timeout: Option<u32>,
 }
 
 /// An agent plugin marketplace: a name plus a source the marketplace is fetched
@@ -999,5 +1095,182 @@ mod tests {
         let yaml = "features:\n  context_mode: {}\n";
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(!cfg.features.unwrap().context_mode.unwrap().enabled);
+    }
+
+    // #505: MCP field parity — new optional fields
+
+    /// A McpServer with all new fields set survives YAML and JSON round-trips with
+    /// values intact.
+    #[test]
+    fn mcp_server_new_fields_roundtrip_yaml() {
+        use std::collections::BTreeMap;
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".to_string(), "Bearer tok".to_string());
+        let original = McpServer {
+            name: "ctx7".to_string(),
+            when: vec!["tag".to_string()],
+            transport: McpTransport::Http,
+            command: None,
+            args: vec![],
+            env: BTreeMap::new(),
+            url: Some("https://ctx7.example/mcp".to_string()),
+            headers,
+            disabled: false,
+            disabled_tools: vec!["dangerous_tool".to_string()],
+            timeout: Some(30),
+        };
+        let yaml = serde_yaml::to_string(&original).unwrap();
+        let parsed: McpServer = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn mcp_server_new_fields_roundtrip_json() {
+        use std::collections::BTreeMap;
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Api-Key".to_string(), "secret".to_string());
+        let original = McpServer {
+            name: "playwright".to_string(),
+            when: vec![],
+            transport: McpTransport::Stdio,
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string()],
+            env: BTreeMap::new(),
+            url: None,
+            headers,
+            disabled: true,
+            disabled_tools: vec!["snap".to_string(), "click".to_string()],
+            timeout: Some(120),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: McpServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    /// A McpServer YAML without any of the new fields parses with defaults applied:
+    /// `headers` empty, `disabled` false, `disabled_tools` empty, `timeout` None.
+    #[test]
+    fn mcp_server_back_compat_missing_new_fields_parse_as_defaults() {
+        let yaml = "name: playwright\ncommand: npx\nargs:\n  - -y\n";
+        let parsed: McpServer = serde_yaml::from_str(yaml).unwrap();
+        assert!(parsed.headers.is_empty(), "headers must default to empty");
+        assert!(!parsed.disabled, "disabled must default to false");
+        assert!(
+            parsed.disabled_tools.is_empty(),
+            "disabled_tools must default to empty"
+        );
+        assert_eq!(parsed.timeout, None, "timeout must default to None");
+    }
+
+    /// Two identical McpServers (incl new fields) dedup to one; differing timeout
+    /// means two entries survive.
+    #[test]
+    fn mcp_server_dedup_respects_new_fields() {
+        use std::collections::BTreeMap;
+        let a = McpServer {
+            name: "ctx".to_string(),
+            when: vec![],
+            transport: McpTransport::Stdio,
+            command: Some("ctx-mcp".to_string()),
+            args: vec![],
+            env: BTreeMap::new(),
+            url: None,
+            headers: BTreeMap::new(),
+            disabled: false,
+            disabled_tools: vec![],
+            timeout: Some(30),
+        };
+        let mut b = a.clone();
+        // Same: dedup to one.
+        let mut list = vec![a.clone(), b.clone()];
+        list.dedup();
+        assert_eq!(list.len(), 1, "identical servers must dedup to one");
+        // Different timeout: both survive.
+        b.timeout = Some(60);
+        let mut list2 = vec![a, b];
+        list2.dedup();
+        assert_eq!(list2.len(), 2, "differing timeout must not dedup");
+    }
+
+    // #503: LSP capability schema tests
+
+    /// An LspServer with all fields set survives a YAML round-trip with values intact.
+    #[test]
+    fn lsp_server_roundtrip_yaml() {
+        use std::collections::BTreeMap;
+        let mut env = BTreeMap::new();
+        env.insert("RUST_LOG".to_string(), "info".to_string());
+        let original = LspServer {
+            name: "rust-analyzer".to_string(),
+            when: vec!["rust".to_string()],
+            command: "rust-analyzer".to_string(),
+            args: vec!["--no-default-features".to_string()],
+            env,
+            disabled: false,
+            filetypes: vec!["rust".to_string()],
+            root_markers: vec!["Cargo.toml".to_string(), ".git".to_string()],
+            init_options: Some(serde_yaml::from_str("checkOnSave:\n  command: clippy\n").unwrap()),
+            timeout: Some(30),
+        };
+        let yaml = serde_yaml::to_string(&original).unwrap();
+        let parsed: LspServer = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    /// A config/bundle YAML with NO `lsp:` key parses — lsp defaults to empty.
+    /// This is the critical back-compat invariant: no existing config breaks.
+    #[test]
+    fn lsp_defaults_to_empty_when_absent() {
+        let yaml = "name: playwright\ncommand: npx\nargs:\n  - -y\n";
+        // Config-level: no lsp key
+        let cfg_yaml = "cache:\n  path: /tmp/x\n";
+        let cfg: Config = serde_yaml::from_str(cfg_yaml).unwrap();
+        assert!(cfg.lsp.is_empty(), "Config.lsp must default to empty");
+        // Capabilities-level: no lsp key
+        let caps_yaml = "hooks: []\n";
+        let caps: Capabilities = serde_yaml::from_str(caps_yaml).unwrap();
+        assert!(
+            caps.lsp.is_empty(),
+            "Capabilities.lsp must default to empty"
+        );
+        // LspServer back-compat: minimal fields only
+        let server_yaml = "name: rust-analyzer\ncommand: rust-analyzer\n";
+        let server: LspServer = serde_yaml::from_str(server_yaml).unwrap();
+        assert!(server.when.is_empty(), "when must default to empty");
+        assert!(server.args.is_empty(), "args must default to empty");
+        assert!(server.env.is_empty(), "env must default to empty");
+        assert!(!server.disabled, "disabled must default to false");
+        assert!(
+            server.filetypes.is_empty(),
+            "filetypes must default to empty"
+        );
+        assert!(
+            server.root_markers.is_empty(),
+            "root_markers must default to empty"
+        );
+        assert!(
+            server.init_options.is_none(),
+            "init_options must default to None"
+        );
+        assert_eq!(server.timeout, None, "timeout must default to None");
+        // Suppress unused variable warning from yaml binding
+        let _ = yaml;
+    }
+
+    /// Capabilities::is_empty() returns false when lsp is non-empty.
+    #[test]
+    fn capabilities_is_empty_false_with_lsp() {
+        let caps = Capabilities {
+            lsp: vec![LspServer {
+                name: "rust-analyzer".to_string(),
+                command: "rust-analyzer".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when lsp is non-empty"
+        );
     }
 }
