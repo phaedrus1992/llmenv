@@ -21,17 +21,22 @@ pub fn state_path() -> anyhow::Result<PathBuf> {
 
 /// Load the correlation map at `path`. A missing file is the normal
 /// first-run case and returns an empty map silently. A file that exists but
-/// fails to parse (truncated by a crash, hand-edited, corrupted) is **not**
-/// the same situation — that's data loss waiting to happen on the next write
-/// (`record_at` round-trips through this), so it's logged at `warn!` even
-/// though the map still degrades to empty (fail-soft: a corrupt correlation
-/// file must not break session logging).
+/// fails to parse (truncated by a crash, hand-edited, corrupted) is handled
+/// fail-soft: the map degrades to empty and a `debug!` message is logged.
+///
+/// **Deliberate deviation from hard-error convention:** Unlike persistent
+/// config (plugins, `.claude.json`), session correlation state is ephemeral
+/// and low-stakes — loss of correlation just means new session IDs next
+/// launch. Session logging must never block a session over a corrupt state
+/// file; fail-soft is correct here. The tradeoff prioritizes availability
+/// over corruption detection (contrast: #522 treats corrupt `installed_plugins.json`
+/// as a hard error to avoid losing version pins).
 fn load_at(path: &Path) -> BTreeMap<String, String> {
     let Ok(s) = std::fs::read_to_string(path) else {
         return BTreeMap::default();
     };
     serde_json::from_str(&s).unwrap_or_else(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
+        tracing::debug!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
         BTreeMap::default()
     })
 }
