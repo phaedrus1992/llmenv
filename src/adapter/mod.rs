@@ -178,4 +178,20 @@ mod tests {
             "name with tab must be rejected without spawning which"
         );
     }
+
+    #[test]
+    fn engine_id_matches_baked_engine_flag_default() {
+        // The `--engine` flag default baked into hook commands is the underscore
+        // form of an adapter's name (`claude_code`), while name() is hyphenated
+        // (`claude-code`). Guard that at least one registered adapter's normalised
+        // identity equals the baked default, so warn_if_unknown_engine (which
+        // normalises the same way) never spuriously warns on the default path.
+        let adapters = registered_adapters();
+        assert!(
+            adapters
+                .iter()
+                .any(|a| a.name().replace('-', "_") == "claude_code"),
+            "no registered adapter's engine id matches the baked --engine default 'claude_code'"
+        );
+    }
 }
