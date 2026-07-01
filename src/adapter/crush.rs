@@ -55,9 +55,13 @@ impl AgentAdapter for CrushAdapter {
         // data from other tools' state dirs. Allows future Crush-specific state cleanup
         // without touching unrelated stores.
         let crush_data_dir = format!("{data_dir}/crush");
-        // Create the dir now: Crush expects CRUSH_GLOBAL_DATA to already exist on first
-        // launch, and nothing else in the export pipeline creates this adapter-specific
-        // subdir (ensure_state_dirs only creates user-configured StateTool entries).
+        // ponytail: env_vars() does I/O here (breaking the "query-only" trait shape)
+        // because it's the only place that knows both the exact path and that it
+        // must exist — nothing else in the export pipeline creates this adapter's
+        // state subdir. Single call site today (cli/mod.rs run_export). If a second
+        // caller needs env_vars() without the mkdir side effect (e.g. a dry-run
+        // command), split dir creation into materialize() and thread state_dir
+        // through its signature instead.
         super::skills::create_dir_owner_only(Path::new(&crush_data_dir))?;
         Ok(vec![
             (
@@ -475,6 +479,7 @@ mod tests {
         overlay_native_crush, reject_modeled_keys_in_native_crush, render_permission_rule,
     };
     use crate::adapter::AgentAdapter;
+    use crate::adapter::skills::arb_yaml_value;
     use crate::config::{
         Capabilities, Hook, HookHandler, HookHandlerKind, NativePermissionRules, PermissionRule,
     };
@@ -557,34 +562,6 @@ mod tests {
         assert_eq!(
             data, &expected,
             "CRUSH_GLOBAL_DATA should point to <state_dir>/crush"
-        );
-    }
-
-    #[test]
-    fn env_vars_data_survives_config_hash_change() {
-        let state = tempfile::tempdir().unwrap();
-        // Simulate two different config renders (different content hashes)
-        let cache1 = tempfile::tempdir().unwrap();
-        let cache2 = tempfile::tempdir().unwrap();
-
-        // First render: cache1 + state
-        let vars1 = CrushAdapter.env_vars(cache1.path(), state.path()).unwrap();
-        let (_, data1) = vars1
-            .iter()
-            .find(|(k, _)| k == "CRUSH_GLOBAL_DATA")
-            .unwrap();
-
-        // Second render with different cache dir: cache2 + same state
-        let vars2 = CrushAdapter.env_vars(cache2.path(), state.path()).unwrap();
-        let (_, data2) = vars2
-            .iter()
-            .find(|(k, _)| k == "CRUSH_GLOBAL_DATA")
-            .unwrap();
-
-        // Both renders point to the same stable state dir, so session data is not lost
-        assert_eq!(
-            data1, data2,
-            "CRUSH_GLOBAL_DATA must point to the same dir despite config hash changes"
         );
     }
 
@@ -952,10 +929,35 @@ mod tests {
     // ── crush_permission_mode ─────────────────────────────────────────────────
 
     #[test]
-    fn crush_permission_mode_bypass_permissions() {
+    fn crush_permission_mode_all_variants() {
+        use crate::config::PermissionMode;
         assert_eq!(
-            super::crush_permission_mode(crate::config::PermissionMode::BypassPermissions),
+            super::crush_permission_mode(PermissionMode::AcceptEdits),
+            "accept_edits"
+        );
+        assert_eq!(super::crush_permission_mode(PermissionMode::Plan), "plan");
+        assert_eq!(
+            super::crush_permission_mode(PermissionMode::Default),
+            "default"
+        );
+        assert_eq!(
+            super::crush_permission_mode(PermissionMode::BypassPermissions),
             "bypass_permissions"
+        );
+
+        // Distinctness: no two variants render to the same string.
+        let outputs: std::collections::HashSet<&str> = [
+            super::crush_permission_mode(PermissionMode::AcceptEdits),
+            super::crush_permission_mode(PermissionMode::Plan),
+            super::crush_permission_mode(PermissionMode::Default),
+            super::crush_permission_mode(PermissionMode::BypassPermissions),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            outputs.len(),
+            4,
+            "all 4 PermissionMode variants must render distinctly"
         );
     }
 
@@ -1471,30 +1473,6 @@ mod tests {
             err.to_string().contains("unsafe") || err.to_string().contains("traversal"),
             "error must name path traversal: {err}"
         );
-    }
-
-    // Arbitrary YAML value, bounded to `depth` levels of nesting — used to fuzz
-    // native_hooks.crush fragment merging for panics.
-    fn arb_yaml_value(depth: u32) -> impl Strategy<Value = serde_yaml::Value> {
-        let leaf = prop_oneof![
-            Just(serde_yaml::Value::Null),
-            any::<bool>().prop_map(serde_yaml::Value::Bool),
-            any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
-            "[a-z]{0,8}".prop_map(serde_yaml::Value::String),
-        ];
-        leaf.prop_recursive(depth, 16, 4, |inner| {
-            prop_oneof![
-                proptest::collection::vec(inner.clone(), 0..4)
-                    .prop_map(serde_yaml::Value::Sequence),
-                proptest::collection::vec(("[a-z]{1,6}", inner), 0..4).prop_map(|pairs| {
-                    let mut m = serde_yaml::Mapping::new();
-                    for (k, v) in pairs {
-                        m.insert(serde_yaml::Value::String(k), v);
-                    }
-                    serde_yaml::Value::Mapping(m)
-                }),
-            ]
-        })
     }
 
     // ── P2-7: proptest — render_lsp and emit_hook_context ────────────────────
