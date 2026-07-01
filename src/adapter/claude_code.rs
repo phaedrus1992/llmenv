@@ -47,8 +47,9 @@ const HOOK_RUN_COMMAND: &str = "llmenv hook-run --engine claude_code";
 /// cheaply when neither memory nor session logging is configured — so this
 /// also closes the long-standing gap where `hook-run` existed but was never
 /// wired into settings.json (memory wake-up/store never fired). Continuous
-/// per-prompt memory recall (`turn_start` / `UserPromptSubmit`) is a separate,
-/// not-yet-wired follow-up (performance-sensitive: would run on every prompt).
+/// per-prompt memory recall (`turn_start` / `UserPromptSubmit`, #499) is wired
+/// separately in `generate_settings_json`, gated on `icm_active` rather than
+/// unconditional like these two (performance-sensitive: runs on every prompt).
 const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("session_start", "SessionStart"),
     ("session_end", "SessionEnd"),
@@ -643,6 +644,12 @@ fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) -> Option<Str
 fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Result<()> {
     let mut settings = serde_json::Map::new();
 
+    // #499: whether a memory backend (the `icm` MCP) resolved for this scope —
+    // reused below both to gate turn_start/UserPromptSubmit and to decide
+    // autoMemoryEnabled, per the design's "Auto-wiring (config gating)" section
+    // (no new config field; the existing `memory:` block already gates this).
+    let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
+
     // #90: Transform hooks: Vec<Hook> into { EventName: [{ matcher, hooks: [...] }] }
     // Design: https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md
     let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
@@ -737,6 +744,20 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
+            }));
+    }
+
+    // #499: continuous per-prompt memory recall. Gated on icm_active (unlike the
+    // always-on baseline events above) because this runs on every prompt, not
+    // just session start/end — an unconditional per-turn network-backed hook
+    // would add latency for every scope, including ones with no memory backend
+    // configured at all.
+    if icm_active {
+        hooks_by_event
+            .entry("UserPromptSubmit".to_string())
+            .or_default()
+            .push(json!({
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} turn_start") }],
             }));
     }
 
@@ -870,7 +891,6 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // the key if: (1) explicitly set in config, or (2) ICM is active and we need
     // to disable it. Emitted before native overlays so `native.claude_code.autoMemoryEnabled`
     // can still override if set (native is the highest-precedence layer).
-    let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
     if let Some(configured) = manifest.capabilities.auto_memory_enabled {
         settings.insert("autoMemoryEnabled".into(), json!(configured));
     } else if icm_active {
@@ -1784,6 +1804,44 @@ mod tests {
                 hook_commands_for(&settings, event)
             );
         }
+    }
+
+    #[test]
+    fn turn_start_wired_when_memory_backend_active() {
+        // #499: UserPromptSubmit gets the turn_start hook-run command only when
+        // a memory backend (the `icm` MCP) resolved for this scope — reuses the
+        // same manifest.mcps signal as autoMemoryEnabled, no new config field.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        assert!(
+            hook_commands_for(&settings, "UserPromptSubmit")
+                .contains(&format!("{HOOK_RUN_COMMAND} turn_start"))
+        );
+    }
+
+    #[test]
+    fn turn_start_not_wired_without_memory_backend() {
+        // No memory MCP resolved for this scope → no per-prompt hook-run call,
+        // avoiding the latency cost on every turn when nothing would use it.
+        let manifest = crate::merge::MergedManifest::default();
+        let settings = render_settings_for_test(&manifest);
+        assert!(
+            hook_commands_for(&settings, "UserPromptSubmit")
+                .iter()
+                .all(|c| !c.contains("turn_start")),
+        );
     }
 
     #[test]

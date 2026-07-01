@@ -83,12 +83,13 @@ mod tests {
     use proptest::prelude::*;
     proptest! {
         #[test]
-        fn every_tag_appears_as_a_token(
+        fn every_tag_and_bundle_appears_as_a_token(
             tags in proptest::collection::vec("[a-z0-9_-]{1,12}", 0..5),
+            bundles in proptest::collection::vec("[a-z0-9_-]{1,12}", 0..5),
         ) {
             let c = scope_header_content(&ScopeContext {
                 tags: tags.clone(),
-                bundles: vec![],
+                bundles: bundles.clone(),
                 project: None,
                 cwd: "/".into(),
                 adapter: "claude_code".into(),
@@ -96,8 +97,11 @@ mod tests {
             });
             for t in &tags {
                 let needle = format!("llmenv-tag:{}", t);
-                let found = c.contains(&needle);
-                prop_assert!(found, "missing token {}", needle);
+                prop_assert!(c.contains(&needle), "missing token {}", needle);
+            }
+            for b in &bundles {
+                let needle = format!("llmenv-bundle:{}", b);
+                prop_assert!(c.contains(&needle), "missing token {}", needle);
             }
         }
     }

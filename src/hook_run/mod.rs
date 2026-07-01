@@ -249,35 +249,46 @@ fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
 /// (`PostToolUse`); `Notification` carries `message`; `Stop`/`SubagentStop`
 /// carry `last_assistant_message`; `PreCompact` carries `trigger`.
 fn verbose_content(event: HookEvent, payload: &serde_json::Value) -> (Option<String>, String) {
-    // String-typed fields (prompt text, messages): "" when absent/non-string.
-    let as_str_field =
-        |v: &serde_json::Value| -> String { v.as_str().map(str::to_owned).unwrap_or_default() };
-    // Object-typed fields (tool input/response): compact JSON, "" when absent.
-    let as_json_text = |v: &serde_json::Value| -> String {
-        if v.is_null() {
-            String::new()
-        } else {
-            v.to_string()
-        }
-    };
     match event {
-        HookEvent::UserPromptSubmit => (None, as_str_field(&payload["prompt"])),
+        HookEvent::UserPromptSubmit => (
+            None,
+            payload["prompt"].as_str().unwrap_or_default().to_string(),
+        ),
         HookEvent::PreToolUse => (
             payload["tool_name"].as_str().map(str::to_owned),
-            as_json_text(&payload["tool_input"]),
+            json_or_empty(&payload["tool_input"]),
         ),
         HookEvent::PostToolUse => (
             payload["tool_name"].as_str().map(str::to_owned),
-            as_json_text(&payload["tool_response"]),
+            json_or_empty(&payload["tool_response"]),
         ),
-        HookEvent::Notification => (None, as_str_field(&payload["message"])),
-        HookEvent::Stop | HookEvent::SubagentStop => {
-            (None, as_str_field(&payload["last_assistant_message"]))
-        }
-        HookEvent::PreCompact => (None, as_str_field(&payload["trigger"])),
+        HookEvent::Notification => (
+            None,
+            payload["message"].as_str().unwrap_or_default().to_string(),
+        ),
+        HookEvent::Stop | HookEvent::SubagentStop => (
+            None,
+            payload["last_assistant_message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        HookEvent::PreCompact => (
+            None,
+            payload["trigger"].as_str().unwrap_or_default().to_string(),
+        ),
         HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => {
             (None, String::new())
         }
+    }
+}
+
+/// Compact JSON for an object-typed field (tool input/response); "" when absent.
+fn json_or_empty(v: &serde_json::Value) -> String {
+    if v.is_null() {
+        String::new()
+    } else {
+        v.to_string()
     }
 }
 
@@ -528,12 +539,10 @@ async fn handle_session_log(
         (_, Some(csid)) => state_path.and_then(|p| state::lookup_session_at(p, csid)),
         (_, None) => None,
     };
-    let Some(lifecycle_kind) = (match event {
-        HookEvent::SessionStart => Some(EventKind::LifecycleStart),
-        HookEvent::SessionEnd => Some(EventKind::LifecycleEnd),
-        _ => None,
-    }) else {
-        return session_id;
+    let lifecycle_kind = match event {
+        HookEvent::SessionStart => EventKind::LifecycleStart,
+        HookEvent::SessionEnd => EventKind::LifecycleEnd,
+        _ => return session_id,
     };
     emit_session_log(
         lifecycle_session_event(lifecycle_kind, &event.to_string()),
@@ -567,7 +576,7 @@ async fn ensure_transcript_session(
     let metadata = scope_metadata_json(ctx);
     match transcript_dispatch::start_session(
         client,
-        ClaudeCodeAdapter.name(),
+        &ctx.adapter,
         ctx.project.as_deref(),
         &metadata,
     )
@@ -612,41 +621,15 @@ fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id: Option<&s
     }
 }
 
-fn lifecycle_session_event(kind: EventKind, content: &str) -> SessionLogEvent {
-    SessionLogEvent {
-        ts: now_rfc3339(),
-        kind,
-        scope: EventScope::AgentSession,
-        role: "system".into(),
-        tool_name: None,
-        tokens: None,
-        level: None,
-        content: content.to_string(),
-        fields: serde_json::json!({}),
-    }
-}
-
-fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
-    SessionLogEvent {
-        ts: now_rfc3339(),
-        kind: EventKind::Scope,
-        scope: EventScope::AgentSession,
-        role: "system".into(),
-        tool_name: None,
-        tokens: None,
-        level: None,
-        content: scope_header_content(ctx),
-        fields: scope_metadata_json(ctx),
-    }
-}
-
-/// Build a verbose-capture event (`session_log.verbose`) from a Claude hook
-/// payload, as extracted by `verbose_content`.
-fn verbose_session_event(
+/// Shared defaults for every agent-session-scoped `SessionLogEvent`: current
+/// timestamp, `AgentSession` scope, no tokens/level. Callers supply only
+/// what varies (#509 item 3).
+fn agent_session_event(
     kind: EventKind,
     role: &str,
     tool_name: Option<String>,
     content: String,
+    fields: serde_json::Value,
 ) -> SessionLogEvent {
     SessionLogEvent {
         ts: now_rfc3339(),
@@ -657,8 +640,39 @@ fn verbose_session_event(
         tokens: None,
         level: None,
         content,
-        fields: serde_json::json!({}),
+        fields,
     }
+}
+
+fn lifecycle_session_event(kind: EventKind, content: &str) -> SessionLogEvent {
+    agent_session_event(
+        kind,
+        "system",
+        None,
+        content.to_string(),
+        serde_json::json!({}),
+    )
+}
+
+fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
+    agent_session_event(
+        EventKind::Scope,
+        "system",
+        None,
+        scope_header_content(ctx),
+        scope_metadata_json(ctx),
+    )
+}
+
+/// Build a verbose-capture event (`session_log.verbose`) from a Claude hook
+/// payload, as extracted by `verbose_content`.
+fn verbose_session_event(
+    kind: EventKind,
+    role: &str,
+    tool_name: Option<String>,
+    content: String,
+) -> SessionLogEvent {
+    agent_session_event(kind, role, tool_name, content, serde_json::json!({}))
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, if any.
@@ -1133,6 +1147,65 @@ mod tests {
 
     fn valid_name() -> impl Strategy<Value = String> {
         "[a-zA-Z0-9_-]{1,24}"
+    }
+
+    fn arb_hook_event() -> impl Strategy<Value = HookEvent> {
+        prop_oneof![
+            Just(HookEvent::SessionStart),
+            Just(HookEvent::TurnStart),
+            Just(HookEvent::SessionEnd),
+            Just(HookEvent::UserPromptSubmit),
+            Just(HookEvent::PreToolUse),
+            Just(HookEvent::PostToolUse),
+            Just(HookEvent::Notification),
+            Just(HookEvent::Stop),
+            Just(HookEvent::SubagentStop),
+            Just(HookEvent::PreCompact),
+        ]
+    }
+
+    /// Arbitrary Claude hook stdin payload shapes: present-and-string,
+    /// present-and-wrong-type, and absent, for each field `verbose_content`
+    /// reads. Exercises the adversarial/malformed-payload path (#509 item 5).
+    fn arb_verbose_payload() -> impl Strategy<Value = serde_json::Value> {
+        let field = |key: &'static str| {
+            prop_oneof![
+                "[a-zA-Z0-9 _-]{0,16}".prop_map(move |s| (key, serde_json::json!(s))),
+                Just((key, serde_json::json!(42))),
+                Just((key, serde_json::json!({"nested": "object"}))),
+                Just((key, serde_json::Value::Null)),
+            ]
+        };
+        prop::collection::vec(
+            prop_oneof![
+                field("prompt"),
+                field("tool_name"),
+                field("tool_input"),
+                field("tool_response"),
+                field("message"),
+                field("last_assistant_message"),
+                field("trigger"),
+            ],
+            0..7,
+        )
+        .prop_map(|pairs| {
+            serde_json::Value::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn prop_verbose_event_display_round_trips_through_from_str(ev in arb_hook_event()) {
+            prop_assert_eq!(ev.to_string().parse::<HookEvent>().unwrap(), ev);
+        }
+
+        #[test]
+        fn prop_verbose_content_never_panics(
+            ev in arb_hook_event(),
+            payload in arb_verbose_payload(),
+        ) {
+            let _ = verbose_content(ev, &payload);
+        }
     }
 
     proptest! {
