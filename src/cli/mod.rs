@@ -384,14 +384,17 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::CheckStale { auto_fix, engine }) => {
             tracing::debug!(engine, "check-stale invoked by engine");
+            warn_if_unknown_engine(&engine);
             run_check_stale(use_color, auto_fix)?;
         }
         Some(Command::ConfigContext { engine }) => {
             tracing::debug!(engine, "config-context invoked by engine");
+            warn_if_unknown_engine(&engine);
             run_config_context();
         }
         Some(Command::ConfigGuard { engine }) => {
             tracing::debug!(engine, "config-guard invoked by engine");
+            warn_if_unknown_engine(&engine);
             run_config_guard();
         }
         Some(Command::Throttle { event }) => {
@@ -399,6 +402,7 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::HookRun { event, engine }) => {
             tracing::debug!(engine, "hook-run invoked by engine");
+            warn_if_unknown_engine(&engine);
             crate::hook_run::run(&event)?;
         }
         Some(Command::SessionLogRecord) => {
@@ -632,6 +636,11 @@ fn run_export(
     // NOTE: build_and_materialize is still Claude Code–specific; #506 wires Crush.
     let cache_dir_root = expand_tilde(&config.cache.cache_dir)?;
     for adapter in crate::adapter::registered_adapters() {
+        debug_assert_eq!(
+            adapter.name(),
+            "claude-code",
+            "build_and_materialize is Claude-specific until #506 threads the adapter"
+        );
         if !crate::adapter::binary_on_path(adapter.binary_name()) {
             tracing::debug!(
                 adapter = adapter.name(),
@@ -834,6 +843,31 @@ fn compress_agents_md(text: &str) -> String {
     result
 }
 
+/// Returns `true` when an entry with the given `when` tags should be active
+/// for the current scope. Empty `when` = always active (no filtering).
+fn tag_active(when: &[String], active: &std::collections::BTreeSet<String>) -> bool {
+    when.is_empty() || when.iter().any(|t| active.contains(t))
+}
+
+/// Emit a warning when `engine` is not the name of any registered adapter.
+/// Defensive: the set of adapters is small and static today; this surfaces
+/// stale or mis-typed `--engine` flags before they silently produce wrong output.
+fn warn_if_unknown_engine(engine: &str) {
+    let known = crate::adapter::registered_adapters();
+    if !known.iter().any(|a| a.name() == engine) {
+        tracing::warn!(
+            engine,
+            "unrecognised engine name — no registered adapter matches; \
+             did you mean one of: {}?",
+            known
+                .iter()
+                .map(|a| a.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+
 /// Build BundleRefs for firing bundles in scope-precedence order, merge them
 /// into a manifest, materialize through the Claude Code adapter, and return
 /// the env vars the adapter wants exported. Returns `Ok(None)` when no
@@ -856,6 +890,18 @@ fn build_and_materialize(
         return Ok(None);
     };
 
+    // Filter skills and lsp entries by active tags — mirror the mcp resolution
+    // model: empty `when` means always active; non-empty must intersect active.tags.
+    let tags = &active.tags;
+    manifest
+        .capabilities
+        .skills
+        .retain(|s| tag_active(&s.when, tags));
+    manifest
+        .capabilities
+        .lsp
+        .retain(|l| tag_active(&l.when, tags));
+
     // Store resolved throttle (top-level + bundle) for hook retrieval.
     if let Err(e) = crate::throttle::store_active_throttle(manifest.throttle.as_ref()) {
         tracing::debug!("failed to store throttle state (non-fatal): {e}");
@@ -870,7 +916,6 @@ fn build_and_materialize(
     // active tags ∪ directly-enabled bundles. Bundles come from active scopes'
     // `enable_bundles` (the manually-forced selection), kept separate from tags
     // so the two namespaces can't alias into one shape.
-    let tags = &active.tags;
     let bundles: BTreeSet<String> = active
         .scopes
         .iter()

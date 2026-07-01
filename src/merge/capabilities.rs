@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 
 use crate::config::{
-    Capabilities, Features, HostEntry, LspServer, Memory, NativePermissionRules, PermissionMode,
-    Permissions, SkillSource, Throttle,
+    Capabilities, Features, HostEntry, Memory, NativePermissionRules, PermissionMode, Permissions,
+    Throttle,
 };
 use crate::util::{dedup, merge_yaml, normalize_yaml};
 
@@ -44,8 +44,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let mut hooks = Vec::new();
     let mut plugins = Vec::new();
     let mut mcp = Vec::new();
-    let mut lsp: Vec<LspServer> = Vec::new();
-    let mut skills: Vec<SkillSource> = Vec::new();
+    let mut lsp = Vec::new();
+    let mut skills = Vec::new();
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -806,7 +806,7 @@ mod tests {
 
     mod props {
         use super::*;
-        use crate::config::{McpServer, McpTransport};
+        use crate::config::{LspServer, McpServer, McpTransport, SkillSource};
         use proptest::prelude::*;
         use std::collections::BTreeSet;
 
@@ -844,7 +844,28 @@ mod tests {
                 )
         }
 
-        // Contributors carrying only list fields (allow rules + plugins + mcp)
+        fn arb_lsp_server() -> impl Strategy<Value = LspServer> {
+            ("[a-z]{1,6}", prop::collection::vec("[a-z]{1,4}", 0..3)).prop_map(|(name, tags)| {
+                LspServer {
+                    name,
+                    when: tags,
+                    command: "lsp-cmd".into(),
+                    ..Default::default()
+                }
+            })
+        }
+
+        fn arb_skill_source() -> impl Strategy<Value = SkillSource> {
+            ("[a-z]{1,6}", prop::collection::vec("[a-z]{1,4}", 0..3)).prop_map(|(name, tags)| {
+                SkillSource {
+                    name,
+                    path: "/tmp/skill".into(),
+                    when: tags,
+                }
+            })
+        }
+
+        // Contributors carrying only list fields (allow rules + plugins + mcp/lsp/skills)
         // plus a small native: map, so the scalar default_mode never forces a
         // same-precedence conflict.
         //
@@ -862,30 +883,40 @@ mod tests {
                     (engine, serde_yaml::Value::Mapping(m))
                 });
             (
-                "[a-z]{1,4}",
-                1u8..=10,
-                prop::collection::vec(arb_rule(), 0..4),
-                prop::collection::vec("[a-z:]{1,6}", 0..4),
-                prop::collection::vec(arb_mcp_server(), 0..3),
-                prop::collection::vec(arb_engine_entry, 0..3),
+                (
+                    "[a-z]{1,4}",
+                    1u8..=10,
+                    prop::collection::vec(arb_rule(), 0..4),
+                    prop::collection::vec("[a-z:]{1,6}", 0..4),
+                ),
+                (
+                    prop::collection::vec(arb_mcp_server(), 0..3),
+                    prop::collection::vec(arb_lsp_server(), 0..3),
+                    prop::collection::vec(arb_skill_source(), 0..3),
+                    prop::collection::vec(arb_engine_entry, 0..3),
+                ),
             )
-                .prop_map(|(name, precedence, allow, plugins, mcp, engine_entries)| {
-                    let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
-                    CapabilityContributor {
-                        name,
-                        precedence,
-                        capabilities: Capabilities {
-                            permissions: Permissions {
-                                allow,
+                .prop_map(
+                    |((name, precedence, allow, plugins), (mcp, lsp, skills, engine_entries))| {
+                        let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
+                        CapabilityContributor {
+                            name,
+                            precedence,
+                            capabilities: Capabilities {
+                                permissions: Permissions {
+                                    allow,
+                                    ..Default::default()
+                                },
+                                plugins,
+                                mcp,
+                                lsp,
+                                skills,
+                                native,
                                 ..Default::default()
                             },
-                            plugins,
-                            mcp,
-                            native,
-                            ..Default::default()
-                        },
-                    }
-                })
+                        }
+                    },
+                )
         }
 
         fn allow_set(caps: &Capabilities) -> BTreeSet<PermissionRule> {
@@ -1170,6 +1201,22 @@ mod tests {
                     Some("winner.local"),
                     "highest-precedence contributor must win"
                 );
+            }
+
+            // SkillSource serde roundtrip: serialize → deserialize must be identity.
+            #[test]
+            fn skill_source_serde_roundtrip(skill in arb_skill_source()) {
+                let yaml = serde_yaml::to_string(&skill).unwrap();
+                let back: SkillSource = serde_yaml::from_str(&yaml).unwrap();
+                prop_assert_eq!(skill, back);
+            }
+
+            // LspServer serde roundtrip: serialize → deserialize must be identity.
+            #[test]
+            fn lsp_server_serde_roundtrip(lsp in arb_lsp_server()) {
+                let yaml = serde_yaml::to_string(&lsp).unwrap();
+                let back: LspServer = serde_yaml::from_str(&yaml).unwrap();
+                prop_assert_eq!(lsp, back);
             }
         }
     }
