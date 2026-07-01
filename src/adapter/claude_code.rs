@@ -492,13 +492,14 @@ fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()
 /// written (relative to `dest_dir`), for inclusion in the `owned` set.
 fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut written: Vec<PathBuf> = Vec::new();
-    std::fs::create_dir_all(dest)?;
+    create_dir_owner_only(dest)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let meta = std::fs::symlink_metadata(&src_path)?;
         if meta.file_type().is_symlink() {
             // Skip symlinks: no TOCTOU-safe way to follow them into a bounded dir.
+            tracing::debug!(path = %src_path.display(), "copy_dir_owner_only: skipping symlink");
             continue;
         }
         let file_name = entry.file_name();
@@ -513,6 +514,25 @@ fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec<PathBuf>> 
         }
     }
     Ok(written)
+}
+
+/// Create `dir` (and all parents) with mode 0o700 on Unix so directory
+/// listings are owner-only from creation, not after a chmod race.
+fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
+    }
 }
 
 /// Write each first-class [`crate::config::SkillSource`] entry into
@@ -549,13 +569,26 @@ fn write_first_class_skills(
         let dest = skills_dir.join(&skill.name);
         let written = copy_dir_owner_only(src, &dest)?;
         // Track relative paths (relative to `out`) in the owned set.
+        // strip_prefix is infallible here: copy_dir_owner_only writes under
+        // `dest` which is `out/skills/<name>`, so every returned path starts
+        // with `out`. The debug_assert guards this invariant in test builds.
         for abs_path in written {
-            if let Ok(rel) = abs_path.strip_prefix(out) {
-                owned.push(rel.to_path_buf());
-            }
+            debug_assert!(
+                abs_path.starts_with(out),
+                "copy_dir_owner_only returned a path outside `out`: {}",
+                abs_path.display()
+            );
+            let rel = abs_path.strip_prefix(out).map_err(|_| {
+                anyhow::anyhow!(
+                    "internal error: written path '{}' is not under output dir '{}'",
+                    abs_path.display(),
+                    out.display()
+                )
+            })?;
+            owned.push(rel.to_path_buf());
         }
         // skills/<name> dir itself (no trailing slash, for reconcile logic).
-        owned.push(PathBuf::from(format!("skills/{}", skill.name)));
+        owned.push(PathBuf::from("skills").join(&skill.name));
     }
     Ok(owned)
 }

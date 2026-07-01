@@ -91,8 +91,14 @@ pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
 ///
 /// Uses the platform `which` command so the result matches what a shell would
 /// find. Returns `false` on any I/O error or when `which` exits non-zero.
+///
+/// Names containing `/` or ASCII whitespace are unconditionally rejected;
+/// they cannot be plain binary names and would produce confusing `which` behaviour.
 #[must_use]
 pub fn binary_on_path(name: &str) -> bool {
+    if name.contains('/') || name.chars().any(char::is_whitespace) {
+        return false;
+    }
     std::process::Command::new("which")
         .arg(name)
         .output()
@@ -150,6 +156,26 @@ mod tests {
         assert!(
             !binary_on_path("__llmenv_no_such_binary_xyzzy__"),
             "bogus binary must not be found on PATH"
+        );
+    }
+
+    #[test]
+    fn binary_on_path_rejects_slash() {
+        assert!(
+            !binary_on_path("/usr/bin/sh"),
+            "path with '/' must be rejected without spawning which"
+        );
+    }
+
+    #[test]
+    fn binary_on_path_rejects_whitespace() {
+        assert!(
+            !binary_on_path("sh -c echo"),
+            "name with whitespace must be rejected without spawning which"
+        );
+        assert!(
+            !binary_on_path("sh\techo"),
+            "name with tab must be rejected without spawning which"
         );
     }
 }

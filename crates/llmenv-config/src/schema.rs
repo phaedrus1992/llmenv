@@ -70,8 +70,8 @@ pub struct Config {
     #[serde(default)]
     pub lsp: Vec<LspServer>,
     /// First-class skills declared at the top level, selected by tag intersection
-    /// (same model as `mcp`/`lsp`). Engines with `supports_skills() == false`
-    /// silently ignore these entries.
+    /// (same model as `mcp`/`lsp`). Skills are supported by all adapters that
+    /// have a skills directory concept; adapters without one silently skip these.
     #[serde(default)]
     pub skills: Vec<SkillSource>,
     /// Feature toggles and experimental configuration.
@@ -638,17 +638,18 @@ pub struct McpServer {
     pub disabled_tools: Vec<String>,
     /// Per-server request timeout in seconds. `None` means use the engine default.
     /// #506: consumed by CrushAdapter when it renders its MCP config.
+    #[serde(default)]
     pub timeout: Option<u32>,
 }
 
-/// An LSP server definition. Selected onto a scope when any of its `when` tags
-/// intersect the active scope tag set (identical to `McpServer` selection).
 /// A first-class skill contributed directly by config or bundle, independent of
 /// any plugin. Claude Code loads skills from its `skills/` directory; this entry
 /// declares one skill's source directory and the scope tags that activate it.
 ///
-/// Engines that report `supports_skills() == false` silently skip these entries —
-/// declaring a skill in a shared bundle is legitimate; it is a no-op for such engines.
+/// Selected onto a scope when any of its `when` tags intersect the active scope
+/// tag set (identical to `McpServer` selection). Adapters without a skills
+/// directory concept silently skip these entries — declaring a skill in a shared
+/// bundle is legitimate; it is a no-op for such adapters.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct SkillSource {
     /// Registration name for the skill (written as the directory name under `skills/`).
@@ -669,8 +670,7 @@ pub struct LspServer {
     /// Registration name for the language server (e.g. `"rust-analyzer"`).
     pub name: String,
     /// Tags that activate this server, intersected with active scope tags.
-    /// An empty list means the entry is never active (use `when: []` to stage
-    /// a server definition without enabling it).
+    /// An empty list means the entry is always active (no tag filtering applied).
     #[serde(default)]
     pub when: Vec<String>,
     /// Executable to launch (absolute path or name resolved via `PATH`).
@@ -697,6 +697,7 @@ pub struct LspServer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init_options: Option<serde_yaml::Value>,
     /// Per-server request timeout in seconds. `None` means use the engine default.
+    #[serde(default)]
     pub timeout: Option<u32>,
 }
 
