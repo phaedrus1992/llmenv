@@ -173,7 +173,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         owned.extend(skill_owned);
 
         // Validate that skills are properly structured with SKILL.md frontmatter
-        validate_skills(out)?;
+        crate::adapter::skills::validate_skills(out)?;
 
         // Generate settings.json from hook/permission bundles
         generate_settings_json(out, manifest)?;
@@ -536,93 +536,8 @@ fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
     }
 }
 
-// write_first_class_skills lives in super::skills — shared with CrushAdapter.
-
-/// Validate a single skill's `SKILL.md` frontmatter (name + description present).
-fn validate_skill_frontmatter(skill_md: &Path, skill_dir: &Path) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(skill_md)?;
-    let Some(frontmatter_end) = content.find("\n---\n").or_else(|| {
-        content
-            .ends_with("---")
-            .then(|| content.len().saturating_sub(3))
-    }) else {
-        anyhow::bail!(
-            "Skill {} SKILL.md missing YAML frontmatter (must start with --- and end with ---)",
-            skill_dir.display()
-        );
-    };
-    let frontmatter_str = &content[3..frontmatter_end];
-    let mapping = serde_yaml::from_str::<serde_yaml::Mapping>(frontmatter_str).map_err(|e| {
-        anyhow::anyhow!(
-            "Skill {} SKILL.md has invalid YAML frontmatter: {e}",
-            skill_dir.display()
-        )
-    })?;
-    if mapping.get("name").is_none() || mapping.get("description").is_none() {
-        anyhow::bail!(
-            "Skill {} SKILL.md missing required frontmatter fields (name and description)",
-            skill_dir.display()
-        );
-    }
-    Ok(())
-}
-
-/// Scan every readable text file under `dir` (recursively) for hardcoded config
-/// paths (#311). Covers scripts and helper files, not just SKILL.md. Symlinks
-/// are not followed (the caller verified `dir` itself is in-bounds), and
-/// non-UTF-8 files (binaries) are skipped — only text can carry a flaggable path.
-fn scan_skill_files_for_hardcoded_paths(dir: &Path) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        let meta = std::fs::symlink_metadata(&path)?;
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        if meta.is_dir() {
-            scan_skill_files_for_hardcoded_paths(&path)?;
-        } else if meta.is_file()
-            && let Ok(content) = std::fs::read_to_string(&path)
-        {
-            reject_hardcoded_config_path(&content, &path.display().to_string())?;
-        }
-    }
-    Ok(())
-}
-
-/// Validates that all skills in the materialized directory have SKILL.md with
-/// required frontmatter and carry no hardcoded `~/.claude` paths (#311).
-fn validate_skills(out: &Path) -> anyhow::Result<()> {
-    let skills_dir = out.join("skills");
-    if !skills_dir.exists() {
-        return Ok(());
-    }
-    // Resolve the skills root once; every skill dir must stay inside it so a
-    // symlink can't redirect validation (or the path scan) at a foreign file.
-    let skills_root = skills_dir.canonicalize()?;
-
-    for entry in std::fs::read_dir(&skills_dir)? {
-        let path = entry?.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let canonical = path.canonicalize()?;
-        if !canonical.starts_with(&skills_root) {
-            anyhow::bail!(
-                "skill path {} escapes the skills directory (symlink?); refusing to validate",
-                path.display()
-            );
-        }
-
-        let skill_md = path.join("SKILL.md");
-        if !skill_md.exists() {
-            anyhow::bail!("Skill directory {} missing SKILL.md", path.display());
-        }
-        validate_skill_frontmatter(&skill_md, &path)?;
-        scan_skill_files_for_hardcoded_paths(&canonical)?;
-    }
-
-    Ok(())
-}
+// write_first_class_skills, validate_skills, validate_skill_frontmatter, and
+// scan_skill_files_for_hardcoded_paths live in crate::adapter::skills — shared with CrushAdapter.
 
 /// Generates settings.json from the already-merged hook + permission
 /// capabilities in the manifest.
@@ -1391,8 +1306,9 @@ mod tests {
         MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path, generate_settings_json,
         is_hook_json, merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, seed_install_method, validate_skills,
+        render_permission_rule, seed_install_method,
     };
+    use crate::adapter::skills::validate_skills;
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use crate::plugins::resolve::ResolvedMarketplace;
