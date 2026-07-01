@@ -5,7 +5,9 @@ configuration you write is engine-neutral; each adapter translates it into one
 engine's native shape. Anything that can't be expressed neutrally drops through a
 per-engine escape hatch.
 
-The current adapter targets **Claude Code**. The design doc behind this model is
+Two adapters ship today: **Claude Code** and **Crush**. Both activate when their
+binary is on `PATH`; users who only have one binary on PATH see no output from the
+other adapter. The design doc behind this model is
 [`docs/design/engine-capabilities.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md) (related: #34, #59).
 
 ## The principle
@@ -96,8 +98,59 @@ Contributors merge by value shape: scalars (like `default_mode`) resolve by
 scope precedence (network → host → user → project); lists (allow/ask/deny, hooks,
 plugins) concatenate and de-duplicate.
 
+## The Crush adapter
+
+[Crush](https://github.com/nicholasgasior/crush) is a second supported engine. It
+is **PATH-gated**: `export`, `hook`, and `regenerate` skip Crush silently if
+`crush` is not on `PATH`. When it is present, a separate `crush/` subtree is
+materialized inside the llmenv cache directory.
+
+### Env vars
+
+| Variable | Points to | Notes |
+|----------|-----------|-------|
+| `CRUSH_GLOBAL_CONFIG` | `<cache>/crush/.../crush.json` | The rendered config file Crush reads |
+| `CRUSH_GLOBAL_DATA` | The stable llmenv state dir | Same dir as `LLMENV_STATE_DIR`; Crush needs no separate workaround |
+
+`CRUSH_GLOBAL_CONFIG` and `CLAUDE_CONFIG_DIR` use separate namespaces and can
+coexist in a single shell session without conflict.
+
+### Capability map
+
+| Feature | Crush support | Notes |
+|---------|--------------|-------|
+| Permissions (`allow`/`deny`) | Supported | Rendered to `allowed_tools` / `denied_tools` |
+| Permissions (`ask`) | **Lossy, fail-closed** | `ask` rules collapse to `denied_tools` — Crush has no interactive-ask concept |
+| Hooks — `PreToolUse` | Supported | `command`-kind handlers only |
+| Hooks — other events | **Hard error** | Crush supports only `PreToolUse`; any other event in config is an error |
+| Hooks — `mcp_tool` kind | **Hard error** | No Crush equivalent; use `command`-kind instead |
+| MCP servers | Supported | Includes `headers`, `disabled_tools`, `timeout` |
+| LSP servers | Supported | Rendered to `lsp.<name>` entries |
+| Skills (first-class) | Supported | Written via `options.skills_paths` |
+| Skills (plugin-projected) | Supported | Plugin `skills/` subdirs are projected into Crush's skill paths |
+| Plugins / marketplace | **Hard error** | Crush has no plugin or marketplace concept; non-skill plugin content (custom `agents/`, `commands/`) produces an actionable error naming the plugin |
+| Custom agents | **Unsupported** | Crush hardcodes exactly two agent roles (coder/task); `agents/*.md` from plugins cannot be loaded |
+
+### The `native.crush` escape hatch
+
+Keys that no modeled feature owns go under `native.crush`:
+
+```yaml
+native:
+  crush:
+    model: claude-opus-4-5
+    provider: anthropic
+```
+
+This is the current home for provider/model configuration — first-class
+provider config is tracked in #508. The fragment is deep-merged verbatim into
+`crush.json` at highest precedence.
+
+The `native_permissions.crush`, `native_hooks.crush`, and `native_mcp.crush`
+siblings work the same way for their respective domains.
+
 ## Other engines
 
 The capability model is engine-neutral by design, so additional adapters (e.g.
 Codex) can render the same neutral config into their own shape and expose their
-own `native_*` overrides. Only the Claude Code adapter ships today.
+own `native_*` overrides.
