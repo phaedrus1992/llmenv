@@ -168,7 +168,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         // Write first-class skills (declared via `capabilities.skills`) before
         // validating, so `validate_skills` covers them along with plugin-sourced ones.
-        let skill_owned = write_first_class_skills(out, &manifest.capabilities.skills)?;
+        let skill_owned =
+            crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
         owned.extend(skill_owned);
 
         // Validate that skills are properly structured with SKILL.md frontmatter
@@ -490,7 +491,7 @@ fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()
 /// each file owner-only (0o600). Non-UTF-8 paths are skipped (same policy as
 /// `scan_skill_files_for_hardcoded_paths`). Returns the list of relative paths
 /// written (relative to `dest_dir`), for inclusion in the `owned` set.
-fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec<PathBuf>> {
+pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut written: Vec<PathBuf> = Vec::new();
     create_dir_owner_only(dest)?;
     for entry in std::fs::read_dir(src)? {
@@ -535,63 +536,7 @@ fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Write each first-class [`crate::config::SkillSource`] entry into
-/// `out/skills/<name>/`, owner-only. Returns relative paths written (for the
-/// `owned` set). Path-traversal is checked on the skill name before joining.
-///
-/// # Errors
-/// Returns an error when the name is unsafe (traversal), the source path is
-/// not a directory, or the canonical source escapes the destination tree.
-fn write_first_class_skills(
-    out: &Path,
-    skills: &[crate::config::SkillSource],
-) -> anyhow::Result<Vec<PathBuf>> {
-    let mut owned: Vec<PathBuf> = Vec::new();
-    if skills.is_empty() {
-        return Ok(owned);
-    }
-    let skills_dir = out.join("skills");
-    for skill in skills {
-        if crate::paths::is_unsafe_join_target(&skill.name) {
-            anyhow::bail!(
-                "unsafe skill name '{}': contains path-traversal components",
-                skill.name
-            );
-        }
-        let src = std::path::Path::new(&skill.path);
-        if !src.is_dir() {
-            anyhow::bail!(
-                "skill '{}': path '{}' is not a directory",
-                skill.name,
-                skill.path
-            );
-        }
-        let dest = skills_dir.join(&skill.name);
-        let written = copy_dir_owner_only(src, &dest)?;
-        // Track relative paths (relative to `out`) in the owned set.
-        // strip_prefix is infallible here: copy_dir_owner_only writes under
-        // `dest` which is `out/skills/<name>`, so every returned path starts
-        // with `out`. The debug_assert guards this invariant in test builds.
-        for abs_path in written {
-            debug_assert!(
-                abs_path.starts_with(out),
-                "copy_dir_owner_only returned a path outside `out`: {}",
-                abs_path.display()
-            );
-            let rel = abs_path.strip_prefix(out).map_err(|_| {
-                anyhow::anyhow!(
-                    "internal error: written path '{}' is not under output dir '{}'",
-                    abs_path.display(),
-                    out.display()
-                )
-            })?;
-            owned.push(rel.to_path_buf());
-        }
-        // skills/<name> dir itself (no trailing slash, for reconcile logic).
-        owned.push(PathBuf::from("skills").join(&skill.name));
-    }
-    Ok(owned)
-}
+// write_first_class_skills lives in super::skills — shared with CrushAdapter.
 
 /// Validate a single skill's `SKILL.md` frontmatter (name + description present).
 fn validate_skill_frontmatter(skill_md: &Path, skill_dir: &Path) -> anyhow::Result<()> {
@@ -1446,7 +1391,7 @@ mod tests {
         MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path, generate_settings_json,
         is_hook_json, merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, seed_install_method, validate_skills, write_first_class_skills,
+        render_permission_rule, seed_install_method, validate_skills,
     };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -2633,44 +2578,6 @@ mod tests {
     // ── First-class skills ────────────────────────────────────────────────────
 
     /// Scan a plugin directory for a `skills/` subdirectory and project each
-    /// skill through the same `write_first_class_skills` path. This helper
-    /// enables engines that don't support plugins (`supports_plugins() == false`)
-    /// to still materialise skills bundled inside a plugin directory.
-    ///
-    // #506: used by CrushAdapter
-    #[cfg(test)]
-    fn project_plugin_skills(
-        plugin_dir: &std::path::Path,
-        out: &std::path::Path,
-    ) -> anyhow::Result<Vec<PathBuf>> {
-        let skills_src = plugin_dir.join("skills");
-        if !skills_src.is_dir() {
-            return Ok(Vec::new());
-        }
-        let mut skills: Vec<crate::config::SkillSource> = Vec::new();
-        for entry in std::fs::read_dir(&skills_src)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            if name.is_empty() || crate::paths::is_unsafe_join_target(&name) {
-                continue;
-            }
-            skills.push(crate::config::SkillSource {
-                name,
-                path: path.to_string_lossy().into_owned(),
-                when: Vec::new(),
-            });
-        }
-        write_first_class_skills(out, &skills)
-    }
-
     #[test]
     fn write_first_class_skills_copies_files_owner_only() {
         let src_tmp = tempfile::tempdir().unwrap();
@@ -2687,7 +2594,11 @@ mod tests {
             path: skill_src.to_str().unwrap().into(),
             when: Vec::new(),
         };
-        let owned = write_first_class_skills(out_tmp.path(), std::slice::from_ref(&skill)).unwrap();
+        let owned = crate::adapter::skills::write_first_class_skills(
+            out_tmp.path(),
+            std::slice::from_ref(&skill),
+        )
+        .unwrap();
 
         // Both files should land in out/skills/my-skill/
         let dest_md = out_tmp.path().join("skills/my-skill/SKILL.md");
@@ -2711,15 +2622,18 @@ mod tests {
             path: "/some/path".into(),
             when: Vec::new(),
         };
-        let err =
-            write_first_class_skills(out_tmp.path(), std::slice::from_ref(&skill)).unwrap_err();
+        let err = crate::adapter::skills::write_first_class_skills(
+            out_tmp.path(),
+            std::slice::from_ref(&skill),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unsafe skill name"), "got: {err}");
     }
 
     #[test]
     fn write_first_class_skills_empty_is_noop() {
         let out_tmp = tempfile::tempdir().unwrap();
-        let owned = write_first_class_skills(out_tmp.path(), &[]).unwrap();
+        let owned = crate::adapter::skills::write_first_class_skills(out_tmp.path(), &[]).unwrap();
         assert!(owned.is_empty());
         assert!(!out_tmp.path().join("skills").exists());
     }
@@ -2734,7 +2648,9 @@ mod tests {
         std::fs::create_dir_all(&skill_src).unwrap();
         std::fs::write(skill_src.join("SKILL.md"), VALID_FRONTMATTER).unwrap();
 
-        let owned = project_plugin_skills(plugin_tmp.path(), out_tmp.path()).unwrap();
+        let owned =
+            crate::adapter::skills::project_plugin_skills(plugin_tmp.path(), out_tmp.path())
+                .unwrap();
 
         assert!(
             out_tmp
@@ -2754,7 +2670,9 @@ mod tests {
         let plugin_tmp = tempfile::tempdir().unwrap();
         let out_tmp = tempfile::tempdir().unwrap();
         // No skills/ subdir in the plugin.
-        let owned = project_plugin_skills(plugin_tmp.path(), out_tmp.path()).unwrap();
+        let owned =
+            crate::adapter::skills::project_plugin_skills(plugin_tmp.path(), out_tmp.path())
+                .unwrap();
         assert!(owned.is_empty());
     }
 }
