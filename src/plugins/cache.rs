@@ -178,10 +178,31 @@ fn sync_git(
     }
 
     let dest = marketplace_path(cache_dir, &m.name);
+    let pinned = split_source_ref(&m.source).1.is_some();
 
     if dest.join(".git").exists() {
         if refresh {
-            git.pull(&dest).map_err(SyncError::Other)?;
+            if pinned {
+                // #496: a pinned source is frozen by definition — pulling would
+                // fast-forward past the pin. Re-clone fresh instead so a
+                // refresh always converges to exactly what the pin specifies,
+                // including when the user bumps the pinned ref in config (the
+                // cache path is keyed by name only, not source, so the stale
+                // clone must be removed explicitly).
+                std::fs::remove_dir_all(&dest).map_err(|e| {
+                    SyncError::Other(anyhow::anyhow!(
+                        "removing stale pinned clone at {}: {e}",
+                        dest.display()
+                    ))
+                })?;
+                git.clone(&m.source, &dest)
+                    .map_err(|e| SyncError::CloneFailed {
+                        name: m.name.clone(),
+                        source: e,
+                    })?;
+            } else {
+                git.pull(&dest).map_err(SyncError::Other)?;
+            }
         }
     } else if !refresh {
         // Marketplace not yet cloned and we're not refreshing (export path).
@@ -387,8 +408,22 @@ pub fn sync_external_plugin_with(
     })
 }
 
+/// Split a marketplace source on its first `#`, returning `(url, Some(ref))`
+/// when a ref (tag/branch/commit) is pinned, or `(source, None)` when it
+/// isn't (#496). Git URLs practically never contain a literal `#` in the
+/// path, so splitting on the first occurrence is unambiguous.
+fn split_source_ref(source: &str) -> (&str, Option<&str>) {
+    match source.split_once('#') {
+        Some((url, r#ref)) => (url, Some(r#ref)),
+        None => (source, None),
+    }
+}
+
 /// Reject marketplace sources git would mishandle: leading-dash (parsed as an
 /// option) and the `ext::`/`fd::` transports (run arbitrary commands on clone).
+/// Also validates a pinned `#<ref>` suffix (#496) with the same rules, since
+/// it flows into `git clone --branch <ref>` the same way the source flows
+/// into the clone URL argument.
 fn reject_unsafe_source(source: &str) -> Result<()> {
     if source.starts_with('-') {
         return Err(anyhow::anyhow!(
@@ -411,13 +446,26 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
             ch
         ));
     }
+    if let Some(r#ref) = split_source_ref(source).1
+        && r#ref.starts_with('-')
+    {
+        return Err(anyhow::anyhow!(
+            "marketplace source's pinned ref may not start with '-': {source}"
+        ));
+    }
     Ok(())
 }
 
 fn git_clone(source: &str, dest: &Path) -> Result<()> {
+    let (url, pin) = split_source_ref(source);
     let mut cmd = git::secure_git();
-    let output = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS)
-        .args(["clone", "--depth", "1", "--", source])
+    let cmd = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS);
+    cmd.args(["clone", "--depth", "1"]);
+    if let Some(r#ref) = pin {
+        cmd.args(["--branch", r#ref]);
+    }
+    let output = cmd
+        .args(["--", url])
         .arg(dest)
         .output()
         .context("spawning git clone")?;
@@ -595,6 +643,184 @@ mod tests {
             }
             other => panic!("expected CloneFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn split_source_ref_parses_pinned_suffix() {
+        assert_eq!(
+            split_source_ref("https://github.com/example/repo.git#v1.2.3"),
+            ("https://github.com/example/repo.git", Some("v1.2.3"))
+        );
+    }
+
+    #[test]
+    fn split_source_ref_returns_none_when_unpinned() {
+        assert_eq!(
+            split_source_ref("https://github.com/example/repo.git"),
+            ("https://github.com/example/repo.git", None)
+        );
+    }
+
+    #[test]
+    fn reject_unsafe_source_rejects_leading_dash_in_pin() {
+        // #496: the pinned ref is passed to `git clone --branch <ref>` — a
+        // leading dash could be misread as a flag, same rationale as the
+        // existing whole-source leading-dash guard.
+        assert!(reject_unsafe_source("https://github.com/example/repo.git#-evil").is_err());
+    }
+
+    #[test]
+    fn reject_unsafe_source_accepts_valid_pin() {
+        assert!(reject_unsafe_source("https://github.com/example/repo.git#v1.2.3").is_ok());
+    }
+
+    /// Real local git repo with two commits; the first is tagged. Proves
+    /// `git_clone` with a `#<tag>` pin checks out the tagged commit, not the
+    /// branch tip (#496).
+    #[test]
+    fn git_clone_pinned_ref_checks_out_tag_not_tip() {
+        let src = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(src.path())
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t.com")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        std::fs::write(src.path().join("f"), "one").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "one"]);
+        run(&["tag", "-m", "v1", "v1"]);
+        let tagged_sha = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(src.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        std::fs::write(src.path().join("f"), "two").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "two"]);
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        let dest = dest_dir.path().join("clone");
+        let source = format!("{}#v1", src.path().display());
+        git_clone(&source, &dest).unwrap();
+
+        let cloned_sha = git_head(&dest).unwrap();
+        assert_eq!(
+            cloned_sha, tagged_sha,
+            "pinned clone must check out the tag, not the branch tip"
+        );
+    }
+
+    #[test]
+    fn sync_git_recloning_pinned_source_on_refresh_instead_of_pulling() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct RecordingGit {
+            clone_calls: Rc<Cell<u32>>,
+            pull_calls: Rc<Cell<u32>>,
+        }
+        impl GitBackend for RecordingGit {
+            fn clone(&self, _source: &str, dest: &Path) -> Result<()> {
+                self.clone_calls.set(self.clone_calls.get() + 1);
+                std::fs::create_dir_all(dest.join(".git")).unwrap();
+                Ok(())
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                self.pull_calls.set(self.pull_calls.get() + 1);
+                Ok(())
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                Some("pinned-sha".to_string())
+            }
+        }
+
+        let clone_calls = Rc::new(Cell::new(0));
+        let pull_calls = Rc::new(Cell::new(0));
+        let git = RecordingGit {
+            clone_calls: clone_calls.clone(),
+            pull_calls: pull_calls.clone(),
+        };
+
+        let m = Marketplace {
+            name: "pinned".into(),
+            source: "https://github.com/example/repo.git#v1.2.3".into(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+
+        // First sync: not yet cloned, refresh=true -> clones once.
+        sync_marketplace_with(cache.path(), &m, true, &git).unwrap();
+        assert_eq!(clone_calls.get(), 1);
+        assert_eq!(pull_calls.get(), 0);
+
+        // Second sync: already cloned, refresh=true -> re-clones (does not
+        // pull) because the source is pinned. Guarantees convergence to
+        // exactly what the pin specifies even if the pin itself changed.
+        sync_marketplace_with(cache.path(), &m, true, &git).unwrap();
+        assert_eq!(
+            clone_calls.get(),
+            2,
+            "pinned source must re-clone on refresh"
+        );
+        assert_eq!(pull_calls.get(), 0, "pinned source must never pull");
+    }
+
+    #[test]
+    fn sync_git_pulls_unpinned_source_on_refresh_instead_of_recloning() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct RecordingGit {
+            clone_calls: Rc<Cell<u32>>,
+            pull_calls: Rc<Cell<u32>>,
+        }
+        impl GitBackend for RecordingGit {
+            fn clone(&self, _source: &str, dest: &Path) -> Result<()> {
+                self.clone_calls.set(self.clone_calls.get() + 1);
+                std::fs::create_dir_all(dest.join(".git")).unwrap();
+                Ok(())
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                self.pull_calls.set(self.pull_calls.get() + 1);
+                Ok(())
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                Some("head-sha".to_string())
+            }
+        }
+
+        let clone_calls = Rc::new(Cell::new(0));
+        let pull_calls = Rc::new(Cell::new(0));
+        let git = RecordingGit {
+            clone_calls: clone_calls.clone(),
+            pull_calls: pull_calls.clone(),
+        };
+
+        let m = Marketplace {
+            name: "floating".into(),
+            source: "https://github.com/example/repo.git".into(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+
+        sync_marketplace_with(cache.path(), &m, true, &git).unwrap();
+        assert_eq!(clone_calls.get(), 1);
+
+        sync_marketplace_with(cache.path(), &m, true, &git).unwrap();
+        assert_eq!(clone_calls.get(), 1, "unpinned source must not re-clone");
+        assert_eq!(pull_calls.get(), 1, "unpinned source must pull on refresh");
     }
 
     #[test]

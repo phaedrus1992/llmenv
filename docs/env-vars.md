@@ -61,6 +61,11 @@ env:
 > **Note:** Token-efficiency is now a built-in feature, not an env var. Enable
 > it with `features.context_mode.enabled: true` (wires the context-mode plugin
 > automatically). The former `LLMENV_BASH_BAN` env var was removed in #490.
+>
+> The built-in marketplace source (`CONTEXT_MODE_SOURCE`) is pinned to a fixed
+> release tag, not a floating `HEAD` ref — every `llmenv regenerate` must
+> resolve the same plugin content until llmenv itself deliberately bumps the
+> pin in a release (#496).
 
 ## Validation & Enforcement
 
