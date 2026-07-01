@@ -37,14 +37,19 @@ pub trait AgentAdapter {
     fn supported_hook_events(&self) -> &'static [&'static str];
 
     /// Environment variables the shell hook should `export` so the agent
-    /// discovers `cache_dir` as its config root.
+    /// discovers `cache_dir` as its config root and `state_dir` for durable state.
+    ///
+    /// # Arguments
+    /// * `cache_dir` — hashed config directory (garbage-collected on content change)
+    /// * `state_dir` — stable state directory (persists across config changes)
     ///
     /// # Errors
-    /// Returns an error if `cache_dir` is not valid UTF-8 — env vars cannot
+    /// Returns an error if either path is not valid UTF-8 — env vars cannot
     /// carry arbitrary bytes on all platforms, so callers that surface a
-    /// non-UTF-8 cache root should fail loudly rather than emit a lossy
-    /// path the agent will silently mis-parse.
-    fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>>;
+    /// non-UTF-8 path should fail loudly rather than emit a lossy path the agent
+    /// will silently mis-parse.
+    fn env_vars(&self, cache_dir: &Path, state_dir: &Path)
+    -> anyhow::Result<Vec<(String, String)>>;
 
     /// Write the manifest into `out` in the agent-native layout, returning the
     /// set of paths the adapter wrote, each relative to `out`. The returned set

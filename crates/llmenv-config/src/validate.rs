@@ -150,6 +150,8 @@ pub enum ValidateError {
     SkillEmptyName(String),
     #[error("skill '{0}' has an empty path")]
     SkillEmptyPath(String),
+    #[error("skill '{0}' path contains traversal components (..): {1}")]
+    SkillPathTraversal(String, String),
 }
 
 /// A marketplace name is safe to use as a single filesystem path component and
@@ -526,12 +528,28 @@ impl Config {
     }
 
     fn validate_skills(&self) -> Result<(), ValidateError> {
+        use llmenv_paths::is_unsafe_join_target;
+
         for s in &self.skills {
             if s.name.is_empty() {
                 return Err(ValidateError::SkillEmptyName(s.name.clone()));
             }
             if s.path.is_empty() {
                 return Err(ValidateError::SkillEmptyPath(s.name.clone()));
+            }
+            // Confine skill paths and names within config/bundle roots — reject traversal
+            // and absolute paths. is_unsafe_join_target checks both .. and is_absolute().
+            if is_unsafe_join_target(&s.path) {
+                return Err(ValidateError::SkillPathTraversal(
+                    s.name.clone(),
+                    s.path.clone(),
+                ));
+            }
+            if is_unsafe_join_target(&s.name) {
+                return Err(ValidateError::SkillEmptyName(format!(
+                    "{} (contains path-traversal components)",
+                    s.name
+                )));
             }
         }
         Ok(())
@@ -2550,7 +2568,7 @@ mod tests {
     fn skill_valid_entry_is_accepted() {
         let cfg = config_with_skills(vec![crate::SkillSource {
             name: "my-skill".into(),
-            path: "/some/path".into(),
+            path: "./skills/my-skill".into(),
             when: vec![],
         }]);
         assert!(cfg.validate().is_ok());
