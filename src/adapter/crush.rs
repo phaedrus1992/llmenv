@@ -24,6 +24,22 @@ impl AgentAdapter for CrushAdapter {
         "crush"
     }
 
+    fn binary_name(&self) -> &'static str {
+        "crush"
+    }
+
+    fn supports_plugins(&self) -> bool {
+        false
+    }
+
+    fn supports_lsp(&self) -> bool {
+        true
+    }
+
+    fn supported_hook_events(&self) -> &'static [&'static str] {
+        SUPPORTED_HOOK_EVENTS
+    }
+
     fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
