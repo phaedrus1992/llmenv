@@ -10,34 +10,36 @@ use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
 
+/// Engine identifier baked into hook command lines so subcommands invoked by
 /// Command the auto-emitted SessionStart hook runs (#121/#85). It shells back
 /// into `llmenv` so the runtime check can compare the booted content hash (the
 /// `CLAUDE_CONFIG_DIR` folder name the session launched with) against what
 /// llmenv would materialize now, and warn the user to restart on drift. Kept as
 /// a bare command (resolved off `PATH`) so it works regardless of install dir.
-const STALE_CHECK_COMMAND: &str = "llmenv check-stale";
+const STALE_CHECK_COMMAND: &str = "llmenv check-stale --engine claude_code";
 
 /// Command the auto-emitted SessionStart hook runs to inject source config paths
 /// into agent context (#289). Outputs `hookSpecificOutput.additionalContext` JSON
 /// so the agent always knows where to edit config rather than touching the cache.
-const CONFIG_CONTEXT_COMMAND: &str = "llmenv config-context";
+const CONFIG_CONTEXT_COMMAND: &str = "llmenv config-context --engine claude_code";
 
 /// Command the auto-emitted PreToolUse hook runs to guard against writes to the
 /// managed cache directory (#289). Reads the Write/Edit/MultiEdit tool call from
 /// stdin and prints a redirection hint if the target is a cache path. Exits 0
 /// (fail-soft) so the write still proceeds; the hint keeps agents oriented.
-const CONFIG_GUARD_COMMAND: &str = "llmenv config-guard";
+const CONFIG_GUARD_COMMAND: &str = "llmenv config-guard --engine claude_code";
 
 /// Command the auto-emitted throttle hooks run. Throttle hooks fire on
 /// PreToolUse and UserPromptSubmit to poll the usage backend and sleep a
 /// capped adaptive delay to avoid rate limits.
 const THROTTLE_COMMAND: &str = "llmenv throttle";
 
-/// Command the auto-emitted lifecycle/session-log hooks run, followed by the
-/// engine-neutral event name (`llmenv hook-run session_start`, etc). Dispatches
-/// ICM memory wake-up/store (#197/#228) and, per `session_log` config, the
-/// session-log file/transcript sinks (#382). Always fail-soft (exit 0).
-const HOOK_RUN_COMMAND: &str = "llmenv hook-run";
+/// Prefix of the auto-emitted lifecycle/session-log hook commands. The full
+/// command is `HOOK_RUN_COMMAND <neutral_event>`, e.g.
+/// `llmenv hook-run --engine claude_code session_start`. Dispatches ICM memory
+/// wake-up/store (#197/#228) and, per `session_log` config, the session-log
+/// file/transcript sinks (#382). Always fail-soft (exit 0).
+const HOOK_RUN_COMMAND: &str = "llmenv hook-run --engine claude_code";
 
 /// `(engine-neutral event, native Claude event)` pairs for the always-on
 /// baseline hooks. Registered unconditionally — `hook-run` itself no-ops
@@ -72,9 +74,40 @@ const VERBOSE_HOOK_EVENTS: &[(&str, &str)] = &[
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClaudeCodeAdapter;
 
+/// Native hook events that Claude Code actually emits. Kept as a named
+/// constant so `supported_hook_events()` and callers that gate on this set
+/// share a single source of truth.
+const CLAUDE_CODE_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Notification",
+    "Stop",
+    "SubagentStop",
+    "PreCompact",
+];
+
 impl AgentAdapter for ClaudeCodeAdapter {
     fn name(&self) -> &'static str {
         "claude-code"
+    }
+
+    fn binary_name(&self) -> &'static str {
+        "claude"
+    }
+
+    fn supports_plugins(&self) -> bool {
+        true
+    }
+
+    fn supports_lsp(&self) -> bool {
+        false
+    }
+
+    fn supported_hook_events(&self) -> &'static [&'static str] {
+        CLAUDE_CODE_HOOK_EVENTS
     }
 
     fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
@@ -133,6 +166,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
             owned.push(rel.clone());
         }
 
+        // Write first-class skills (declared via `capabilities.skills`) before
+        // validating, so `validate_skills` covers them along with plugin-sourced ones.
+        let skill_owned = write_first_class_skills(out, &manifest.capabilities.skills)?;
+        owned.extend(skill_owned);
+
         // Validate that skills are properly structured with SKILL.md frontmatter
         validate_skills(out)?;
 
@@ -164,6 +202,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if !manifest.mcps.is_empty() || native_mcp.is_some() {
             merge_mcp_into_claude_json(out, &manifest.mcps, native_mcp)?;
         }
+
+        // LSP servers in manifest.capabilities.lsp are intentionally not rendered
+        // here. ClaudeCodeAdapter::supports_lsp() returns false — Claude Code has no
+        // LSP surface. Declaring LSP in a shared bundle is legitimate for engines that
+        // do support it; it is a silent no-op for Claude (unlike unsupported plugins,
+        // which represent a user-visible loss of functionality and warrant a warning).
 
         crate::materialize::prune_empty_dirs(out)?;
 
@@ -279,10 +323,19 @@ fn build_mcp_servers(
                 if !env.is_empty() {
                     obj["env"] = json!(env);
                 }
+                // #506: disabled_tools consumed by CrushAdapter
                 obj
             }
             ResolvedKind::Remote { url, transport } => {
-                json!({ "type": remote_type_str(*transport), "url": url })
+                let mut obj = json!({ "type": remote_type_str(*transport), "url": url });
+                if !m.headers.is_empty() {
+                    obj["headers"] = json!(m.headers);
+                }
+                if let Some(secs) = m.timeout {
+                    obj["timeout"] = json!(secs);
+                }
+                // #506: disabled_tools consumed by CrushAdapter
+                obj
             }
         };
 
@@ -431,6 +484,80 @@ fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()
         }
     }
     Ok(())
+}
+
+/// Copy files from a source directory into a destination recursively, writing
+/// each file owner-only (0o600). Non-UTF-8 paths are skipped (same policy as
+/// `scan_skill_files_for_hardcoded_paths`). Returns the list of relative paths
+/// written (relative to `dest_dir`), for inclusion in the `owned` set.
+fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut written: Vec<PathBuf> = Vec::new();
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let meta = std::fs::symlink_metadata(&src_path)?;
+        if meta.file_type().is_symlink() {
+            // Skip symlinks: no TOCTOU-safe way to follow them into a bounded dir.
+            continue;
+        }
+        let file_name = entry.file_name();
+        let dest_path = dest.join(&file_name);
+        if meta.is_dir() {
+            let sub_written = copy_dir_owner_only(&src_path, &dest_path)?;
+            written.extend(sub_written);
+        } else if meta.is_file() {
+            let content = std::fs::read(&src_path)?;
+            crate::paths::write_owner_only(&dest_path, &content)?;
+            written.push(dest_path);
+        }
+    }
+    Ok(written)
+}
+
+/// Write each first-class [`crate::config::SkillSource`] entry into
+/// `out/skills/<name>/`, owner-only. Returns relative paths written (for the
+/// `owned` set). Path-traversal is checked on the skill name before joining.
+///
+/// # Errors
+/// Returns an error when the name is unsafe (traversal), the source path is
+/// not a directory, or the canonical source escapes the destination tree.
+fn write_first_class_skills(
+    out: &Path,
+    skills: &[crate::config::SkillSource],
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut owned: Vec<PathBuf> = Vec::new();
+    if skills.is_empty() {
+        return Ok(owned);
+    }
+    let skills_dir = out.join("skills");
+    for skill in skills {
+        if crate::paths::is_unsafe_join_target(&skill.name) {
+            anyhow::bail!(
+                "unsafe skill name '{}': contains path-traversal components",
+                skill.name
+            );
+        }
+        let src = std::path::Path::new(&skill.path);
+        if !src.is_dir() {
+            anyhow::bail!(
+                "skill '{}': path '{}' is not a directory",
+                skill.name,
+                skill.path
+            );
+        }
+        let dest = skills_dir.join(&skill.name);
+        let written = copy_dir_owner_only(src, &dest)?;
+        // Track relative paths (relative to `out`) in the owned set.
+        for abs_path in written {
+            if let Ok(rel) = abs_path.strip_prefix(out) {
+                owned.push(rel.to_path_buf());
+            }
+        }
+        // skills/<name> dir itself (no trailing slash, for reconcile logic).
+        owned.push(PathBuf::from(format!("skills/{}", skill.name)));
+    }
+    Ok(owned)
 }
 
 /// Validate a single skill's `SKILL.md` frontmatter (name + description present).
@@ -1282,10 +1409,11 @@ enum PermissionAction {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        CLAUDE_JSON_FILE, HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS, classify_claude_path,
-        generate_settings_json, is_hook_json, merge_mcp_into_claude_json, overlay_native,
-        reconcile_settings, reject_hardcoded_config_path, reject_modeled_keys_in_catch_all,
-        render_marketplace_source, render_permission_rule, seed_install_method, validate_skills,
+        CLAUDE_JSON_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND, HOOK_RUN_COMMAND,
+        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path, generate_settings_json,
+        is_hook_json, merge_mcp_into_claude_json, overlay_native, reconcile_settings,
+        reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
+        render_permission_rule, seed_install_method, validate_skills, write_first_class_skills,
     };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -1717,6 +1845,9 @@ mod tests {
             .prop_map(|(name, command, args, env)| ResolvedMcp {
                 name,
                 kind: ResolvedKind::Stdio { command, args, env },
+                headers: std::collections::BTreeMap::new(),
+                timeout: None,
+                disabled_tools: vec![],
             });
         let remote =
             ("[a-z][a-z0-9_-]{0,10}", "https://[a-z]{1,8}\\.test").prop_map(|(name, url)| {
@@ -1726,6 +1857,9 @@ mod tests {
                         url,
                         transport: crate::config::McpTransport::Http,
                     },
+                    headers: std::collections::BTreeMap::new(),
+                    timeout: None,
+                    disabled_tools: vec![],
                 }
             });
         prop_oneof![stdio, remote]
@@ -1765,11 +1899,11 @@ mod tests {
 
         assert!(
             hook_commands_for(&settings, "SessionStart")
-                .contains(&"llmenv hook-run session_start".to_string())
+                .contains(&format!("{HOOK_RUN_COMMAND} session_start"))
         );
         assert!(
             hook_commands_for(&settings, "SessionEnd")
-                .contains(&"llmenv hook-run session_end".to_string())
+                .contains(&format!("{HOOK_RUN_COMMAND} session_end"))
         );
         for event in [
             "PreToolUse",
@@ -1820,7 +1954,7 @@ mod tests {
         // Baseline hooks remain present too.
         assert!(
             hook_commands_for(&settings, "SessionStart")
-                .contains(&"llmenv hook-run session_start".to_string())
+                .contains(&format!("{HOOK_RUN_COMMAND} session_start"))
         );
     }
 
@@ -2031,6 +2165,9 @@ mod tests {
                 args: vec![],
                 env: std::collections::BTreeMap::new(),
             },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
         }
     }
 
@@ -2041,6 +2178,9 @@ mod tests {
                 url: url.into(),
                 transport,
             },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
         }
     }
 
@@ -2396,5 +2536,192 @@ mod tests {
             merged["enabledPlugins"]["context-mode@context-mode"],
             json!(true)
         );
+    }
+
+    // ---- --engine flag baking ----
+
+    #[test]
+    fn hook_commands_carry_engine_flag() {
+        // #502: every auto-emitted hook command must include `--engine claude_code`
+        // so the invoked subcommand knows its caller engine.
+        let manifest = crate::merge::MergedManifest::default();
+        let settings = render_settings_for_test(&manifest);
+
+        for cmd in hook_commands_for(&settings, "SessionStart") {
+            if cmd.starts_with("llmenv ") {
+                assert!(
+                    cmd.contains("--engine claude_code"),
+                    "SessionStart command missing --engine flag: {cmd:?}"
+                );
+            }
+        }
+        for cmd in hook_commands_for(&settings, "PreToolUse") {
+            if cmd.starts_with("llmenv ") {
+                assert!(
+                    cmd.contains("--engine claude_code"),
+                    "PreToolUse command missing --engine flag: {cmd:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_check_command_carries_engine_flag() {
+        assert!(
+            STALE_CHECK_COMMAND.contains("--engine claude_code"),
+            "STALE_CHECK_COMMAND must carry --engine flag: {STALE_CHECK_COMMAND:?}"
+        );
+    }
+
+    #[test]
+    fn config_context_command_carries_engine_flag() {
+        assert!(
+            CONFIG_CONTEXT_COMMAND.contains("--engine claude_code"),
+            "CONFIG_CONTEXT_COMMAND must carry --engine flag: {CONFIG_CONTEXT_COMMAND:?}"
+        );
+    }
+
+    #[test]
+    fn config_guard_command_carries_engine_flag() {
+        assert!(
+            CONFIG_GUARD_COMMAND.contains("--engine claude_code"),
+            "CONFIG_GUARD_COMMAND must carry --engine flag: {CONFIG_GUARD_COMMAND:?}"
+        );
+    }
+
+    #[test]
+    fn hook_run_command_carries_engine_flag() {
+        assert!(
+            HOOK_RUN_COMMAND.contains("--engine claude_code"),
+            "HOOK_RUN_COMMAND must carry --engine flag: {HOOK_RUN_COMMAND:?}"
+        );
+    }
+
+    // ── First-class skills ────────────────────────────────────────────────────
+
+    /// Scan a plugin directory for a `skills/` subdirectory and project each
+    /// skill through the same `write_first_class_skills` path. This helper
+    /// enables engines that don't support plugins (`supports_plugins() == false`)
+    /// to still materialise skills bundled inside a plugin directory.
+    ///
+    // #506: used by CrushAdapter
+    #[cfg(test)]
+    fn project_plugin_skills(
+        plugin_dir: &std::path::Path,
+        out: &std::path::Path,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        let skills_src = plugin_dir.join("skills");
+        if !skills_src.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut skills: Vec<crate::config::SkillSource> = Vec::new();
+        for entry in std::fs::read_dir(&skills_src)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() || crate::paths::is_unsafe_join_target(&name) {
+                continue;
+            }
+            skills.push(crate::config::SkillSource {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                when: Vec::new(),
+            });
+        }
+        write_first_class_skills(out, &skills)
+    }
+
+    #[test]
+    fn write_first_class_skills_copies_files_owner_only() {
+        let src_tmp = tempfile::tempdir().unwrap();
+        let out_tmp = tempfile::tempdir().unwrap();
+
+        // Build a minimal skill source dir.
+        let skill_src = src_tmp.path().join("my-skill");
+        std::fs::create_dir_all(skill_src.join("subdir")).unwrap();
+        std::fs::write(skill_src.join("SKILL.md"), VALID_FRONTMATTER).unwrap();
+        std::fs::write(skill_src.join("subdir/helper.sh"), "#!/bin/sh\necho hi\n").unwrap();
+
+        let skill = crate::config::SkillSource {
+            name: "my-skill".into(),
+            path: skill_src.to_str().unwrap().into(),
+            when: Vec::new(),
+        };
+        let owned = write_first_class_skills(out_tmp.path(), std::slice::from_ref(&skill)).unwrap();
+
+        // Both files should land in out/skills/my-skill/
+        let dest_md = out_tmp.path().join("skills/my-skill/SKILL.md");
+        let dest_sh = out_tmp.path().join("skills/my-skill/subdir/helper.sh");
+        assert!(dest_md.exists(), "SKILL.md not written");
+        assert!(dest_sh.exists(), "subdir/helper.sh not written");
+        // Owned paths are relative to out.
+        assert!(owned.iter().any(|p| p.ends_with("skills/my-skill")));
+
+        // Permissions should be owner-only (0o600 for files).
+        use std::os::unix::fs::PermissionsExt;
+        let mode_md = std::fs::metadata(&dest_md).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode_md, 0o600, "SKILL.md should be 0o600, got {mode_md:o}");
+    }
+
+    #[test]
+    fn write_first_class_skills_rejects_traversal_name() {
+        let out_tmp = tempfile::tempdir().unwrap();
+        let skill = crate::config::SkillSource {
+            name: "../evil".into(),
+            path: "/some/path".into(),
+            when: Vec::new(),
+        };
+        let err =
+            write_first_class_skills(out_tmp.path(), std::slice::from_ref(&skill)).unwrap_err();
+        assert!(err.to_string().contains("unsafe skill name"), "got: {err}");
+    }
+
+    #[test]
+    fn write_first_class_skills_empty_is_noop() {
+        let out_tmp = tempfile::tempdir().unwrap();
+        let owned = write_first_class_skills(out_tmp.path(), &[]).unwrap();
+        assert!(owned.is_empty());
+        assert!(!out_tmp.path().join("skills").exists());
+    }
+
+    #[test]
+    fn project_plugin_skills_copies_skill_from_plugin_dir() {
+        let plugin_tmp = tempfile::tempdir().unwrap();
+        let out_tmp = tempfile::tempdir().unwrap();
+
+        // Plugin has a skills/ subdir with one skill.
+        let skill_src = plugin_tmp.path().join("skills/my-plugin-skill");
+        std::fs::create_dir_all(&skill_src).unwrap();
+        std::fs::write(skill_src.join("SKILL.md"), VALID_FRONTMATTER).unwrap();
+
+        let owned = project_plugin_skills(plugin_tmp.path(), out_tmp.path()).unwrap();
+
+        assert!(
+            out_tmp
+                .path()
+                .join("skills/my-plugin-skill/SKILL.md")
+                .exists(),
+            "skill SKILL.md not projected"
+        );
+        assert!(
+            owned.iter().any(|p| p.ends_with("skills/my-plugin-skill")),
+            "owned missing skills dir"
+        );
+    }
+
+    #[test]
+    fn project_plugin_skills_no_skills_dir_returns_empty() {
+        let plugin_tmp = tempfile::tempdir().unwrap();
+        let out_tmp = tempfile::tempdir().unwrap();
+        // No skills/ subdir in the plugin.
+        let owned = project_plugin_skills(plugin_tmp.path(), out_tmp.path()).unwrap();
+        assert!(owned.is_empty());
     }
 }

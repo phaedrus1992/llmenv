@@ -38,6 +38,9 @@ fn stdio(name: &str, command: &str, args: &[&str]) -> ResolvedMcp {
             args: args.iter().map(|s| (*s).into()).collect(),
             env: BTreeMap::new(),
         },
+        headers: BTreeMap::new(),
+        timeout: None,
+        disabled_tools: vec![],
     }
 }
 
@@ -48,6 +51,9 @@ fn remote(name: &str, url: &str) -> ResolvedMcp {
             url: url.into(),
             transport: llmenv::config::McpTransport::Http,
         },
+        headers: BTreeMap::new(),
+        timeout: None,
+        disabled_tools: vec![],
     }
 }
 

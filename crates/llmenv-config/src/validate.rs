@@ -686,6 +686,7 @@ mod tests {
                     args,
                     env,
                     url,
+                    ..Default::default()
                 },
             )
     }
@@ -1129,6 +1130,7 @@ mod tests {
                 args: vec![],
                 env: Default::default(),
                 url: None,
+                ..Default::default()
             }],
             features: None,
             marketplace: vec![],
@@ -1216,6 +1218,7 @@ mod tests {
                 args: vec![],
                 env,
                 url: None,
+                ..Default::default()
             }],
             features: None,
             marketplace: vec![],
@@ -1250,6 +1253,7 @@ mod tests {
                 args: vec![],
                 env,
                 url: None,
+                ..Default::default()
             }],
             features: None,
             marketplace: vec![],
@@ -1284,6 +1288,7 @@ mod tests {
                 args: vec![],
                 env,
                 url: None,
+                ..Default::default()
             }],
             features: None,
             marketplace: vec![],
