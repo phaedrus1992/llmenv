@@ -7,8 +7,13 @@ pub const RESERVED_STATE_ENV_VARS: &[&str] = &[STATE_DIR_ENV, "CLAUDE_CONFIG_DIR
 pub const MEMORY_MCP_NAME: &str = "icm";
 /// Marketplace registration name for the built-in context-mode plugin.
 pub const CONTEXT_MODE_MARKETPLACE: &str = "context-mode";
-/// Canonical git source for the built-in context-mode plugin.
-pub const CONTEXT_MODE_SOURCE: &str = "https://github.com/mksglu/context-mode";
+/// Canonical git source for the built-in context-mode plugin, pinned to a
+/// fixed release tag (#496) — an unpinned floating `HEAD` ref would make
+/// `llmenv regenerate` non-reproducible across time (whatever the upstream
+/// repo currently has). Bump this deliberately as part of a llmenv release,
+/// not automatically. `#<ref>` is llmenv's own marketplace-source pin syntax
+/// (see `split_source_ref` in `src/plugins/cache.rs`), not a URL fragment.
+pub const CONTEXT_MODE_SOURCE: &str = "https://github.com/mksglu/context-mode#v1.0.169";
 /// Plugin name inside the context-mode marketplace.
 pub const CONTEXT_MODE_PLUGIN: &str = "context-mode";
 /// MCP tool-name prefix Claude Code assigns the context-mode plugin's server.
@@ -78,6 +83,19 @@ impl Config {
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_mode_source_is_pinned_not_floating() {
+        // #496: the built-in context-mode marketplace source must not be an
+        // unpinned floating HEAD ref — every regenerate would otherwise pull
+        // whatever the upstream repo currently has, breaking reproducibility.
+        assert!(
+            CONTEXT_MODE_SOURCE
+                .split_once('#')
+                .is_some_and(|(_, r#ref)| !r#ref.is_empty()),
+            "CONTEXT_MODE_SOURCE must carry a non-empty pinned #<tag> suffix: {CONTEXT_MODE_SOURCE}"
+        );
+    }
 
     #[test]
     fn load_accepts_expanded_path() {

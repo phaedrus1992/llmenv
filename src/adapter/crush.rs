@@ -335,9 +335,9 @@ fn resolve_plugin_payload(
     plugin: &crate::plugins::resolve::ResolvedPlugin,
     marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
 ) -> anyhow::Result<PathBuf> {
-    // P2-5: guard traversal before any path join, regardless of which path is taken.
-    if crate::paths::is_unsafe_join_target(&plugin.plugin) {
-        anyhow::bail!("plugin name '{}' is unsafe (path traversal)", plugin.plugin);
+    // P2-5/#534: guard before any path join, regardless of which path is taken.
+    if !crate::paths::is_valid_short_name(&plugin.plugin) {
+        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
     }
     if let Some(p) = &plugin.install_path {
         return Ok(PathBuf::from(p));
@@ -1470,8 +1470,8 @@ mod tests {
         // The join guard must fire before the plugin is resolved as a path.
         let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
         assert!(
-            err.to_string().contains("unsafe") || err.to_string().contains("traversal"),
-            "error must name path traversal: {err}"
+            err.to_string().contains("not a valid name"),
+            "error must reject the invalid plugin name: {err}"
         );
     }
 

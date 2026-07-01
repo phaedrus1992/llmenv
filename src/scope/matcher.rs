@@ -13,6 +13,10 @@ pub struct ResolvedProject {
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub enable_bundles: Vec<String>,
+    /// Bundle names this scope removes from the firing set even if a lower-
+    /// precedence scope's tag or `enable_bundles` turned them on (#194).
+    /// Disable always wins, including within this same scope.
+    pub disable_bundles: Vec<String>,
     /// Keys from the marker file not matching any declared field.
     pub unknown_fields: Vec<String>,
 }
@@ -31,6 +35,8 @@ struct ProjectFile {
     tags: Vec<String>,
     #[serde(default)]
     enable_bundles: Vec<String>,
+    #[serde(default)]
+    disable_bundles: Vec<String>,
     /// Capture unknown fields for warning emission.
     #[serde(flatten)]
     extra: BTreeMap<String, serde_yaml::Value>,
@@ -188,7 +194,11 @@ pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
                 .filter(|k| {
                     !matches!(
                         k.as_str(),
-                        "id" | "name" | "description" | "tags" | "enable_bundles"
+                        "id" | "name"
+                            | "description"
+                            | "tags"
+                            | "enable_bundles"
+                            | "disable_bundles"
                     )
                 })
                 .cloned()
@@ -200,6 +210,7 @@ pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
                 description: pf.description,
                 tags: pf.tags,
                 enable_bundles: pf.enable_bundles,
+                disable_bundles: pf.disable_bundles,
                 unknown_fields,
             });
         }
@@ -307,6 +318,21 @@ mod tests {
     }
 
     #[test]
+    fn discovers_project_with_disable_bundles() {
+        // #194
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let yaml = "id: myapp\nenable_bundles: [github-issues]\ndisable_bundles: [yaks]\n";
+        write_project_file(temp_dir.path(), yaml);
+
+        let env = env_in(temp_dir.path(), temp_dir.path());
+
+        let project = discover_project(&env).expect("discover");
+        assert_eq!(project.enable_bundles, vec!["github-issues"]);
+        assert_eq!(project.disable_bundles, vec!["yaks"]);
+        assert!(project.unknown_fields.is_empty());
+    }
+
+    #[test]
     fn empty_file_uses_defaults() {
         let temp_dir = tempfile::TempDir::new().expect("tempdir");
         write_project_file(temp_dir.path(), "");
@@ -320,6 +346,7 @@ mod tests {
         assert_eq!(project.description, None);
         assert!(project.tags.is_empty());
         assert!(project.enable_bundles.is_empty());
+        assert!(project.disable_bundles.is_empty());
     }
 
     #[test]
@@ -652,7 +679,7 @@ mod tests {
             for uf in &project.unknown_fields {
                 prop_assert!(!matches!(
                     uf.as_str(),
-                    "id" | "name" | "description" | "tags" | "enable_bundles"
+                    "id" | "name" | "description" | "tags" | "enable_bundles" | "disable_bundles"
                 ));
             }
         }

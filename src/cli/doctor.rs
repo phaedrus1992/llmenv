@@ -3,7 +3,7 @@ use crate::adapter::claude_code::ClaudeCodeAdapter;
 use crate::config::Config;
 use crate::paths;
 use anyhow::Context;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 pub(super) fn run_doctor_token_efficiency(
     use_color: bool,
@@ -216,6 +216,24 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                     orphan_count += 1;
                 }
             }
+            for bundle_name in &scope.disable_bundles {
+                if !configured_bundle_names.contains(bundle_name.as_str()) {
+                    eprintln!(
+                        "{warn} .llmenv.yaml disable_bundles references unknown bundle: {bundle_name}"
+                    );
+                    orphan_count += 1;
+                }
+                // #194: same-scope enable+disable is contradictory intent —
+                // disable wins at runtime, but flag it so the user notices
+                // the enable_bundles entry is dead.
+                if scope.enable_bundles.contains(bundle_name) {
+                    eprintln!(
+                        "{warn} .llmenv.yaml enables and disables the same bundle: {bundle_name} \
+                         (disable wins; the enable_bundles entry has no effect)"
+                    );
+                    orphan_count += 1;
+                }
+            }
         }
 
         for b in &config.bundle {
@@ -237,21 +255,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
 
         // Build merged host table for server_host checks
-        let doctor_firing: Vec<_> = {
-            let manually: BTreeSet<&str> = active
-                .scopes
-                .iter()
-                .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-                .collect();
-            config
-                .bundle
-                .iter()
-                .filter(|b| {
-                    b.when.iter().any(|bt| active.tags.contains(bt))
-                        || manually.contains(b.name.as_str())
-                })
-                .collect()
-        };
+        let doctor_firing: Vec<_> = super::firing_bundles(&config.bundle, &active, None);
 
         let doctor_bundle_caps = {
             let refs = super::build_bundle_refs(&config_dir, &active, &doctor_firing);
