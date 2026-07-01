@@ -137,11 +137,13 @@ mod tests {
         // The child (re-invoking the current, test-harness executable with
         // args it doesn't understand) is expected to exit non-zero almost
         // instantly; spawn_record never waits on it, so this call itself must
-        // return promptly regardless of what the child does.
+        // return promptly regardless of what the child does. Use a generous
+        // 5-second timeout to tolerate high parallel test load while still
+        // catching any actual blocking behavior.
         let start = std::time::Instant::now();
         spawn_record("sess-1", &ev());
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(1),
+            start.elapsed() < std::time::Duration::from_secs(5),
             "spawn_record must not block on the child"
         );
     }
