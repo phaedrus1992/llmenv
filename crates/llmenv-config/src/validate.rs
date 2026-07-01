@@ -936,6 +936,8 @@ mod tests {
                         host,
                         init: Default::default(),
                         session_log,
+                        lsp: vec![],
+                        skills: vec![],
                     }
                 },
             )
@@ -980,6 +982,8 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                lsp: vec![],
+                skills: vec![],
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -1011,6 +1015,8 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                lsp: vec![],
+                skills: vec![],
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -1039,6 +1045,8 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                lsp: vec![],
+                skills: vec![],
             };
             prop_assert!(
                 config.validate().is_err(),
@@ -1078,6 +1086,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -1110,6 +1120,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1142,6 +1154,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1173,6 +1187,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(matches!(
             config.validate(),
@@ -1199,6 +1215,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         }
     }
 
@@ -1261,6 +1279,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(matches!(
             config.validate(),
@@ -1296,6 +1316,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(matches!(
             config.validate(),
@@ -1331,6 +1353,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(matches!(
             config.validate(),
@@ -1367,6 +1391,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1399,6 +1425,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1429,6 +1457,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1459,6 +1489,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1489,6 +1521,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1521,6 +1555,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1554,6 +1590,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1584,6 +1622,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1614,6 +1654,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1639,6 +1681,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1666,6 +1710,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1691,6 +1737,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1711,6 +1759,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -1736,6 +1786,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_err());
     }
@@ -1761,6 +1813,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -1786,6 +1840,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -1808,6 +1864,8 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            lsp: vec![],
+            skills: vec![],
         }
     }
 
