@@ -212,16 +212,20 @@ pub(crate) fn project_plugin_skills(plugin_dir: &Path, out: &Path) -> anyhow::Re
         if !path.is_dir() {
             continue;
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        if name.is_empty() || crate::paths::is_unsafe_join_target(&name) {
-            continue;
+        let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin skill directory has a non-UTF-8 name: {}",
+                path.display()
+            )
+        })?;
+        // Fail loud rather than silently drop — matches write_first_class_skills.
+        if name.is_empty() || crate::paths::is_unsafe_join_target(name) {
+            anyhow::bail!(
+                "plugin skill '{name}': unsafe name (contains path-traversal components)"
+            );
         }
         skills.push(crate::config::SkillSource {
-            name,
+            name: name.to_string(),
             path: path.to_string_lossy().into_owned(),
             when: Vec::new(),
         });

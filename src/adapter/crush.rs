@@ -89,11 +89,12 @@ impl AgentAdapter for CrushAdapter {
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
         for plugin in &manifest.plugins {
             let payload = resolve_plugin_payload(plugin, &manifest.marketplaces)?;
-            for bad_dir in &["agents", "commands"] {
+            for bad_dir in &["agents", "commands", "hooks"] {
                 if payload.join(bad_dir).is_dir() {
                     anyhow::bail!(
-                        "plugin '{}' contains unsupported Crush content: '{}' directory \
-                         — Crush does not support agents/commands",
+                        "plugin '{}' contains unsupported Crush content: '{}/' directory \
+                         — Crush has no equivalent for plugin agents, commands, or hooks. \
+                         Scope this bundle away from Crush with `when:` or remove the content.",
                         plugin.plugin,
                         bad_dir
                     );
@@ -1158,6 +1159,35 @@ mod tests {
         );
         assert!(
             err.to_string().contains("bad-plugin"),
+            "error must name the plugin: {err}"
+        );
+    }
+
+    #[test]
+    fn materialize_plugin_with_hooks_dir_hard_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Plugin dir with a hooks/ subdirectory — spec §3.2 lists plugin-only
+        // hooks as unsupported content that must hard-error, not silently drop.
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("hooks")).unwrap();
+
+        let mut manifest = empty_manifest();
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "hooky-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            });
+        let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("hooks"),
+            "error must name the unsupported 'hooks' directory: {err}"
+        );
+        assert!(
+            err.to_string().contains("hooky-plugin"),
             "error must name the plugin: {err}"
         );
     }
