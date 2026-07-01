@@ -102,7 +102,8 @@ impl GitBackend for SystemGit {
 /// # Errors
 /// Returns `SyncError::NotCloned` if a git marketplace is not yet cloned locally
 /// and refresh is false. Returns `SyncError::CloneFailed` if a git clone fails
-/// on first use. Returns `SyncError::Other` for path source resolution errors.
+/// on first use. Returns `SyncError::Other` for path source resolution errors or
+/// when git HEAD cannot be resolved after a successful clone (broken clone).
 pub fn sync_marketplace(
     cache_dir: &Path,
     m: &Marketplace,
@@ -117,7 +118,8 @@ pub fn sync_marketplace(
 /// # Errors
 /// Returns `SyncError::NotCloned` if a git marketplace is not yet cloned locally
 /// and refresh is false. Returns `SyncError::CloneFailed` if a git clone fails
-/// on first use. Returns `SyncError::Other` for path source resolution errors.
+/// on first use. Returns `SyncError::Other` for path source resolution errors or
+/// when git HEAD cannot be resolved after a successful clone (broken clone).
 pub fn sync_marketplace_with(
     cache_dir: &Path,
     m: &Marketplace,
@@ -180,7 +182,6 @@ fn sync_git(
 
     let dest = marketplace_path(cache_dir, &m.name);
     let pinned = split_source_ref(&m.source).1.is_some();
-    let mut cloned = false;
 
     if dest.join(".git").exists() {
         if refresh {
@@ -217,7 +218,6 @@ fn sync_git(
                         dest.display()
                     ))
                 })?;
-                cloned = true;
             } else {
                 git.pull(&dest).map_err(SyncError::Other)?;
             }
@@ -239,16 +239,18 @@ fn sync_git(
                 name: m.name.clone(),
                 source: e,
             })?;
-        cloned = true;
     }
 
     let head = git.head(&dest);
-    // After a successful clone, HEAD must be resolvable. If it isn't, the clone
-    // is broken and we shouldn't silently cache it with an unstable hash.
-    if cloned && head.is_none() {
+    // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,
+    // the clone is broken and we shouldn't silently cache it with an unstable hash.
+    // Clean up on error so the next invocation retries the clone instead of hitting
+    // the pull path (fixes #537).
+    if head.is_none() && dest.join(".git").exists() {
+        let _ = std::fs::remove_dir_all(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(
-            "marketplace '{}': git rev-parse HEAD failed after successful clone \
-             (cache will have unstable hash until this is resolved)",
+            "marketplace '{}': unable to resolve git HEAD \
+             (corrupted clone removed; run sync again to retry)",
             m.name
         )));
     }
@@ -359,7 +361,8 @@ pub fn is_external_plugin_source(source: &str) -> bool {
 ///
 /// # Errors
 /// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
-/// is false. Returns `SyncError::CloneFailed` on clone failure.
+/// is false. Returns `SyncError::CloneFailed` on clone failure. Returns
+/// `SyncError::Other` when git HEAD cannot be resolved after a successful clone.
 pub fn sync_external_plugin(
     cache_dir: &Path,
     marketplace: &str,
@@ -374,7 +377,8 @@ pub fn sync_external_plugin(
 ///
 /// # Errors
 /// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
-/// is false. Returns `SyncError::CloneFailed` on clone failure.
+/// is false. Returns `SyncError::CloneFailed` on clone failure. Returns
+/// `SyncError::Other` when git HEAD cannot be resolved after a successful clone.
 pub fn sync_external_plugin_with(
     cache_dir: &Path,
     marketplace: &str,
@@ -421,6 +425,17 @@ pub fn sync_external_plugin_with(
             })?;
     }
     let head = git.head(&dest);
+    // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,
+    // the clone is broken and we shouldn't silently cache it with an unstable hash.
+    // Clean up on error so the next invocation retries the clone instead of hitting
+    // the pull path (fixes #537).
+    if head.is_none() && dest.join(".git").exists() {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "plugin '{plugin}@{marketplace}': unable to resolve git HEAD \
+             (corrupted clone removed; run sync again to retry)"
+        )));
+    }
 
     let manifest = dest.join("plugin.json");
     if !manifest.exists() {
@@ -965,7 +980,7 @@ mod tests {
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("git rev-parse HEAD failed after successful clone"),
+            msg.contains("unable to resolve git HEAD"),
             "error message should explain HEAD resolution failure, got: {msg}"
         );
     }
