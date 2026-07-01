@@ -11,6 +11,11 @@ use std::path::{Path, PathBuf};
 
 use llmenv_paths::{state_dir, write_owner_only_atomic};
 
+/// Cap on the correlation map's entry count (#509 item 2). Realistic usage is
+/// small (one UUID per dev session), but nothing ever removes an entry, so a
+/// long-lived install accumulates them forever without a bound.
+const MAX_CORRELATION_ENTRIES: usize = 1000;
+
 /// Path to the correlation map file.
 ///
 /// # Errors
@@ -47,6 +52,15 @@ fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyh
     }
     let mut map = load_at(path);
     map.insert(claude_session_id.to_string(), icm_session_id.to_string());
+    // ponytail: eviction order is BTreeMap key order (the random session-id
+    // string), not recency — this format carries no timestamp to sort by.
+    // Correlation entries are looked up by exact claude_session_id, and an
+    // evicted-but-still-live session just starts a fresh transcript on its
+    // next lookup miss (no data loss, no error). Upgrade to a timestamped
+    // structure if true LRU ever matters.
+    while map.len() > MAX_CORRELATION_ENTRIES {
+        map.pop_first();
+    }
     let body = serde_json::to_string(&map)?;
     write_owner_only_atomic(path, body.as_bytes())?;
     Ok(())
@@ -106,6 +120,17 @@ mod tests {
         assert_eq!(map.get("claude-1").map(String::as_str), Some("icm-aaa"));
         assert_eq!(map.get("claude-2").map(String::as_str), Some("icm-bbb"));
         assert_eq!(map.get("missing"), None);
+    }
+
+    #[test]
+    fn record_at_caps_correlation_map_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        for i in 0..MAX_CORRELATION_ENTRIES + 10 {
+            record_at(&path, &format!("claude-{i:05}"), "icm-x").unwrap();
+        }
+        let map = load_at(&path);
+        assert_eq!(map.len(), MAX_CORRELATION_ENTRIES);
     }
 
     #[test]

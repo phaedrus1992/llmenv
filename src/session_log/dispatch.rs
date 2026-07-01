@@ -10,7 +10,11 @@ use crate::session_log::transcript::{RECORD_TOOL, START_TOOL, record_args, start
 /// Start a transcript session; returns its id (the tool's text result, trimmed).
 ///
 /// # Errors
-/// Any `call_tool` failure, or an empty id.
+/// Any `call_tool` failure, an empty id, or an id containing whitespace/control
+/// characters (#509 item 1: defense-in-depth — the id is persisted to
+/// `transcript-sessions.json` and later passed as a CLI/process argument
+/// elsewhere, so a well-formed id matters even though ICM is a trusted
+/// boundary today).
 pub async fn start_session(
     client: &McpHttpClient,
     agent: &str,
@@ -23,6 +27,11 @@ pub async fn start_session(
     let id = text.trim().to_string();
     if id.is_empty() {
         anyhow::bail!("{START_TOOL} returned an empty session id");
+    }
+    if id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        anyhow::bail!(
+            "{START_TOOL} returned a session id with whitespace/control characters: {id:?}"
+        );
     }
     Ok(id)
 }
@@ -73,6 +82,44 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(id, "sess-42");
+    }
+
+    #[tokio::test]
+    async fn start_session_rejects_id_with_whitespace() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text_result("sess 42")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let err = start_session(
+            &client,
+            "claude_code",
+            Some("llmenv"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("whitespace/control"));
+    }
+
+    #[tokio::test]
+    async fn start_session_rejects_id_with_control_character() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text_result("sess\x0042")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let err = start_session(
+            &client,
+            "claude_code",
+            Some("llmenv"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("whitespace/control"));
     }
 
     #[tokio::test]
