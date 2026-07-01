@@ -964,7 +964,12 @@ fn build_and_materialize(
         .with_auth_status(auth_status);
     write_cache_manifest(&cache_path, &current, config.cache.hashing)?;
 
-    let mut env_vars = adapter.env_vars(&cache_path)?;
+    // Durable state (#175): the state dir is a stable sibling of the hashed
+    // config folders (`<adapter_root>/state`), so it survives every hash change.
+    // Compute it early so adapters can route their data-bearing env vars through it
+    // instead of the hashed cache_dir (which gets GC'd on every config change).
+    let state_dir = crate::materialize::state::state_dir(&adapter_root);
+    let mut env_vars = adapter.env_vars(&cache_path, &state_dir)?;
 
     // Collect env vars from merged bundle Capabilities. Later contributors override
     // earlier ones (enforced by the merge_capabilities function via precedence).
@@ -972,8 +977,6 @@ fn build_and_materialize(
         env_vars.push((key.clone(), value.clone()));
     }
 
-    // Durable state (#175): the state dir is a stable sibling of the hashed
-    // config folders (`<adapter_root>/state`), so it survives every hash change.
     // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and
     // create the dirs so tools find them on first run.
     // When context-mode is enabled (#490) inject CONTEXT_MODE_DATA_DIR as a
@@ -982,7 +985,6 @@ fn build_and_materialize(
         &config.state,
         config.context_mode_enabled(),
     );
-    let state_dir = crate::materialize::state::state_dir(&adapter_root);
     crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
         .context("creating durable state directories")?;
     env_vars.extend(crate::materialize::state::state_env_vars(
