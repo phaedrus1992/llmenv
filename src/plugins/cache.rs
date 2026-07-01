@@ -168,12 +168,13 @@ fn sync_git(
     // transports run arbitrary commands on clone. Validating here keeps the
     // check independent of the backend and runnable in tests.
     reject_unsafe_source(&m.source).map_err(SyncError::Other)?;
-    // Marketplace name comes from user config; guard against path traversal
-    // before joining into the cache path. Fixes #384.
-    if crate::paths::is_unsafe_join_target(&m.name) {
+    // Marketplace name comes from user config; guard before joining into the
+    // cache path (this name also flows into remove_dir_all below when the
+    // source is pinned). Fixes #384, #534.
+    if !crate::paths::is_valid_short_name(&m.name) {
         let name = &m.name;
         return Err(SyncError::Other(anyhow::anyhow!(
-            "marketplace name '{name}' contains an unsafe path component"
+            "marketplace name '{name}' is not a valid name"
         )));
     }
 
@@ -189,17 +190,32 @@ fn sync_git(
                 // including when the user bumps the pinned ref in config (the
                 // cache path is keyed by name only, not source, so the stale
                 // clone must be removed explicitly).
-                std::fs::remove_dir_all(&dest).map_err(|e| {
-                    SyncError::Other(anyhow::anyhow!(
-                        "removing stale pinned clone at {}: {e}",
-                        dest.display()
-                    ))
-                })?;
-                git.clone(&m.source, &dest)
+                //
+                // #536: clone into a staging dir first, alongside `dest`, so a
+                // slow or failing clone never touches the working clone — only
+                // a confirmed-successful clone gets swapped in via `rename`
+                // (near-instant), collapsing the "dest doesn't exist" window
+                // from the whole clone duration down to a couple of syscalls.
+                let staging = dest.with_file_name(format!("{}.{}.tmp", m.name, std::process::id()));
+                let _ = std::fs::remove_dir_all(&staging);
+                git.clone(&m.source, &staging)
                     .map_err(|e| SyncError::CloneFailed {
                         name: m.name.clone(),
                         source: e,
                     })?;
+                if let Err(e) = std::fs::remove_dir_all(&dest) {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(SyncError::Other(anyhow::anyhow!(
+                        "removing stale pinned clone at {}: {e}",
+                        dest.display()
+                    )));
+                }
+                std::fs::rename(&staging, &dest).map_err(|e| {
+                    SyncError::Other(anyhow::anyhow!(
+                        "moving refreshed pinned clone into place at {}: {e}",
+                        dest.display()
+                    ))
+                })?;
             } else {
                 git.pull(&dest).map_err(SyncError::Other)?;
             }
@@ -356,16 +372,15 @@ pub fn sync_external_plugin_with(
 ) -> Result<MarketplaceState, SyncError> {
     reject_unsafe_source(source).map_err(SyncError::Other)?;
     // Both marketplace and plugin names are joined into the cache path; guard
-    // both against path traversal. Fixes #384.
-    if crate::paths::is_unsafe_join_target(marketplace) {
+    // both. Fixes #384, #534.
+    if !crate::paths::is_valid_short_name(marketplace) {
         return Err(SyncError::Other(anyhow::anyhow!(
-            "marketplace name '{marketplace}' contains an unsafe path component"
+            "marketplace name '{marketplace}' is not a valid name"
         )));
     }
-    if crate::paths::is_unsafe_join_target(plugin) {
+    if !crate::paths::is_valid_short_name(plugin) {
         return Err(SyncError::Other(anyhow::anyhow!(
-            "plugin name '{plugin}' in marketplace '{marketplace}' \
-             contains an unsafe path component"
+            "plugin name '{plugin}' in marketplace '{marketplace}' is not a valid name"
         )));
     }
     let dest = plugin_payload_path(cache_dir, marketplace, plugin);
@@ -451,12 +466,17 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
             ch
         ));
     }
-    if let Some(r#ref) = split_source_ref(source).1
-        && r#ref.starts_with('-')
-    {
-        return Err(anyhow::anyhow!(
-            "marketplace source's pinned ref may not start with '-': {source}"
-        ));
+    if let Some(r#ref) = split_source_ref(source).1 {
+        if r#ref.is_empty() {
+            return Err(anyhow::anyhow!(
+                "marketplace source has an empty pinned ref (nothing after '#'): {source}"
+            ));
+        }
+        if r#ref.starts_with('-') {
+            return Err(anyhow::anyhow!(
+                "marketplace source's pinned ref may not start with '-': {source}"
+            ));
+        }
     }
     Ok(())
 }
@@ -666,12 +686,49 @@ mod tests {
         );
     }
 
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn prop_split_source_ref_no_panic(s in ".*") {
+            let _ = split_source_ref(&s);
+        }
+
+        #[test]
+        fn prop_split_source_ref_no_hash_gives_none(s in "[^#]*") {
+            prop_assert_eq!(split_source_ref(&s), (s.as_str(), None));
+        }
+
+        #[test]
+        fn prop_split_source_ref_url_half_never_contains_hash(
+            url in "[^#]*",
+            r#ref in "[^#]*",
+        ) {
+            let source = format!("{url}#{ref}");
+            let (out_url, out_ref) = split_source_ref(&source);
+            prop_assert!(!out_url.contains('#'));
+            prop_assert_eq!(out_ref, Some(r#ref.as_str()));
+        }
+
+        #[test]
+        fn prop_reject_unsafe_source_no_panic(s in ".*") {
+            let _ = reject_unsafe_source(&s);
+        }
+    }
+
     #[test]
     fn reject_unsafe_source_rejects_leading_dash_in_pin() {
         // #496: the pinned ref is passed to `git clone --branch <ref>` — a
         // leading dash could be misread as a flag, same rationale as the
         // existing whole-source leading-dash guard.
         assert!(reject_unsafe_source("https://github.com/example/repo.git#-evil").is_err());
+    }
+
+    #[test]
+    fn reject_unsafe_source_rejects_empty_pin() {
+        // `url#` with nothing after the `#` would otherwise reach
+        // `git clone --branch ""`, a cryptic downstream failure instead of a
+        // clear validation error.
+        assert!(reject_unsafe_source("https://github.com/example/repo.git#").is_err());
     }
 
     #[test]
@@ -781,6 +838,41 @@ mod tests {
             "pinned source must re-clone on refresh"
         );
         assert_eq!(pull_calls.get(), 0, "pinned source must never pull");
+    }
+
+    #[test]
+    fn sync_git_pinned_refresh_leaves_old_clone_intact_when_reclone_fails() {
+        // #536: a failed reclone must not have already destroyed the working
+        // clone — the old one stays usable until the new one is confirmed.
+        struct FailingCloneGit;
+        impl GitBackend for FailingCloneGit {
+            fn clone(&self, _source: &str, _dest: &Path) -> Result<()> {
+                anyhow::bail!("simulated network failure")
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                unreachable!("pinned source must never pull")
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                Some("old-sha".to_string())
+            }
+        }
+
+        let m = Marketplace {
+            name: "pinned".into(),
+            source: "https://github.com/example/repo.git#v1.2.3".into(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let dest = marketplace_path(cache.path(), &m.name);
+        std::fs::create_dir_all(dest.join(".git")).unwrap();
+        std::fs::write(dest.join("marker"), "old content").unwrap();
+
+        let err = sync_marketplace_with(cache.path(), &m, true, &FailingCloneGit).unwrap_err();
+        assert!(matches!(err, SyncError::CloneFailed { .. }));
+        assert!(
+            dest.join("marker").exists(),
+            "old clone must survive a failed reclone attempt"
+        );
+        assert!(dest.join(".git").exists());
     }
 
     #[test]
@@ -1034,8 +1126,8 @@ mod tests {
             );
             let msg = result.unwrap_err().to_string();
             assert!(
-                msg.contains("unsafe path component"),
-                "error message should mention unsafe path component, got: {msg}"
+                msg.contains("not a valid name"),
+                "error message should reject the invalid name, got: {msg}"
             );
         }
     }
@@ -1073,8 +1165,8 @@ mod tests {
             );
             let msg = result.unwrap_err().to_string();
             assert!(
-                msg.contains("unsafe path component"),
-                "error message should mention unsafe path component, got: {msg}"
+                msg.contains("not a valid name"),
+                "error message should reject the invalid name, got: {msg}"
             );
         }
     }
@@ -1112,8 +1204,8 @@ mod tests {
             );
             let msg = result.unwrap_err().to_string();
             assert!(
-                msg.contains("unsafe path component"),
-                "error message should mention unsafe path component, got: {msg}"
+                msg.contains("not a valid name"),
+                "error message should reject the invalid name, got: {msg}"
             );
         }
     }

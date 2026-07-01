@@ -18,6 +18,8 @@ pub enum ValidateError {
     BundleNoTags(String),
     #[error("duplicate bundle name: {0}")]
     DuplicateBundleName(String),
+    #[error("invalid bundle name: {0}")]
+    InvalidBundleName(String),
     #[error("invalid CIDR notation: {0}")]
     InvalidCIDR(String),
     #[error("invalid MAC address: {0}")]
@@ -312,6 +314,13 @@ impl Config {
             }
             if !seen_bundle_names.insert(&b.name) {
                 return Err(ValidateError::DuplicateBundleName(b.name.clone()));
+            }
+            // A bundle name is joined as a single path component (the
+            // content directory name) at every call site that resolves a
+            // firing bundle to disk — validating here is the actual
+            // security boundary, since not every join site re-checks it.
+            if !llmenv_paths::is_valid_short_name(&b.name) {
+                return Err(ValidateError::InvalidBundleName(b.name.clone()));
             }
         }
         for key in self.capabilities.env.keys() {
@@ -2058,6 +2067,37 @@ mod tests {
     #[test]
     fn test_marketplace_name_valid_accepted() {
         let config = config_with_marketplace("super-powers_2.0", "https://example.com/m");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn bundle_name_with_path_traversal_is_rejected() {
+        // A bundle name is joined as a single path component in multiple
+        // places (src/cli/mod.rs::build_bundle_refs,
+        // src/hook_run/mod.rs::build_hook_bundle_refs) with no per-site
+        // guard — validation here is the actual security boundary.
+        let config = Config {
+            bundle: vec![crate::Bundle {
+                name: "../evil".into(),
+                when: vec!["t".into()],
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::InvalidBundleName(_))
+        ));
+    }
+
+    #[test]
+    fn bundle_name_valid_is_accepted() {
+        let config = Config {
+            bundle: vec![crate::Bundle {
+                name: "rust-dev".into(),
+                when: vec!["rust".into()],
+            }],
+            ..Default::default()
+        };
         assert!(config.validate().is_ok());
     }
 
