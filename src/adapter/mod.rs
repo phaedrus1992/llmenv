@@ -1,4 +1,6 @@
 pub mod claude_code;
+pub mod crush;
+pub(crate) mod skills;
 
 use std::path::{Path, PathBuf};
 
@@ -82,9 +84,11 @@ pub trait AgentAdapter {
 ///
 /// # Extending the registry
 /// Add new adapters here once their crate is wired in:
-// #506: CrushAdapter appended here
 pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
-    vec![Box::new(claude_code::ClaudeCodeAdapter)]
+    vec![
+        Box::new(claude_code::ClaudeCodeAdapter),
+        Box::new(crush::CrushAdapter),
+    ]
 }
 
 /// Returns `true` when `name` resolves to an executable on the current `PATH`.
@@ -110,19 +114,22 @@ mod tests {
     use super::{binary_on_path, registered_adapters};
 
     #[test]
-    fn registry_contains_exactly_claude_adapter() {
+    fn registry_contains_claude_and_crush_adapters() {
         let adapters = registered_adapters();
         assert_eq!(
             adapters.len(),
-            1,
-            "registry should have exactly one adapter"
+            2,
+            "registry should have exactly two adapters"
         );
         assert_eq!(adapters[0].name(), "claude-code");
+        assert_eq!(adapters[1].name(), "crush");
     }
 
     #[test]
     fn registry_adapter_trait_probes() {
         let adapters = registered_adapters();
+
+        // ClaudeCodeAdapter
         let a = &*adapters[0];
         assert_eq!(a.binary_name(), "claude");
         assert!(a.supports_plugins(), "ClaudeCodeAdapter supports plugins");
@@ -144,6 +151,19 @@ mod tests {
                 "supported_hook_events missing {expected}"
             );
         }
+
+        // CrushAdapter
+        let c = &*adapters[1];
+        assert_eq!(c.binary_name(), "crush");
+        assert!(
+            !c.supports_plugins(),
+            "CrushAdapter does not support plugins"
+        );
+        assert!(c.supports_lsp(), "CrushAdapter supports LSP");
+        assert!(
+            c.supported_hook_events().contains(&"PreToolUse"),
+            "CrushAdapter must support PreToolUse"
+        );
     }
 
     #[test]

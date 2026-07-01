@@ -34,6 +34,8 @@ Variables for controlling external LLM CLI tools, tools installed on the system,
 | `BASH_MAX_OUTPUT_LENGTH` | Max bash command output length | Claude Code tool dispatch | User session |
 | `MAX_MCP_OUTPUT_TOKENS` | Max MCP tool output token count | Claude Code integration | User session |
 | `ENABLE_PROMPT_CACHING_1H` | Enable 1-hour prompt caching | Claude API / Claude Code | User session |
+| `CRUSH_GLOBAL_CONFIG` | Path to `crush.json` (rendered by llmenv) | Crush CLI | User session |
+| `CRUSH_GLOBAL_DATA` | Crush state directory (points at `LLMENV_STATE_DIR`) | Crush CLI | User session |
 | `HOME` | User home directory | System | System-wide |
 | `PATH` | Executable search path | System | System-wide |
 | `EDITOR` | Default text editor | System | System-wide |
