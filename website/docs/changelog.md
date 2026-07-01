@@ -79,6 +79,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (read from llmenv's process env before bundle-declared values landed) and is
   superseded by the built-in context-mode feature. (#490, removes #464)
 
+### Fixed
+
+- Fix marketplace and plugin-payload sync returning a broken clone with unstable cache key when
+  git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
+  cleans up the corrupted directory, and forces a fresh clone on retry (#537)
+
 ## [2.3.0] - 2026-06-30
 
 ### Added
