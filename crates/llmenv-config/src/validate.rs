@@ -528,6 +528,8 @@ impl Config {
     }
 
     fn validate_skills(&self) -> Result<(), ValidateError> {
+        use llmenv_paths::is_unsafe_join_target;
+
         for s in &self.skills {
             if s.name.is_empty() {
                 return Err(ValidateError::SkillEmptyName(s.name.clone()));
@@ -535,12 +537,19 @@ impl Config {
             if s.path.is_empty() {
                 return Err(ValidateError::SkillEmptyPath(s.name.clone()));
             }
-            // Confine skill paths within config/bundle roots — reject traversal attempts
-            if has_parent_component(&s.path) {
+            // Confine skill paths and names within config/bundle roots — reject traversal
+            // and absolute paths. is_unsafe_join_target checks both .. and is_absolute().
+            if is_unsafe_join_target(&s.path) {
                 return Err(ValidateError::SkillPathTraversal(
                     s.name.clone(),
                     s.path.clone(),
                 ));
+            }
+            if is_unsafe_join_target(&s.name) {
+                return Err(ValidateError::SkillEmptyName(format!(
+                    "{} (contains path-traversal components)",
+                    s.name
+                )));
             }
         }
         Ok(())

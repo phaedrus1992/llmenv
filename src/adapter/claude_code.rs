@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::skills::create_dir_owner_only;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
@@ -113,10 +114,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn env_vars(
         &self,
         cache_dir: &Path,
-        _state_dir: &Path,
+        state_dir: &Path,
     ) -> anyhow::Result<Vec<(String, String)>> {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
+        })?;
+        // Validate state_dir UTF-8 even though Claude Code doesn't consume it yet,
+        // keeping the trait contract uniform across adapters.
+        let _ = state_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!("state_dir is not valid UTF-8: {}", state_dir.display())
         })?;
         Ok(vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())])
     }
@@ -523,22 +529,6 @@ pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec
 
 /// Create `dir` (and all parents) with mode 0o700 on Unix so directory
 /// listings are owner-only from creation, not after a chmod race.
-fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
-    }
-}
 
 // write_first_class_skills, validate_skills, validate_skill_frontmatter, and
 // scan_skill_files_for_hardcoded_paths live in crate::adapter::skills — shared with CrushAdapter.
@@ -569,13 +559,8 @@ fn generate_installed_plugins_json(
     out: &Path,
     plugins: &[&crate::plugins::resolve::ResolvedPlugin],
 ) -> anyhow::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-
     let plugins_dir = out.join("plugins");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .recursive(true)
-        .create(&plugins_dir)?;
+    create_dir_owner_only(&plugins_dir)?;
     let path = plugins_dir.join("installed_plugins.json");
 
     // A fixed epoch timestamp is acceptable: CC uses installedAt/lastUpdated

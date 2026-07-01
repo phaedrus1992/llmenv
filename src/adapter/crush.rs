@@ -65,8 +65,8 @@ impl AgentAdapter for CrushAdapter {
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
-        // 1. Create output dir
-        std::fs::create_dir_all(out)?;
+        // 1. Create output dir with owner-only permissions
+        super::skills::create_dir_owner_only(out)?;
 
         // 2. Validate hook events + hard-error on mcp_tool hooks (fix 5)
         for hook in &manifest.capabilities.hooks {

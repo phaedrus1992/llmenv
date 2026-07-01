@@ -12,6 +12,25 @@ use std::path::{Path, PathBuf};
 const IGNORE_INLINE: &str = "# llmenv-ignore: hardcoded-path";
 const IGNORE_FILE: &str = "# llmenv-ignore-file: hardcoded-path";
 
+/// Create a directory with owner-only permissions (0o700 on Unix, default on non-Unix).
+/// Recursive — creates parent directories as needed.
+pub(crate) fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
+    }
+}
+
 /// Reject materialized content carrying a hardcoded `~/.claude` / `$HOME/.claude`
 /// path (#311). Such paths resolve against the *default* config dir, so they
 /// break whenever `CLAUDE_CONFIG_DIR` points at a materialized llmenv folder
