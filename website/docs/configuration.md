@@ -173,10 +173,11 @@ the `native_<feature>` siblings under `capabilities:` instead.
 ## `bundle:`
 
 A bundle is a named content set that fires when one of its tags is active, or
-when a project marker force-enables it via `enable_bundles`. Its content directory
-lives at `<config_dir>/bundles/<name>/` and its files are merged into the agent
-config. A bundle's `bundle.yaml` inside its content directory may declare
-`env:` and other `capabilities:` fields.
+when a project marker force-enables it via `enable_bundles` — unless a project
+marker force-disables it via `disable_bundles`, which always wins. Its content
+directory lives at `<config_dir>/bundles/<name>/` and its files are merged
+into the agent config. A bundle's `bundle.yaml` inside its content directory
+may declare `env:` and other `capabilities:` fields.
 
 ```yaml
 bundle:
@@ -447,12 +448,18 @@ name: MyApp                     # defaults to the folder basename
 description: "Customer API"     # capped at 1024 bytes
 tags: [myapp, rust]             # joined into the active tag set
 enable_bundles: [base]          # force-enable bundles regardless of their tags
+disable_bundles: [yaks]         # force-disable bundles even if a scope's tag enables them
 ```
 
-All fields are optional; an empty file is valid. Unknown fields are reported by
-`llmenv doctor`. Malformed YAML degrades to defaults derived from the folder
-basename. See [Concepts → Project markers](concepts.md#project-markers) for
-discovery rules.
+All fields are optional; an empty file is valid. `disable_bundles` always wins
+over any scope's tag-firing or `enable_bundles` for the named bundle,
+including this same marker's own `enable_bundles` if it lists the same
+name — see [Concepts → Precedence](concepts.md#precedence). Unknown fields
+are reported by `llmenv doctor`, which also flags a `disable_bundles`/
+`enable_bundles` entry referencing an unknown bundle or the same bundle
+appearing in both lists. Malformed YAML degrades to defaults derived from the
+folder basename. See [Concepts → Project markers](concepts.md#project-markers)
+for discovery rules.
 
 ## YAML gotchas
 
