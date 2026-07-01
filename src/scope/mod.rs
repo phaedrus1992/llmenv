@@ -46,6 +46,11 @@ pub struct ActiveScope {
     /// Bundles this scope manually enables (from `.llmenv.yaml`'s
     /// `enable_bundles` list). Only populated for project scopes.
     pub enable_bundles: Vec<String>,
+    /// Bundles this scope removes from the firing set (from `.llmenv.yaml`'s
+    /// `disable_bundles` list, #194). Only populated for project scopes.
+    /// Disable always wins over any scope's tag-firing or `enable_bundles`,
+    /// including this same scope's own `enable_bundles`.
+    pub disable_bundles: Vec<String>,
     /// Project display name (from `.llmenv.yaml` `name` field or folder
     /// basename). Only present for `kind == "project"`.
     pub name: Option<String>,
@@ -73,6 +78,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 tags: s.tags.clone(),
                 project_root: None,
                 enable_bundles: Vec::new(),
+                disable_bundles: Vec::new(),
                 name: None,
                 description: None,
                 unknown_fields: Vec::new(),
@@ -87,6 +93,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 tags: s.tags.clone(),
                 project_root: None,
                 enable_bundles: Vec::new(),
+                disable_bundles: Vec::new(),
                 name: None,
                 description: None,
                 unknown_fields: Vec::new(),
@@ -101,6 +108,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 tags: s.tags.clone(),
                 project_root: None,
                 enable_bundles: Vec::new(),
+                disable_bundles: Vec::new(),
                 name: None,
                 description: None,
                 unknown_fields: Vec::new(),
@@ -114,6 +122,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             tags: p.tags,
             project_root: Some(p.root),
             enable_bundles: p.enable_bundles,
+            disable_bundles: p.disable_bundles,
             name: Some(p.name),
             description: p.description,
             unknown_fields: p.unknown_fields,

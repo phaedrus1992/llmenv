@@ -18,6 +18,8 @@ pub enum ValidateError {
     BundleNoTags(String),
     #[error("duplicate bundle name: {0}")]
     DuplicateBundleName(String),
+    #[error("invalid bundle name: {0}")]
+    InvalidBundleName(String),
     #[error("invalid CIDR notation: {0}")]
     InvalidCIDR(String),
     #[error("invalid MAC address: {0}")]
@@ -152,17 +154,6 @@ pub enum ValidateError {
     SkillEmptyPath(String),
     #[error("skill '{0}' path contains traversal components (..): {1}")]
     SkillPathTraversal(String, String),
-}
-
-/// A marketplace name is safe to use as a single filesystem path component and
-/// as a JSON key: non-empty, only `[A-Za-z0-9._-]`, never `.`/`..`, and no
-/// leading `-` (which a CLI/git would treat as a flag).
-fn is_valid_marketplace_name(name: &str) -> bool {
-    if name.is_empty() || name == "." || name == ".." || name.starts_with('-') {
-        return false;
-    }
-    name.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// A state-tool subdir must be a single safe path component: non-empty, not
@@ -324,6 +315,13 @@ impl Config {
             if !seen_bundle_names.insert(&b.name) {
                 return Err(ValidateError::DuplicateBundleName(b.name.clone()));
             }
+            // A bundle name is joined as a single path component (the
+            // content directory name) at every call site that resolves a
+            // firing bundle to disk — validating here is the actual
+            // security boundary, since not every join site re-checks it.
+            if !llmenv_paths::is_valid_short_name(&b.name) {
+                return Err(ValidateError::InvalidBundleName(b.name.clone()));
+            }
         }
         for key in self.capabilities.env.keys() {
             validate_capabilities_env_key("config.yaml: capabilities", key)?;
@@ -346,7 +344,7 @@ impl Config {
             // it to `[A-Za-z0-9._-]` (and rejecting `.`/`..`/leading-`-`) blocks
             // path traversal out of the cache dir and keeps the `plugin@market`
             // key unambiguous (no embedded `@`/`/`/control chars).
-            if !is_valid_marketplace_name(&m.name) {
+            if !llmenv_paths::is_valid_short_name(&m.name) {
                 return Err(ValidateError::InvalidMarketplaceName(m.name.clone()));
             }
             if m.source.is_empty() {
@@ -537,7 +535,7 @@ impl Config {
             if s.path.is_empty() {
                 return Err(ValidateError::SkillEmptyPath(s.name.clone()));
             }
-            // Confine skill paths and names within config/bundle roots — reject traversal
+            // Confine skill paths within config/bundle roots — reject traversal
             // and absolute paths. is_unsafe_join_target checks both .. and is_absolute().
             if is_unsafe_join_target(&s.path) {
                 return Err(ValidateError::SkillPathTraversal(
@@ -545,9 +543,14 @@ impl Config {
                     s.path.clone(),
                 ));
             }
-            if is_unsafe_join_target(&s.name) {
+            // The name becomes a single filesystem path component under
+            // `skills/` and (via plugin projection) a JSON key — reject
+            // anything outside the same allowlist used for marketplace names
+            // (#534: a blocklist here previously missed control characters
+            // and Unicode formatting characters like zero-width space).
+            if !llmenv_paths::is_valid_short_name(&s.name) {
                 return Err(ValidateError::SkillEmptyName(format!(
-                    "{} (contains path-traversal components)",
+                    "{} (not a valid skill name: use only ASCII letters, digits, '.', '_', '-')",
                     s.name
                 )));
             }
@@ -2067,6 +2070,37 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    #[test]
+    fn bundle_name_with_path_traversal_is_rejected() {
+        // A bundle name is joined as a single path component in multiple
+        // places (src/cli/mod.rs::build_bundle_refs,
+        // src/hook_run/mod.rs::build_hook_bundle_refs) with no per-site
+        // guard — validation here is the actual security boundary.
+        let config = Config {
+            bundle: vec![crate::Bundle {
+                name: "../evil".into(),
+                when: vec!["t".into()],
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::InvalidBundleName(_))
+        ));
+    }
+
+    #[test]
+    fn bundle_name_valid_is_accepted() {
+        let config = Config {
+            bundle: vec![crate::Bundle {
+                name: "rust-dev".into(),
+                when: vec!["rust".into()],
+            }],
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
     // ===== Property tests against the real validators =====
     //
     // These call the private is_valid_* functions directly (rather than
@@ -2237,7 +2271,7 @@ mod tests {
             // so it must be accepted (the "." / ".." cases are excluded by the
             // leading-char class never producing a bare "." or "..").
             prop_assume!(name != "." && name != "..");
-            prop_assert!(is_valid_marketplace_name(&name), "valid name rejected: {name}");
+            prop_assert!(llmenv_paths::is_valid_short_name(&name), "valid name rejected: {name}");
         }
 
         #[test]
@@ -2248,7 +2282,7 @@ mod tests {
         ) {
             let name = format!("{before}{bad}{after}");
             prop_assert!(
-                !is_valid_marketplace_name(&name),
+                !llmenv_paths::is_valid_short_name(&name),
                 "name with disallowed char accepted: {name:?}"
             );
         }
@@ -2256,7 +2290,7 @@ mod tests {
         #[test]
         fn prop_marketplace_name_leading_dash_rejected(rest in "[A-Za-z0-9._-]{0,20}") {
             let name = format!("-{rest}");
-            prop_assert!(!is_valid_marketplace_name(&name), "leading-dash name accepted: {name}");
+            prop_assert!(!llmenv_paths::is_valid_short_name(&name), "leading-dash name accepted: {name}");
         }
 
         #[test]
@@ -2568,6 +2602,45 @@ mod tests {
     fn skill_valid_entry_is_accepted() {
         let cfg = config_with_skills(vec![crate::SkillSource {
             name: "my-skill".into(),
+            path: "./skills/my-skill".into(),
+            when: vec![],
+        }]);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn skill_name_with_path_separator_is_rejected() {
+        // #534: a skill name is a single directory component, not a nested
+        // path — is_unsafe_join_target alone would accept "foo/bar" (no `..`,
+        // not absolute) even though the doc contract says "the" directory name.
+        let cfg = config_with_skills(vec![crate::SkillSource {
+            name: "foo/bar".into(),
+            path: "./skills/foo".into(),
+            when: vec![],
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::SkillEmptyName(_))
+        ));
+    }
+
+    #[test]
+    fn skill_name_with_control_character_is_rejected() {
+        let cfg = config_with_skills(vec![crate::SkillSource {
+            name: "foo\0bar".into(),
+            path: "./skills/foo".into(),
+            when: vec![],
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::SkillEmptyName(_))
+        ));
+    }
+
+    #[test]
+    fn skill_name_with_dot_and_dash_is_accepted() {
+        let cfg = config_with_skills(vec![crate::SkillSource {
+            name: "my-skill.v2".into(),
             path: "./skills/my-skill".into(),
             when: vec![],
         }]);

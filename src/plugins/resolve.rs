@@ -385,7 +385,7 @@ mod tests {
                 .marketplaces
                 .iter()
                 .any(|m| m.name == "context-mode"
-                    && m.source == "https://github.com/mksglu/context-mode")
+                    && m.source == crate::config::CONTEXT_MODE_SOURCE)
         );
     }
 
