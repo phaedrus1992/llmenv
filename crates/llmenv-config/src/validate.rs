@@ -150,6 +150,8 @@ pub enum ValidateError {
     SkillEmptyName(String),
     #[error("skill '{0}' has an empty path")]
     SkillEmptyPath(String),
+    #[error("skill '{0}' path contains traversal components (..): {1}")]
+    SkillPathTraversal(String, String),
 }
 
 /// A marketplace name is safe to use as a single filesystem path component and
@@ -532,6 +534,13 @@ impl Config {
             }
             if s.path.is_empty() {
                 return Err(ValidateError::SkillEmptyPath(s.name.clone()));
+            }
+            // Confine skill paths within config/bundle roots — reject traversal attempts
+            if has_parent_component(&s.path) {
+                return Err(ValidateError::SkillPathTraversal(
+                    s.name.clone(),
+                    s.path.clone(),
+                ));
             }
         }
         Ok(())

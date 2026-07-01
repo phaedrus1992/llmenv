@@ -110,7 +110,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
         CLAUDE_CODE_HOOK_EVENTS
     }
 
-    fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    fn env_vars(
+        &self,
+        cache_dir: &Path,
+        _state_dir: &Path,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
         })?;
@@ -565,8 +569,13 @@ fn generate_installed_plugins_json(
     out: &Path,
     plugins: &[&crate::plugins::resolve::ResolvedPlugin],
 ) -> anyhow::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
     let plugins_dir = out.join("plugins");
-    std::fs::create_dir_all(&plugins_dir)?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&plugins_dir)?;
     let path = plugins_dir.join("installed_plugins.json");
 
     // A fixed epoch timestamp is acceptable: CC uses installedAt/lastUpdated

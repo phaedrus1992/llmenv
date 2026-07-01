@@ -40,16 +40,27 @@ impl AgentAdapter for CrushAdapter {
         SUPPORTED_HOOK_EVENTS
     }
 
-    fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
-        let dir = cache_dir.to_str().ok_or_else(|| {
+    fn env_vars(
+        &self,
+        cache_dir: &Path,
+        state_dir: &Path,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let config_dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
         })?;
+        let data_dir = state_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!("state_dir is not valid UTF-8: {}", state_dir.display())
+        })?;
+        // ponytail: creating a crush-specific subdir in state_dir to isolate Crush's runtime
+        // data from other tools' state dirs. Allows future Crush-specific state cleanup
+        // without touching unrelated stores.
+        let crush_data_dir = format!("{data_dir}/crush");
         Ok(vec![
             (
                 "CRUSH_GLOBAL_CONFIG".into(),
-                format!("{dir}/{CRUSH_JSON_FILE}"),
+                format!("{config_dir}/{CRUSH_JSON_FILE}"),
             ),
-            ("CRUSH_GLOBAL_DATA".into(), dir.to_owned()),
+            ("CRUSH_GLOBAL_DATA".into(), crush_data_dir),
         ])
     }
 
@@ -509,8 +520,9 @@ mod tests {
 
     #[test]
     fn env_vars_returns_config_and_data() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vars = CrushAdapter.env_vars(tmp.path()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let vars = CrushAdapter.env_vars(cache.path(), state.path()).unwrap();
         assert_eq!(vars.len(), 2);
         assert!(vars.iter().any(|(k, _)| k == "CRUSH_GLOBAL_CONFIG"));
         assert!(vars.iter().any(|(k, _)| k == "CRUSH_GLOBAL_DATA"));
@@ -518,8 +530,9 @@ mod tests {
 
     #[test]
     fn env_vars_config_path_ends_with_crush_json() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vars = CrushAdapter.env_vars(tmp.path()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let vars = CrushAdapter.env_vars(cache.path(), state.path()).unwrap();
         let (_, config) = vars
             .iter()
             .find(|(k, _)| k == "CRUSH_GLOBAL_CONFIG")
@@ -531,11 +544,44 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_data_dir_is_cache_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vars = CrushAdapter.env_vars(tmp.path()).unwrap();
+    fn env_vars_data_dir_is_state_subdir() {
+        let cache = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let vars = CrushAdapter.env_vars(cache.path(), state.path()).unwrap();
         let (_, data) = vars.iter().find(|(k, _)| k == "CRUSH_GLOBAL_DATA").unwrap();
-        assert_eq!(data, tmp.path().to_str().unwrap());
+        let expected = format!("{}/crush", state.path().display());
+        assert_eq!(
+            data, &expected,
+            "CRUSH_GLOBAL_DATA should point to <state_dir>/crush"
+        );
+    }
+
+    #[test]
+    fn env_vars_data_survives_config_hash_change() {
+        let state = tempfile::tempdir().unwrap();
+        // Simulate two different config renders (different content hashes)
+        let cache1 = tempfile::tempdir().unwrap();
+        let cache2 = tempfile::tempdir().unwrap();
+
+        // First render: cache1 + state
+        let vars1 = CrushAdapter.env_vars(cache1.path(), state.path()).unwrap();
+        let (_, data1) = vars1
+            .iter()
+            .find(|(k, _)| k == "CRUSH_GLOBAL_DATA")
+            .unwrap();
+
+        // Second render with different cache dir: cache2 + same state
+        let vars2 = CrushAdapter.env_vars(cache2.path(), state.path()).unwrap();
+        let (_, data2) = vars2
+            .iter()
+            .find(|(k, _)| k == "CRUSH_GLOBAL_DATA")
+            .unwrap();
+
+        // Both renders point to the same stable state dir, so session data is not lost
+        assert_eq!(
+            data1, data2,
+            "CRUSH_GLOBAL_DATA must point to the same dir despite config hash changes"
+        );
     }
 
     // ── materialize: empty config ─────────────────────────────────────────────
