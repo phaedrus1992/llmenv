@@ -45,13 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   render `crush.json` when `crush` is on `PATH`. What maps: permissions →
   `allowed_tools`/`denied_tools` (lossy, fail-closed — `ask` rules collapse to
   `denied_tools`, never silently allowed; Crush has no ask concept); hooks →
-  `PreToolUse` only (`mcp_tool`-kind hooks and unsupported hook events hard-error
-  with an actionable message); MCP servers (including `headers`, `disabled_tools`,
-  `timeout`); LSP servers → `lsp.<name>`; first-class skills and plugin-projected
-  skills → `options.skills_paths`. Non-skill plugin content (`agents/`, `commands/`)
-  hard-errors naming the offending plugin. `native.crush` / `native_permissions.crush`
+  `PreToolUse` only (`mcp_tool`-kind hooks and unsupported hook events are
+  skipped with a warning naming the hook, not fatal to the rest of the render);
+  MCP servers (including `headers`, `disabled_tools`, `timeout`); LSP servers →
+  `lsp.<name>`; first-class skills and plugin-projected skills →
+  `options.skills_paths`. Non-skill plugin content (`agents/`, `commands/`,
+  `hooks/`) is skipped with a warning naming the offending plugin — the rest of
+  the manifest still materializes. `native.crush` / `native_permissions.crush`
   / `native_hooks.crush` / `native_mcp.crush` merge verbatim — provider/model config
-  lives here until first-class provider config ships (#508). Docs in #507. (#506)
+  lives here until first-class provider config ships (#508). Docs in #507. (#506, #543)
+- `llmenv doctor` now reports, by name, every hook event that a `PATH`-detected
+  adapter can't materialize (e.g. Crush skipping a `PostToolUse` hook), and its
+  token-efficiency checks now count a var as set if it's declared in
+  `native.claude_code.env`, not only in the live process environment. (#543)
 
 ### Changed
 
@@ -81,6 +87,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Code's layout, so `crush.json` and `CRUSH_GLOBAL_CONFIG`/`CRUSH_GLOBAL_DATA` were never
   produced even with `crush` on `PATH`. `regenerate` also gained the same per-adapter
   `PATH`-gated loop `export` already had. (#543)
+- Fix `CrushAdapter` hard-erroring the *entire* render over a single incompatible hook
+  event, `mcp_tool` hook, or plugin with `agents/`/`commands/`/`hooks/` content — one
+  unsupported bundle previously blocked Crush output altogether. Incompatible pieces
+  are now skipped with a warning naming them; everything Crush can support still
+  materializes. (#543)
+- Fix `LLMENV_STATE_DIR` (and other configured tool-state relocation vars) getting
+  silently overwritten with the wrong adapter's state directory once more than one
+  adapter materializes in the same `export`/`regenerate` run — the durable-state
+  feature is scoped to tools writing into `CLAUDE_CONFIG_DIR`, so it now only runs
+  for the Claude Code adapter instead of once per adapter. (#543)
 
 ## [2.3.0] - 2026-06-30
 
