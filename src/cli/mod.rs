@@ -1058,18 +1058,26 @@ fn build_and_materialize(
     }
 
     // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and
-    // create the dirs so tools find them on first run.
+    // create the dirs so tools find them on first run. This feature exists for
+    // tools that persist runtime state into CLAUDE_CONFIG_DIR (#175), so it's
+    // Claude Code-only: emitting it per-adapter would make LLMENV_STATE_DIR
+    // collide in the shared env-var map, with whichever adapter materializes
+    // last silently winning and pointing Claude at Crush's state dir (#543
+    // follow-up). Crush keeps its own dedicated CRUSH_GLOBAL_DATA from
+    // adapter.env_vars() above, unaffected by this gate.
     // When context-mode is enabled (#490) inject CONTEXT_MODE_DATA_DIR as a
     // synthetic StateTool so the store lands in the durable dir automatically.
-    let state_cfg = crate::materialize::state::effective_state_config(
-        &config.state,
-        config.context_mode_enabled(),
-    );
-    crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
-        .context("creating durable state directories")?;
-    env_vars.extend(crate::materialize::state::state_env_vars(
-        &state_cfg, &state_dir,
-    ));
+    if adapter.name() == ClaudeCodeAdapter.name() {
+        let state_cfg = crate::materialize::state::effective_state_config(
+            &config.state,
+            config.context_mode_enabled(),
+        );
+        crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
+            .context("creating durable state directories")?;
+        env_vars.extend(crate::materialize::state::state_env_vars(
+            &state_cfg, &state_dir,
+        ));
+    }
 
     // Defense-in-depth (#67): validate var names at the source, not only at the
     // final emission loop. A future emission path that doesn't route through
@@ -2902,6 +2910,67 @@ mod tests {
             claude_path, crush_path,
             "each adapter must materialize into its own cache subtree"
         );
+    }
+
+    #[test]
+    fn build_and_materialize_only_claude_code_emits_llmenv_state_dir() {
+        // Regression test for the #543 follow-up: state_env_vars() always emits
+        // the literal key "LLMENV_STATE_DIR", so calling it once per adapter in
+        // the export/regenerate loop made whichever adapter materialized last
+        // silently overwrite the value, pointing Claude Code's durable-state
+        // tooling at Crush's state dir instead of its own.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let (_, claude_vars) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("claude adapter should materialize with a firing bundle");
+        let claude_state_dir = claude_vars
+            .iter()
+            .find(|(k, _)| k == "LLMENV_STATE_DIR")
+            .map(|(_, v)| v.clone())
+            .expect("Claude Code must emit LLMENV_STATE_DIR");
+
+        let crush = crate::adapter::crush::CrushAdapter;
+        let (_, crush_vars) = build_and_materialize(&crush, ctx, false)
+            .unwrap()
+            .expect("crush adapter should materialize with a firing bundle");
+        assert!(
+            !crush_vars.iter().any(|(k, _)| k == "LLMENV_STATE_DIR"),
+            "Crush must not emit LLMENV_STATE_DIR — it would collide with \
+             Claude Code's value in the shared export env-var map"
+        );
+
+        // Re-materializing Claude Code after Crush must still see its own,
+        // unclobbered state dir — proves ordering in the adapter loop can't
+        // corrupt the value.
+        let (_, claude_vars_again) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("claude adapter should materialize again");
+        let claude_state_dir_again = claude_vars_again
+            .iter()
+            .find(|(k, _)| k == "LLMENV_STATE_DIR")
+            .map(|(_, v)| v.clone())
+            .expect("Claude Code must still emit LLMENV_STATE_DIR");
+        assert_eq!(claude_state_dir, claude_state_dir_again);
     }
 
     #[test]
