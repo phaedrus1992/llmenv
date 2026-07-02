@@ -105,6 +105,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   adapter materializes in the same `export`/`regenerate` run — the durable-state
   feature is scoped to tools writing into `CLAUDE_CONFIG_DIR`, so it now only runs
   for the Claude Code adapter instead of once per adapter. (#543)
+- Fix unbounded, non-timeout-bounded DNS resolution in the ICM MCP client's SSRF
+  guard: `validate_url_production` resolved domain hosts via a plain blocking
+  `to_socket_addrs()` call before the 2s `HOOK_TIMEOUT` was ever applied, so a slow
+  or failing DNS resolver could hang `llmenv hook-run` — including the per-prompt
+  `turn_start` hook — for minutes instead of seconds. Resolution is now bounded by
+  the same timeout via a dedicated helper. (#547)
+- Fix the ICM memory backend (`session_start`/`turn_start`/`session_end`) being
+  completely non-functional whenever it resolved to loopback or a private-network
+  address — the documented common topology (AGENTS.md: "the resolved icm MCP
+  endpoint can be a remote `icm serve`"). Four bugs stacked, each masking the next:
+  the SSRF guard rejected loopback/private/ULA outright (now split into
+  `SsrfPolicy::PublicOnly` vs. `AllowPrivateNetwork`, the latter used by the ICM
+  client); the client never sent the `Accept` header MCP's Streamable HTTP
+  transport requires (406); the client never performed the MCP `initialize`
+  session handshake the transport requires (400 missing session ID); and the
+  `SessionEnd` store action never sent the tool's required `topic` field. All four
+  fixed together; verified end-to-end against a live ICM server. (#548)
 
 ## [2.3.0] - 2026-06-30
 
