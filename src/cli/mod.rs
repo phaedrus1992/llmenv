@@ -526,6 +526,25 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Registered adapters whose binary is present on `PATH`, logging (at debug)
+/// and skipping any that aren't — the shared PATH-gate `run_export` and
+/// `run_regenerate` both apply before materializing an adapter (#543).
+fn installed_adapters() -> impl Iterator<Item = Box<dyn AgentAdapter>> {
+    crate::adapter::registered_adapters()
+        .into_iter()
+        .filter(|adapter| {
+            let on_path = crate::adapter::binary_on_path(adapter.binary_name());
+            if !on_path {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    binary = adapter.binary_name(),
+                    "adapter binary not on PATH — skipping"
+                );
+            }
+            on_path
+        })
+}
+
 fn run_export(
     scope: Option<String>,
     tag: Option<String>,
@@ -624,15 +643,8 @@ fn run_export(
         active: &active,
         firing: &firing,
     };
-    for adapter in crate::adapter::registered_adapters() {
-        if !crate::adapter::binary_on_path(adapter.binary_name()) {
-            tracing::debug!(
-                adapter = adapter.name(),
-                binary = adapter.binary_name(),
-                "adapter binary not on PATH — skipping"
-            );
-            continue;
-        }
+    let mut any_adapter_failed = false;
+    for adapter in installed_adapters() {
         match build_and_materialize(adapter.as_ref(), materialize_ctx, compress) {
             Ok(Some((ref cache_path, ref extra_vars))) => {
                 tracing::debug!(
@@ -676,12 +688,21 @@ fn run_export(
             // breaking the PATH-gating promise that unrelated setups see zero
             // change.
             Err(e) => {
+                any_adapter_failed = true;
                 eprintln!(
                     "warning: {} adapter materialization failed (skipping): {e:#}",
                     adapter.name()
                 );
             }
         }
+    }
+
+    // If every attempted adapter failed and none produced env vars, surface
+    // that loudly instead of exiting 0 with an empty environment — an `eval
+    // "$(llmenv export)"` wrapper only reacts to a non-zero exit, and silently
+    // sourcing nothing looks identical to "no bundles fire" (#543).
+    if vars.is_empty() && any_adapter_failed {
+        anyhow::bail!("all adapter materializations failed — no env vars to export");
     }
 
     // Introspection env: comma-separated, deterministic order. Scopes get
@@ -795,15 +816,8 @@ fn run_regenerate() -> anyhow::Result<()> {
         firing: &firing,
     };
     let mut materialized_any = false;
-    for adapter in crate::adapter::registered_adapters() {
-        if !crate::adapter::binary_on_path(adapter.binary_name()) {
-            tracing::debug!(
-                adapter = adapter.name(),
-                binary = adapter.binary_name(),
-                "adapter binary not on PATH — skipping"
-            );
-            continue;
-        }
+    let mut any_adapter_failed = false;
+    for adapter in installed_adapters() {
         match build_and_materialize(adapter.as_ref(), materialize_ctx, false) {
             Ok(Some((cache_path, _))) => {
                 materialized_any = true;
@@ -822,6 +836,7 @@ fn run_regenerate() -> anyhow::Result<()> {
             // Non-fatal (#543): same rationale as run_export — one adapter's
             // failure must not prevent other adapters from regenerating.
             Err(e) => {
+                any_adapter_failed = true;
                 eprintln!(
                     "warning: {} adapter regeneration failed (skipping): {e:#}",
                     adapter.name()
@@ -830,8 +845,13 @@ fn run_regenerate() -> anyhow::Result<()> {
         }
     }
 
+    // Mirror run_export's degenerate-case handling (#543): don't print the
+    // same "nothing to do" message for "everything failed" as for "legitimately
+    // no bundle content" — the two need different exit codes and wording.
     if materialized_any {
         eprintln!("\n  Restart your shell session or source the config to load changes.");
+    } else if any_adapter_failed {
+        anyhow::bail!("all adapter regenerations failed — see warnings above");
     } else {
         eprintln!("✓ No bundle content to materialize");
     }
@@ -905,6 +925,33 @@ struct MaterializeContext<'a> {
     config_dir: &'a Path,
     active: &'a ActiveScopes,
     firing: &'a [&'a Bundle],
+}
+
+/// Run the Claude Code–specific steps that have no equivalent in other
+/// adapters yet: merging seeded settings, seeding `installMethod`, and
+/// injecting cached auth into `.claude.json`. No-ops (returning a default
+/// [`AuthStatus`]) for any other adapter.
+fn claude_code_only_post_materialize(
+    adapter: &dyn AgentAdapter,
+    config: &Config,
+    adapter_root: &Path,
+    cache_path: &Path,
+) -> anyhow::Result<crate::materialize::manifest::AuthStatus> {
+    if adapter.name() != ClaudeCodeAdapter.name() {
+        return Ok(crate::materialize::manifest::AuthStatus::default());
+    }
+
+    // Merge user-elected seeded settings after materialize succeeds (#172).
+    // Must run post-materialize so a materialize failure leaves settings.json
+    // either absent (new folder) or in its prior good state (re-render).
+    crate::adapter::claude_code::apply_seeded_settings(cache_path, &config.init.seeded_settings)?;
+    // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
+    crate::adapter::claude_code::seed_install_method(cache_path)?;
+
+    // Auth inheritance (#172): inject cached credentials after the adapter has
+    // finished its own .claude.json writes (mcpServers upsert). Only fires
+    // when the stable cache has an entry.
+    Ok(inject_cached_auth_if_available(adapter_root, cache_path))
 }
 
 /// Build BundleRefs for firing bundles in scope-precedence order, merge them
@@ -986,28 +1033,8 @@ fn build_and_materialize(
     // form llmenv's complete owned set (#196). Idempotent.
     let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
 
-    // Seeded settings, installMethod seeding, and auth inheritance are all
-    // Claude Code–specific concepts (`.claude.json` / `settings.json` shape) —
-    // other adapters have no equivalent yet, so these only run for Claude Code.
-    let is_claude_code = adapter.name() == ClaudeCodeAdapter.name();
-    let auth_status = if is_claude_code {
-        // Merge user-elected seeded settings after materialize succeeds (#172).
-        // Must run post-materialize so a materialize failure leaves settings.json
-        // either absent (new folder) or in its prior good state (re-render).
-        crate::adapter::claude_code::apply_seeded_settings(
-            &cache_path,
-            &config.init.seeded_settings,
-        )?;
-        // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
-        crate::adapter::claude_code::seed_install_method(&cache_path)?;
-
-        // Auth inheritance (#172): inject cached credentials after the adapter has
-        // finished its own .claude.json writes (mcpServers upsert). Only fires
-        // when the stable cache has an entry.
-        inject_cached_auth_if_available(&adapter_root, &cache_path)
-    } else {
-        crate::materialize::manifest::AuthStatus::default()
-    };
+    let auth_status =
+        claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;
 
     let owned = adapter_owned
         .into_iter()
