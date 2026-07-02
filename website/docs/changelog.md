@@ -53,13 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   render `crush.json` when `crush` is on `PATH`. What maps: permissions →
   `allowed_tools`/`denied_tools` (lossy, fail-closed — `ask` rules collapse to
   `denied_tools`, never silently allowed; Crush has no ask concept); hooks →
-  `PreToolUse` only (`mcp_tool`-kind hooks and unsupported hook events hard-error
-  with an actionable message); MCP servers (including `headers`, `disabled_tools`,
-  `timeout`); LSP servers → `lsp.<name>`; first-class skills and plugin-projected
-  skills → `options.skills_paths`. Non-skill plugin content (`agents/`, `commands/`)
-  hard-errors naming the offending plugin. `native.crush` / `native_permissions.crush`
+  `PreToolUse` only (`mcp_tool`-kind hooks and unsupported hook events are
+  skipped with a warning naming the hook, not fatal to the rest of the render);
+  MCP servers (including `headers`, `disabled_tools`, `timeout`); LSP servers →
+  `lsp.<name>`; first-class skills and plugin-projected skills →
+  `options.skills_paths`. Non-skill plugin content (`agents/`, `commands/`,
+  `hooks/`) is skipped with a warning naming the offending plugin — the rest of
+  the manifest still materializes. `native.crush` / `native_permissions.crush`
   / `native_hooks.crush` / `native_mcp.crush` merge verbatim — provider/model config
-  lives here until first-class provider config ships (#508). Docs in #507. (#506)
+  lives here until first-class provider config ships (#508). Docs in #507. (#506, #543)
+- `llmenv doctor` now reports, by name, every hook event that a `PATH`-detected
+  adapter can't materialize (e.g. Crush skipping a `PostToolUse` hook), and its
+  token-efficiency checks now count a var as set if it's declared in
+  `native.claude_code.env`, not only in the live process environment. (#543)
 
 ### Changed
 
@@ -84,6 +90,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix marketplace and plugin-payload sync returning a broken clone with unstable cache key when
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
+- Fix `export`/`regenerate` never actually materializing Crush output: the internal
+  materialization step ignored which adapter was passed in and always rendered Claude
+  Code's layout, so `crush.json` and `CRUSH_GLOBAL_CONFIG`/`CRUSH_GLOBAL_DATA` were never
+  produced even with `crush` on `PATH`. `regenerate` also gained the same per-adapter
+  `PATH`-gated loop `export` already had. (#543)
+- Fix `CrushAdapter` hard-erroring the *entire* render over a single incompatible hook
+  event, `mcp_tool` hook, or plugin with `agents/`/`commands/`/`hooks/` content — one
+  unsupported bundle previously blocked Crush output altogether. Incompatible pieces
+  are now skipped with a warning naming them; everything Crush can support still
+  materializes. (#543)
+- Fix `LLMENV_STATE_DIR` (and other configured tool-state relocation vars) getting
+  silently overwritten with the wrong adapter's state directory once more than one
+  adapter materializes in the same `export`/`regenerate` run — the durable-state
+  feature is scoped to tools writing into `CLAUDE_CONFIG_DIR`, so it now only runs
+  for the Claude Code adapter instead of once per adapter. (#543)
+- Fix unbounded, non-timeout-bounded DNS resolution in the ICM MCP client's SSRF
+  guard: `validate_url_production` resolved domain hosts via a plain blocking
+  `to_socket_addrs()` call before the 2s `HOOK_TIMEOUT` was ever applied, so a slow
+  or failing DNS resolver could hang `llmenv hook-run` — including the per-prompt
+  `turn_start` hook — for minutes instead of seconds. Resolution is now bounded by
+  the same timeout via a dedicated helper. (#547)
+- Fix the ICM memory backend (`session_start`/`turn_start`/`session_end`) being
+  completely non-functional whenever it resolved to loopback or a private-network
+  address — the documented common topology (AGENTS.md: "the resolved icm MCP
+  endpoint can be a remote `icm serve`"). Four bugs stacked, each masking the next:
+  the SSRF guard rejected loopback/private/ULA outright (now split into
+  `SsrfPolicy::PublicOnly` vs. `AllowPrivateNetwork`, the latter used by the ICM
+  client); the client never sent the `Accept` header MCP's Streamable HTTP
+  transport requires (406); the client never performed the MCP `initialize`
+  session handshake the transport requires (400 missing session ID); and the
+  `SessionEnd` store action never sent the tool's required `topic` field. All four
+  fixed together; verified end-to-end against a live ICM server. (#548)
 
 ## [2.3.0] - 2026-06-30
 

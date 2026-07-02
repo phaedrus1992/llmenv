@@ -11,9 +11,11 @@
 //! real `run()` entry point end to end, including config resolution and the SSRF
 //! URL guard. Backend-response parsing (JSON-RPC error bodies, missing/malformed
 //! `result.content`) is covered by unit tests in `src/hook_run/mcp_client.rs`,
-//! which can use the test-only client that bypasses the loopback SSRF guard —
-//! something the production CLI path deliberately cannot do, since wiremock binds
-//! loopback and the guard rejects loopback before any request is sent.
+//! which can use the test-only client to point at a wiremock server. The
+//! production CLI path's `McpHttpClient::new` allows loopback/private ranges
+//! too (`SsrfPolicy::AllowPrivateNetwork`) — that's the expected topology for
+//! llmenv's own ICM backend (AGENTS.md) — so these tests exercise that
+//! directly rather than needing the test-only client's bypass.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -169,25 +171,29 @@ fn malformed_backend_url_exits_zero_with_warning() {
 }
 
 #[test]
-fn ssrf_rejected_loopback_url_exits_zero_with_warning() {
-    // Loopback URLs are rejected by the SSRF guard in `McpHttpClient::new`. The
-    // dispatcher must treat that rejection as fail-soft, not as a hard error.
+fn loopback_url_is_allowed_not_ssrf_rejected() {
+    // Loopback is the expected topology for llmenv's own same-host ICM backend
+    // (AGENTS.md) and must NOT be SSRF-rejected — `McpHttpClient::new` uses
+    // `SsrfPolicy::AllowPrivateNetwork`. Nothing listens on this discard port,
+    // so the *connection* fails instead, but that's a plain unreachable-backend
+    // fail-soft ("skipped"), not an "invalid ... SSRF" rejection.
     let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
 
     assert_fail_soft(
         hook_cmd(dir.path(), &config_path, "session_start"),
-        "invalid memory backend URL",
+        "session_start skipped",
     );
 }
 
 #[test]
-fn ssrf_rejected_private_url_exits_zero_with_warning() {
-    // Private-range IPs are likewise SSRF-rejected and must fail-soft.
+fn private_network_url_is_allowed_not_ssrf_rejected() {
+    // Private-range IPs are likewise the expected LAN topology for a remote
+    // `icm serve` (AGENTS.md) and must not be SSRF-rejected.
     let (dir, config_path) = setup_config(&config_with_memory_addr("10.0.0.1", 8080));
 
     assert_fail_soft(
         hook_cmd(dir.path(), &config_path, "session_start"),
-        "invalid memory backend URL",
+        "session_start skipped",
     );
 }
 

@@ -526,6 +526,25 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Registered adapters whose binary is present on `PATH`, logging (at debug)
+/// and skipping any that aren't — the shared PATH-gate `run_export` and
+/// `run_regenerate` both apply before materializing an adapter (#543).
+fn installed_adapters() -> impl Iterator<Item = Box<dyn AgentAdapter>> {
+    crate::adapter::registered_adapters()
+        .into_iter()
+        .filter(|adapter| {
+            let on_path = crate::adapter::binary_on_path(adapter.binary_name());
+            if !on_path {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    binary = adapter.binary_name(),
+                    "adapter binary not on PATH — skipping"
+                );
+            }
+            on_path
+        })
+}
+
 fn run_export(
     scope: Option<String>,
     tag: Option<String>,
@@ -617,23 +636,16 @@ fn run_export(
     // Merge + materialize the agent config directory for each installed adapter
     // and collect env vars. PATH-gating skips adapters whose binary is absent so
     // a machine without a given tool sees zero behavior change. (#502)
-    // NOTE: build_and_materialize is still Claude Code–specific; #506 wires Crush.
     let cache_dir_root = expand_tilde(&config.cache.cache_dir)?;
-    for adapter in crate::adapter::registered_adapters() {
-        debug_assert_eq!(
-            adapter.name(),
-            "claude-code",
-            "build_and_materialize is Claude-specific until #506 threads the adapter"
-        );
-        if !crate::adapter::binary_on_path(adapter.binary_name()) {
-            tracing::debug!(
-                adapter = adapter.name(),
-                binary = adapter.binary_name(),
-                "adapter binary not on PATH — skipping"
-            );
-            continue;
-        }
-        match build_and_materialize(&config, &config_dir, &active, &firing, compress) {
+    let materialize_ctx = MaterializeContext {
+        config: &config,
+        config_dir: &config_dir,
+        active: &active,
+        firing: &firing,
+    };
+    let mut any_adapter_failed = false;
+    for adapter in installed_adapters() {
+        match build_and_materialize(adapter.as_ref(), materialize_ctx, compress) {
             Ok(Some((ref cache_path, ref extra_vars))) => {
                 tracing::debug!(
                     adapter = adapter.name(),
@@ -669,8 +681,28 @@ fn run_export(
                     "no bundle content directories — skipping materialize"
                 );
             }
-            Err(e) => return Err(e).context("agent materialization failed"),
+            // Non-fatal (#543): one adapter's materialize failure (e.g. Crush
+            // rejecting an unsupported hook event) must not take down every
+            // other adapter's env vars. A machine with `crush` on PATH but an
+            // incompatible bundle would otherwise lose Claude Code output too,
+            // breaking the PATH-gating promise that unrelated setups see zero
+            // change.
+            Err(e) => {
+                any_adapter_failed = true;
+                eprintln!(
+                    "warning: {} adapter materialization failed (skipping): {e:#}",
+                    adapter.name()
+                );
+            }
         }
+    }
+
+    // If every attempted adapter failed and none produced env vars, surface
+    // that loudly instead of exiting 0 with an empty environment — an `eval
+    // "$(llmenv export)"` wrapper only reacts to a non-zero exit, and silently
+    // sourcing nothing looks identical to "no bundles fire" (#543).
+    if vars.is_empty() && any_adapter_failed {
+        anyhow::bail!("all adapter materializations failed — no env vars to export");
     }
 
     // Introspection env: comma-separated, deterministic order. Scopes get
@@ -762,28 +794,66 @@ fn run_regenerate() -> anyhow::Result<()> {
     // Collect firing bundles (same logic as run_export)
     let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, None);
 
-    // Materialize the config
-    match build_and_materialize(&config, &config_dir, &active, &firing, false) {
-        Ok(Some((cache_path, _))) => {
-            eprintln!("✓ Regenerated config at {}", cache_path.display());
-            eprintln!(
-                "  Tags: {}",
-                active.tags.iter().cloned().collect::<Vec<_>>().join(", ")
-            );
-            eprintln!(
-                "  Bundles: {}",
-                firing
-                    .iter()
-                    .map(|b| b.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            eprintln!("\n  Restart your shell session or source the config to load changes.");
+    eprintln!(
+        "  Tags: {}",
+        active.tags.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+    eprintln!(
+        "  Bundles: {}",
+        firing
+            .iter()
+            .map(|b| b.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Materialize the config for every installed adapter, same PATH-gating as
+    // run_export (#543) — a machine without a given tool sees zero behavior change.
+    let materialize_ctx = MaterializeContext {
+        config: &config,
+        config_dir: &config_dir,
+        active: &active,
+        firing: &firing,
+    };
+    let mut materialized_any = false;
+    let mut any_adapter_failed = false;
+    for adapter in installed_adapters() {
+        match build_and_materialize(adapter.as_ref(), materialize_ctx, false) {
+            Ok(Some((cache_path, _))) => {
+                materialized_any = true;
+                eprintln!(
+                    "✓ Regenerated {} config at {}",
+                    adapter.name(),
+                    cache_path.display()
+                );
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    "no bundle content directories — skipping materialize"
+                );
+            }
+            // Non-fatal (#543): same rationale as run_export — one adapter's
+            // failure must not prevent other adapters from regenerating.
+            Err(e) => {
+                any_adapter_failed = true;
+                eprintln!(
+                    "warning: {} adapter regeneration failed (skipping): {e:#}",
+                    adapter.name()
+                );
+            }
         }
-        Ok(None) => {
-            eprintln!("✓ No bundle content to materialize");
-        }
-        Err(e) => return Err(e).context("config regeneration failed"),
+    }
+
+    // Mirror run_export's degenerate-case handling (#543): don't print the
+    // same "nothing to do" message for "everything failed" as for "legitimately
+    // no bundle content" — the two need different exit codes and wording.
+    if materialized_any {
+        eprintln!("\n  Restart your shell session or source the config to load changes.");
+    } else if any_adapter_failed {
+        anyhow::bail!("all adapter regenerations failed — see warnings above");
+    } else {
+        eprintln!("✓ No bundle content to materialize");
     }
 
     Ok(())
@@ -846,17 +916,59 @@ fn warn_if_unknown_engine(engine: &str) {
     }
 }
 
-/// Build BundleRefs for firing bundles in scope-precedence order, merge them
-/// into a manifest, materialize through the Claude Code adapter, and return
-/// the env vars the adapter wants exported. Returns `Ok(None)` when no
-/// firing bundle has a content directory on disk.
-fn build_and_materialize(
+/// Bundles the four values every `build_and_materialize` call site already
+/// threads together, keeping the function within the 5-positional-param limit
+/// once the adapter parameter (#543) is added.
+#[derive(Clone, Copy)]
+struct MaterializeContext<'a> {
+    config: &'a Config,
+    config_dir: &'a Path,
+    active: &'a ActiveScopes,
+    firing: &'a [&'a Bundle],
+}
+
+/// Run the Claude Code–specific steps that have no equivalent in other
+/// adapters yet: merging seeded settings, seeding `installMethod`, and
+/// injecting cached auth into `.claude.json`. No-ops (returning a default
+/// [`AuthStatus`]) for any other adapter.
+fn claude_code_only_post_materialize(
+    adapter: &dyn AgentAdapter,
     config: &Config,
-    config_dir: &Path,
-    active: &ActiveScopes,
-    firing: &[&Bundle],
+    adapter_root: &Path,
+    cache_path: &Path,
+) -> anyhow::Result<crate::materialize::manifest::AuthStatus> {
+    if adapter.name() != ClaudeCodeAdapter.name() {
+        return Ok(crate::materialize::manifest::AuthStatus::default());
+    }
+
+    // Merge user-elected seeded settings after materialize succeeds (#172).
+    // Must run post-materialize so a materialize failure leaves settings.json
+    // either absent (new folder) or in its prior good state (re-render).
+    crate::adapter::claude_code::apply_seeded_settings(cache_path, &config.init.seeded_settings)?;
+    // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
+    crate::adapter::claude_code::seed_install_method(cache_path)?;
+
+    // Auth inheritance (#172): inject cached credentials after the adapter has
+    // finished its own .claude.json writes (mcpServers upsert). Only fires
+    // when the stable cache has an entry.
+    Ok(inject_cached_auth_if_available(adapter_root, cache_path))
+}
+
+/// Build BundleRefs for firing bundles in scope-precedence order, merge them
+/// into a manifest, materialize through `adapter`, and return the env vars the
+/// adapter wants exported. Returns `Ok(None)` when no firing bundle has a
+/// content directory on disk.
+fn build_and_materialize(
+    adapter: &dyn AgentAdapter,
+    ctx: MaterializeContext<'_>,
     compress: bool,
 ) -> anyhow::Result<Option<Materialized>> {
+    let MaterializeContext {
+        config,
+        config_dir,
+        active,
+        firing,
+    } = ctx;
     let Some((mut manifest, cache_root)) =
         build_manifest(config, config_dir, active, firing, false)?
     else {
@@ -906,7 +1018,6 @@ fn build_and_materialize(
         .collect();
     let shape = crate::materialize::cache::shape(tags, &bundles);
 
-    let adapter = ClaudeCodeAdapter;
     let adapter_root = cache_root.join(adapter.name());
     let rendered = crate::materialize::materialize_with_mode(
         &manifest,
@@ -916,22 +1027,14 @@ fn build_and_materialize(
     )?;
     let cache_path = rendered.path;
 
-    // Run the adapter writer — materialize writes CLAUDE.md, rules, MCP config,
-    // and settings.json. Returns the paths it owns; we union them with the
-    // generic bundle files to form llmenv's complete owned set (#196). Idempotent.
+    // Run the adapter writer — materialize writes each adapter's native config
+    // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
+    // Returns the paths it owns; we union them with the generic bundle files to
+    // form llmenv's complete owned set (#196). Idempotent.
     let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
 
-    // Merge user-elected seeded settings after materialize succeeds (#172).
-    // Must run post-materialize so a materialize failure leaves settings.json
-    // either absent (new folder) or in its prior good state (re-render).
-    crate::adapter::claude_code::apply_seeded_settings(&cache_path, &config.init.seeded_settings)?;
-    // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
-    crate::adapter::claude_code::seed_install_method(&cache_path)?;
-
-    // Auth inheritance (#172): inject cached credentials after the adapter has
-    // finished its own .claude.json writes (mcpServers upsert). Only fires
-    // when the stable cache has an entry.
-    let auth_status = inject_cached_auth_if_available(&adapter_root, &cache_path);
+    let auth_status =
+        claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;
 
     let owned = adapter_owned
         .into_iter()
@@ -955,18 +1058,26 @@ fn build_and_materialize(
     }
 
     // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and
-    // create the dirs so tools find them on first run.
+    // create the dirs so tools find them on first run. This feature exists for
+    // tools that persist runtime state into CLAUDE_CONFIG_DIR (#175), so it's
+    // Claude Code-only: emitting it per-adapter would make LLMENV_STATE_DIR
+    // collide in the shared env-var map, with whichever adapter materializes
+    // last silently winning and pointing Claude at Crush's state dir (#543
+    // follow-up). Crush keeps its own dedicated CRUSH_GLOBAL_DATA from
+    // adapter.env_vars() above, unaffected by this gate.
     // When context-mode is enabled (#490) inject CONTEXT_MODE_DATA_DIR as a
     // synthetic StateTool so the store lands in the durable dir automatically.
-    let state_cfg = crate::materialize::state::effective_state_config(
-        &config.state,
-        config.context_mode_enabled(),
-    );
-    crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
-        .context("creating durable state directories")?;
-    env_vars.extend(crate::materialize::state::state_env_vars(
-        &state_cfg, &state_dir,
-    ));
+    if adapter.name() == ClaudeCodeAdapter.name() {
+        let state_cfg = crate::materialize::state::effective_state_config(
+            &config.state,
+            config.context_mode_enabled(),
+        );
+        crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
+            .context("creating durable state directories")?;
+        env_vars.extend(crate::materialize::state::state_env_vars(
+            &state_cfg, &state_dir,
+        ));
+    }
 
     // Defense-in-depth (#67): validate var names at the source, not only at the
     // final emission loop. A future emission path that doesn't route through
@@ -1209,7 +1320,15 @@ fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
     match stale_status(booted.as_deref(), &current) {
         StaleStatus::Stale { .. } => {
             if auto_fix {
-                match build_and_materialize(&config, &config_dir, &active, &firing, false) {
+                // check-stale reads CLAUDE_CONFIG_DIR specifically (Claude Code's own
+                // env var), so its auto-fix only ever re-materializes Claude Code.
+                let materialize_ctx = MaterializeContext {
+                    config: &config,
+                    config_dir: &config_dir,
+                    active: &active,
+                    firing: &firing,
+                };
+                match build_and_materialize(&ClaudeCodeAdapter, materialize_ctx, false) {
                     Ok(Some((cache_path, _))) => {
                         eprintln!("✓ Config refreshed at {}", cache_path.display());
                     }
@@ -2738,6 +2857,120 @@ mod tests {
             firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
             vec!["github-issues"]
         );
+    }
+
+    // ===== Tests for build_and_materialize adapter dispatch (#543) =====
+
+    #[test]
+    fn build_and_materialize_renders_the_given_adapter_not_always_claude_code() {
+        // Regression test for #543: build_and_materialize hardcoded
+        // `let adapter = ClaudeCodeAdapter;` regardless of the caller's chosen
+        // adapter, so the export/regenerate loop over registered_adapters()
+        // silently rendered Claude Code output twice instead of ever rendering
+        // Crush's crush.json.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let (claude_path, _) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("claude adapter should materialize with a firing bundle");
+        assert!(
+            claude_path.join("settings.json").exists(),
+            "Claude Code adapter must render settings.json"
+        );
+
+        let crush = crate::adapter::crush::CrushAdapter;
+        let (crush_path, _) = build_and_materialize(&crush, ctx, false)
+            .unwrap()
+            .expect("crush adapter should materialize with a firing bundle");
+        assert!(
+            crush_path.join("crush.json").exists(),
+            "Crush adapter must render crush.json — regression for #543 \
+             (build_and_materialize used to hardcode ClaudeCodeAdapter for every adapter)"
+        );
+        assert_ne!(
+            claude_path, crush_path,
+            "each adapter must materialize into its own cache subtree"
+        );
+    }
+
+    #[test]
+    fn build_and_materialize_only_claude_code_emits_llmenv_state_dir() {
+        // Regression test for the #543 follow-up: state_env_vars() always emits
+        // the literal key "LLMENV_STATE_DIR", so calling it once per adapter in
+        // the export/regenerate loop made whichever adapter materialized last
+        // silently overwrite the value, pointing Claude Code's durable-state
+        // tooling at Crush's state dir instead of its own.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let (_, claude_vars) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("claude adapter should materialize with a firing bundle");
+        let claude_state_dir = claude_vars
+            .iter()
+            .find(|(k, _)| k == "LLMENV_STATE_DIR")
+            .map(|(_, v)| v.clone())
+            .expect("Claude Code must emit LLMENV_STATE_DIR");
+
+        let crush = crate::adapter::crush::CrushAdapter;
+        let (_, crush_vars) = build_and_materialize(&crush, ctx, false)
+            .unwrap()
+            .expect("crush adapter should materialize with a firing bundle");
+        assert!(
+            !crush_vars.iter().any(|(k, _)| k == "LLMENV_STATE_DIR"),
+            "Crush must not emit LLMENV_STATE_DIR — it would collide with \
+             Claude Code's value in the shared export env-var map"
+        );
+
+        // Re-materializing Claude Code after Crush must still see its own,
+        // unclobbered state dir — proves ordering in the adapter loop can't
+        // corrupt the value.
+        let (_, claude_vars_again) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("claude adapter should materialize again");
+        let claude_state_dir_again = claude_vars_again
+            .iter()
+            .find(|(k, _)| k == "LLMENV_STATE_DIR")
+            .map(|(_, v)| v.clone())
+            .expect("Claude Code must still emit LLMENV_STATE_DIR");
+        assert_eq!(claude_state_dir, claude_state_dir_again);
     }
 
     #[test]

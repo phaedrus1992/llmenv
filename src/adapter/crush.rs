@@ -76,47 +76,66 @@ impl AgentAdapter for CrushAdapter {
         // 1. Create output dir with owner-only permissions
         super::skills::create_dir_owner_only(out)?;
 
-        // 2. Validate hook events + hard-error on mcp_tool hooks (fix 5)
-        for hook in &manifest.capabilities.hooks {
-            if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
-                anyhow::bail!(
-                    "Crush adapter does not support hook event '{}'. \
-                     Supported events: {}. Remove or move this hook to a \
-                     claude_code-only bundle.",
-                    hook.event,
-                    SUPPORTED_HOOK_EVENTS.join(", ")
-                );
-            }
-            if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
-                anyhow::bail!(
-                    "Crush adapter does not support mcp_tool hooks (hook event '{}', tool '{}'). \
-                     Use a command hook instead.",
-                    hook.event,
-                    hook.handler.tool.as_deref().unwrap_or("<unknown>")
-                );
-            }
-        }
+        // 2. Filter hooks Crush can't express (#543 follow-up): a bundle shared
+        // across engines commonly declares hooks only Claude Code supports (e.g.
+        // PostToolUse). That is a cross-engine compatibility gap, not a
+        // config-authoring mistake — failing the whole render over one
+        // incompatible hook would also drop every other capability (MCP, LSP,
+        // skills, permissions) Crush *can* express. Skip the incompatible hook
+        // and warn loudly instead so the rest of the config still materializes.
+        let compatible_hooks: Vec<&crate::config::Hook> = manifest
+            .capabilities
+            .hooks
+            .iter()
+            .filter(|hook| {
+                if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
+                    eprintln!(
+                        "warning: Crush adapter does not support hook event '{}' — \
+                         skipping this hook. Supported events: {}. Remove or move \
+                         this hook to a claude_code-only bundle to silence this warning.",
+                        hook.event,
+                        SUPPORTED_HOOK_EVENTS.join(", ")
+                    );
+                    return false;
+                }
+                if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
+                    eprintln!(
+                        "warning: Crush adapter does not support mcp_tool hooks \
+                         (hook event '{}', tool '{}') — skipping this hook. \
+                         Use a command hook instead.",
+                        hook.event,
+                        hook.handler.tool.as_deref().unwrap_or("<unknown>")
+                    );
+                    return false;
+                }
+                true
+            })
+            .collect();
 
         // 3. Write first-class skills (fix 2)
         let skill_paths =
             crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
 
-        // 4. Project plugin skills + hard-error on non-skill content (fix 4)
+        // 4. Project plugin skills, skipping plugins with non-skill content Crush
+        // can't express (#543 follow-up: was a hard-error that aborted the whole
+        // render over one incompatible plugin, dropping every other plugin's
+        // skills, MCP servers, permissions, and hooks along with it).
         let mut owned: Vec<PathBuf> = vec![PathBuf::from(CRUSH_JSON_FILE)];
         owned.extend(skill_paths.iter().cloned());
 
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
-        for plugin in &manifest.plugins {
+        'plugin: for plugin in &manifest.plugins {
             let payload = resolve_plugin_payload(plugin, &manifest.marketplaces)?;
             for bad_dir in &["agents", "commands", "hooks"] {
                 if payload.join(bad_dir).is_dir() {
-                    anyhow::bail!(
-                        "plugin '{}' contains unsupported Crush content: '{}/' directory \
-                         — Crush has no equivalent for plugin agents, commands, or hooks. \
-                         Scope this bundle away from Crush with `when:` or remove the content.",
-                        plugin.plugin,
-                        bad_dir
+                    eprintln!(
+                        "warning: plugin '{}' contains unsupported Crush content: '{}/' \
+                         directory — skipping this plugin. Crush has no equivalent for \
+                         plugin agents, commands, or hooks. Scope this bundle away from \
+                         Crush with `when:` or remove the content to silence this warning.",
+                        plugin.plugin, bad_dir
                     );
+                    continue 'plugin;
                 }
             }
             let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
@@ -133,13 +152,13 @@ impl AgentAdapter for CrushAdapter {
         // Hooks
         let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
             std::collections::BTreeMap::new();
-        for hook in &manifest.capabilities.hooks {
+        for hook in &compatible_hooks {
             let handler = json!({
                 "type": match hook.handler.kind {
                     crate::config::HookHandlerKind::Command => "command",
-                    // P2-6: mcp_tool hooks are rejected at the validation gate above.
+                    // P2-6: mcp_tool hooks are filtered out at the gate above.
                     crate::config::HookHandlerKind::McpTool => unreachable!(
-                        "mcp_tool hooks are rejected at the validation gate above"
+                        "mcp_tool hooks are filtered out at the gate above"
                     ),
                 },
                 "command": hook.handler.command,
@@ -486,6 +505,7 @@ mod tests {
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use crate::merge::MergedManifest;
     use proptest::prelude::*;
+    use std::path::PathBuf;
 
     fn empty_manifest() -> MergedManifest {
         MergedManifest::default()
@@ -618,7 +638,11 @@ mod tests {
     }
 
     #[test]
-    fn materialize_unsupported_hook_event_hard_errors() {
+    fn materialize_unsupported_hook_event_is_skipped_not_fatal() {
+        // #543 follow-up: an incompatible hook must not fail the whole render —
+        // it's a cross-engine compatibility gap (a bundle shared with Claude
+        // Code), not a config-authoring mistake. Skip it (with a warning) and
+        // still materialize everything Crush can express.
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
         caps.hooks.push(Hook {
@@ -631,19 +655,26 @@ mod tests {
             },
             bundle_origin: None,
         });
-        let err = CrushAdapter
+        let owned = CrushAdapter
             .materialize(&manifest_with_caps(caps), tmp.path())
-            .unwrap_err();
+            .expect("unsupported hook must not fail materialize");
+        assert!(owned.contains(&PathBuf::from(CRUSH_JSON_FILE)));
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(
-            err.to_string().contains("SessionStart"),
-            "error should name the unsupported event: {err}"
+            doc.get("hooks").is_none(),
+            "unsupported hook must not appear in output: {doc}"
         );
     }
 
     #[test]
-    fn materialize_unsupported_hook_includes_supported_list_in_error() {
+    fn materialize_mixed_supported_and_unsupported_hooks_keeps_supported() {
+        // The concrete regression this guards: a bundle with both a Crush-compatible
+        // hook and an incompatible one must still render the compatible one, not
+        // drop everything because one hook couldn't be expressed.
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
+        caps.hooks.push(pretooluse_hook("echo hi"));
         caps.hooks.push(Hook {
             event: "PostToolUse".into(),
             matcher: None,
@@ -654,12 +685,18 @@ mod tests {
             },
             bundle_origin: None,
         });
-        let err = CrushAdapter
+        CrushAdapter
             .materialize(&manifest_with_caps(caps), tmp.path())
-            .unwrap_err();
+            .expect("one incompatible hook must not fail the whole render");
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(
-            err.to_string().contains("PreToolUse"),
-            "error should list supported events: {err}"
+            doc["hooks"]["PreToolUse"].is_array(),
+            "supported hook must still render: {doc}"
+        );
+        assert!(
+            doc["hooks"].get("PostToolUse").is_none(),
+            "unsupported hook must not appear in output: {doc}"
         );
     }
 
@@ -1035,10 +1072,10 @@ mod tests {
         );
     }
 
-    // ── materialize: mcp_tool hook hard-errors (fix 5) ───────────────────────
+    // ── materialize: mcp_tool hook is skipped, not fatal (#543 follow-up) ────
 
     #[test]
-    fn materialize_mcp_tool_hook_hard_errors() {
+    fn materialize_mcp_tool_hook_is_skipped_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
         caps.hooks.push(Hook {
@@ -1051,12 +1088,15 @@ mod tests {
             },
             bundle_origin: None,
         });
-        let err = CrushAdapter
+        let owned = CrushAdapter
             .materialize(&manifest_with_caps(caps), tmp.path())
-            .unwrap_err();
+            .expect("mcp_tool hook must not fail materialize");
+        assert!(owned.contains(&PathBuf::from(CRUSH_JSON_FILE)));
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(
-            err.to_string().contains("mcp_tool"),
-            "error must mention mcp_tool: {err}"
+            doc.get("hooks").is_none(),
+            "mcp_tool hook must not appear in output: {doc}"
         );
     }
 
@@ -1210,7 +1250,10 @@ mod tests {
     }
 
     #[test]
-    fn materialize_plugin_with_agents_hard_errors() {
+    fn materialize_plugin_with_agents_is_skipped_not_fatal() {
+        // #543 follow-up: an incompatible plugin must not fail the whole render —
+        // it would drop every other plugin's skills, MCP servers, permissions,
+        // and hooks along with it. Skip just this plugin (with a warning).
         let tmp = tempfile::tempdir().unwrap();
         // Plugin dir that contains an agents/ subdirectory.
         let plugin_dir = tempfile::tempdir().unwrap();
@@ -1226,22 +1269,17 @@ mod tests {
                 install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
                 git_commit_sha: None,
             });
-        let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
-        assert!(
-            err.to_string().contains("agents"),
-            "error must name the unsupported 'agents' directory: {err}"
-        );
-        assert!(
-            err.to_string().contains("bad-plugin"),
-            "error must name the plugin: {err}"
-        );
+        CrushAdapter
+            .materialize(&manifest, tmp.path())
+            .expect("incompatible plugin content must not fail materialize");
     }
 
     #[test]
-    fn materialize_plugin_with_hooks_dir_hard_errors() {
+    fn materialize_plugin_with_hooks_dir_is_skipped_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
-        // Plugin dir with a hooks/ subdirectory — spec §3.2 lists plugin-only
-        // hooks as unsupported content that must hard-error, not silently drop.
+        // Plugin dir with a hooks/ subdirectory — Crush has no plugin-hooks
+        // equivalent, so this plugin is skipped, but the rest of the config
+        // (other plugins, permissions, MCP, compatible hooks) still renders.
         let plugin_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(plugin_dir.path().join("hooks")).unwrap();
 
@@ -1255,14 +1293,54 @@ mod tests {
                 install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
                 git_commit_sha: None,
             });
-        let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
+        CrushAdapter
+            .materialize(&manifest, tmp.path())
+            .expect("incompatible plugin content must not fail materialize");
+    }
+
+    #[test]
+    fn materialize_plugin_with_hooks_dir_keeps_other_plugin_skills() {
+        // The concrete regression this guards: one plugin with unsupported
+        // content must not prevent an unrelated, compatible plugin's skills
+        // from being projected.
+        let tmp = tempfile::tempdir().unwrap();
+        let bad_plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(bad_plugin_dir.path().join("hooks")).unwrap();
+
+        let good_plugin_dir = tempfile::tempdir().unwrap();
+        let skill_dir = good_plugin_dir.path().join("skills/foo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: foo\ndescription: a foo skill\n---\nBody",
+        )
+        .unwrap();
+
+        let mut manifest = empty_manifest();
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "hooky-plugin".into(),
+                collection: String::new(),
+                install_path: Some(bad_plugin_dir.path().to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            });
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "good-plugin".into(),
+                collection: String::new(),
+                install_path: Some(good_plugin_dir.path().to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            });
+        CrushAdapter
+            .materialize(&manifest, tmp.path())
+            .expect("one incompatible plugin must not fail the whole render");
         assert!(
-            err.to_string().contains("hooks"),
-            "error must name the unsupported 'hooks' directory: {err}"
-        );
-        assert!(
-            err.to_string().contains("hooky-plugin"),
-            "error must name the plugin: {err}"
+            tmp.path().join("skills/foo/SKILL.md").exists(),
+            "unrelated plugin's skill must still be projected"
         );
     }
 
