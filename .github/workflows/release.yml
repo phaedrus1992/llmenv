@@ -176,6 +176,8 @@ jobs:
     needs: build-binaries
     permissions:
       contents: read
+    # Note: Unlike update-homebrew, this job intentionally runs for prerelease tags (v3.0.0-rc.1, etc.)
+    # because crates.io natively supports semver prerelease versions. See RELEASING.md for the prerelease workflow.
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
@@ -310,8 +312,9 @@ jobs:
             exit 1
           fi
           VERSION="${GH_REF#refs/tags/v}"
-          # Detect prerelease suffix per semver (e.g., 1.0.0-rc.1, 1.0.0-beta.1)
-          if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+          # Detect prerelease suffix per semver (e.g., 1.0.0-rc.1, 1.0.0-beta.1).
+          # Regex requires at least one identifier char after the hyphen; bare hyphens (1.0.0-) are invalid.
+          if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9] ]]; then
             IS_PRERELEASE="true"
           else
             IS_PRERELEASE="false"
@@ -393,17 +396,23 @@ jobs:
           # Stay idempotent for a re-pushed tag (mirrors the crates.io publish
           # step): update an existing release in place instead of hard-failing.
 
-          # Prerelease tags should not be marked as latest on GitHub.
-          LATEST_FLAG=""
-          PRERELEASE_FLAG=""
+          # Validate IS_PRERELEASE before building release flags.
+          if [[ "${IS_PRERELEASE}" != "true" && "${IS_PRERELEASE}" != "false" ]]; then
+            echo "ERROR: IS_PRERELEASE='${IS_PRERELEASE}' is neither 'true' nor 'false'" >&2
+            exit 1
+          fi
+
+          # Prerelease tags should not be marked as latest on GitHub. Use an array
+          # to safely handle flags regardless of future content changes.
+          flags=()
           if [[ "${IS_PRERELEASE}" == "true" ]]; then
-            PRERELEASE_FLAG="--prerelease"
+            flags+=(--prerelease)
           else
-            LATEST_FLAG="--latest"
+            flags+=(--latest)
           fi
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" --notes-file release-body.md ${LATEST_FLAG} ${PRERELEASE_FLAG}
+            gh release edit "${TAG}" --notes-file release-body.md "${flags[@]}"
             gh release upload "${TAG}" --clobber \
               release-assets/llmenv-* \
               checksums/checksums.txt \
@@ -416,14 +425,14 @@ jobs:
               --title "${TAG}" \
               --notes-file release-body.md \
               --verify-tag \
-              ${LATEST_FLAG} ${PRERELEASE_FLAG}
+              "${flags[@]}"
           fi
 
   update-homebrew:
     name: Update Homebrew formula
     runs-on: ubuntu-latest
     needs: [publish-crate, create-release]
-    if: startsWith(github.ref, 'refs/tags/v') && needs.create-release.outputs.is_prerelease == 'false'
+    if: startsWith(github.ref, 'refs/tags/v') && needs.create-release.result == 'success' && needs.create-release.outputs.is_prerelease == 'false'
     permissions:
       contents: read
     steps:
