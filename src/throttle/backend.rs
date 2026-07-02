@@ -185,8 +185,12 @@ impl ThrottleBackend for UmansBackend {
                 umans_cfg.api_endpoint
             );
         }
-        let _ = crate::hook_run::mcp_client::validate_url_production(&url)
-            .context("umans api_endpoint SSRF check")?;
+        let _ = crate::hook_run::mcp_client::validate_url_production(
+            &url,
+            crate::hook_run::mcp_client::SsrfPolicy::PublicOnly,
+            Duration::from_secs(10),
+        )
+        .context("umans api_endpoint SSRF check")?;
         let body = fetch_json_blocking(&url, &umans_cfg.api_token)?;
         map_umans_body(body)
     }
