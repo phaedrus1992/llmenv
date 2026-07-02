@@ -102,7 +102,8 @@ impl GitBackend for SystemGit {
 /// # Errors
 /// Returns `SyncError::NotCloned` if a git marketplace is not yet cloned locally
 /// and refresh is false. Returns `SyncError::CloneFailed` if a git clone fails
-/// on first use. Returns `SyncError::Other` for path source resolution errors.
+/// on first use. Returns `SyncError::Other` for path source resolution errors or
+/// when git HEAD cannot be resolved after a successful clone (broken clone).
 pub fn sync_marketplace(
     cache_dir: &Path,
     m: &Marketplace,
@@ -117,7 +118,8 @@ pub fn sync_marketplace(
 /// # Errors
 /// Returns `SyncError::NotCloned` if a git marketplace is not yet cloned locally
 /// and refresh is false. Returns `SyncError::CloneFailed` if a git clone fails
-/// on first use. Returns `SyncError::Other` for path source resolution errors.
+/// on first use. Returns `SyncError::Other` for path source resolution errors or
+/// when git HEAD cannot be resolved after a successful clone (broken clone).
 pub fn sync_marketplace_with(
     cache_dir: &Path,
     m: &Marketplace,
@@ -240,6 +242,19 @@ fn sync_git(
     }
 
     let head = git.head(&dest);
+    // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,
+    // the clone is broken and we shouldn't silently cache it with an unstable hash.
+    // Clean up on error so the next invocation retries the clone instead of hitting
+    // the pull path (fixes #537).
+    if head.is_none() && dest.join(".git").exists() {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "marketplace '{}': unable to resolve git HEAD \
+             (corrupted clone removed; run sync again to retry)",
+            m.name
+        )));
+    }
+
     Ok(MarketplaceState {
         install_location: dest,
         head,
@@ -346,7 +361,8 @@ pub fn is_external_plugin_source(source: &str) -> bool {
 ///
 /// # Errors
 /// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
-/// is false. Returns `SyncError::CloneFailed` on clone failure.
+/// is false. Returns `SyncError::CloneFailed` on clone failure. Returns
+/// `SyncError::Other` when git HEAD cannot be resolved after a successful clone.
 pub fn sync_external_plugin(
     cache_dir: &Path,
     marketplace: &str,
@@ -361,7 +377,8 @@ pub fn sync_external_plugin(
 ///
 /// # Errors
 /// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
-/// is false. Returns `SyncError::CloneFailed` on clone failure.
+/// is false. Returns `SyncError::CloneFailed` on clone failure. Returns
+/// `SyncError::Other` when git HEAD cannot be resolved after a successful clone.
 pub fn sync_external_plugin_with(
     cache_dir: &Path,
     marketplace: &str,
@@ -408,6 +425,17 @@ pub fn sync_external_plugin_with(
             })?;
     }
     let head = git.head(&dest);
+    // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,
+    // the clone is broken and we shouldn't silently cache it with an unstable hash.
+    // Clean up on error so the next invocation retries the clone instead of hitting
+    // the pull path (fixes #537).
+    if head.is_none() && dest.join(".git").exists() {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "plugin '{plugin}@{marketplace}': unable to resolve git HEAD \
+             (corrupted clone removed; run sync again to retry)"
+        )));
+    }
 
     let manifest = dest.join("plugin.json");
     if !manifest.exists() {
@@ -918,6 +946,43 @@ mod tests {
         sync_marketplace_with(cache.path(), &m, true, &git).unwrap();
         assert_eq!(clone_calls.get(), 1, "unpinned source must not re-clone");
         assert_eq!(pull_calls.get(), 1, "unpinned source must pull on refresh");
+    }
+
+    #[test]
+    fn git_clone_succeeds_but_head_unresolvable_returns_error() {
+        // Fixes #537: if clone succeeds but we can't resolve HEAD, the clone is
+        // broken and shouldn't be cached with an unstable hash. Return an error
+        // to force the user to address the broken clone.
+        struct SuccessfulCloneNoHead;
+        impl GitBackend for SuccessfulCloneNoHead {
+            fn clone(&self, _: &str, dest: &std::path::Path) -> Result<()> {
+                std::fs::create_dir_all(dest.join(".git"))?;
+                Ok(())
+            }
+            fn pull(&self, _: &std::path::Path) -> Result<()> {
+                unreachable!()
+            }
+            fn head(&self, _: &std::path::Path) -> Option<String> {
+                None
+            }
+        }
+
+        let m = Marketplace {
+            name: "corrupted".into(),
+            source: "https://github.com/example/plugins".into(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let result = sync_marketplace_with(cache.path(), &m, true, &SuccessfulCloneNoHead);
+        assert!(
+            matches!(result, Err(SyncError::Other(_))),
+            "expected error when clone succeeds but HEAD is unresolvable, got {result:?}"
+        );
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unable to resolve git HEAD"),
+            "error message should explain HEAD resolution failure, got: {msg}"
+        );
     }
 
     #[test]
