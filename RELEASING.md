@@ -222,6 +222,48 @@ CI publishes to crates.io, creates the GitHub Release, and updates Homebrew. The
 crates.io publish runs exactly once per tag — re-pushing an existing tag will
 fail at publish because that version already exists on the registry.
 
+## Pre-releases (RC, beta, alpha)
+
+Pre-releases use standard semantic versioning format: `v3.0.0-rc.1`, `v3.0.0-beta.1`, `v3.0.0-alpha.1`.
+
+Follow the same release process as a stable release, but **tag the prerelease version instead** of the stable version. The suffix (anything after a `-` in the version) signals to the release pipeline:
+
+1. **GitHub Release** — marked as a prerelease, not as the latest release, so
+   `/releases/latest` keeps pointing at the last stable version. Users can still
+   access the prerelease via GitHub's prerelease filter or direct link, but
+   third-party tools checking for latest won't auto-upgrade to an RC.
+2. **crates.io** — prerelease versions publish normally (semver.org support is
+   native). Users opting into the prerelease add `=3.0.0-rc.1` (with `=` pinning,
+   not `^` range) to `Cargo.toml` to depend on it.
+3. **Homebrew** — prerelease versions skip the Homebrew tap update entirely. Users
+   testing a prerelease download the binary directly from the GitHub Release. No
+   separate `--devel` formula or versioned tap formula exists today; document in
+   your RC announcement that prerelease testers use `curl` / direct release downloads
+   rather than Homebrew.
+
+**Example RC workflow:**
+
+```bash
+git switch main && git pull
+cargo release minor --workspace                        # dry-run; say → 3.0.0-rc.1
+cargo release minor --workspace --execute              # bumps + CHANGELOG + commit
+git push -u origin HEAD
+gh pr create --fill  # Create PR w/ title "chore(release): 3.0.0-rc.1"
+# After merge:
+git switch main && git pull
+git tag -a "v3.0.0-rc.1" -m "v3.0.0-rc.1"   # Prerelease tag
+git push origin "v3.0.0-rc.1"
+gh run watch                                           # Release workflow executes
+```
+
+After the RC test period:
+
+1. Decide what patches/fixes are needed post-RC.
+2. Apply them to `main` (on a feature branch + PR, as usual).
+3. Tag the final stable version (`v3.0.0`, not another `-rc.2`) on the post-RC commit.
+
+If the post-RC changes are substantial, consider a second RC (`v3.0.0-rc.2`) before cutting stable.
+
 ## Why cargo-release does so little
 
 `cargo-release` is fully capable of tagging, pushing, and publishing. We disable
