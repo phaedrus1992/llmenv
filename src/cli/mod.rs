@@ -617,14 +617,14 @@ fn run_export(
     // Merge + materialize the agent config directory for each installed adapter
     // and collect env vars. PATH-gating skips adapters whose binary is absent so
     // a machine without a given tool sees zero behavior change. (#502)
-    // NOTE: build_and_materialize is still Claude Code–specific; #506 wires Crush.
     let cache_dir_root = expand_tilde(&config.cache.cache_dir)?;
+    let materialize_ctx = MaterializeContext {
+        config: &config,
+        config_dir: &config_dir,
+        active: &active,
+        firing: &firing,
+    };
     for adapter in crate::adapter::registered_adapters() {
-        debug_assert_eq!(
-            adapter.name(),
-            "claude-code",
-            "build_and_materialize is Claude-specific until #506 threads the adapter"
-        );
         if !crate::adapter::binary_on_path(adapter.binary_name()) {
             tracing::debug!(
                 adapter = adapter.name(),
@@ -633,7 +633,7 @@ fn run_export(
             );
             continue;
         }
-        match build_and_materialize(&config, &config_dir, &active, &firing, compress) {
+        match build_and_materialize(adapter.as_ref(), materialize_ctx, compress) {
             Ok(Some((ref cache_path, ref extra_vars))) => {
                 tracing::debug!(
                     adapter = adapter.name(),
@@ -669,7 +669,18 @@ fn run_export(
                     "no bundle content directories — skipping materialize"
                 );
             }
-            Err(e) => return Err(e).context("agent materialization failed"),
+            // Non-fatal (#543): one adapter's materialize failure (e.g. Crush
+            // rejecting an unsupported hook event) must not take down every
+            // other adapter's env vars. A machine with `crush` on PATH but an
+            // incompatible bundle would otherwise lose Claude Code output too,
+            // breaking the PATH-gating promise that unrelated setups see zero
+            // change.
+            Err(e) => {
+                eprintln!(
+                    "warning: {} adapter materialization failed (skipping): {e:#}",
+                    adapter.name()
+                );
+            }
         }
     }
 
@@ -762,28 +773,67 @@ fn run_regenerate() -> anyhow::Result<()> {
     // Collect firing bundles (same logic as run_export)
     let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, None);
 
-    // Materialize the config
-    match build_and_materialize(&config, &config_dir, &active, &firing, false) {
-        Ok(Some((cache_path, _))) => {
-            eprintln!("✓ Regenerated config at {}", cache_path.display());
-            eprintln!(
-                "  Tags: {}",
-                active.tags.iter().cloned().collect::<Vec<_>>().join(", ")
+    eprintln!(
+        "  Tags: {}",
+        active.tags.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+    eprintln!(
+        "  Bundles: {}",
+        firing
+            .iter()
+            .map(|b| b.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Materialize the config for every installed adapter, same PATH-gating as
+    // run_export (#543) — a machine without a given tool sees zero behavior change.
+    let materialize_ctx = MaterializeContext {
+        config: &config,
+        config_dir: &config_dir,
+        active: &active,
+        firing: &firing,
+    };
+    let mut materialized_any = false;
+    for adapter in crate::adapter::registered_adapters() {
+        if !crate::adapter::binary_on_path(adapter.binary_name()) {
+            tracing::debug!(
+                adapter = adapter.name(),
+                binary = adapter.binary_name(),
+                "adapter binary not on PATH — skipping"
             );
-            eprintln!(
-                "  Bundles: {}",
-                firing
-                    .iter()
-                    .map(|b| b.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            eprintln!("\n  Restart your shell session or source the config to load changes.");
+            continue;
         }
-        Ok(None) => {
-            eprintln!("✓ No bundle content to materialize");
+        match build_and_materialize(adapter.as_ref(), materialize_ctx, false) {
+            Ok(Some((cache_path, _))) => {
+                materialized_any = true;
+                eprintln!(
+                    "✓ Regenerated {} config at {}",
+                    adapter.name(),
+                    cache_path.display()
+                );
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    "no bundle content directories — skipping materialize"
+                );
+            }
+            // Non-fatal (#543): same rationale as run_export — one adapter's
+            // failure must not prevent other adapters from regenerating.
+            Err(e) => {
+                eprintln!(
+                    "warning: {} adapter regeneration failed (skipping): {e:#}",
+                    adapter.name()
+                );
+            }
         }
-        Err(e) => return Err(e).context("config regeneration failed"),
+    }
+
+    if materialized_any {
+        eprintln!("\n  Restart your shell session or source the config to load changes.");
+    } else {
+        eprintln!("✓ No bundle content to materialize");
     }
 
     Ok(())
@@ -846,17 +896,32 @@ fn warn_if_unknown_engine(engine: &str) {
     }
 }
 
+/// Bundles the four values every `build_and_materialize` call site already
+/// threads together, keeping the function within the 5-positional-param limit
+/// once the adapter parameter (#543) is added.
+#[derive(Clone, Copy)]
+struct MaterializeContext<'a> {
+    config: &'a Config,
+    config_dir: &'a Path,
+    active: &'a ActiveScopes,
+    firing: &'a [&'a Bundle],
+}
+
 /// Build BundleRefs for firing bundles in scope-precedence order, merge them
-/// into a manifest, materialize through the Claude Code adapter, and return
-/// the env vars the adapter wants exported. Returns `Ok(None)` when no
-/// firing bundle has a content directory on disk.
+/// into a manifest, materialize through `adapter`, and return the env vars the
+/// adapter wants exported. Returns `Ok(None)` when no firing bundle has a
+/// content directory on disk.
 fn build_and_materialize(
-    config: &Config,
-    config_dir: &Path,
-    active: &ActiveScopes,
-    firing: &[&Bundle],
+    adapter: &dyn AgentAdapter,
+    ctx: MaterializeContext<'_>,
     compress: bool,
 ) -> anyhow::Result<Option<Materialized>> {
+    let MaterializeContext {
+        config,
+        config_dir,
+        active,
+        firing,
+    } = ctx;
     let Some((mut manifest, cache_root)) =
         build_manifest(config, config_dir, active, firing, false)?
     else {
@@ -906,7 +971,6 @@ fn build_and_materialize(
         .collect();
     let shape = crate::materialize::cache::shape(tags, &bundles);
 
-    let adapter = ClaudeCodeAdapter;
     let adapter_root = cache_root.join(adapter.name());
     let rendered = crate::materialize::materialize_with_mode(
         &manifest,
@@ -916,22 +980,34 @@ fn build_and_materialize(
     )?;
     let cache_path = rendered.path;
 
-    // Run the adapter writer — materialize writes CLAUDE.md, rules, MCP config,
-    // and settings.json. Returns the paths it owns; we union them with the
-    // generic bundle files to form llmenv's complete owned set (#196). Idempotent.
+    // Run the adapter writer — materialize writes each adapter's native config
+    // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
+    // Returns the paths it owns; we union them with the generic bundle files to
+    // form llmenv's complete owned set (#196). Idempotent.
     let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
 
-    // Merge user-elected seeded settings after materialize succeeds (#172).
-    // Must run post-materialize so a materialize failure leaves settings.json
-    // either absent (new folder) or in its prior good state (re-render).
-    crate::adapter::claude_code::apply_seeded_settings(&cache_path, &config.init.seeded_settings)?;
-    // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
-    crate::adapter::claude_code::seed_install_method(&cache_path)?;
+    // Seeded settings, installMethod seeding, and auth inheritance are all
+    // Claude Code–specific concepts (`.claude.json` / `settings.json` shape) —
+    // other adapters have no equivalent yet, so these only run for Claude Code.
+    let is_claude_code = adapter.name() == ClaudeCodeAdapter.name();
+    let auth_status = if is_claude_code {
+        // Merge user-elected seeded settings after materialize succeeds (#172).
+        // Must run post-materialize so a materialize failure leaves settings.json
+        // either absent (new folder) or in its prior good state (re-render).
+        crate::adapter::claude_code::apply_seeded_settings(
+            &cache_path,
+            &config.init.seeded_settings,
+        )?;
+        // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
+        crate::adapter::claude_code::seed_install_method(&cache_path)?;
 
-    // Auth inheritance (#172): inject cached credentials after the adapter has
-    // finished its own .claude.json writes (mcpServers upsert). Only fires
-    // when the stable cache has an entry.
-    let auth_status = inject_cached_auth_if_available(&adapter_root, &cache_path);
+        // Auth inheritance (#172): inject cached credentials after the adapter has
+        // finished its own .claude.json writes (mcpServers upsert). Only fires
+        // when the stable cache has an entry.
+        inject_cached_auth_if_available(&adapter_root, &cache_path)
+    } else {
+        crate::materialize::manifest::AuthStatus::default()
+    };
 
     let owned = adapter_owned
         .into_iter()
@@ -1209,7 +1285,15 @@ fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
     match stale_status(booted.as_deref(), &current) {
         StaleStatus::Stale { .. } => {
             if auto_fix {
-                match build_and_materialize(&config, &config_dir, &active, &firing, false) {
+                // check-stale reads CLAUDE_CONFIG_DIR specifically (Claude Code's own
+                // env var), so its auto-fix only ever re-materializes Claude Code.
+                let materialize_ctx = MaterializeContext {
+                    config: &config,
+                    config_dir: &config_dir,
+                    active: &active,
+                    firing: &firing,
+                };
+                match build_and_materialize(&ClaudeCodeAdapter, materialize_ctx, false) {
                     Ok(Some((cache_path, _))) => {
                         eprintln!("✓ Config refreshed at {}", cache_path.display());
                     }
@@ -2737,6 +2821,59 @@ mod tests {
         assert_eq!(
             firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
             vec!["github-issues"]
+        );
+    }
+
+    // ===== Tests for build_and_materialize adapter dispatch (#543) =====
+
+    #[test]
+    fn build_and_materialize_renders_the_given_adapter_not_always_claude_code() {
+        // Regression test for #543: build_and_materialize hardcoded
+        // `let adapter = ClaudeCodeAdapter;` regardless of the caller's chosen
+        // adapter, so the export/regenerate loop over registered_adapters()
+        // silently rendered Claude Code output twice instead of ever rendering
+        // Crush's crush.json.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let (claude_path, _) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("claude adapter should materialize with a firing bundle");
+        assert!(
+            claude_path.join("settings.json").exists(),
+            "Claude Code adapter must render settings.json"
+        );
+
+        let crush = crate::adapter::crush::CrushAdapter;
+        let (crush_path, _) = build_and_materialize(&crush, ctx, false)
+            .unwrap()
+            .expect("crush adapter should materialize with a firing bundle");
+        assert!(
+            crush_path.join("crush.json").exists(),
+            "Crush adapter must render crush.json — regression for #543 \
+             (build_and_materialize used to hardcode ClaudeCodeAdapter for every adapter)"
+        );
+        assert_ne!(
+            claude_path, crush_path,
+            "each adapter must materialize into its own cache subtree"
         );
     }
 
