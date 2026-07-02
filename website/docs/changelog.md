@@ -84,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix marketplace and plugin-payload sync returning a broken clone with unstable cache key when
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
+- Fix `export`/`regenerate` never actually materializing Crush output: the internal
+  materialization step ignored which adapter was passed in and always rendered Claude
+  Code's layout, so `crush.json` and `CRUSH_GLOBAL_CONFIG`/`CRUSH_GLOBAL_DATA` were never
+  produced even with `crush` on `PATH`. `regenerate` also gained the same per-adapter
+  `PATH`-gated loop `export` already had. (#543)
 
 ## [2.3.0] - 2026-06-30
 
