@@ -283,6 +283,7 @@ jobs:
       contents: write
     outputs:
       release_version: ${{ steps.extract_version.outputs.version }}
+      is_prerelease: ${{ steps.extract_version.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
@@ -309,7 +310,14 @@ jobs:
             exit 1
           fi
           VERSION="${GH_REF#refs/tags/v}"
+          # Detect prerelease suffix per semver (e.g., 1.0.0-rc.1, 1.0.0-beta.1)
+          if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+            IS_PRERELEASE="true"
+          else
+            IS_PRERELEASE="false"
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
       - name: Build release body
         env:
           VERSION: ${{ steps.extract_version.outputs.version }}
@@ -378,13 +386,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+          IS_PRERELEASE: ${{ steps.extract_version.outputs.is_prerelease }}
         run: |
           set -euo pipefail
           # `gh release` ships with the runner, so we avoid a third-party action.
           # Stay idempotent for a re-pushed tag (mirrors the crates.io publish
           # step): update an existing release in place instead of hard-failing.
+
+          # Prerelease tags should not be marked as latest on GitHub.
+          LATEST_FLAG=""
+          PRERELEASE_FLAG=""
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          else
+            LATEST_FLAG="--latest"
+          fi
+
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" --notes-file release-body.md --latest
+            gh release edit "${TAG}" --notes-file release-body.md ${LATEST_FLAG} ${PRERELEASE_FLAG}
             gh release upload "${TAG}" --clobber \
               release-assets/llmenv-* \
               checksums/checksums.txt \
@@ -397,14 +416,14 @@ jobs:
               --title "${TAG}" \
               --notes-file release-body.md \
               --verify-tag \
-              --latest
+              ${LATEST_FLAG} ${PRERELEASE_FLAG}
           fi
 
   update-homebrew:
     name: Update Homebrew formula
     runs-on: ubuntu-latest
     needs: [publish-crate, create-release]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && needs.create-release.outputs.is_prerelease == 'false'
     permissions:
       contents: read
     steps:
