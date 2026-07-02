@@ -123,8 +123,7 @@ fn llmenv_cmd(
 /// Returns the assert result for further validation.
 fn assert_completes_within(mut cmd: Command, timeout_secs: u64) -> assert_cmd::assert::Assert {
     let timeout = Duration::from_secs(timeout_secs);
-    let assert = cmd.timeout(timeout).assert();
-    assert
+    cmd.timeout(timeout).assert()
 }
 
 // ============================================================================
