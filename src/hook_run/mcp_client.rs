@@ -291,20 +291,43 @@ fn resolve_with_timeout(
     timeout: Duration,
 ) -> anyhow::Result<Vec<SocketAddr>> {
     let host_owned = host.to_string();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let result = (host_owned.as_str(), port)
-            .to_socket_addrs()
-            .map(|it| it.collect::<Vec<_>>());
-        let _ = tx.send(result);
-    });
-    match rx.recv_timeout(timeout) {
+    let result = run_with_timeout(
+        move || {
+            (host_owned.as_str(), port)
+                .to_socket_addrs()
+                .map(|it| it.collect::<Vec<_>>())
+        },
+        timeout,
+    );
+    match result {
         Ok(Ok(addrs)) => Ok(addrs),
         Ok(Err(e)) => Err(anyhow!("failed to resolve host '{host}': {e}")),
-        Err(_) => Err(anyhow!(
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
             "DNS resolution for host '{host}' timed out after {timeout:?}"
         )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(anyhow!("DNS resolution for host '{host}' thread panicked"))
+        }
     }
+}
+
+/// Race an arbitrary blocking closure against `timeout` on a dedicated thread.
+///
+/// Split out from `resolve_with_timeout` so the timeout/race mechanism itself
+/// can be tested deterministically (a controllable closure) instead of racing
+/// against real DNS resolution — the latter timed out or not depending on
+/// scheduling noise (thread spawn latency, resolver cache state), not on the
+/// mechanism under test.
+fn run_with_timeout<T, F>(f: F, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(timeout)
 }
 
 /// Whether an IPv6 address falls in the Unique Local Address range `fc00::/7`.
@@ -696,13 +719,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_with_timeout_errors_when_exceeded() {
-        // A near-zero timeout guarantees the recv_timeout expires before the
-        // spawned resolver thread can possibly deliver a result — deterministic
-        // without needing a genuinely unreachable/hanging DNS target.
-        let err = resolve_with_timeout("localhost", 80, Duration::from_nanos(1))
-            .expect_err("near-zero timeout must fail");
-        assert!(err.to_string().contains("timed out"), "got: {err}");
+    fn run_with_timeout_errors_when_exceeded() {
+        // The closure sleeps far longer than the timeout, so the race is
+        // decided by the sleep vs. timeout durations rather than by real DNS
+        // resolution latency, which varies with scheduling and resolver
+        // caching and made this test flaky under slow (e.g. coverage) runs.
+        let result = run_with_timeout(
+            || {
+                thread::sleep(Duration::from_millis(50));
+                42
+            },
+            Duration::from_millis(1),
+        );
+        assert_eq!(result, Err(mpsc::RecvTimeoutError::Timeout));
     }
 
     #[test]
