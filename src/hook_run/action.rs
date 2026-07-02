@@ -88,7 +88,11 @@ impl Action {
                 "project": "",
                 "keyword": q.keyword,
             }),
-            Action::Store => json!({ "content": chunk }),
+            // icm_memory_store requires `topic` (schema: ["topic", "content"]);
+            // omitting it fails every call with "missing required field: topic",
+            // which the SSRF loopback bug (fixed alongside this) masked entirely
+            // for same-host setups since the call never reached the server.
+            Action::Store => json!({ "topic": "llmenv-scope-context", "content": chunk }),
         }
     }
 
@@ -142,6 +146,14 @@ mod tests {
     fn store_arguments_carry_content() {
         let args = Action::Store.arguments("query", "## llmenv context\n...");
         assert_eq!(args["content"], serde_json::json!("## llmenv context\n..."));
+    }
+
+    #[test]
+    fn store_arguments_carry_required_topic() {
+        // icm_memory_store's schema requires "topic" alongside "content"; a
+        // call missing it fails server-side with "missing required field: topic".
+        let args = Action::Store.arguments("query", "chunk");
+        assert_eq!(args["topic"], serde_json::json!("llmenv-scope-context"));
     }
 
     #[test]

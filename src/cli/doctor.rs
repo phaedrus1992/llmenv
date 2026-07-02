@@ -5,18 +5,41 @@ use crate::paths;
 use anyhow::Context;
 use std::collections::HashSet;
 
+/// Effective value of a token-efficiency env var: the process environment
+/// wins if set (matches what Claude Code will actually see if it inherited
+/// the shell), otherwise fall back to `native.claude_code.env` in the
+/// resolved config — a var declared there lands in settings.json's own `env`
+/// block, which Claude Code applies to itself independent of the shell that
+/// launched it, so it counts as "set" even when the shell never exported it.
+fn effective_token_efficiency_var(
+    native_claude_env: Option<&serde_yaml::Value>,
+    key: &str,
+) -> Option<String> {
+    if let Ok(val) = std::env::var(key) {
+        return Some(val);
+    }
+    let value = native_claude_env?.get(key)?;
+    value
+        .as_str()
+        .map(String::from)
+        .or_else(|| value.as_bool().map(|b| b.to_string()))
+        .or_else(|| value.as_i64().map(|n| n.to_string()))
+}
+
 pub(super) fn run_doctor_token_efficiency(
     use_color: bool,
     pass: &str,
     warn: &str,
     cm_enabled: bool,
+    native_claude_env: Option<&serde_yaml::Value>,
 ) {
     let info = super::doctor_info(use_color);
     eprintln!();
     eprintln!("Token-efficiency checks:");
+    let get = |key: &str| effective_token_efficiency_var(native_claude_env, key);
 
-    match std::env::var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") {
-        Ok(val) => match val.parse::<u32>() {
+    match get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") {
+        Some(val) => match val.parse::<u32>() {
             Ok(pct) if pct <= 70 => eprintln!("{pass} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct}"),
             Ok(pct) => eprintln!(
                 "{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct} (recommend ≤70 for PreCompact cleanup)"
@@ -25,36 +48,38 @@ pub(super) fn run_doctor_token_efficiency(
                 eprintln!("{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE has invalid (non-numeric) value")
             }
         },
-        Err(_) => eprintln!(
+        None => eprintln!(
             "{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE not set (recommend 50 for PreCompact headroom)"
         ),
     }
 
-    match std::env::var("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
-        Ok(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
-        Ok(Err(_)) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value"),
-        Err(_) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
+    match get("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
+        Some(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
+        Some(Err(_)) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value"),
+        None => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
     }
 
-    match std::env::var("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
-        Ok(Ok(n)) => eprintln!("{pass} MAX_MCP_OUTPUT_TOKENS={n}"),
-        Ok(Err(_)) => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS has invalid (non-numeric) value"),
-        Err(_) => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
+    match get("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
+        Some(Ok(n)) => eprintln!("{pass} MAX_MCP_OUTPUT_TOKENS={n}"),
+        Some(Err(_)) => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS has invalid (non-numeric) value"),
+        None => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
     }
 
-    match std::env::var("ENABLE_PROMPT_CACHING_1H") {
-        Ok(val) if val.eq_ignore_ascii_case("true") || val == "1" => {
+    match get("ENABLE_PROMPT_CACHING_1H") {
+        Some(val) if val.eq_ignore_ascii_case("true") || val == "1" => {
             eprintln!("{pass} ENABLE_PROMPT_CACHING_1H=true (1h cache TTL enabled)")
         }
-        Ok(_) => eprintln!("{warn} ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)"),
-        Err(_) => {
+        Some(_) => {
+            eprintln!("{warn} ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)")
+        }
+        None => {
             eprintln!("{warn} ENABLE_PROMPT_CACHING_1H not set (recommend true for 1h cache reuse)")
         }
     }
 
-    match std::env::var("CLAUDE_CODE_SUBAGENT_MODEL") {
-        Ok(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
-        Err(_) => {
+    match get("CLAUDE_CODE_SUBAGENT_MODEL") {
+        Some(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
+        None => {
             eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL not set (default: claude-sonnet-4-6)")
         }
     }
@@ -160,10 +185,45 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         eprintln!("{warn} Config directory is not a git repo");
     }
 
+    let env = crate::scope::matcher::Env::detect();
+    let active = crate::scope::evaluate(&config, &env);
+
+    // Cross-engine hook compatibility (#543 follow-up): name any hook that will
+    // be silently skipped when materializing for an installed adapter with a
+    // narrower supported-hook-event set (e.g. Crush only supports PreToolUse).
+    // Only checks adapters actually on PATH — an adapter you don't have
+    // installed skipping a hook it could never run isn't worth flagging.
+    let doctor_firing = super::firing_bundles(&config.bundle, &active, None);
+    let doctor_manifest =
+        super::build_manifest(&config, &config_dir, &active, &doctor_firing, false)?;
+    if let Some((manifest, _)) = &doctor_manifest {
+        for adapter in crate::adapter::registered_adapters() {
+            if !crate::adapter::binary_on_path(adapter.binary_name()) {
+                continue;
+            }
+            let supported = adapter.supported_hook_events();
+            for hook in &manifest.capabilities.hooks {
+                if !supported.contains(&hook.event.as_str()) {
+                    eprintln!(
+                        "{warn} hook event '{}' is not supported by the {} adapter — \
+                         it will be skipped, not materialized. Supported events: {}",
+                        hook.event,
+                        adapter.name(),
+                        supported.join(", ")
+                    );
+                }
+            }
+        }
+    }
+    // Resolved native.claude_code.env, for the token-efficiency checks below
+    // to treat as equally "set" alongside the process environment (#543 follow-up).
+    let native_claude_env = doctor_manifest
+        .as_ref()
+        .and_then(|(manifest, _)| manifest.native.get("claude_code"))
+        .and_then(|v| v.get("env"));
+
     if all {
         // Orphan detection
-        let env = crate::scope::matcher::Env::detect();
-        let active = crate::scope::evaluate(&config, &env);
         let mut emitted = super::all_emitted_tags(&config);
         emitted.extend(active.tags.iter().cloned());
         let consumed = super::all_consumed_tags(&config);
@@ -405,7 +465,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
-    run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled);
+    run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled, native_claude_env);
 
     eprintln!("{pass} Doctor check complete.");
 
