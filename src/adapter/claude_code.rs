@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::resolve_bundle_relative_paths;
 use super::skills::create_dir_owner_only;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -610,33 +611,6 @@ fn generate_installed_plugins_json(
     let json_str = serde_json::to_string_pretty(&serde_json::Value::Object(existing))?;
     crate::paths::write_owner_only_atomic(&path, json_str.as_bytes())
         .with_context(|| format!("writing {}", path.display()))
-}
-
-/// Resolve bundle-relative paths in a hook command string.
-/// Scans whitespace-separated tokens and resolves those containing '/' (but not
-/// starting with '/', '~', '$', or '-') to absolute paths relative to bundle_dir.
-fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) -> Option<String> {
-    let mut resolved = false;
-    let mut result = String::new();
-    for (i, token) in command.split_whitespace().enumerate() {
-        if i > 0 {
-            result.push(' ');
-        }
-        if token.contains('/')
-            && !token.starts_with('/')
-            && !token.starts_with('~')
-            && !token.starts_with('$')
-            && !token.starts_with('-')
-            && !crate::paths::is_unsafe_join_target(token)
-        {
-            let abs_path = bundle_dir.join(token);
-            result.push_str(&abs_path.to_string_lossy());
-            resolved = true;
-        } else {
-            result.push_str(token);
-        }
-    }
-    if resolved { Some(result) } else { None }
 }
 
 /// SessionStart (#85): the hook object shape supports it; hash-comparison logic
