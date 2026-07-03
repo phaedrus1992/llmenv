@@ -260,8 +260,11 @@ mod tests {
     #[test]
     fn resolve_bundle_relative_paths_rewrites_relative_token() {
         let dir = std::path::Path::new("/bundles/foo");
-        let resolved = resolve_bundle_relative_paths("bash hooks/guard.sh", dir).unwrap();
-        assert_eq!(resolved, "bash /bundles/foo/hooks/guard.sh");
+        let resolved = resolve_bundle_relative_paths("bash hooks/guard.sh", dir);
+        assert_eq!(
+            resolved,
+            Some("bash /bundles/foo/hooks/guard.sh".to_string())
+        );
     }
 
     #[test]
