@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::resolve_bundle_relative_paths;
 use crate::merge::MergedManifest;
 use crate::util::{dedup, merge_json};
 
@@ -149,26 +150,30 @@ impl AgentAdapter for CrushAdapter {
         // 5. Build doc
         let mut doc = serde_json::Map::new();
 
-        // Hooks
+        // Hooks: Crush's HookConfig (internal/config/config.go) is a flat
+        // { matcher?, command, name?, timeout? } object per event entry — unlike
+        // Claude Code's { matcher, hooks: [{ type, command, tool }] } nesting.
+        // Rendering the nested shape here means Crush reads an empty `command`
+        // off the wrapper object and rejects the whole config at load time.
         let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
             std::collections::BTreeMap::new();
         for hook in &compatible_hooks {
-            let handler = json!({
-                "type": match hook.handler.kind {
-                    crate::config::HookHandlerKind::Command => "command",
-                    // P2-6: mcp_tool hooks are filtered out at the gate above.
-                    crate::config::HookHandlerKind::McpTool => unreachable!(
-                        "mcp_tool hooks are filtered out at the gate above"
-                    ),
-                },
-                "command": hook.handler.command,
-                "tool": hook.handler.tool,
-            });
+            // P2-6: mcp_tool hooks are filtered out at the gate above, so `command`
+            // is always present for the remaining Command-kind hooks.
+            let resolved_command =
+                hook.handler
+                    .command
+                    .as_ref()
+                    .map(|cmd| match &hook.bundle_origin {
+                        Some(bundle_dir) => resolve_bundle_relative_paths(cmd, bundle_dir)
+                            .unwrap_or_else(|| cmd.clone()),
+                        None => cmd.clone(),
+                    });
             let mut entry = serde_json::Map::new();
             if let Some(matcher) = &hook.matcher {
                 entry.insert("matcher".into(), json!(matcher));
             }
-            entry.insert("hooks".into(), json!([handler]));
+            entry.insert("command".into(), json!(resolved_command));
             hooks_by_event
                 .entry(hook.event.clone())
                 .or_default()
@@ -639,6 +644,73 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(doc["hooks"]["PreToolUse"].is_array());
+    }
+
+    #[test]
+    fn materialize_hook_uses_crush_flat_shape_not_claude_nesting() {
+        // Crush's HookConfig (internal/config/config.go) is a flat
+        // { matcher?, command } object per event entry, not Claude Code's
+        // { matcher, hooks: [{ type, command, tool }] } nesting. Rendering the
+        // nested shape makes Crush read an empty `command` off the wrapper and
+        // reject the config with "command is required" (#551 follow-up).
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: Some("Bash".into()),
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: Some("echo hi".into()),
+                tool: None,
+            },
+            bundle_origin: None,
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entry = &doc["hooks"]["PreToolUse"][0];
+        assert_eq!(entry["command"], serde_json::json!("echo hi"));
+        assert_eq!(entry["matcher"], serde_json::json!("Bash"));
+        assert!(
+            entry.get("hooks").is_none(),
+            "must not nest under a Claude Code-style 'hooks' array: {entry}"
+        );
+        assert!(
+            entry.get("type").is_none(),
+            "Crush's HookConfig has no 'type' field: {entry}"
+        );
+        assert!(
+            entry.get("tool").is_none(),
+            "Crush's HookConfig has no 'tool' field: {entry}"
+        );
+    }
+
+    #[test]
+    fn materialize_hook_resolves_bundle_relative_command_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: Some("bash hooks/guard.sh".into()),
+                tool: None,
+            },
+            bundle_origin: Some(PathBuf::from("/bundles/mybundle")),
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["hooks"]["PreToolUse"][0]["command"],
+            serde_json::json!("bash /bundles/mybundle/hooks/guard.sh"),
+            "bundle-relative hook script path must resolve to an absolute path: {doc}"
+        );
     }
 
     #[test]

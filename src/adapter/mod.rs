@@ -120,9 +120,40 @@ pub fn binary_on_path(name: &str) -> bool {
         .is_ok_and(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
 }
 
+/// Resolve bundle-relative paths in a hook command string.
+/// Scans whitespace-separated tokens and resolves those containing '/' (but not
+/// starting with '/', '~', '$', or '-') to absolute paths relative to `bundle_dir`.
+///
+/// Shared across adapters: any engine that renders a hook `command` string must
+/// resolve bundle-relative script paths the same way, since a bundle is authored
+/// once and materialized for every engine.
+pub(crate) fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) -> Option<String> {
+    let mut resolved = false;
+    let mut result = String::new();
+    for (i, token) in command.split_whitespace().enumerate() {
+        if i > 0 {
+            result.push(' ');
+        }
+        if token.contains('/')
+            && !token.starts_with('/')
+            && !token.starts_with('~')
+            && !token.starts_with('$')
+            && !token.starts_with('-')
+            && !crate::paths::is_unsafe_join_target(token)
+        {
+            let abs_path = bundle_dir.join(token);
+            result.push_str(&abs_path.to_string_lossy());
+            resolved = true;
+        } else {
+            result.push_str(token);
+        }
+    }
+    if resolved { Some(result) } else { None }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{binary_on_path, registered_adapters};
+    use super::{binary_on_path, registered_adapters, resolve_bundle_relative_paths};
 
     #[test]
     fn registry_contains_claude_and_crush_adapters() {
@@ -224,5 +255,21 @@ mod tests {
                 .any(|a| a.name().replace('-', "_") == "claude_code"),
             "no registered adapter's engine id matches the baked --engine default 'claude_code'"
         );
+    }
+
+    #[test]
+    fn resolve_bundle_relative_paths_rewrites_relative_token() {
+        let dir = std::path::Path::new("/bundles/foo");
+        let resolved = resolve_bundle_relative_paths("bash hooks/guard.sh", dir).unwrap();
+        assert_eq!(resolved, "bash /bundles/foo/hooks/guard.sh");
+    }
+
+    #[test]
+    fn resolve_bundle_relative_paths_leaves_absolute_and_shell_tokens_alone() {
+        let dir = std::path::Path::new("/bundles/foo");
+        assert!(resolve_bundle_relative_paths("bash /abs/path.sh", dir).is_none());
+        assert!(resolve_bundle_relative_paths("bash ${HOME}/x.sh", dir).is_none());
+        assert!(resolve_bundle_relative_paths("bash ~/x.sh", dir).is_none());
+        assert!(resolve_bundle_relative_paths("echo hello", dir).is_none());
     }
 }
