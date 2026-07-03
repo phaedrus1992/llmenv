@@ -302,18 +302,6 @@ fn is_hook_json(rel: &Path) -> bool {
 /// legacy `mcp.json` was never a config surface Claude ingested.
 const CLAUDE_JSON_FILE: &str = ".claude.json";
 
-/// Map a resolved remote transport onto Claude Code's `type` discriminator
-/// (#244). Claude requires `"type"` on remote `mcpServers` entries; without it
-/// the server is dropped. `Stdio` never reaches a `Remote` entry, so it is
-/// treated as `http` defensively rather than panicking.
-fn remote_type_str(transport: crate::config::McpTransport) -> &'static str {
-    use crate::config::McpTransport;
-    match transport {
-        McpTransport::Sse => "sse",
-        McpTransport::Http | McpTransport::Stdio => "http",
-    }
-}
-
 /// Build the `mcpServers` object for every resolved server, keyed by name.
 /// Stdio entries carry `command`/`args`/`env`; remote entries carry
 /// `{"type", "url"}` — the transport discriminator Claude Code requires (#244).
@@ -340,7 +328,8 @@ fn build_mcp_servers(
                 obj
             }
             ResolvedKind::Remote { url, transport } => {
-                let mut obj = json!({ "type": remote_type_str(*transport), "url": url });
+                let mut obj =
+                    json!({ "type": super::remote_transport_type_str(*transport), "url": url });
                 if !m.headers.is_empty() {
                     obj["headers"] = json!(m.headers);
                 }

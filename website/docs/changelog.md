@@ -126,6 +126,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `command` resolves against the bundle's directory) into the shared adapter helper
   so Crush benefits from it too — it previously only ran for Claude Code, leaving a
   bundle-authored relative script path broken under Crush. (#551)
+- Fix `CrushAdapter` rendering MCP servers, LSP `init_options`, and permissions in
+  Claude Code's shapes instead of Crush's actual schema
+  (https://charm.land/crush.json), found by auditing the adapter against it: every
+  MCP server previously failed to initialize because Crush's required `type` field
+  (`stdio`/`sse`/`http`) was either missing (stdio entries) or set to the
+  nonexistent value `"remote"` (remote entries) — Crush's MCP client hits an
+  `unsupported mcp type` error for anything else. LSP `init_options` was written
+  under Claude Code's `initializationOptions` key, so Crush's plain
+  `json.Unmarshal` silently dropped it. `permissions.denied_tools`/`default_mode`
+  were also dropped — Crush's `PermissionsConfig` has only `allowed_tools`; not a
+  security regression (Crush already denies-by-default outside the allow-list),
+  but dead output. The full rendered config (all three MCP transports, hooks, LSP,
+  permissions) now validates against the real schema with zero violations. (#554)
 - Fix the ICM memory backend (`session_start`/`turn_start`/`session_end`) being
   completely non-functional whenever it resolved to loopback or a private-network
   address — the documented common topology (AGENTS.md: "the resolved icm MCP
