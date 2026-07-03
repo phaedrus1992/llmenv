@@ -151,9 +151,27 @@ pub(crate) fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) ->
     if resolved { Some(result) } else { None }
 }
 
+/// Map a resolved remote transport onto the `type` discriminator string shared
+/// by every engine's remote-MCP config shape (`"http"` / `"sse"`).
+///
+/// `ResolvedKind::Remote` never actually carries `McpTransport::Stdio` (stdio
+/// servers always resolve to `ResolvedKind::Stdio` instead — see
+/// `crate::mcp::resolve`), so that arm is unreachable in practice; it is
+/// folded to `"http"` defensively rather than panicking.
+pub(crate) fn remote_transport_type_str(transport: crate::config::McpTransport) -> &'static str {
+    use crate::config::McpTransport;
+    match transport {
+        McpTransport::Sse => "sse",
+        McpTransport::Http | McpTransport::Stdio => "http",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{binary_on_path, registered_adapters, resolve_bundle_relative_paths};
+    use super::{
+        binary_on_path, registered_adapters, remote_transport_type_str,
+        resolve_bundle_relative_paths,
+    };
 
     #[test]
     fn registry_contains_claude_and_crush_adapters() {
@@ -274,5 +292,17 @@ mod tests {
         assert!(resolve_bundle_relative_paths("bash ${HOME}/x.sh", dir).is_none());
         assert!(resolve_bundle_relative_paths("bash ~/x.sh", dir).is_none());
         assert!(resolve_bundle_relative_paths("echo hello", dir).is_none());
+    }
+
+    #[test]
+    fn remote_transport_type_str_maps_http_and_sse() {
+        use crate::config::McpTransport;
+        assert_eq!(remote_transport_type_str(McpTransport::Http), "http");
+        assert_eq!(remote_transport_type_str(McpTransport::Sse), "sse");
+        assert_eq!(
+            remote_transport_type_str(McpTransport::Stdio),
+            "http",
+            "unreachable in practice, but must not panic"
+        );
     }
 }
