@@ -63,11 +63,11 @@ impl AgentAdapter for CrushAdapter {
         // command), split dir creation into materialize() and thread state_dir
         // through its signature instead.
         super::skills::create_dir_owner_only(Path::new(&crush_data_dir))?;
+        // Crush's `GlobalConfig()` does `filepath.Join(CRUSH_GLOBAL_CONFIG, "crush.json")`
+        // itself — this must be the directory containing crush.json, not the file path,
+        // or Crush ends up joining "crush.json" onto an already-file-ending path.
         Ok(vec![
-            (
-                "CRUSH_GLOBAL_CONFIG".into(),
-                format!("{config_dir}/{CRUSH_JSON_FILE}"),
-            ),
+            ("CRUSH_GLOBAL_CONFIG".into(), config_dir.to_string()),
             ("CRUSH_GLOBAL_DATA".into(), crush_data_dir),
         ])
     }
@@ -558,7 +558,10 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_config_path_ends_with_crush_json() {
+    fn env_vars_config_path_is_the_cache_dir_not_the_json_file() {
+        // Crush's GlobalConfig() does filepath.Join(CRUSH_GLOBAL_CONFIG, "crush.json")
+        // itself. If we point this var at the crush.json file path, Crush ends up
+        // looking for crush.json/crush.json (#regression).
         let cache = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let vars = CrushAdapter.env_vars(cache.path(), state.path()).unwrap();
@@ -566,9 +569,10 @@ mod tests {
             .iter()
             .find(|(k, _)| k == "CRUSH_GLOBAL_CONFIG")
             .unwrap();
-        assert!(
-            config.ends_with("crush.json"),
-            "expected crush.json in path, got {config}"
+        assert_eq!(
+            config,
+            &cache.path().to_str().unwrap().to_string(),
+            "CRUSH_GLOBAL_CONFIG must be the cache dir itself, not the crush.json file"
         );
     }
 

@@ -103,6 +103,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   or failing DNS resolver could hang `llmenv hook-run` — including the per-prompt
   `turn_start` hook — for minutes instead of seconds. Resolution is now bounded by
   the same timeout via a dedicated helper. (#547)
+- Fix `CrushAdapter` exporting `CRUSH_GLOBAL_CONFIG` pointing directly at the rendered
+  `crush.json` file instead of the directory containing it. Crush's own config loader
+  joins `crush.json` onto `CRUSH_GLOBAL_CONFIG` itself, so the file-path value made it
+  look for `crush.json/crush.json` and fail to load — `crush` couldn't start with any
+  llmenv-managed config. `CRUSH_GLOBAL_CONFIG` now points at the cache directory, matching
+  the original design intent. (#551)
 - Fix the ICM memory backend (`session_start`/`turn_start`/`session_end`) being
   completely non-functional whenever it resolved to loopback or a private-network
   address — the documented common topology (AGENTS.md: "the resolved icm MCP
