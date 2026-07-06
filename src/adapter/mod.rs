@@ -144,7 +144,7 @@ mod tests {
         let a = &*adapters[0];
         assert_eq!(a.binary_name(), "claude");
         assert!(a.supports_plugins(), "ClaudeCodeAdapter supports plugins");
-        assert!(!a.supports_lsp(), "ClaudeCodeAdapter does not support LSP");
+        assert!(a.supports_lsp(), "ClaudeCodeAdapter supports LSP (#556)");
         let events = a.supported_hook_events();
         for expected in [
             "SessionStart",

@@ -709,6 +709,14 @@ pub struct LspServer {
     /// Per-server request timeout in seconds. `None` means use the engine default.
     #[serde(default)]
     pub timeout: Option<u32>,
+    /// File extension → language identifier (e.g. `{".rs": "rust"}`).
+    /// #556: Claude Code's plugin `lspServers` schema requires an
+    /// `extensionToLanguage` map (it has no `filetypes`-style language-id list);
+    /// consumed only by `ClaudeCodeAdapter`. A server without this mapping is
+    /// skipped (with a warning) when rendering for Claude Code, since `filetypes`
+    /// language ids don't reliably convert to file extensions (e.g. `rust` → `.rs`).
+    #[serde(default)]
+    pub extension_to_language: std::collections::BTreeMap<String, String>,
 }
 
 /// An agent plugin marketplace: a name plus a source the marketplace is fetched
@@ -1274,6 +1282,8 @@ mod tests {
         use std::collections::BTreeMap;
         let mut env = BTreeMap::new();
         env.insert("RUST_LOG".to_string(), "info".to_string());
+        let mut extension_to_language = BTreeMap::new();
+        extension_to_language.insert(".rs".to_string(), "rust".to_string());
         let original = LspServer {
             name: "rust-analyzer".to_string(),
             when: vec!["rust".to_string()],
@@ -1285,6 +1295,7 @@ mod tests {
             root_markers: vec!["Cargo.toml".to_string(), ".git".to_string()],
             init_options: Some(serde_yaml::from_str("checkOnSave:\n  command: clippy\n").unwrap()),
             timeout: Some(30),
+            extension_to_language,
         };
         let yaml = serde_yaml::to_string(&original).unwrap();
         let parsed: LspServer = serde_yaml::from_str(&yaml).unwrap();
@@ -1327,6 +1338,10 @@ mod tests {
             "init_options must default to None"
         );
         assert_eq!(server.timeout, None, "timeout must default to None");
+        assert!(
+            server.extension_to_language.is_empty(),
+            "extension_to_language must default to empty"
+        );
         // Suppress unused variable warning from yaml binding
         let _ = yaml;
     }

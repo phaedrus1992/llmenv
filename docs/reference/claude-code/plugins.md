@@ -41,6 +41,34 @@ Manifest with `name` and optional component declarations, e.g. LSP servers:
 Plugin agents support `name`, `description`, `model`, `effort`, `maxTurns`,
 `disallowedTools`, but **not** `hooks`/`mcpServers`/`permissionMode` (security).
 
+### LSP servers
+
+`lspServers` (inline in `plugin.json`, or `.lsp.json` in the plugin root) maps
+language-server names to their configs:
+
+```json
+{
+  "go": {
+    "command": "gopls",
+    "args": ["serve"],
+    "extensionToLanguage": { ".go": "go" }
+  }
+}
+```
+
+Required: `command`, `extensionToLanguage` (file extension → language id).
+Optional: `args`, `transport` (`stdio` default | `socket`), `env`,
+`initializationOptions`, `settings`, `workspaceFolder`, `startupTimeout`,
+`maxRestarts`, `diagnostics` (default `true`).
+
+### Skills-directory plugins
+
+A folder under a skills directory (`~/.claude/skills/` personal,
+`<cwd>/.claude/skills/` project) containing `.claude-plugin/plugin.json` loads as
+a plugin `<name>@skills-dir` — no marketplace, no install step, no
+`enabledPlugins` entry. This is distinct from a plain `<name>/SKILL.md` (a skill)
+or `<plugin>/skills/<name>/SKILL.md` (a skill packaged inside a plugin).
+
 ## Marketplaces (settings.json)
 
 `extraKnownMarketplaces` (sources: `github`, `git`, `directory`, `hostPattern`,
@@ -89,6 +117,17 @@ already cached.
 The internal model (`ResolvedPlugin { marketplace, plugin }` +
 `ResolvedMarketplace { name, source, install_location, head }`) is engine-agnostic
 so a future Codex adapter can render the same data into its own format.
+
+**`capabilities.lsp` (#556).** Unlike MCP (a bare `mcpServers` key in
+`.claude.json`), Claude Code's only LSP surface is a plugin's `lspServers`
+manifest key — there is no top-level config surface for it. llmenv renders
+`lsp:` entries into a synthetic skills-directory plugin instead of a real
+marketplace plugin: `skills/llmenv-lsp/.claude-plugin/plugin.json` containing
+`{"name": "llmenv-lsp", "lspServers": {...}}`, auto-loaded with no
+`enabledPlugins`/`installed_plugins.json` entry needed. An `lsp:` entry missing
+`extension_to_language` (llmenv's neutral `filetypes` is a language-id list, not
+an extension map, and the two don't reliably convert) is skipped for Claude Code
+with a warning rather than rendered incorrectly.
 
 - `strictPluginOnlyCustomization` (M) is notable: in an enterprise that sets it,
   user/project skills/agents/hooks/MCP are blocked — only plugins and managed

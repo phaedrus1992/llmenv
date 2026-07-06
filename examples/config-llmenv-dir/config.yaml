@@ -606,8 +606,10 @@ mcp:
 ################################################################################
 # LSP servers — selected by tag, rendered into the agent's LSP config.
 #
-# Only engines with an LSP surface render these (Crush today); it's a silent
-# no-op elsewhere, so it's safe to declare alongside engine-neutral bundles.
+# Only engines with an LSP surface render these (Crush, Claude Code); it's a
+# silent no-op elsewhere, so it's safe to declare alongside engine-neutral
+# bundles. `filetypes`/`root_markers` are Crush-only; `extension_to_language`
+# is Claude Code-only (and required there — see configuration.md#lsp).
 ################################################################################
 lsp:
   - name: rust-analyzer
@@ -615,6 +617,8 @@ lsp:
     command: rust-analyzer
     filetypes: ["rust"]
     root_markers: ["Cargo.toml"]
+    extension_to_language:
+      ".rs": rust
 
 ################################################################################
 # Memory backend (llmenv's ICM topology).

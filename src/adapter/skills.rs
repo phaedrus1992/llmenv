@@ -135,6 +135,13 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
             );
         }
 
+        // #556: a folder marked by `.claude-plugin/plugin.json` is a skills-directory
+        // plugin (e.g. llmenv's synthetic LSP plugin), not a skill — it needs no
+        // SKILL.md of its own.
+        if path.join(".claude-plugin").join("plugin.json").exists() {
+            continue;
+        }
+
         let skill_md = path.join("SKILL.md");
         if !skill_md.exists() {
             anyhow::bail!("Skill directory {} missing SKILL.md", path.display());
