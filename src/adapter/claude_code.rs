@@ -144,6 +144,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if text.is_empty() {
             return String::new();
         }
+
+        // Store-only events (SessionStart, SessionEnd) have no model turn to inject context
+        // into, and Claude Code's hook schema rejects additionalContext in their
+        // hookSpecificOutput. Return empty so these events emit no output. (#558)
+        match hook_event_name {
+            "SessionStart" | "SessionEnd" => return String::new(),
+            _ => {}
+        }
+
         // Wrap in a system barrier to prevent prompt injection: the MCP response
         // (possibly from an untrusted memory backend) is wrapped so any attempts
         // to escape the context block are trapped as unparseable markdown.
@@ -1257,9 +1266,10 @@ enum PermissionAction {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::super::AgentAdapter;
     use super::{
-        CLAUDE_JSON_FILE, MODELED_SETTINGS_KEYS, classify_claude_path, is_hook_json,
-        merge_mcp_into_claude_json, overlay_native, reconcile_settings,
+        CLAUDE_JSON_FILE, ClaudeCodeAdapter, MODELED_SETTINGS_KEYS, classify_claude_path,
+        is_hook_json, merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
         render_permission_rule, seed_install_method, validate_skills,
     };
@@ -2167,5 +2177,71 @@ mod tests {
         std::os::unix::fs::symlink(&outside, skills.join("evil")).unwrap();
         let err = validate_skills(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("escapes"), "got: {err}");
+    }
+
+    #[test]
+    fn emit_hook_context_session_end_returns_empty_string() {
+        // SessionEnd is a store-only event with no model turn to inject context into.
+        // Should return empty string per Claude Code schema (no additionalContext allowed).
+        let adapter = ClaudeCodeAdapter;
+        let output = adapter.emit_hook_context("SessionEnd", "stored session data");
+        assert_eq!(output, "", "SessionEnd should emit no output");
+    }
+
+    #[test]
+    fn emit_hook_context_session_start_returns_empty_string() {
+        // SessionStart is also a store-only event without context injection.
+        // Should return empty string per Claude Code schema.
+        let adapter = ClaudeCodeAdapter;
+        let output = adapter.emit_hook_context("SessionStart", "session started");
+        assert_eq!(output, "", "SessionStart should emit no output");
+    }
+
+    #[test]
+    fn emit_hook_context_user_prompt_submit_includes_additional_context() {
+        // UserPromptSubmit should include additionalContext per Claude Code schema
+        let adapter = ClaudeCodeAdapter;
+        let output = adapter.emit_hook_context("UserPromptSubmit", "some context data");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("output must be valid JSON");
+
+        // hookEventName must be present
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"].as_str(),
+            Some("UserPromptSubmit")
+        );
+
+        // additionalContext must be present and contain the context
+        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("UserPromptSubmit must include additionalContext");
+        assert!(
+            ctx.contains("some context data"),
+            "context should be preserved in additionalContext"
+        );
+    }
+
+    #[test]
+    fn emit_hook_context_post_tool_use_includes_additional_context() {
+        // PostToolUse should include additionalContext per Claude Code schema
+        let adapter = ClaudeCodeAdapter;
+        let output = adapter.emit_hook_context("PostToolUse", "tool result context");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("output must be valid JSON");
+
+        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("PostToolUse must include additionalContext");
+        assert!(ctx.contains("tool result context"));
+    }
+
+    #[test]
+    fn emit_hook_context_empty_text_returns_empty_string() {
+        // Empty text should return empty string, not invalid JSON
+        let adapter = ClaudeCodeAdapter;
+        let output = adapter.emit_hook_context("SessionEnd", "");
+        assert_eq!(output, "", "empty text should produce empty output");
     }
 }
