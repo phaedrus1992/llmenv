@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The Claude Code adapter now renders `capabilities.lsp`: entries with an
+  `extension_to_language` map (new field, e.g. `{".rs": "rust"}`) render into a
+  synthetic skills-directory plugin (`skills/llmenv-lsp/.claude-plugin/plugin.json`),
+  which Claude Code auto-loads with no marketplace or install step — its only LSP
+  surface is a plugin's `lspServers` manifest key. Entries without the map are
+  skipped (with a warning) rather than rendered incorrectly, since the existing
+  `filetypes` field (language ids) doesn't reliably convert to Claude's required
+  extension-to-language form. (#556)
 - `features.context_mode` built-in feature: enabling `features.context_mode.enabled`
   auto-wires the context-mode plugin (marketplace, plugin, durable
   `CONTEXT_MODE_DATA_DIR`, and MCP permission) — the token-efficiency counterpart
