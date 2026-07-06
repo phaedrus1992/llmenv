@@ -604,6 +604,19 @@ mcp:
     args: ["@playwright/mcp@latest"]
 
 ################################################################################
+# LSP servers — selected by tag, rendered into the agent's LSP config.
+#
+# Only engines with an LSP surface render these (Crush today); it's a silent
+# no-op elsewhere, so it's safe to declare alongside engine-neutral bundles.
+################################################################################
+lsp:
+  - name: rust-analyzer
+    when: [rust]
+    command: rust-analyzer
+    filetypes: ["rust"]
+    root_markers: ["Cargo.toml"]
+
+################################################################################
 # Memory backend (llmenv's ICM topology).
 #
 # `personal-laptop` runs the daemon; every selected host points at it. The `host:`
