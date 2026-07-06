@@ -19,6 +19,7 @@ The config directory is resolved in this order:
 | `native:` | map (per engine) | Opaque per-engine passthrough for keys no feature models |
 | `bundle:` | list | Environment-variable + file bundles |
 | `mcp:` | list | MCP server declarations |
+| `lsp:` | list | LSP server declarations (Crush only; no-op on engines without an LSP surface) |
 | `features:` | map | Feature flags; holds `memory:` (ICM backend topology) and `throttle:` (usage throttling) |
 | `session_log:` | map | Session-activity logging: local JSONL file and/or ICM transcript |
 | `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
@@ -222,6 +223,39 @@ mcp:
 | `url` | for http/sse | Remote endpoint |
 
 See [MCP & Memory](mcp.md) for the full model.
+
+## `lsp:`
+
+Language servers selected by tag, rendered into the agent's LSP config.
+Only engines whose adapter reports `supports_lsp() == true` render these —
+today that's Crush; Claude Code has no LSP surface and silently ignores
+`lsp:` entries, so it's safe to declare in a bundle shared across engines.
+
+```yaml
+lsp:
+  - name: rust-analyzer
+    when: [me]
+    command: rust-analyzer
+    filetypes: ["rust"]
+    root_markers: ["Cargo.toml"]
+    init_options:
+      check:
+        command: clippy
+    timeout: 30
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `name` | yes | Registration name in the agent's LSP config |
+| `when` | no | Activation tags |
+| `command` | yes | Executable to launch |
+| `args` | no | Arguments for `command` |
+| `env` | no | Environment for the launched process |
+| `disabled` | no | Excludes the server from every engine when `true` |
+| `filetypes` | no | Language identifiers the server handles (e.g. `["rust"]`) |
+| `root_markers` | no | Filenames/patterns that anchor the workspace root |
+| `init_options` | no | Opaque data forwarded verbatim as the LSP `initialize` handshake options |
+| `timeout` | no | Per-server request timeout in seconds |
 
 ## `features:`
 
