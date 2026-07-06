@@ -183,6 +183,22 @@ impl AgentAdapter for ClaudeCodeAdapter {
             crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
         owned.extend(skill_owned);
 
+        // #556: LSP servers render into a synthetic skills-directory plugin named
+        // `LSP_PLUGIN_NAME`. A first-class skill of the same name would silently
+        // lose its SKILL.md to this directory (validate_skills treats any
+        // `LSP_PLUGIN_NAME` dir as the LSP plugin, not a skill) — reject it instead.
+        if manifest
+            .capabilities
+            .skills
+            .iter()
+            .any(|s| s.name == LSP_PLUGIN_NAME)
+        {
+            anyhow::bail!(
+                "skill name '{LSP_PLUGIN_NAME}' is reserved for llmenv's synthetic \
+                 LSP plugin; rename the skill to avoid the conflict"
+            );
+        }
+
         // #556: LSP servers render into a synthetic skills-directory plugin. Written
         // before validate_skills so the plugin dir it creates is in place first.
         if let Some(lsp_owned) = write_lsp_plugin(out, &manifest.capabilities.lsp)? {
@@ -618,7 +634,7 @@ fn generate_installed_plugins_json(
 /// with no marketplace and no install step — this is Claude Code's only LSP
 /// surface (a plugin manifest's `lspServers` key); there is no bare top-level
 /// config key the way MCP has `mcpServers`.
-const LSP_PLUGIN_NAME: &str = "llmenv-lsp";
+pub(crate) const LSP_PLUGIN_NAME: &str = "llmenv-lsp";
 
 /// Renders `manifest.capabilities.lsp` into `skills/llmenv-lsp/.claude-plugin/plugin.json`.
 /// Returns the relative path written, or `None` if nothing rendered (mirrors how the
@@ -691,7 +707,7 @@ fn write_lsp_plugin(
         .join(".claude-plugin")
         .join("plugin.json");
     crate::paths::write_owner_only_atomic(
-        &out.join(&rel_path),
+        &plugin_dir.join("plugin.json"),
         serde_json::to_string_pretty(&manifest)?.as_bytes(),
     )
     .with_context(|| format!("writing {}", rel_path.display()))?;
