@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::resolve_bundle_relative_paths;
 use super::skills::create_dir_owner_only;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -301,18 +302,6 @@ fn is_hook_json(rel: &Path) -> bool {
 /// legacy `mcp.json` was never a config surface Claude ingested.
 const CLAUDE_JSON_FILE: &str = ".claude.json";
 
-/// Map a resolved remote transport onto Claude Code's `type` discriminator
-/// (#244). Claude requires `"type"` on remote `mcpServers` entries; without it
-/// the server is dropped. `Stdio` never reaches a `Remote` entry, so it is
-/// treated as `http` defensively rather than panicking.
-fn remote_type_str(transport: crate::config::McpTransport) -> &'static str {
-    use crate::config::McpTransport;
-    match transport {
-        McpTransport::Sse => "sse",
-        McpTransport::Http | McpTransport::Stdio => "http",
-    }
-}
-
 /// Build the `mcpServers` object for every resolved server, keyed by name.
 /// Stdio entries carry `command`/`args`/`env`; remote entries carry
 /// `{"type", "url"}` — the transport discriminator Claude Code requires (#244).
@@ -339,7 +328,8 @@ fn build_mcp_servers(
                 obj
             }
             ResolvedKind::Remote { url, transport } => {
-                let mut obj = json!({ "type": remote_type_str(*transport), "url": url });
+                let mut obj =
+                    json!({ "type": super::remote_transport_type_str(*transport), "url": url });
                 if !m.headers.is_empty() {
                     obj["headers"] = json!(m.headers);
                 }
@@ -610,33 +600,6 @@ fn generate_installed_plugins_json(
     let json_str = serde_json::to_string_pretty(&serde_json::Value::Object(existing))?;
     crate::paths::write_owner_only_atomic(&path, json_str.as_bytes())
         .with_context(|| format!("writing {}", path.display()))
-}
-
-/// Resolve bundle-relative paths in a hook command string.
-/// Scans whitespace-separated tokens and resolves those containing '/' (but not
-/// starting with '/', '~', '$', or '-') to absolute paths relative to bundle_dir.
-fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) -> Option<String> {
-    let mut resolved = false;
-    let mut result = String::new();
-    for (i, token) in command.split_whitespace().enumerate() {
-        if i > 0 {
-            result.push(' ');
-        }
-        if token.contains('/')
-            && !token.starts_with('/')
-            && !token.starts_with('~')
-            && !token.starts_with('$')
-            && !token.starts_with('-')
-            && !crate::paths::is_unsafe_join_target(token)
-        {
-            let abs_path = bundle_dir.join(token);
-            result.push_str(&abs_path.to_string_lossy());
-            resolved = true;
-        } else {
-            result.push_str(token);
-        }
-    }
-    if resolved { Some(result) } else { None }
 }
 
 /// SessionStart (#85): the hook object shape supports it; hash-comparison logic
