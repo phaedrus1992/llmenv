@@ -135,6 +135,21 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
             );
         }
 
+        // #556: llmenv's own synthetic LSP plugin dir is a skills-directory plugin
+        // (marked by `.claude-plugin/plugin.json`), not a skill — it needs no
+        // SKILL.md and, being synthesized from typed config rather than copied
+        // bundle files, no hardcoded-path scan either. Scoped to the exact
+        // reserved name (not "any dir with that marker") so a plugin-sourced skill
+        // can't use the same marker to bypass validation.
+        if path.file_name()
+            == Some(std::ffi::OsStr::new(
+                crate::adapter::claude_code::LSP_PLUGIN_NAME,
+            ))
+            && path.join(".claude-plugin").join("plugin.json").exists()
+        {
+            continue;
+        }
+
         let skill_md = path.join("SKILL.md");
         if !skill_md.exists() {
             anyhow::bail!("Skill directory {} missing SKILL.md", path.display());
