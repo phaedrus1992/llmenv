@@ -76,6 +76,7 @@ permissions):
 | `CLAUDE.md` | the merged `AGENTS.md` / rules content |
 | `settings.json` | permissions, hooks, plugins (+ `native_*` overrides, + `native:` catch-all) |
 | `.claude.json` | resolved MCP servers upserted into `mcpServers`; foreign keys preserved (+ `native_mcp`) |
+| `skills/llmenv-lsp/.claude-plugin/plugin.json` | `lsp:` entries with `extension_to_language` set, as a synthetic skills-directory plugin (#556) |
 
 It also:
 

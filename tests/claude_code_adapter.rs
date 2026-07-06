@@ -1550,10 +1550,14 @@ fn materialize_writes_installed_plugins_json_for_external_plugins() {
     assert_eq!(entry["scope"], "user");
 }
 
-/// LSP entries in the manifest capabilities are silently ignored by Claude Code.
-/// `materialize()` must succeed and produce no `lsp` key anywhere in its outputs.
+/// #556: Claude Code's plugin `lspServers` schema requires an
+/// `extensionToLanguage` map, which the neutral `filetypes` (language ids, not
+/// extensions) cannot be reliably converted into. An entry missing
+/// `extension_to_language` is skipped for Claude Code (not a hard error, and
+/// not rendered anywhere) so a bundle shared with Crush (which uses
+/// `filetypes` directly) doesn't break Claude Code materialization.
 #[test]
-fn lsp_entries_in_manifest_are_not_rendered_by_claude() {
+fn lsp_entry_missing_extension_map_is_skipped_by_claude() {
     use llmenv::config::LspServer;
 
     let tmp = tempdir().unwrap();
@@ -1571,7 +1575,6 @@ fn lsp_entries_in_manifest_are_not_rendered_by_claude() {
     };
 
     let manifest = merge(&caps, &empty_native(), &[]).unwrap();
-    // Ensure the lsp entry actually made it into the merged manifest.
     assert_eq!(
         manifest.capabilities.lsp.len(),
         1,
@@ -1580,23 +1583,114 @@ fn lsp_entries_in_manifest_are_not_rendered_by_claude() {
 
     ClaudeCodeAdapter.materialize(&manifest, &out).unwrap();
 
-    // settings.json must not contain an "lsp" key.
-    let settings_path = out.join("settings.json");
-    if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path).unwrap();
-        assert!(
-            !content.contains("\"lsp\""),
-            "settings.json must not contain an lsp key; got: {content}"
-        );
-    }
+    assert!(
+        !out.join("skills/llmenv-lsp").exists(),
+        "no synthetic LSP plugin should be written when no entry has extension_to_language"
+    );
+}
 
-    // .claude.json (if written) must not contain an "lsp" key.
-    let claude_json = out.join(".claude.json");
-    if claude_json.exists() {
-        let content = std::fs::read_to_string(&claude_json).unwrap();
-        assert!(
-            !content.contains("\"lsp\""),
-            ".claude.json must not contain an lsp key; got: {content}"
-        );
-    }
+/// #556: an `lsp:` entry with `extension_to_language` set renders into a
+/// skills-directory plugin (`skills/llmenv-lsp/.claude-plugin/plugin.json`),
+/// which Claude Code auto-loads with no marketplace/install step.
+#[test]
+fn lsp_entry_with_extension_map_renders_skills_directory_plugin() {
+    use llmenv::config::LspServer;
+
+    let mut extension_to_language = BTreeMap::new();
+    extension_to_language.insert(".rs".to_string(), "rust".to_string());
+    let caps = llmenv::config::Capabilities {
+        lsp: vec![LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            args: vec!["--no-default-features".into()],
+            extension_to_language,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let plugin_json = tmp
+        .path()
+        .join("skills/llmenv-lsp/.claude-plugin/plugin.json");
+    let content = std::fs::read_to_string(&plugin_json).expect("read synthetic plugin.json");
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse plugin.json");
+
+    assert_eq!(parsed["name"], "llmenv-lsp");
+    let entry = &parsed["lspServers"]["rust-analyzer"];
+    assert_eq!(entry["command"], "rust-analyzer");
+    assert_eq!(entry["args"][0], "--no-default-features");
+    assert_eq!(entry["extensionToLanguage"][".rs"], "rust");
+}
+
+/// #556: a disabled LSP server never reaches Claude Code's synthetic plugin,
+/// matching the same `disabled` semantics Crush already honors.
+#[test]
+fn lsp_disabled_entry_omitted_from_claude_plugin() {
+    use llmenv::config::LspServer;
+
+    let mut extension_to_language = BTreeMap::new();
+    extension_to_language.insert(".rs".to_string(), "rust".to_string());
+    let caps = llmenv::config::Capabilities {
+        lsp: vec![LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            disabled: true,
+            extension_to_language,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    assert!(
+        !tmp.path().join("skills/llmenv-lsp").exists(),
+        "disabled server must not produce the synthetic LSP plugin"
+    );
+}
+
+/// #556: a first-class skill named the same as the reserved synthetic LSP
+/// plugin directory (`llmenv-lsp`) must be rejected, not silently shadowed —
+/// otherwise its SKILL.md would never be validated or usable.
+#[test]
+fn lsp_plugin_name_collision_with_first_class_skill_is_rejected() {
+    use llmenv::config::{LspServer, SkillSource};
+
+    let skill_dir = tempdir().unwrap();
+    std::fs::write(
+        skill_dir.path().join("SKILL.md"),
+        "---\nname: llmenv-lsp\ndescription: a user skill\n---\nbody\n",
+    )
+    .unwrap();
+
+    let mut extension_to_language = BTreeMap::new();
+    extension_to_language.insert(".rs".to_string(), "rust".to_string());
+    let caps = llmenv::config::Capabilities {
+        skills: vec![SkillSource {
+            name: "llmenv-lsp".into(),
+            path: skill_dir.path().to_string_lossy().into_owned(),
+            when: vec![],
+        }],
+        lsp: vec![LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            extension_to_language,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    let err = ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect_err("must reject a skill name colliding with the LSP plugin dir");
+    assert!(err.to_string().contains("llmenv-lsp"));
 }

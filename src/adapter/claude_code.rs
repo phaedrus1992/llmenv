@@ -106,7 +106,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn supports_lsp(&self) -> bool {
-        false
+        true
     }
 
     fn supported_hook_events(&self) -> &'static [&'static str] {
@@ -184,6 +184,28 @@ impl AgentAdapter for ClaudeCodeAdapter {
             crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
         owned.extend(skill_owned);
 
+        // #556: LSP servers render into a synthetic skills-directory plugin named
+        // `LSP_PLUGIN_NAME`. A first-class skill of the same name would silently
+        // lose its SKILL.md to this directory (validate_skills treats any
+        // `LSP_PLUGIN_NAME` dir as the LSP plugin, not a skill) — reject it instead.
+        if manifest
+            .capabilities
+            .skills
+            .iter()
+            .any(|s| s.name == LSP_PLUGIN_NAME)
+        {
+            anyhow::bail!(
+                "skill name '{LSP_PLUGIN_NAME}' is reserved for llmenv's synthetic \
+                 LSP plugin; rename the skill to avoid the conflict"
+            );
+        }
+
+        // #556: LSP servers render into a synthetic skills-directory plugin. Written
+        // before validate_skills so the plugin dir it creates is in place first.
+        if let Some(lsp_owned) = write_lsp_plugin(out, &manifest.capabilities.lsp)? {
+            owned.push(lsp_owned);
+        }
+
         // Validate that skills are properly structured with SKILL.md frontmatter
         crate::adapter::skills::validate_skills(out)?;
 
@@ -215,12 +237,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if !manifest.mcps.is_empty() || native_mcp.is_some() {
             merge_mcp_into_claude_json(out, &manifest.mcps, native_mcp)?;
         }
-
-        // LSP servers in manifest.capabilities.lsp are intentionally not rendered
-        // here. ClaudeCodeAdapter::supports_lsp() returns false — Claude Code has no
-        // LSP surface. Declaring LSP in a shared bundle is legitimate for engines that
-        // do support it; it is a silent no-op for Claude (unlike unsupported plugins,
-        // which represent a user-visible loss of functionality and warrant a warning).
 
         crate::materialize::prune_empty_dirs(out)?;
 
@@ -608,6 +624,93 @@ fn generate_installed_plugins_json(
     let json_str = serde_json::to_string_pretty(&serde_json::Value::Object(existing))?;
     crate::paths::write_owner_only_atomic(&path, json_str.as_bytes())
         .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Name of the synthetic skills-directory plugin (#556) that carries `lsp:`
+/// entries into Claude Code. Any folder under `skills/` containing a
+/// `.claude-plugin/plugin.json` auto-loads as a plugin named `<name>@skills-dir`
+/// with no marketplace and no install step — this is Claude Code's only LSP
+/// surface (a plugin manifest's `lspServers` key); there is no bare top-level
+/// config key the way MCP has `mcpServers`.
+pub(crate) const LSP_PLUGIN_NAME: &str = "llmenv-lsp";
+
+/// Renders `manifest.capabilities.lsp` into `skills/llmenv-lsp/.claude-plugin/plugin.json`.
+/// Returns the relative path written, or `None` if nothing rendered (mirrors how the
+/// Crush adapter omits its `lsp` key entirely when every server is disabled/skipped).
+///
+/// Claude Code's `lspServers` schema requires `extensionToLanguage` (file extension →
+/// language id). The neutral `filetypes` field (language ids only, e.g. `"rust"`) can't
+/// be reliably converted into that — a language id is often not its own extension
+/// (`rust` → `.rs`, `python` → `.py`) — so a server without `extension_to_language` set
+/// is skipped for Claude Code with a warning, the same "skip + warn loudly" pattern
+/// `CrushAdapter` uses for hooks it can't express, rather than a hard error that would
+/// break a bundle shared with an engine (Crush) that renders `filetypes` directly.
+/// `root_markers` and `timeout` have no Claude Code equivalent (a single `workspaceFolder`
+/// path and a startup-only `startupTimeout` respectively, not per-request) and are left
+/// unrendered rather than guessed at.
+fn write_lsp_plugin(
+    out: &Path,
+    servers: &[crate::config::LspServer],
+) -> anyhow::Result<Option<PathBuf>> {
+    let mut lsp_servers = serde_json::Map::new();
+    for srv in servers {
+        if srv.disabled {
+            continue;
+        }
+        if srv.extension_to_language.is_empty() {
+            eprintln!(
+                "warning: Claude Code requires an extensionToLanguage map for LSP servers — \
+                 skipping '{}' for Claude Code. Add capabilities.lsp[].extension_to_language \
+                 (e.g. {{\".rs\": \"rust\"}}) to enable it there.",
+                srv.name
+            );
+            continue;
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("command".into(), json!(srv.command));
+        if !srv.args.is_empty() {
+            entry.insert("args".into(), json!(srv.args));
+        }
+        if !srv.env.is_empty() {
+            entry.insert("env".into(), json!(srv.env));
+        }
+        entry.insert(
+            "extensionToLanguage".into(),
+            json!(srv.extension_to_language),
+        );
+        if let Some(opts) = &srv.init_options {
+            let as_json = serde_json::to_value(opts).map_err(|err| {
+                anyhow::anyhow!(
+                    "LSP server '{}': failed to convert init_options to JSON: {err}",
+                    srv.name
+                )
+            })?;
+            entry.insert("initializationOptions".into(), as_json);
+        }
+        lsp_servers.insert(srv.name.clone(), serde_json::Value::Object(entry));
+    }
+
+    if lsp_servers.is_empty() {
+        return Ok(None);
+    }
+
+    let plugin_dir = out
+        .join("skills")
+        .join(LSP_PLUGIN_NAME)
+        .join(".claude-plugin");
+    create_dir_owner_only(&plugin_dir)?;
+    let manifest = json!({ "name": LSP_PLUGIN_NAME, "lspServers": lsp_servers });
+    let rel_path = PathBuf::from("skills")
+        .join(LSP_PLUGIN_NAME)
+        .join(".claude-plugin")
+        .join("plugin.json");
+    crate::paths::write_owner_only_atomic(
+        &plugin_dir.join("plugin.json"),
+        serde_json::to_string_pretty(&manifest)?.as_bytes(),
+    )
+    .with_context(|| format!("writing {}", rel_path.display()))?;
+
+    Ok(Some(rel_path))
 }
 
 /// SessionStart (#85): the hook object shape supports it; hash-comparison logic
