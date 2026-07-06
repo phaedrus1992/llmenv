@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::resolve_bundle_relative_paths;
 use super::skills::create_dir_owner_only;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -246,6 +247,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if text.is_empty() {
             return String::new();
         }
+
+        // Store-only events (SessionStart, SessionEnd) have no model turn to inject context
+        // into, and Claude Code's hook schema rejects additionalContext in their
+        // hookSpecificOutput. Return empty so these events emit no output. (#558)
+        if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
+            return String::new();
+        }
+
         // Wrap in a system barrier to prevent prompt injection: the MCP response
         // (possibly from an untrusted memory backend) is wrapped so any attempts
         // to escape the context block are trapped as unparseable markdown.
@@ -317,18 +326,6 @@ fn is_hook_json(rel: &Path) -> bool {
 /// legacy `mcp.json` was never a config surface Claude ingested.
 const CLAUDE_JSON_FILE: &str = ".claude.json";
 
-/// Map a resolved remote transport onto Claude Code's `type` discriminator
-/// (#244). Claude requires `"type"` on remote `mcpServers` entries; without it
-/// the server is dropped. `Stdio` never reaches a `Remote` entry, so it is
-/// treated as `http` defensively rather than panicking.
-fn remote_type_str(transport: crate::config::McpTransport) -> &'static str {
-    use crate::config::McpTransport;
-    match transport {
-        McpTransport::Sse => "sse",
-        McpTransport::Http | McpTransport::Stdio => "http",
-    }
-}
-
 /// Build the `mcpServers` object for every resolved server, keyed by name.
 /// Stdio entries carry `command`/`args`/`env`; remote entries carry
 /// `{"type", "url"}` — the transport discriminator Claude Code requires (#244).
@@ -355,7 +352,8 @@ fn build_mcp_servers(
                 obj
             }
             ResolvedKind::Remote { url, transport } => {
-                let mut obj = json!({ "type": remote_type_str(*transport), "url": url });
+                let mut obj =
+                    json!({ "type": super::remote_transport_type_str(*transport), "url": url });
                 if !m.headers.is_empty() {
                     obj["headers"] = json!(m.headers);
                 }
@@ -713,33 +711,6 @@ fn write_lsp_plugin(
     .with_context(|| format!("writing {}", rel_path.display()))?;
 
     Ok(Some(rel_path))
-}
-
-/// Resolve bundle-relative paths in a hook command string.
-/// Scans whitespace-separated tokens and resolves those containing '/' (but not
-/// starting with '/', '~', '$', or '-') to absolute paths relative to bundle_dir.
-fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) -> Option<String> {
-    let mut resolved = false;
-    let mut result = String::new();
-    for (i, token) in command.split_whitespace().enumerate() {
-        if i > 0 {
-            result.push(' ');
-        }
-        if token.contains('/')
-            && !token.starts_with('/')
-            && !token.starts_with('~')
-            && !token.starts_with('$')
-            && !token.starts_with('-')
-            && !crate::paths::is_unsafe_join_target(token)
-        {
-            let abs_path = bundle_dir.join(token);
-            result.push_str(&abs_path.to_string_lossy());
-            resolved = true;
-        } else {
-            result.push_str(token);
-        }
-    }
-    if resolved { Some(result) } else { None }
 }
 
 /// SessionStart (#85): the hook object shape supports it; hash-comparison logic
@@ -1415,9 +1386,10 @@ enum PermissionAction {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::super::AgentAdapter;
     use super::{
-        CLAUDE_JSON_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND, HOOK_RUN_COMMAND,
-        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
+        CLAUDE_JSON_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND, ClaudeCodeAdapter,
+        HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
@@ -2841,5 +2813,44 @@ mod tests {
                 "calling with the same plugin set twice must not duplicate entries or change output"
             );
         }
+    }
+
+    #[test]
+    fn emit_hook_context_store_only_events_return_empty_string() {
+        // Store-only events (SessionStart, SessionEnd) have no model turn to inject
+        // context into. Should return empty per Claude Code schema (no additionalContext).
+        let adapter = ClaudeCodeAdapter;
+        assert_eq!(adapter.emit_hook_context("SessionEnd", "data"), "");
+        assert_eq!(adapter.emit_hook_context("SessionStart", "data"), "");
+    }
+
+    #[test]
+    fn emit_hook_context_injection_events_include_additional_context() {
+        // Context-injection events (UserPromptSubmit, PostToolUse) should include
+        // additionalContext per Claude Code schema.
+        let adapter = ClaudeCodeAdapter;
+        for event in ["UserPromptSubmit", "PostToolUse"] {
+            let output = adapter.emit_hook_context(event, "context data");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&output).expect("must be valid JSON");
+            assert_eq!(
+                parsed["hookSpecificOutput"]["hookEventName"].as_str(),
+                Some(event)
+            );
+            assert!(
+                parsed["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .expect("must have additionalContext")
+                    .contains("context data")
+            );
+        }
+    }
+
+    #[test]
+    fn emit_hook_context_empty_text_returns_empty_string() {
+        // Empty text should return empty string, not invalid JSON
+        let adapter = ClaudeCodeAdapter;
+        let output = adapter.emit_hook_context("SessionEnd", "");
+        assert_eq!(output, "", "empty text should produce empty output");
     }
 }
