@@ -110,8 +110,8 @@ materialized inside the llmenv cache directory.
 
 | Variable | Points to | Notes |
 |----------|-----------|-------|
-| `CRUSH_GLOBAL_CONFIG` | `<cache>/crush/.../crush.json` | The rendered config file Crush reads |
-| `CRUSH_GLOBAL_DATA` | The stable llmenv state dir | Same dir as `LLMENV_STATE_DIR`; Crush needs no separate workaround |
+| `CRUSH_GLOBAL_CONFIG` | `<cache>/crush/...` (the directory containing `crush.json`) | Crush joins `crush.json` onto this path itself — it must be a directory, not the file |
+| `CRUSH_GLOBAL_DATA` | `<state_dir>/crush` | A dedicated subdir of the stable llmenv state dir; Crush needs no separate workaround |
 
 `CRUSH_GLOBAL_CONFIG` and `CLAUDE_CONFIG_DIR` use separate namespaces and can
 coexist in a single shell session without conflict.

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::resolve_bundle_relative_paths;
 use crate::merge::MergedManifest;
 use crate::util::{dedup, merge_json};
 
@@ -63,11 +64,11 @@ impl AgentAdapter for CrushAdapter {
         // command), split dir creation into materialize() and thread state_dir
         // through its signature instead.
         super::skills::create_dir_owner_only(Path::new(&crush_data_dir))?;
+        // Crush's `GlobalConfig()` does `filepath.Join(CRUSH_GLOBAL_CONFIG, "crush.json")`
+        // itself — this must be the directory containing crush.json, not the file path,
+        // or Crush ends up joining "crush.json" onto an already-file-ending path.
         Ok(vec![
-            (
-                "CRUSH_GLOBAL_CONFIG".into(),
-                format!("{config_dir}/{CRUSH_JSON_FILE}"),
-            ),
+            ("CRUSH_GLOBAL_CONFIG".into(), config_dir.to_string()),
             ("CRUSH_GLOBAL_DATA".into(), crush_data_dir),
         ])
     }
@@ -149,26 +150,30 @@ impl AgentAdapter for CrushAdapter {
         // 5. Build doc
         let mut doc = serde_json::Map::new();
 
-        // Hooks
+        // Hooks: Crush's HookConfig (internal/config/config.go) is a flat
+        // { matcher?, command, name?, timeout? } object per event entry — unlike
+        // Claude Code's { matcher, hooks: [{ type, command, tool }] } nesting.
+        // Rendering the nested shape here means Crush reads an empty `command`
+        // off the wrapper object and rejects the whole config at load time.
         let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
             std::collections::BTreeMap::new();
         for hook in &compatible_hooks {
-            let handler = json!({
-                "type": match hook.handler.kind {
-                    crate::config::HookHandlerKind::Command => "command",
-                    // P2-6: mcp_tool hooks are filtered out at the gate above.
-                    crate::config::HookHandlerKind::McpTool => unreachable!(
-                        "mcp_tool hooks are filtered out at the gate above"
-                    ),
-                },
-                "command": hook.handler.command,
-                "tool": hook.handler.tool,
-            });
+            // P2-6: mcp_tool hooks are filtered out at the gate above, so `command`
+            // is always present for the remaining Command-kind hooks.
+            let resolved_command =
+                hook.handler
+                    .command
+                    .as_ref()
+                    .map(|cmd| match &hook.bundle_origin {
+                        Some(bundle_dir) => resolve_bundle_relative_paths(cmd, bundle_dir)
+                            .unwrap_or_else(|| cmd.clone()),
+                        None => cmd.clone(),
+                    });
             let mut entry = serde_json::Map::new();
             if let Some(matcher) = &hook.matcher {
                 entry.insert("matcher".into(), json!(matcher));
             }
-            entry.insert("hooks".into(), json!([handler]));
+            entry.insert("command".into(), json!(resolved_command));
             hooks_by_event
                 .entry(hook.event.clone())
                 .or_default()
@@ -206,7 +211,16 @@ impl AgentAdapter for CrushAdapter {
             doc.insert("hooks".into(), hooks_value);
         }
 
-        // Permissions: fail-closed — ask → deny (Crush has no ask concept)
+        // Permissions: Crush's PermissionsConfig (internal/config/config.go) has
+        // exactly one field, `allowed_tools` — an allow-list of tools that skip
+        // the interactive approval prompt. There is no `denied_tools` or
+        // `default_mode` concept: any tool not in the allow-list already
+        // requires prompt approval by default (deny-by-default), so `ask` and
+        // `deny` rules need no explicit rendering — omitting a tool from
+        // `allowed_tools` already produces the fail-closed behavior. Rendering
+        // extra keys here previously did nothing (Crush's plain
+        // `json.Unmarshal` silently drops unknown fields), so this was already
+        // a no-op, not a security regression — just dead output (#554).
         let perms = &manifest.capabilities.permissions;
         let native_perms = manifest.capabilities.native_permissions.get("crush");
 
@@ -214,35 +228,23 @@ impl AgentAdapter for CrushAdapter {
         if let Some(n) = native_perms {
             allowed_tools.extend(n.allow.iter().cloned());
         }
-
-        let mut denied_tools = render_rules_to_strings(&perms.ask);
-        denied_tools.extend(render_rules_to_strings(&perms.deny));
-        if let Some(n) = native_perms {
-            // ponytail: native ask → deny (fail-closed, same as neutral ask)
-            denied_tools.extend(n.ask.iter().cloned());
-            denied_tools.extend(n.deny.iter().cloned());
-        }
-
         dedup(&mut allowed_tools);
-        dedup(&mut denied_tools);
 
-        let has_perms =
-            !allowed_tools.is_empty() || !denied_tools.is_empty() || perms.default_mode.is_some();
-        if has_perms {
+        if !allowed_tools.is_empty() {
             let mut perm_obj = serde_json::Map::new();
-            if !allowed_tools.is_empty() {
-                perm_obj.insert("allowed_tools".into(), json!(allowed_tools));
-            }
-            if !denied_tools.is_empty() {
-                perm_obj.insert("denied_tools".into(), json!(denied_tools));
-            }
-            if let Some(mode) = perms.default_mode {
-                perm_obj.insert("default_mode".into(), json!(crush_permission_mode(mode)));
-            }
+            perm_obj.insert("allowed_tools".into(), json!(allowed_tools));
             doc.insert("permissions".into(), serde_json::Value::Object(perm_obj));
         }
 
         // MCP servers (fix 6: headers/timeout/disabled_tools)
+        //
+        // Crush's MCPConfig.Type (internal/config/config.go) is a *required* field
+        // with exactly three valid values: "stdio", "sse", "http". Its MCP client
+        // dispatches on this field (internal/agent/tools/mcp/init.go) and returns
+        // "unsupported mcp type" for anything else, including a missing/empty
+        // value — so every server previously failed to initialize: stdio entries
+        // carried no `type` at all, and remote entries carried the invalid
+        // literal `"remote"`.
         if !manifest.mcps.is_empty() || manifest.capabilities.native_mcp.contains_key("crush") {
             let mut mcp_obj = serde_json::Map::new();
             for mcp in &manifest.mcps {
@@ -250,6 +252,7 @@ impl AgentAdapter for CrushAdapter {
                 let mut e = match &mcp.kind {
                     ResolvedKind::Stdio { command, args, env } => {
                         let mut e = serde_json::Map::new();
+                        e.insert("type".into(), json!("stdio"));
                         e.insert("command".into(), json!(command));
                         e.insert("args".into(), json!(args));
                         if !env.is_empty() {
@@ -257,9 +260,12 @@ impl AgentAdapter for CrushAdapter {
                         }
                         e
                     }
-                    ResolvedKind::Remote { url, .. } => {
+                    ResolvedKind::Remote { url, transport } => {
                         let mut e = serde_json::Map::new();
-                        e.insert("type".into(), json!("remote"));
+                        e.insert(
+                            "type".into(),
+                            json!(super::remote_transport_type_str(*transport)),
+                        );
                         e.insert("url".into(), json!(url));
                         e
                     }
@@ -411,11 +417,13 @@ fn render_lsp(servers: &[llmenv_config::LspServer]) -> anyhow::Result<serde_json
         if let Some(opts) = &srv.init_options {
             let as_json = serde_json::to_value(opts).map_err(|err| {
                 anyhow::anyhow!(
-                    "LSP server '{}': failed to convert initializationOptions to JSON: {err}",
+                    "LSP server '{}': failed to convert init_options to JSON: {err}",
                     srv.name
                 )
             })?;
-            e.insert("initializationOptions".into(), as_json);
+            // Crush's LSPConfig field is `init_options` (snake_case) — not
+            // Claude Code's `initializationOptions`.
+            e.insert("init_options".into(), as_json);
         }
         lsp_obj.insert(srv.name.clone(), serde_json::Value::Object(e));
     }
@@ -478,16 +486,6 @@ fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
             .collect();
     }
     vec![rule.tool.clone()]
-}
-
-fn crush_permission_mode(mode: crate::config::PermissionMode) -> &'static str {
-    use crate::config::PermissionMode;
-    match mode {
-        PermissionMode::AcceptEdits => "accept_edits",
-        PermissionMode::Plan => "plan",
-        PermissionMode::Default => "default",
-        PermissionMode::BypassPermissions => "bypass_permissions",
-    }
 }
 
 #[cfg(test)]
@@ -558,7 +556,10 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_config_path_ends_with_crush_json() {
+    fn env_vars_config_path_is_the_cache_dir_not_the_json_file() {
+        // Crush's GlobalConfig() does filepath.Join(CRUSH_GLOBAL_CONFIG, "crush.json")
+        // itself. If we point this var at the crush.json file path, Crush ends up
+        // looking for crush.json/crush.json (#regression).
         let cache = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let vars = CrushAdapter.env_vars(cache.path(), state.path()).unwrap();
@@ -566,9 +567,10 @@ mod tests {
             .iter()
             .find(|(k, _)| k == "CRUSH_GLOBAL_CONFIG")
             .unwrap();
-        assert!(
-            config.ends_with("crush.json"),
-            "expected crush.json in path, got {config}"
+        assert_eq!(
+            config,
+            &cache.path().to_str().unwrap().to_string(),
+            "CRUSH_GLOBAL_CONFIG must be the cache dir itself, not the crush.json file"
         );
     }
 
@@ -635,6 +637,73 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(doc["hooks"]["PreToolUse"].is_array());
+    }
+
+    #[test]
+    fn materialize_hook_uses_crush_flat_shape_not_claude_nesting() {
+        // Crush's HookConfig (internal/config/config.go) is a flat
+        // { matcher?, command } object per event entry, not Claude Code's
+        // { matcher, hooks: [{ type, command, tool }] } nesting. Rendering the
+        // nested shape makes Crush read an empty `command` off the wrapper and
+        // reject the config with "command is required" (#551 follow-up).
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: Some("Bash".into()),
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: Some("echo hi".into()),
+                tool: None,
+            },
+            bundle_origin: None,
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entry = &doc["hooks"]["PreToolUse"][0];
+        assert_eq!(entry["command"], serde_json::json!("echo hi"));
+        assert_eq!(entry["matcher"], serde_json::json!("Bash"));
+        assert!(
+            entry.get("hooks").is_none(),
+            "must not nest under a Claude Code-style 'hooks' array: {entry}"
+        );
+        assert!(
+            entry.get("type").is_none(),
+            "Crush's HookConfig has no 'type' field: {entry}"
+        );
+        assert!(
+            entry.get("tool").is_none(),
+            "Crush's HookConfig has no 'tool' field: {entry}"
+        );
+    }
+
+    #[test]
+    fn materialize_hook_resolves_bundle_relative_command_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: Some("bash hooks/guard.sh".into()),
+                tool: None,
+            },
+            bundle_origin: Some(PathBuf::from("/bundles/mybundle")),
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["hooks"]["PreToolUse"][0]["command"],
+            serde_json::json!("bash /bundles/mybundle/hooks/guard.sh"),
+            "bundle-relative hook script path must resolve to an absolute path: {doc}"
+        );
     }
 
     #[test]
@@ -721,8 +790,12 @@ mod tests {
     }
 
     #[test]
-    fn materialize_ask_rules_fail_closed_to_deny() {
-        // ask → denied on Crush (fail-closed; Crush has no ask concept)
+    fn materialize_ask_and_deny_rules_produce_no_permissions_output() {
+        // Crush's PermissionsConfig has only `allowed_tools` (no `denied_tools` /
+        // `default_mode` concept — see internal/config/config.go). Anything not
+        // in the allow-list already requires interactive approval by default, so
+        // `ask`/`deny` rules correctly produce no permissions output at all
+        // rather than an unknown key Crush would silently ignore (#554).
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
         caps.permissions.ask.push(PermissionRule {
@@ -730,24 +803,6 @@ mod tests {
             pattern: None,
             paths: vec![],
         });
-        CrushAdapter
-            .materialize(&manifest_with_caps(caps), tmp.path())
-            .unwrap();
-        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
-        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let denied = doc["permissions"]["denied_tools"].as_array().unwrap();
-        assert!(denied.contains(&serde_json::json!("WebFetch")));
-        let in_allowed = doc["permissions"]
-            .get("allowed_tools")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|a| a.contains(&serde_json::json!("WebFetch")));
-        assert!(!in_allowed, "ask rule must NOT appear in allowed_tools");
-    }
-
-    #[test]
-    fn materialize_deny_rule_becomes_denied_tools() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = Capabilities::default();
         caps.permissions.deny.push(PermissionRule {
             tool: "Edit".into(),
             pattern: None,
@@ -758,8 +813,10 @@ mod tests {
             .unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let denied = doc["permissions"]["denied_tools"].as_array().unwrap();
-        assert!(denied.contains(&serde_json::json!("Edit")));
+        assert!(
+            doc.get("permissions").is_none(),
+            "ask/deny-only config must produce no permissions key: {doc}"
+        );
     }
 
     #[test]
@@ -818,7 +875,9 @@ mod tests {
     }
 
     #[test]
-    fn materialize_native_permissions_ask_fail_closed() {
+    fn materialize_native_permissions_ask_produces_no_permissions_output() {
+        // Same rationale as materialize_ask_and_deny_rules_produce_no_permissions_output,
+        // for the native_permissions.crush channel.
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
         caps.native_permissions.insert(
@@ -834,8 +893,10 @@ mod tests {
             .unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let denied = doc["permissions"]["denied_tools"].as_array().unwrap();
-        assert!(denied.contains(&serde_json::json!("Read(secret*)")));
+        assert!(
+            doc.get("permissions").is_none(),
+            "native ask-only config must produce no permissions key: {doc}"
+        );
     }
 
     // ── materialize: round-trip ───────────────────────────────────────────────
@@ -963,39 +1024,121 @@ mod tests {
         assert!(SUPPORTED_HOOK_EVENTS.contains(&"PreToolUse"));
     }
 
-    // ── crush_permission_mode ─────────────────────────────────────────────────
-
     #[test]
-    fn crush_permission_mode_all_variants() {
-        use crate::config::PermissionMode;
+    fn materialize_full_config_matches_charm_land_crush_schema_shape() {
+        // Regression test for #554: every field name/shape here was checked
+        // against the real schema at https://charm.land/crush.json (mirrored
+        // from internal/config/config.go in Crush's own source) — MCPConfig's
+        // required `type` enum (stdio/sse/http), LSPConfig's `init_options`
+        // (not Claude Code's `initializationOptions`), the flat HookConfig
+        // shape, and PermissionsConfig's `allowed_tools`-only surface.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.hooks.push(pretooluse_hook("echo hi"));
+        caps.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: Some("Bash".into()),
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: Some("bash hooks/guard.sh".into()),
+                tool: None,
+            },
+            bundle_origin: Some(PathBuf::from("/bundles/foo")),
+        });
+        caps.permissions.allow.push(PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("ls*".into()),
+            paths: vec![],
+        });
+        caps.permissions.ask.push(PermissionRule {
+            tool: "WebFetch".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        caps.lsp.push(llmenv_config::LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            args: vec!["--quiet".into()],
+            filetypes: vec!["rust".into()],
+            root_markers: vec!["Cargo.toml".into()],
+            timeout: Some(60),
+            init_options: Some(serde_yaml::from_str("checkOnSave: true").unwrap()),
+            ..Default::default()
+        });
+        let skill_src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            skill_src.path().join("SKILL.md"),
+            "---\nname: my-skill\ndescription: A test skill.\n---\n# MySkill\n",
+        )
+        .unwrap();
+        caps.skills.push(crate::config::SkillSource {
+            name: "my-skill".into(),
+            path: skill_src.path().to_string_lossy().into_owned(),
+            when: Vec::new(),
+        });
+
+        let mut manifest = manifest_with_caps(caps);
+        manifest.mcps.push(stdio_mcp("stdio-server"));
+        manifest.mcps.push(ResolvedMcp {
+            name: "http-server".into(),
+            kind: ResolvedKind::Remote {
+                url: "http://localhost:3000/mcp".into(),
+                transport: crate::config::McpTransport::Http,
+            },
+            headers: std::collections::BTreeMap::from([(
+                "Authorization".into(),
+                "Bearer tok".into(),
+            )]),
+            timeout: Some(30),
+            disabled_tools: vec!["dangerous_tool".into()],
+        });
+        manifest.mcps.push(ResolvedMcp {
+            name: "sse-server".into(),
+            kind: ResolvedKind::Remote {
+                url: "http://localhost:4000/sse".into(),
+                transport: crate::config::McpTransport::Sse,
+            },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
+        });
+
+        CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        // hooks: flat HookConfig, no Claude Code-style nesting.
         assert_eq!(
-            super::crush_permission_mode(PermissionMode::AcceptEdits),
-            "accept_edits"
+            doc["hooks"]["PreToolUse"][0]["command"],
+            serde_json::json!("echo hi")
         );
-        assert_eq!(super::crush_permission_mode(PermissionMode::Plan), "plan");
+        assert!(doc["hooks"]["PreToolUse"][0].get("hooks").is_none());
+
+        // mcp: every transport carries the schema's required `type` enum value.
         assert_eq!(
-            super::crush_permission_mode(PermissionMode::Default),
-            "default"
+            doc["mcp"]["stdio-server"]["type"],
+            serde_json::json!("stdio")
         );
+        assert_eq!(doc["mcp"]["http-server"]["type"], serde_json::json!("http"));
+        assert_eq!(doc["mcp"]["sse-server"]["type"], serde_json::json!("sse"));
+
+        // lsp: init_options (snake_case), not initializationOptions.
         assert_eq!(
-            super::crush_permission_mode(PermissionMode::BypassPermissions),
-            "bypass_permissions"
+            doc["lsp"]["rust-analyzer"]["init_options"]["checkOnSave"],
+            serde_json::json!(true)
+        );
+        assert!(
+            doc["lsp"]["rust-analyzer"]
+                .get("initializationOptions")
+                .is_none()
         );
 
-        // Distinctness: no two variants render to the same string.
-        let outputs: std::collections::HashSet<&str> = [
-            super::crush_permission_mode(PermissionMode::AcceptEdits),
-            super::crush_permission_mode(PermissionMode::Plan),
-            super::crush_permission_mode(PermissionMode::Default),
-            super::crush_permission_mode(PermissionMode::BypassPermissions),
-        ]
-        .into_iter()
-        .collect();
+        // permissions: allow-only surface; ask rule produces no denied_tools key.
         assert_eq!(
-            outputs.len(),
-            4,
-            "all 4 PermissionMode variants must render distinctly"
+            doc["permissions"]["allowed_tools"],
+            serde_json::json!(["Bash(ls*)"])
         );
+        assert!(doc["permissions"].get("denied_tools").is_none());
     }
 
     // ── materialize: LSP (fix 1) ──────────────────────────────────────────────
@@ -1067,8 +1210,36 @@ mod tests {
         );
         assert!(srv.get("timeout").is_none(), "None timeout must be omitted");
         assert!(
-            srv.get("initializationOptions").is_none(),
+            srv.get("init_options").is_none(),
             "None init_options must be omitted"
+        );
+    }
+
+    #[test]
+    fn materialize_lsp_init_options_uses_crush_snake_case_key() {
+        // Crush's LSPConfig field is `init_options` (snake_case), not Claude
+        // Code's `initializationOptions` — using the wrong key means Crush's
+        // plain json.Unmarshal silently drops the value (#554).
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.lsp.push(llmenv_config::LspServer {
+            name: "gopls".into(),
+            command: "gopls".into(),
+            init_options: Some(serde_yaml::from_str("usePlaceholders: true").unwrap()),
+            ..Default::default()
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["lsp"]["gopls"]["init_options"]["usePlaceholders"],
+            serde_json::json!(true)
+        );
+        assert!(
+            doc["lsp"]["gopls"].get("initializationOptions").is_none(),
+            "must not use Claude Code's camelCase key"
         );
     }
 

@@ -119,6 +119,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   or failing DNS resolver could hang `llmenv hook-run` — including the per-prompt
   `turn_start` hook — for minutes instead of seconds. Resolution is now bounded by
   the same timeout via a dedicated helper. (#547)
+- Fix `CrushAdapter` exporting `CRUSH_GLOBAL_CONFIG` pointing directly at the rendered
+  `crush.json` file instead of the directory containing it. Crush's own config loader
+  joins `crush.json` onto `CRUSH_GLOBAL_CONFIG` itself, so the file-path value made it
+  look for `crush.json/crush.json` and fail to load — `crush` couldn't start with any
+  llmenv-managed config. `CRUSH_GLOBAL_CONFIG` now points at the cache directory, matching
+  the original design intent. (#551)
+- Fix `CrushAdapter` rendering hooks in Claude Code's nested `{matcher, hooks:
+  [{type, command, tool}]}` shape instead of Crush's flat `HookConfig` (`{matcher?,
+  command}`) — Crush read an empty `command` off the wrapper object and rejected the
+  whole config with `hook PreToolUse[0]: command is required`, so no hook (or any
+  other capability sharing the render) ever reached Crush. Also ports Claude Code's
+  bundle-relative hook-script path resolution (a bare `hooks/foo.sh` in a hook
+  `command` resolves against the bundle's directory) into the shared adapter helper
+  so Crush benefits from it too — it previously only ran for Claude Code, leaving a
+  bundle-authored relative script path broken under Crush. (#551)
+- Fix `CrushAdapter` rendering MCP servers, LSP `init_options`, and permissions in
+  Claude Code's shapes instead of Crush's actual schema
+  (https://charm.land/crush.json), found by auditing the adapter against it: every
+  MCP server previously failed to initialize because Crush's required `type` field
+  (`stdio`/`sse`/`http`) was either missing (stdio entries) or set to the
+  nonexistent value `"remote"` (remote entries) — Crush's MCP client hits an
+  `unsupported mcp type` error for anything else. LSP `init_options` was written
+  under Claude Code's `initializationOptions` key, so Crush's plain
+  `json.Unmarshal` silently dropped it. `permissions.denied_tools`/`default_mode`
+  were also dropped — Crush's `PermissionsConfig` has only `allowed_tools`; not a
+  security regression (Crush already denies-by-default outside the allow-list),
+  but dead output. The full rendered config (all three MCP transports, hooks, LSP,
+  permissions) now validates against the real schema with zero violations. (#554)
 - Fix the ICM memory backend (`session_start`/`turn_start`/`session_end`) being
   completely non-functional whenever it resolved to loopback or a private-network
   address — the documented common topology (AGENTS.md: "the resolved icm MCP
