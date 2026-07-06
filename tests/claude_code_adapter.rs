@@ -1393,7 +1393,7 @@ fn emit_hook_context_returns_empty_string_for_empty_input() {
 #[test]
 fn emit_hook_context_wraps_text_in_json() {
     let text = "test content";
-    let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", text);
+    let output = ClaudeCodeAdapter.emit_hook_context("UserPromptSubmit", text);
     let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
     assert!(parsed.is_object());
     assert!(
@@ -1403,7 +1403,7 @@ fn emit_hook_context_wraps_text_in_json() {
     assert!(parsed.get("hookSpecificOutput").is_some());
     assert_eq!(
         parsed["hookSpecificOutput"]["hookEventName"].as_str(),
-        Some("SessionStart")
+        Some("UserPromptSubmit")
     );
     assert!(
         parsed["hookSpecificOutput"]
@@ -1414,7 +1414,8 @@ fn emit_hook_context_wraps_text_in_json() {
 
 #[test]
 fn emit_hook_context_includes_correct_hook_event_name() {
-    for event in &["SessionStart", "TurnStart", "SessionEnd"] {
+    // Only test context-injection events that produce JSON output; store-only events return empty string
+    for event in &["UserPromptSubmit", "PostToolUse"] {
         let output = ClaudeCodeAdapter.emit_hook_context(event, "context");
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         assert_eq!(
@@ -1428,7 +1429,7 @@ fn emit_hook_context_includes_correct_hook_event_name() {
 #[test]
 fn emit_hook_context_preserves_markdown_content() {
     let text = "## Memory\nContent";
-    let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", text);
+    let output = ClaudeCodeAdapter.emit_hook_context("UserPromptSubmit", text);
     let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
     let context = parsed["hookSpecificOutput"]["additionalContext"]
         .as_str()
@@ -1440,7 +1441,7 @@ fn emit_hook_context_preserves_markdown_content() {
 #[test]
 fn emit_hook_context_escapes_special_characters() {
     let text = r#"{"injection": "attempt", "quote": "\"", "backslash": "\\"}"#;
-    let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", text);
+    let output = ClaudeCodeAdapter.emit_hook_context("UserPromptSubmit", text);
     // Should be valid JSON with properly escaped special chars
     let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
     let context = parsed["hookSpecificOutput"]["additionalContext"]
@@ -1454,7 +1455,7 @@ fn emit_hook_context_escapes_special_characters() {
 #[test]
 fn emit_hook_context_wraps_with_barrier_comment() {
     let text = "context data";
-    let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", text);
+    let output = ClaudeCodeAdapter.emit_hook_context("UserPromptSubmit", text);
     let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
     let context = parsed["hookSpecificOutput"]["additionalContext"]
         .as_str()
@@ -1467,7 +1468,7 @@ fn emit_hook_context_wraps_with_barrier_comment() {
 #[test]
 fn emit_hook_context_handles_newlines() {
     let text = "line1\nline2\nline3";
-    let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", text);
+    let output = ClaudeCodeAdapter.emit_hook_context("UserPromptSubmit", text);
     let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
     let context = parsed["hookSpecificOutput"]["additionalContext"]
         .as_str()
@@ -1480,7 +1481,7 @@ fn emit_hook_context_handles_newlines() {
 #[test]
 fn emit_hook_context_handles_unicode() {
     let text = "émojis: 🚀 🔒 日本語 中文";
-    let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", text);
+    let output = ClaudeCodeAdapter.emit_hook_context("UserPromptSubmit", text);
     let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
     let context = parsed["hookSpecificOutput"]["additionalContext"]
         .as_str()
