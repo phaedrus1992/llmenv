@@ -845,14 +845,18 @@ mod tests {
         }
 
         fn arb_lsp_server() -> impl Strategy<Value = LspServer> {
-            ("[a-z]{1,6}", prop::collection::vec("[a-z]{1,4}", 0..3)).prop_map(|(name, tags)| {
-                LspServer {
+            (
+                "[a-z]{1,6}",
+                prop::collection::vec("[a-z]{1,4}", 0..3),
+                prop::collection::btree_map(".[a-z]{1,4}", "[a-z]{1,8}", 0..3),
+            )
+                .prop_map(|(name, tags, extension_to_language)| LspServer {
                     name,
                     when: tags,
                     command: "lsp-cmd".into(),
+                    extension_to_language,
                     ..Default::default()
-                }
-            })
+                })
         }
 
         fn arb_skill_source() -> impl Strategy<Value = SkillSource> {

@@ -1655,3 +1655,41 @@ fn lsp_disabled_entry_omitted_from_claude_plugin() {
         "disabled server must not produce the synthetic LSP plugin"
     );
 }
+
+/// #556: a first-class skill named the same as the reserved synthetic LSP
+/// plugin directory (`llmenv-lsp`) must be rejected, not silently shadowed —
+/// otherwise its SKILL.md would never be validated or usable.
+#[test]
+fn lsp_plugin_name_collision_with_first_class_skill_is_rejected() {
+    use llmenv::config::{LspServer, SkillSource};
+
+    let skill_dir = tempdir().unwrap();
+    std::fs::write(
+        skill_dir.path().join("SKILL.md"),
+        "---\nname: llmenv-lsp\ndescription: a user skill\n---\nbody\n",
+    )
+    .unwrap();
+
+    let mut extension_to_language = BTreeMap::new();
+    extension_to_language.insert(".rs".to_string(), "rust".to_string());
+    let caps = llmenv::config::Capabilities {
+        skills: vec![SkillSource {
+            name: "llmenv-lsp".into(),
+            path: skill_dir.path().to_string_lossy().into_owned(),
+            when: vec![],
+        }],
+        lsp: vec![LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            extension_to_language,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    let err = ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect_err("must reject a skill name colliding with the LSP plugin dir");
+    assert!(err.to_string().contains("llmenv-lsp"));
+}
