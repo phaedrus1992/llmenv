@@ -148,9 +148,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Store-only events (SessionStart, SessionEnd) have no model turn to inject context
         // into, and Claude Code's hook schema rejects additionalContext in their
         // hookSpecificOutput. Return empty so these events emit no output. (#558)
-        match hook_event_name {
-            "SessionStart" | "SessionEnd" => return String::new(),
-            _ => {}
+        if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
+            return String::new();
         }
 
         // Wrap in a system barrier to prevent prompt injection: the MCP response
@@ -2180,61 +2179,34 @@ mod tests {
     }
 
     #[test]
-    fn emit_hook_context_session_end_returns_empty_string() {
-        // SessionEnd is a store-only event with no model turn to inject context into.
-        // Should return empty string per Claude Code schema (no additionalContext allowed).
+    fn emit_hook_context_store_only_events_return_empty_string() {
+        // Store-only events (SessionStart, SessionEnd) have no model turn to inject
+        // context into. Should return empty per Claude Code schema (no additionalContext).
         let adapter = ClaudeCodeAdapter;
-        let output = adapter.emit_hook_context("SessionEnd", "stored session data");
-        assert_eq!(output, "", "SessionEnd should emit no output");
+        assert_eq!(adapter.emit_hook_context("SessionEnd", "data"), "");
+        assert_eq!(adapter.emit_hook_context("SessionStart", "data"), "");
     }
 
     #[test]
-    fn emit_hook_context_session_start_returns_empty_string() {
-        // SessionStart is also a store-only event without context injection.
-        // Should return empty string per Claude Code schema.
+    fn emit_hook_context_injection_events_include_additional_context() {
+        // Context-injection events (UserPromptSubmit, PostToolUse) should include
+        // additionalContext per Claude Code schema.
         let adapter = ClaudeCodeAdapter;
-        let output = adapter.emit_hook_context("SessionStart", "session started");
-        assert_eq!(output, "", "SessionStart should emit no output");
-    }
-
-    #[test]
-    fn emit_hook_context_user_prompt_submit_includes_additional_context() {
-        // UserPromptSubmit should include additionalContext per Claude Code schema
-        let adapter = ClaudeCodeAdapter;
-        let output = adapter.emit_hook_context("UserPromptSubmit", "some context data");
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&output).expect("output must be valid JSON");
-
-        // hookEventName must be present
-        assert_eq!(
-            parsed["hookSpecificOutput"]["hookEventName"].as_str(),
-            Some("UserPromptSubmit")
-        );
-
-        // additionalContext must be present and contain the context
-        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .expect("UserPromptSubmit must include additionalContext");
-        assert!(
-            ctx.contains("some context data"),
-            "context should be preserved in additionalContext"
-        );
-    }
-
-    #[test]
-    fn emit_hook_context_post_tool_use_includes_additional_context() {
-        // PostToolUse should include additionalContext per Claude Code schema
-        let adapter = ClaudeCodeAdapter;
-        let output = adapter.emit_hook_context("PostToolUse", "tool result context");
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&output).expect("output must be valid JSON");
-
-        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .expect("PostToolUse must include additionalContext");
-        assert!(ctx.contains("tool result context"));
+        for event in ["UserPromptSubmit", "PostToolUse"] {
+            let output = adapter.emit_hook_context(event, "context data");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&output).expect("must be valid JSON");
+            assert_eq!(
+                parsed["hookSpecificOutput"]["hookEventName"].as_str(),
+                Some(event)
+            );
+            assert!(
+                parsed["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .expect("must have additionalContext")
+                    .contains("context data")
+            );
+        }
     }
 
     #[test]
