@@ -526,6 +526,11 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Case-insensitive check: true if any item in `list` matches `target` ignoring case.
+fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
+    list.iter().any(|item| item.eq_ignore_ascii_case(target))
+}
+
 /// Registered adapters whose binary is present on `PATH` and that aren't
 /// named in `config.disabled_engines` (#562), logging (at debug) and skipping
 /// any that fail either check — the shared gate `run_export`, `run_regenerate`,
@@ -536,13 +541,6 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
 /// prints a warning here rather than failing silently — this is the only
 /// gate all three call sites route through, and `llmenv validate` alone
 /// isn't run on every export/regenerate/doctor invocation.
-/// Case-insensitive check: returns true if any item in `list` matches `target` ignoring case.
-fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
-    let target_lower = target.to_ascii_lowercase();
-    list.iter()
-        .any(|item| item.to_ascii_lowercase() == target_lower)
-}
-
 fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdapter>> + '_ {
     let known_ids = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
@@ -934,7 +932,7 @@ fn tag_active(when: &[String], active: &std::collections::BTreeSet<String>) -> b
 /// (`claude-code`). Normalise before comparing so the baked-in default matches.
 fn warn_if_unknown_engine(engine: &str) {
     let known = crate::adapter::known_engine_ids();
-    if !known.iter().any(|id| id == engine) {
+    if !engine_id_matches_any(engine, &known) {
         tracing::warn!(
             engine,
             "unrecognised engine name — no registered adapter matches; \
