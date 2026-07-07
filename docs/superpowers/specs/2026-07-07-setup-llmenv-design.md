@@ -24,8 +24,8 @@ The mechanical, non-AI part. Runs first.
 3. **AGENTS.md** — Writes a starter orientation guide
 4. **GitHub repo** — Prompts: existing repo URL, help-me-create instructions, or skip
 5. **Scan existing configs** — Reads contents of `~/.claude/settings.json`,
-   `~/.claude/plugins.json`, `~/.claude/projects/*/settings.json`, and
-   `~/.cursor/settings.json` at the content level (not just existence check)
+   `~/.claude/plugins.json`, and `~/.claude/projects/*/settings.json`
+   at the content level (not just existence check)
 6. **Write enumeration JSON** — Dumps found configs + contents into
    `.llmenv-setup-state.json` in the config dir, structured for AI consumption
 7. **Install the skill** — Copies the embedded setup skill into
@@ -59,9 +59,6 @@ Written to `{config_dir}/.llmenv-setup-state.json`. Format:
       "projects": {
         "project-name": { "settings": { ... } }
       }
-    },
-    "cursor": {
-      "settings": { ... }
     }
   },
   "created_bundles": ["base"]
@@ -156,7 +153,6 @@ is tested at integration level only.
 | Re-run on existing config | Overwrite prompt fires, safe paths on "keep" |
 | Claude Code settings exist | Enumeration JSON includes claude_code.settings with correct keys |
 | Claude Code projects exist | Enumeration JSON includes project entries |
-| Cursor settings exist | Enumeration JSON includes cursor.settings |
 | No existing configs | Enumeration JSON has empty existing_configs |
 | Setup with bad bundle names | `is_unsafe_join_target` rejected, user re-prompted |
 | Enumeration JSON format | JSON is valid, has version field, has all expected sections |
