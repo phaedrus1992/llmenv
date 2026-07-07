@@ -932,6 +932,7 @@ mod tests {
                     session_log,
                 )| {
                     Config {
+                        disabled_engines: vec![],
                         cache,
                         scope: Scopes {
                             network,
@@ -990,6 +991,7 @@ mod tests {
             ];
 
             let config = Config {
+                disabled_engines: vec![],
                 cache: Cache::default(),
                 capabilities: Default::default(),
                 native: Default::default(),
@@ -1023,6 +1025,7 @@ mod tests {
                 bundles[0].when.clear();
             }
             let config = Config {
+                disabled_engines: vec![],
                 cache: Cache::default(),
                 capabilities: Default::default(),
                 native: Default::default(),
@@ -1050,6 +1053,7 @@ mod tests {
             name in arb_string(),
         ) {
             let config = Config {
+                disabled_engines: vec![],
                 cache: Cache::default(),
                 capabilities: Default::default(),
                 native: Default::default(),
@@ -1079,6 +1083,7 @@ mod tests {
     #[test]
     fn test_valid_config_passes_validation() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1116,6 +1121,7 @@ mod tests {
     #[test]
     fn test_invalid_cidr_prefix_too_large() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1150,6 +1156,7 @@ mod tests {
     #[test]
     fn test_invalid_cidr_malformed() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1186,6 +1193,7 @@ mod tests {
         // A user MCP named "icm" collides with the memory backend's reserved
         // registration name; rendering both would silently drop one entry.
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1219,6 +1227,7 @@ mod tests {
 
     fn config_with_throttle(throttle: Vec<crate::Throttle>) -> Config {
         Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1278,6 +1287,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("CLAUDE_CONFIG_DIR".to_string(), "x".to_string());
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1315,6 +1325,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("LLMENV_CUSTOM".to_string(), "x".to_string());
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1352,6 +1363,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("123INVALID".to_string(), "x".to_string());
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1387,6 +1399,7 @@ mod tests {
     #[test]
     fn test_invalid_mac_incomplete() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1421,6 +1434,7 @@ mod tests {
     #[test]
     fn test_invalid_mac_invalid_hex() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1455,6 +1469,7 @@ mod tests {
     #[test]
     fn test_invalid_hostname_starts_with_hyphen() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1487,6 +1502,7 @@ mod tests {
     #[test]
     fn test_invalid_hostname_ends_with_hyphen() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1519,6 +1535,7 @@ mod tests {
     #[test]
     fn test_invalid_hostname_double_dot() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1553,6 +1570,7 @@ mod tests {
         // RFC 1123: a single label may not exceed 63 octets.
         let long_label = "a".repeat(64);
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1586,6 +1604,7 @@ mod tests {
     fn test_invalid_cidr_leading_zero_octet() {
         // Dotted-decimal forbids leading zeros ("01") even though they parse.
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1620,6 +1639,7 @@ mod tests {
     #[test]
     fn test_invalid_hostname_label_ends_with_hyphen() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1652,6 +1672,7 @@ mod tests {
     #[test]
     fn test_invalid_hostname_label_starts_with_hyphen() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1684,6 +1705,7 @@ mod tests {
     #[test]
     fn test_cache_dir_with_traversal() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache {
                 cache_dir: "~/.cache/../../../etc/passwd".to_string(),
                 sync_interval_minutes: 15,
@@ -1713,6 +1735,7 @@ mod tests {
         // `foo/..` has no "../" or "/.." substring on the right side but is a
         // real traversal — semantic parsing (#65) must reject it.
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache {
                 cache_dir: "~/.cache/llmenv/..".to_string(),
                 sync_interval_minutes: 15,
@@ -1740,6 +1763,7 @@ mod tests {
     #[test]
     fn test_cache_dir_with_null_byte() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache {
                 cache_dir: "~/.cache/llm\0env".to_string(),
                 sync_interval_minutes: 15,
@@ -1767,6 +1791,7 @@ mod tests {
     #[test]
     fn test_cache_dir_valid() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1789,6 +1814,7 @@ mod tests {
     #[test]
     fn test_cache_retention_zero() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
@@ -1816,6 +1842,7 @@ mod tests {
     #[test]
     fn test_cache_retention_valid() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
@@ -1843,6 +1870,7 @@ mod tests {
     #[test]
     fn test_cache_retention_none() {
         let config = Config {
+            disabled_engines: vec![],
             cache: Cache {
                 cache_dir: "~/.cache/llmenv".to_string(),
                 sync_interval_minutes: 15,
@@ -1869,6 +1897,7 @@ mod tests {
 
     fn config_with_marketplace(name: &str, source: &str) -> Config {
         Config {
+            disabled_engines: vec![],
             cache: Cache::default(),
             capabilities: Default::default(),
             native: Default::default(),
@@ -1892,6 +1921,7 @@ mod tests {
 
     fn config_with_state(tools: Vec<crate::StateTool>) -> Config {
         Config {
+            disabled_engines: vec![],
             state: crate::StateConfig { tools },
             ..Config::default()
         }
@@ -2077,6 +2107,7 @@ mod tests {
         // src/hook_run/mod.rs::build_hook_bundle_refs) with no per-site
         // guard — validation here is the actual security boundary.
         let config = Config {
+            disabled_engines: vec![],
             bundle: vec![crate::Bundle {
                 name: "../evil".into(),
                 when: vec!["t".into()],
@@ -2092,6 +2123,7 @@ mod tests {
     #[test]
     fn bundle_name_valid_is_accepted() {
         let config = Config {
+            disabled_engines: vec![],
             bundle: vec![crate::Bundle {
                 name: "rust-dev".into(),
                 when: vec!["rust".into()],
@@ -2348,6 +2380,7 @@ mod tests {
     fn config_with_capabilities_env(key: &str, value: &str) -> crate::Config {
         use std::collections::BTreeMap;
         crate::Config {
+            disabled_engines: vec![],
             capabilities: Capabilities {
                 env: BTreeMap::from([(key.to_string(), value.to_string())]),
                 ..Default::default()
@@ -2358,6 +2391,7 @@ mod tests {
 
     fn minimal_config() -> crate::Config {
         crate::Config {
+            disabled_engines: vec![],
             bundle: vec![Bundle {
                 name: "b".into(),
                 when: vec!["t".into()],
@@ -2524,6 +2558,7 @@ mod tests {
 
     fn config_with_lsp(lsp: Vec<crate::LspServer>) -> Config {
         Config {
+            disabled_engines: vec![],
             lsp,
             ..Default::default()
         }
@@ -2531,6 +2566,7 @@ mod tests {
 
     fn config_with_skills(skills: Vec<crate::SkillSource>) -> Config {
         Config {
+            disabled_engines: vec![],
             skills,
             ..Default::default()
         }
