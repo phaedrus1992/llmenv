@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::paths;
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Detected external tool configuration.
@@ -66,6 +67,111 @@ fn scan_existing_configs() -> Vec<DetectedConfig> {
     }
 
     configs
+}
+
+/// Read ~/.claude/settings.json if it exists.
+fn read_claude_settings(home: &Path) -> Option<serde_json::Value> {
+    let path = home.join(".claude").join("settings.json");
+    if !path.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Read ~/.claude/plugins.json if it exists.
+fn read_claude_plugins(home: &Path) -> Option<serde_json::Value> {
+    let path = home.join(".claude").join("plugins.json");
+    if !path.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Read ~/.claude/claude.md if it exists.
+fn read_claude_md(home: &Path) -> Option<String> {
+    let path = home.join(".claude").join("CLAUDE.md");
+    if !path.is_file() {
+        return None;
+    }
+    std::fs::read_to_string(&path).ok()
+}
+
+/// Read ~/.claude/gemini.md if it exists.
+fn read_gemini_md(home: &Path) -> Option<String> {
+    let path = home.join(".claude").join("GEMINI.md");
+    if !path.is_file() {
+        return None;
+    }
+    std::fs::read_to_string(&path).ok()
+}
+
+/// Read per-project settings from ~/.claude/projects/*/settings.json.
+fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
+    let mut projects = BTreeMap::new();
+    let projects_dir = home.join(".claude").join("projects");
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return projects;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let settings_path = entry.path().join("settings.json");
+        if let Ok(bytes) = std::fs::read(&settings_path) {
+            if let Ok(val) = serde_json::from_slice(&bytes) {
+                projects.insert(name, val);
+            }
+        }
+    }
+    projects
+}
+
+/// Build the full enumeration JSON value.
+fn build_enumeration(available: &[String], config_dir: &Path) -> serde_json::Value {
+    let home = std::env::var("HOME").map(PathBuf::from).ok();
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+
+    let claude_section = home.as_ref().map(|h| {
+        let settings = read_claude_settings(h);
+        let plugins = read_claude_plugins(h);
+        let marketplaces = settings
+            .as_ref()
+            .and_then(|s| s.get("marketplaces").cloned())
+            .or_else(|| {
+                plugins
+                    .as_ref()
+                    .and_then(|p| p.get("marketplaces").cloned())
+            });
+
+        serde_json::json!({
+            "settings": settings,
+            "plugins": plugins,
+            "marketplaces": marketplaces,
+            "claude_md": read_claude_md(h),
+            "gemini_md": read_gemini_md(h),
+            "projects": read_project_configs(h),
+        })
+    });
+
+    serde_json::json!({
+        "version": 1,
+        "user": user,
+        "config_dir": config_dir.to_string_lossy(),
+        "engines_available": available,
+        "existing_configs": {
+            "claude_code": claude_section
+        },
+        "created_bundles": ["base"]
+    })
+}
+
+/// Write the enumeration JSON to {config_dir}/.llmenv-setup-state.json.
+fn write_enumeration_json(config_dir: &Path, enumeration: &serde_json::Value) -> Result<()> {
+    let path = config_dir.join(".llmenv-setup-state.json");
+    let json = serde_json::to_string_pretty(enumeration).context("serializing enumeration JSON")?;
+    paths::write_owner_only_atomic(&path, json.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 /// Probe PATH for supported engines.
@@ -342,14 +448,26 @@ pub(super) fn run_setup(
         }
     }
 
-    // --- Phase 2: GitHub repo ---
+    // Probe engines and set up disabled_engines
+    let available = probe_engines();
+    let disabled = compute_disabled_engines(&available);
+    if available.is_empty() {
+        eprintln!("  No supported AI engines found on PATH (claude, crush).");
+    }
+
+    // --- Phase 2: Enumeration JSON ---
+    let enumeration = build_enumeration(&available, &config_dir);
+    write_enumeration_json(&config_dir, &enumeration)?;
+    eprintln!("✓ Environment snapshot written to .llmenv-setup-state.json");
+
+    // --- Phase 3: GitHub repo ---
     let repo_url = if let Some(given) = repo {
         Some(given)
     } else {
         prompt_github_repo(&config_dir)?
     };
 
-    // --- Phase 3: User identity ---
+    // --- Phase 4: User identity ---
     use dialoguer::Input;
     let user_name: String = Input::new()
         .with_prompt("Your username (used for bundle tag matching)")
@@ -366,10 +484,10 @@ pub(super) fn run_setup(
         .interact_text()
         .context("username prompt failed")?;
 
-    // --- Phase 4: Bundle setup ---
+    // --- Phase 5: Bundle setup ---
     let bundles = prompt_bundles(&config_dir)?;
 
-    // --- Phase 5: Write config ---
+    // --- Phase 6: Write config ---
     let config_path = config_dir.join("config.yaml");
     let disabled = compute_disabled_engines(&probe_engines());
     write_config(
@@ -386,7 +504,7 @@ pub(super) fn run_setup(
         .with_context(|| format!("validating new config at {}", config_path.display()))?;
     eprintln!("✓ Config validated successfully");
 
-    // --- Phase 6: AGENTS.md ---
+    // --- Phase 7: AGENTS.md ---
     let agents_path = config_dir.join("AGENTS.md");
     if !agents_path.exists() {
         write_agents_md(&agents_path, &bundles)?;
@@ -465,6 +583,26 @@ mod tests {
     }
 
     #[test]
+    fn test_disabled_engines_in_config() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bundles = vec!["base".to_string()];
+        let config_path = dir.path().join("config.yaml");
+        write_config(
+            &config_path,
+            &bundles,
+            None,
+            "testuser",
+            &["crush".to_string()],
+        )
+        .expect("write_config");
+        let config = Config::load(&config_path).expect("load");
+        assert!(
+            config.disabled_engines.contains(&"crush".to_string()),
+            "crush should be disabled"
+        );
+    }
+
+    #[test]
     fn test_probe_engines_does_not_panic() {
         let engines = probe_engines();
         for e in &engines {
@@ -507,5 +645,47 @@ mod tests {
         let content = fs::read_to_string(&agents_path).expect("read AGENTS.md");
         assert!(content.contains("Agent Orientation"));
         assert!(content.contains("bundles/base/"));
+    }
+
+    #[test]
+    fn test_read_claude_settings_file_not_found() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let result = read_claude_settings(dir.path());
+        assert!(
+            result.is_none(),
+            "should be None when no settings file exists"
+        );
+    }
+
+    #[test]
+    fn test_write_enumeration_json_creates_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let enumeration = serde_json::json!({"version": 1});
+        write_enumeration_json(dir.path(), &enumeration).expect("write enumeration");
+        let path = dir.path().join(".llmenv-setup-state.json");
+        assert!(path.is_file(), "enumeration file should exist");
+        let content = std::fs::read_to_string(&path).expect("read");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+        assert_eq!(parsed["version"], 1);
+    }
+
+    #[test]
+    fn test_build_enumeration_has_required_fields() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let enumeration = build_enumeration(&["claude_code".to_string()], dir.path());
+        let obj = enumeration
+            .as_object()
+            .expect("enumeration must be an object");
+        assert!(obj.contains_key("version"));
+        assert!(obj.contains_key("engines_available"));
+        assert!(obj.contains_key("existing_configs"));
+        assert!(obj.contains_key("created_bundles"));
+    }
+
+    #[test]
+    fn test_read_project_configs_empty_dir() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let projects = read_project_configs(dir.path());
+        assert!(projects.is_empty(), "no projects dir should return empty");
     }
 }
