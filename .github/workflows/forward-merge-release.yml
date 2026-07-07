@@ -241,9 +241,14 @@ jobs:
                 break
               fi
 
-              # Create branch pointing to current HEAD (the merge commit from line 199),
+              # Create branch pointing to current HEAD (the merge commit at line 205),
               # not origin/$TARGET (which would discard the merge commit).
-              git checkout -B "$MERGE_BRANCH"
+              if ! git checkout -B "$MERGE_BRANCH"; then
+                echo "::error::Failed to create merge branch $MERGE_BRANCH"
+                echo "::endgroup::"
+                HALTED="checkout failed at $TARGET"
+                break
+              fi
               if ! git push origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
                 echo "::endgroup::"
@@ -255,9 +260,9 @@ jobs:
                 --title "Forward-merge $CURRENT into $TARGET" \
                 --body "Direct push to $TARGET blocked by branch protection; opening PR."; then
                 echo "::error::Failed to create PR for $MERGE_BRANCH after protected-branch push was rejected"
+              else
+                echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
               fi
-
-              echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
               echo "::endgroup::"
               HALTED="protected branch $TARGET"
               break
