@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `llmenv setup` interactive wizard: scans existing tool configurations
+  (`~/.claude`, `~/.cursor`), prompts for GitHub repo and bundle organization,
+  and generates a validated `config.yaml` with starter `AGENTS.md`. (#561, #575)
 - The Claude Code adapter now renders `capabilities.lsp`: entries with an
   `extension_to_language` map (new field, e.g. `{".rs": "rust"}`) render into a
   synthetic skills-directory plugin (`skills/llmenv-lsp/.claude-plugin/plugin.json`),
