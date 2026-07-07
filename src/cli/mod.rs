@@ -536,10 +536,17 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
 /// prints a warning here rather than failing silently — this is the only
 /// gate all three call sites route through, and `llmenv validate` alone
 /// isn't run on every export/regenerate/doctor invocation.
+/// Case-insensitive check: returns true if any item in `list` matches `target` ignoring case.
+fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
+    let target_lower = target.to_ascii_lowercase();
+    list.iter()
+        .any(|item| item.to_ascii_lowercase() == target_lower)
+}
+
 fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdapter>> + '_ {
     let known_ids = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
-        if !known_ids.contains(engine) {
+        if !engine_id_matches_any(engine, &known_ids) {
             eprintln!(
                 "warning: disabled_engines references unknown engine: {engine} \
                  (known: {}) — it has no effect",
@@ -559,9 +566,8 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
                 );
                 return false;
             }
-            let disabled = config
-                .disabled_engines
-                .contains(&crate::adapter::engine_id(adapter.as_ref()));
+            let adapter_id = crate::adapter::engine_id(adapter.as_ref());
+            let disabled = engine_id_matches_any(&adapter_id, &config.disabled_engines);
             if disabled {
                 tracing::debug!(
                     adapter = adapter.name(),
@@ -2676,7 +2682,7 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
     }
     let known_engines = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
-        if !known_engines.contains(engine) {
+        if !engine_id_matches_any(engine, &known_engines) {
             eprintln!(
                 "{fail} disabled_engines references unknown engine: {engine} \
                  (known: {})",
@@ -3066,6 +3072,20 @@ mod tests {
             installed_adapters(&config).count(),
             0,
             "disabling every known engine id must yield no installed adapters"
+        );
+    }
+
+    #[test]
+    fn installed_adapters_case_insensitive_disabled_engines() {
+        // #564: disabled_engines entries should match case-insensitively
+        let config = Config {
+            disabled_engines: vec!["Claude_Code".to_string(), "CRUSH".to_string()],
+            ..Config::default()
+        };
+        assert_eq!(
+            installed_adapters(&config).count(),
+            0,
+            "disabled_engines with different casing must still disable engines"
         );
     }
 
