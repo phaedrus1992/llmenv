@@ -195,6 +195,100 @@ fn install_setup_skill(config_dir: &Path) -> Result<PathBuf> {
     Ok(skill_path)
 }
 
+/// Present the engine handoff prompt and optionally launch the AI agent.
+fn engine_handoff_prompt(
+    skill_path: &Path,
+    _state_path: &Path,
+    available: &[String],
+    no_launch: bool,
+) -> Result<()> {
+    if no_launch {
+        return Ok(());
+    }
+
+    if available.is_empty() {
+        eprintln!();
+        eprintln!("No AI engines found on PATH. Install Claude Code or Crush to");
+        eprintln!("run the interactive setup skill. The skill file is already");
+        eprintln!("installed — invoke it manually when ready.");
+        return Ok(());
+    }
+
+    use dialoguer::Select;
+    let mut choices: Vec<String> = available
+        .iter()
+        .map(|e| match e.as_str() {
+            "claude_code" => "Claude Code".to_string(),
+            "crush" => "Crush".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    choices.push("Skip (I'll run the skill later)".to_string());
+
+    let selection = Select::new()
+        .with_prompt("Launch the interactive setup skill?")
+        .items(&choices)
+        .default(0)
+        .interact()
+        .context("handoff prompt failed")?;
+
+    if selection >= available.len() {
+        eprintln!("You can run the skill later by invoking `setup-llmenv` in your AI agent.");
+        return Ok(());
+    }
+
+    let engine_id = &available[selection];
+    let skill_content = std::fs::read_to_string(skill_path).context("reading skill file")?;
+    let state_path_str = _state_path.to_string_lossy();
+    let skill_content = skill_content.replace("{STATE_PATH}", &state_path_str);
+
+    eprintln!();
+    eprintln!("🚀 Launching {engine_id} with the setup skill...");
+    eprintln!("(The AI will guide you through the rest of the setup.)");
+    eprintln!();
+
+    match engine_id.as_str() {
+        "claude_code" => {
+            let status = std::process::Command::new("claude")
+                .arg("-p")
+                .arg(&skill_content)
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .context("launching claude")?;
+            if !status.success() {
+                anyhow::bail!("claude exited with status {status}");
+            }
+        }
+        "crush" => {
+            use std::io::Write;
+            let mut child = std::process::Command::new("crush")
+                .arg("run")
+                .arg("--quiet")
+                .arg("Execute the setup-llmenv skill")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .context("launching crush")?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(skill_content.as_bytes())
+                    .context("writing skill to crush stdin")?;
+            }
+            let status = child.wait().context("waiting for crush")?;
+            if !status.success() {
+                anyhow::bail!("crush exited with status {status}");
+            }
+        }
+        other => anyhow::bail!("unsupported engine: {other}"),
+    }
+
+    eprintln!("✓ Setup complete!");
+    Ok(())
+}
+
 /// Probe PATH for supported engines.
 /// Returns adapter IDs of engines found (e.g. "claude_code", "crush").
 fn probe_engines() -> Vec<String> {
@@ -555,6 +649,16 @@ pub(super) fn run_setup(
             config_dir.display()
         );
     }
+
+    // --- Phase 8: Engine handoff ---
+    let skill_path = config_dir
+        .join("bundles")
+        .join("base")
+        .join("skills")
+        .join("setup-llmenv")
+        .join("SKILL.md");
+    let state_path = config_dir.join(".llmenv-setup-state.json");
+    engine_handoff_prompt(&skill_path, &state_path, &available, _no_launch)?;
 
     Ok(())
 }
