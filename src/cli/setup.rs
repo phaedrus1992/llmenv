@@ -68,6 +68,31 @@ fn scan_existing_configs() -> Vec<DetectedConfig> {
     configs
 }
 
+/// Probe PATH for supported engines.
+/// Returns adapter IDs of engines found (e.g. "claude_code", "crush").
+fn probe_engines() -> Vec<String> {
+    let mut found = Vec::new();
+    let probes: &[(&str, &str)] = &[("claude", "claude_code"), ("crush", "crush")];
+    for (binary, engine_id) in probes {
+        if let Ok(out) = std::process::Command::new("which").arg(binary).output() {
+            if out.status.success() {
+                found.push(engine_id.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// Compute which engines should be disabled given which are available.
+fn compute_disabled_engines(available: &[String]) -> Vec<String> {
+    const ALL_SUPPORTED: &[&str] = &["claude_code", "crush"];
+    ALL_SUPPORTED
+        .iter()
+        .filter(|e| !available.contains(&e.to_string()))
+        .map(|e| e.to_string())
+        .collect()
+}
+
 /// Prompt the user to pick bundle names and create bundle directories.
 fn prompt_bundles(config_dir: &Path) -> Result<Vec<String>> {
     use dialoguer::Input;
@@ -193,6 +218,7 @@ fn write_config(
     bundles: &[String],
     repo: Option<&str>,
     user_name: &str,
+    disabled_engines: &[String],
 ) -> Result<()> {
     // Load template as base
     let template = crate::config::generate_template();
@@ -215,6 +241,9 @@ fn write_config(
             source: repo_url.to_string(),
         });
     }
+
+    // Set disabled engines based on which engines are (not) on PATH
+    config.disabled_engines = disabled_engines.to_vec();
 
     let yaml = serde_yaml::to_string(&config).context("serializing config")?;
     paths::write_owner_only_atomic(config_path, yaml.as_bytes())
@@ -342,7 +371,14 @@ pub(super) fn run_setup(
 
     // --- Phase 5: Write config ---
     let config_path = config_dir.join("config.yaml");
-    write_config(&config_path, &bundles, repo_url.as_deref(), &user_name)?;
+    let disabled = compute_disabled_engines(&probe_engines());
+    write_config(
+        &config_path,
+        &bundles,
+        repo_url.as_deref(),
+        &user_name,
+        &disabled,
+    )?;
     eprintln!("✓ Written config to {}", config_path.display());
 
     // Validate
@@ -399,12 +435,41 @@ mod tests {
         let config_path = dir.path().join("config.yaml");
         let bundles = vec!["base".to_string(), "work".to_string()];
 
-        write_config(&config_path, &bundles, None, "testuser").expect("write_config");
+        write_config(&config_path, &bundles, None, "testuser", &[]).expect("write_config");
         assert!(config_path.is_file(), "config.yaml should exist");
 
         // Verify it parses as valid Config
         let loaded: Config = Config::load(&config_path).expect("should load valid config");
         assert_eq!(loaded.bundle.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_disabled_engines_none_available() {
+        let disabled = compute_disabled_engines(&[]);
+        assert_eq!(disabled.len(), 2);
+        assert!(disabled.contains(&"claude_code".to_string()));
+        assert!(disabled.contains(&"crush".to_string()));
+    }
+
+    #[test]
+    fn test_compute_disabled_engines_all_available() {
+        let disabled = compute_disabled_engines(&["claude_code".to_string(), "crush".to_string()]);
+        assert!(disabled.is_empty());
+    }
+
+    #[test]
+    fn test_compute_disabled_engines_partial() {
+        let disabled = compute_disabled_engines(&["claude_code".to_string()]);
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0], "crush");
+    }
+
+    #[test]
+    fn test_probe_engines_does_not_panic() {
+        let engines = probe_engines();
+        for e in &engines {
+            assert!(e == "claude_code" || e == "crush", "unexpected engine: {e}");
+        }
     }
 
     #[test]
@@ -417,6 +482,7 @@ mod tests {
             &["base".to_string()],
             Some("https://github.com/user/repo"),
             "testuser",
+            &[],
         )
         .expect("write_config with repo");
 
