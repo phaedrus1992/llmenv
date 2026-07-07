@@ -74,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   adapter can't materialize (e.g. Crush skipping a `PostToolUse` hook), and its
   token-efficiency checks now count a var as set if it's declared in
   `native.claude_code.env`, not only in the live process environment. (#543)
+- Top-level `disabled_engines` config list: skip rendering for named engines
+  (e.g. `claude_code`, `crush`) even when their binary is on `PATH`. An entry
+  that doesn't match any registered engine prints a warning on every
+  `export`/`regenerate`/`doctor` run (not just `llmenv validate`). (#562)
 
 ### Changed
 
