@@ -174,6 +174,27 @@ fn write_enumeration_json(config_dir: &Path, enumeration: &serde_json::Value) ->
     Ok(())
 }
 
+/// The embedded setup skill content.
+const SETUP_SKILL_SOURCE: &str = include_str!("../../skills/setup-llmenv/SKILL.md");
+
+/// Write the setup skill to the bundle's skills directory.
+fn install_setup_skill(config_dir: &Path) -> Result<PathBuf> {
+    let skill_dir = config_dir
+        .join("bundles")
+        .join("base")
+        .join("skills")
+        .join("setup-llmenv");
+    std::fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("creating skill dir {}", skill_dir.display()))?;
+
+    let skill_path = skill_dir.join("SKILL.md");
+    let state_path = config_dir.join(".llmenv-setup-state.json");
+    let content = SETUP_SKILL_SOURCE.replace("{STATE_PATH}", &state_path.to_string_lossy());
+    paths::write_owner_only(&skill_path, content.as_bytes())
+        .with_context(|| format!("writing skill {}", skill_path.display()))?;
+    Ok(skill_path)
+}
+
 /// Probe PATH for supported engines.
 /// Returns adapter IDs of engines found (e.g. "claude_code", "crush").
 fn probe_engines() -> Vec<String> {
@@ -460,6 +481,10 @@ pub(super) fn run_setup(
     write_enumeration_json(&config_dir, &enumeration)?;
     eprintln!("✓ Environment snapshot written to .llmenv-setup-state.json");
 
+    // Install the setup skill into the bundle
+    install_setup_skill(&config_dir)?;
+    eprintln!("✓ Setup skill installed to bundles/base/skills/setup-llmenv/");
+
     // --- Phase 3: GitHub repo ---
     let repo_url = if let Some(given) = repo {
         Some(given)
@@ -687,5 +712,33 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let projects = read_project_configs(dir.path());
         assert!(projects.is_empty(), "no projects dir should return empty");
+    }
+
+    #[test]
+    fn test_install_setup_skill_creates_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let skill_path = install_setup_skill(dir.path()).expect("install");
+        assert!(skill_path.is_file(), "SKILL.md should exist");
+        let content = std::fs::read_to_string(&skill_path).expect("read");
+        assert!(
+            content.contains("Setup llmenv"),
+            "should contain skill content"
+        );
+        assert!(
+            !content.contains("{STATE_PATH}"),
+            "placeholder should be resolved"
+        );
+        assert!(
+            content.contains(".llmenv-setup-state.json"),
+            "should reference state file"
+        );
+    }
+
+    #[test]
+    fn test_installed_skill_has_frontmatter() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let skill_path = install_setup_skill(dir.path()).expect("install");
+        let content = std::fs::read_to_string(&skill_path).expect("read");
+        assert!(content.starts_with("---"), "skill should have frontmatter");
     }
 }
