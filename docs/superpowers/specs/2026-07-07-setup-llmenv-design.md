@@ -52,7 +52,8 @@ Written to `{config_dir}/.llmenv-setup-state.json`. Format:
   "existing_configs": {
     "claude_code": {
       "settings": { ... full key-value content of settings.json ... },
-      "plugins": [ ... plugin refs ... ],
+      "plugins": [ ... plugin refs from plugins.json (name, marketplace) ... ],
+      "marketplaces": [ ... marketplace sources from settings.json/plugins.json ... ],
       "claude_md": "raw text content or null",
       "gemini_md": "raw text content or null",
       "projects": {
@@ -80,7 +81,8 @@ no repo checkout needed, version sync guaranteed.
 1. **Context** — Load `.llmenv-setup-state.json`, greet the user, show what was found
 2. **Claude Code settings** — Walk through discovered settings keys: "This permission
    rule was in your ~/.claude — keep in the `base` bundle or create a separate one?"
-   - Plugin refs → suggest migrating to llmenv `plugin-collection` entries
+   - Plugin refs (with marketplace sources) → suggest migrating to llmenv `plugin-collection` entries; detect if the marketplace is already available (e.g. `dev-commons`, `claude-plugins-official`) and suggest the right `marketplace:` declaration
+   - Marketplace registrations → map to llmenv `marketplace:` entries in config.yaml
    - MCP servers → suggest migrating to llmenv `mcp:` entries
    - Hooks → check for llmenv equivalents, import if unique
    - Custom instructions (CLAUDE.md/AGENTS.md content) → merge into bundle instructions
