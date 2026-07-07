@@ -23,14 +23,17 @@ The mechanical, non-AI part. Runs first.
    `generate_template()` as the base, same as `run_init`
 3. **AGENTS.md** — Writes a starter orientation guide
 4. **GitHub repo** — Prompts: existing repo URL, help-me-create instructions, or skip
-5. **Scan existing configs** — Reads contents of `~/.claude/settings.json`,
+5. **Probe engines** — Check `which claude` and `which crush`. Engines found go into
+   `engines_available` in the enumeration JSON. Engines NOT found get added to
+   `disabled_engines` in config.yaml so llmenv doesn't waste materialization attempts.
+6. **Scan existing configs** — Reads contents of `~/.claude/settings.json`,
    `~/.claude/plugins.json`, and `~/.claude/projects/*/settings.json`
    at the content level (not just existence check)
-6. **Write enumeration JSON** — Dumps found configs + contents into
+7. **Write enumeration JSON** — Dumps found configs + contents into
    `.llmenv-setup-state.json` in the config dir, structured for AI consumption
-7. **Install the skill** — Copies the embedded setup skill into
+8. **Install the skill** — Copies the embedded setup skill into
    `bundles/base/skills/setup-llmenv/SKILL.md` so it's available by name
-8. **Engine handoff** — Detects available engines (`claude`, `crush`) on PATH,
+9. **Engine handoff** — Detects available engines (`claude`, `crush`) on PATH,
    asks "Launch setup skill with [engine]?", pipes the skill + enumeration to the engine
    via its stdin prompt (`claude -p` / `crush run`)
 
