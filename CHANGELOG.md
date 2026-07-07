@@ -69,7 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Top-level `disabled_engines` config list: skip rendering for named engines
   (e.g. `claude_code`, `crush`) even when their binary is on `PATH`. An entry
   that doesn't match any registered engine prints a warning on every
-  `export`/`regenerate`/`doctor` run (not just `llmenv validate`). (#562)
+  `export`/`regenerate`/`doctor` run (not just `llmenv validate`). Matching is
+  case-insensitive, so `Claude_Code` or `CRUSH` disable the same engines as
+  their lowercase form, and the `--engine` flag's own unknown-engine check
+  now matches case-insensitively too. (#562, #564)
 
 ### Changed
 
