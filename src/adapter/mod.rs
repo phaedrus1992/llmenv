@@ -112,6 +112,17 @@ pub(crate) fn engine_id(adapter: &dyn AgentAdapter) -> String {
     adapter.name().replace('-', "_")
 }
 
+/// Every registered adapter's [`engine_id`], for validating user-facing
+/// engine-id strings (`--engine`, `disabled_engines`) against what's actually
+/// registered.
+#[must_use]
+pub(crate) fn known_engine_ids() -> Vec<String> {
+    registered_adapters()
+        .iter()
+        .map(|a| engine_id(a.as_ref()))
+        .collect()
+}
+
 /// Returns `true` when `name` resolves to an executable on the current `PATH`.
 ///
 /// Uses the platform `which` command so the result matches what a shell would
@@ -179,8 +190,8 @@ pub(crate) fn remote_transport_type_str(transport: crate::config::McpTransport) 
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_on_path, engine_id, registered_adapters, remote_transport_type_str,
-        resolve_bundle_relative_paths,
+        binary_on_path, engine_id, known_engine_ids, registered_adapters,
+        remote_transport_type_str, resolve_bundle_relative_paths,
     };
 
     #[test]
@@ -244,6 +255,11 @@ mod tests {
     }
 
     #[test]
+    fn known_engine_ids_matches_registered_adapters() {
+        assert_eq!(known_engine_ids(), vec!["claude_code", "crush"]);
+    }
+
+    #[test]
     fn binary_on_path_true_for_sh() {
         assert!(binary_on_path("sh"), "sh must be on PATH in any POSIX env");
     }
@@ -287,7 +303,7 @@ mod tests {
         assert!(
             adapters
                 .iter()
-                .any(|a| a.name().replace('-', "_") == "claude_code"),
+                .any(|a| engine_id(a.as_ref()) == "claude_code"),
             "no registered adapter's engine id matches the baked --engine default 'claude_code'"
         );
     }

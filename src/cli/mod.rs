@@ -531,7 +531,22 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
 /// any that fail either check — the shared gate `run_export`, `run_regenerate`,
 /// and `llmenv doctor` all apply before materializing or inspecting an
 /// adapter (#543).
+///
+/// A `disabled_engines` entry that matches no registered adapter (a typo)
+/// prints a warning here rather than failing silently — this is the only
+/// gate all three call sites route through, and `llmenv validate` alone
+/// isn't run on every export/regenerate/doctor invocation.
 fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdapter>> + '_ {
+    let known_ids = crate::adapter::known_engine_ids();
+    for engine in &config.disabled_engines {
+        if !known_ids.contains(engine) {
+            eprintln!(
+                "warning: disabled_engines references unknown engine: {engine} \
+                 (known: {}) — it has no effect",
+                known_ids.join(", ")
+            );
+        }
+    }
     crate::adapter::registered_adapters()
         .into_iter()
         .filter(move |adapter| {
@@ -912,20 +927,13 @@ fn tag_active(when: &[String], active: &std::collections::BTreeSet<String>) -> b
 /// [`crate::adapter::AgentAdapter::name`] is the hyphenated cache-dir form
 /// (`claude-code`). Normalise before comparing so the baked-in default matches.
 fn warn_if_unknown_engine(engine: &str) {
-    let known = crate::adapter::registered_adapters();
-    if !known
-        .iter()
-        .any(|a| crate::adapter::engine_id(a.as_ref()) == engine)
-    {
+    let known = crate::adapter::known_engine_ids();
+    if !known.iter().any(|id| id == engine) {
         tracing::warn!(
             engine,
             "unrecognised engine name — no registered adapter matches; \
              did you mean one of: {}?",
-            known
-                .iter()
-                .map(|a| crate::adapter::engine_id(a.as_ref()))
-                .collect::<Vec<_>>()
-                .join(", ")
+            known.join(", ")
         );
     }
 }
@@ -2666,10 +2674,7 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
             }
         }
     }
-    let known_engines: Vec<String> = crate::adapter::registered_adapters()
-        .iter()
-        .map(|a| crate::adapter::engine_id(a.as_ref()))
-        .collect();
+    let known_engines = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
         if !known_engines.contains(engine) {
             eprintln!(
