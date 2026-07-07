@@ -164,6 +164,9 @@ enum Command {
         /// Repository to store config in (optional)
         #[arg(long)]
         repo: Option<String>,
+        /// Skip the AI engine handoff at the end
+        #[arg(long)]
+        no_launch: bool,
     },
     /// Show current environment status
     Status {
@@ -341,8 +344,12 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Init { path, repo }) => {
             run_init(path, repo)?;
         }
-        Some(Command::Setup { path, repo }) => {
-            setup::run_setup(path, repo)?;
+        Some(Command::Setup {
+            path,
+            repo,
+            no_launch,
+        }) => {
+            setup::run_setup(path, repo, no_launch)?;
         }
         Some(Command::Status { section }) => {
             status::run_status(section, use_color)?;
