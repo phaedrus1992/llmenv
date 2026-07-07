@@ -167,6 +167,9 @@ enum Command {
         /// Skip the AI engine handoff at the end
         #[arg(long)]
         no_launch: bool,
+        /// Re-scan existing configs without overwriting config files
+        #[arg(long)]
+        rescan: bool,
     },
     /// Show current environment status
     Status {
@@ -348,8 +351,9 @@ pub fn run() -> anyhow::Result<()> {
             path,
             repo,
             no_launch,
+            rescan,
         }) => {
-            setup::run_setup(path, repo, no_launch)?;
+            setup::run_setup(path, repo, no_launch, rescan)?;
         }
         Some(Command::Status { section }) => {
             status::run_status(section, use_color)?;
