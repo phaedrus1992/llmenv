@@ -526,6 +526,11 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Case-insensitive check: true if any item in `list` matches `target` ignoring case.
+fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
+    list.iter().any(|item| item.eq_ignore_ascii_case(target))
+}
+
 /// Registered adapters whose binary is present on `PATH` and that aren't
 /// named in `config.disabled_engines` (#562), logging (at debug) and skipping
 /// any that fail either check — the shared gate `run_export`, `run_regenerate`,
@@ -539,7 +544,7 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
 fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdapter>> + '_ {
     let known_ids = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
-        if !known_ids.contains(engine) {
+        if !engine_id_matches_any(engine, &known_ids) {
             eprintln!(
                 "warning: disabled_engines references unknown engine: {engine} \
                  (known: {}) — it has no effect",
@@ -559,9 +564,8 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
                 );
                 return false;
             }
-            let disabled = config
-                .disabled_engines
-                .contains(&crate::adapter::engine_id(adapter.as_ref()));
+            let adapter_id = crate::adapter::engine_id(adapter.as_ref());
+            let disabled = engine_id_matches_any(&adapter_id, &config.disabled_engines);
             if disabled {
                 tracing::debug!(
                     adapter = adapter.name(),
@@ -928,7 +932,7 @@ fn tag_active(when: &[String], active: &std::collections::BTreeSet<String>) -> b
 /// (`claude-code`). Normalise before comparing so the baked-in default matches.
 fn warn_if_unknown_engine(engine: &str) {
     let known = crate::adapter::known_engine_ids();
-    if !known.iter().any(|id| id == engine) {
+    if !engine_id_matches_any(engine, &known) {
         tracing::warn!(
             engine,
             "unrecognised engine name — no registered adapter matches; \
@@ -2676,7 +2680,7 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
     }
     let known_engines = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
-        if !known_engines.contains(engine) {
+        if !engine_id_matches_any(engine, &known_engines) {
             eprintln!(
                 "{fail} disabled_engines references unknown engine: {engine} \
                  (known: {})",
@@ -3066,6 +3070,20 @@ mod tests {
             installed_adapters(&config).count(),
             0,
             "disabling every known engine id must yield no installed adapters"
+        );
+    }
+
+    #[test]
+    fn installed_adapters_case_insensitive_disabled_engines() {
+        // #564: disabled_engines entries should match case-insensitively
+        let config = Config {
+            disabled_engines: vec!["Claude_Code".to_string(), "CRUSH".to_string()],
+            ..Config::default()
+        };
+        assert_eq!(
+            installed_adapters(&config).count(),
+            0,
+            "disabled_engines with different casing must still disable engines"
         );
     }
 
