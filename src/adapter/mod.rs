@@ -102,6 +102,16 @@ pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     ]
 }
 
+/// Normalise an adapter's identity to the underscore form used by `--engine`
+/// flags, `native.<engine>` config keys, and `disabled_engines` entries.
+/// [`AgentAdapter::name`] is the hyphenated cache-dir form (`claude-code`);
+/// this converts it to `claude_code` for comparison against those
+/// user-facing engine-id strings.
+#[must_use]
+pub(crate) fn engine_id(adapter: &dyn AgentAdapter) -> String {
+    adapter.name().replace('-', "_")
+}
+
 /// Returns `true` when `name` resolves to an executable on the current `PATH`.
 ///
 /// Uses the platform `which` command so the result matches what a shell would
@@ -169,7 +179,7 @@ pub(crate) fn remote_transport_type_str(transport: crate::config::McpTransport) 
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_on_path, registered_adapters, remote_transport_type_str,
+        binary_on_path, engine_id, registered_adapters, remote_transport_type_str,
         resolve_bundle_relative_paths,
     };
 
@@ -224,6 +234,13 @@ mod tests {
             c.supported_hook_events().contains(&"PreToolUse"),
             "CrushAdapter must support PreToolUse"
         );
+    }
+
+    #[test]
+    fn engine_id_normalises_hyphen_to_underscore() {
+        let adapters = registered_adapters();
+        assert_eq!(engine_id(adapters[0].as_ref()), "claude_code");
+        assert_eq!(engine_id(adapters[1].as_ref()), "crush");
     }
 
     #[test]

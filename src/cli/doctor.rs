@@ -197,10 +197,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     let doctor_manifest =
         super::build_manifest(&config, &config_dir, &active, &doctor_firing, false)?;
     if let Some((manifest, _)) = &doctor_manifest {
-        for adapter in crate::adapter::registered_adapters() {
-            if !crate::adapter::binary_on_path(adapter.binary_name()) {
-                continue;
-            }
+        for adapter in super::installed_adapters(&config) {
             let supported = adapter.supported_hook_events();
             for hook in &manifest.capabilities.hooks {
                 if !supported.contains(&hook.event.as_str()) {

@@ -40,6 +40,13 @@ pub struct Features {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 pub struct Config {
+    /// Engine ids to skip entirely during materialization, even if the
+    /// engine's binary is on `PATH` (#562). Uses the same underscore-form
+    /// engine id as `native.<engine>` and the `--engine` flag (e.g.
+    /// `claude_code`, `crush`) rather than an adapter's hyphenated
+    /// cache-dir name (`claude-code`).
+    #[serde(default)]
+    pub disabled_engines: Vec<String>,
     #[serde(default)]
     pub cache: Cache,
     #[serde(default)]
