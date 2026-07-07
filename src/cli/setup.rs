@@ -29,15 +29,30 @@ fn scan_existing_configs() -> Vec<DetectedConfig> {
 
     // Claude Code projects
     let projects_dir = claude_dir.join("projects");
-    if let Ok(entries) = std::fs::read_dir(&projects_dir) {
-        for entry in entries.flatten() {
-            let proj_settings = entry.path().join("settings.json");
-            if proj_settings.is_file() {
-                configs.push(DetectedConfig {
-                    source: format!("Claude Code project: {}", entry.path().display()),
-                    path: proj_settings,
-                });
+    match std::fs::read_dir(&projects_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(de) => {
+                        let proj_settings = de.path().join("settings.json");
+                        if proj_settings.is_file() {
+                            configs.push(DetectedConfig {
+                                source: format!("Claude Code project: {}", de.path().display()),
+                                path: proj_settings,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  warn: skipping unreadable entry in ~/.claude/projects: {e}");
+                    }
+                }
             }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // No projects directory yet, that's fine
+        }
+        Err(e) => {
+            eprintln!("  warn: could not scan ~/.claude/projects: {e}");
         }
     }
 
@@ -69,21 +84,30 @@ fn prompt_bundles(config_dir: &Path) -> Result<Vec<String>> {
             .interact_text()
             .context("bundle name prompt failed")?;
 
-        if name.is_empty() {
+        let name = if name.is_empty() {
             if bundles.is_empty() {
-                eprintln!("At least one bundle is required. Creating a 'base' bundle.");
-                bundles.push("base".to_string());
+                "base".to_string()
+            } else {
+                break;
             }
-            break;
-        }
+        } else {
+            if crate::paths::is_unsafe_join_target(&name) {
+                eprintln!(
+                    "Invalid bundle name '{name}'. Use letters, numbers, hyphens, underscores."
+                );
+                continue;
+            }
+            name
+        };
 
         let bundle_dir = config_dir.join("bundles").join(&name);
         std::fs::create_dir_all(&bundle_dir)
             .with_context(|| format!("creating bundle dir {}", bundle_dir.display()))?;
 
-        // Create empty skills and hooks dirs
-        let _ = std::fs::create_dir_all(bundle_dir.join("skills"));
-        let _ = std::fs::create_dir_all(bundle_dir.join("hooks"));
+        std::fs::create_dir_all(bundle_dir.join("skills"))
+            .with_context(|| format!("creating skills dir in {}", bundle_dir.display()))?;
+        std::fs::create_dir_all(bundle_dir.join("hooks"))
+            .with_context(|| format!("creating hooks dir in {}", bundle_dir.display()))?;
 
         bundles.push(name);
     }
@@ -117,10 +141,24 @@ fn prompt_github_repo(config_dir: &Path) -> Result<Option<String>> {
         1 => {
             let owner: String = Input::new()
                 .with_prompt("GitHub username or org")
+                .validate_with(|input: &String| -> Result<(), &str> {
+                    if input.contains('/') || input.contains(char::is_whitespace) {
+                        Err("Invalid GitHub username or org")
+                    } else {
+                        Ok(())
+                    }
+                })
                 .interact_text()
                 .context("GitHub owner prompt failed")?;
             let name: String = Input::new()
                 .with_prompt("Repo name (e.g. llmenv-config)")
+                .validate_with(|input: &String| -> Result<(), &str> {
+                    if input.contains('/') || input.contains(char::is_whitespace) {
+                        Err("Invalid repo name")
+                    } else {
+                        Ok(())
+                    }
+                })
                 .interact_text()
                 .context("repo name prompt failed")?;
 
@@ -237,7 +275,7 @@ pub(super) fn run_setup(path: Option<PathBuf>, repo: Option<String>) -> Result<(
         None => paths::config_dir()?,
     };
 
-    if config_dir.join("config.yaml").exists() && repo.is_none() {
+    if config_dir.join("config.yaml").exists() {
         use dialoguer::Select;
         let overwrite = Select::new()
             .with_prompt(format!(
@@ -283,6 +321,15 @@ pub(super) fn run_setup(path: Option<PathBuf>, repo: Option<String>) -> Result<(
     let user_name: String = Input::new()
         .with_prompt("Your username (used for bundle tag matching)")
         .default(std::env::var("USER").unwrap_or_else(|_| "me".to_string()))
+        .validate_with(|input: &String| -> Result<(), &str> {
+            if input.contains(char::is_whitespace) {
+                Err("Username must not contain spaces")
+            } else if input.is_empty() {
+                Err("Username must not be empty")
+            } else {
+                Ok(())
+            }
+        })
         .interact_text()
         .context("username prompt failed")?;
 
@@ -336,7 +383,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn test_scan_existing_configs_no_home() {
+    fn test_scan_existing_configs_does_not_panic() {
         // Should not panic when HOME is unset
         let _configs = scan_existing_configs();
         // Just check it returns without panic — result is environment-dependent
