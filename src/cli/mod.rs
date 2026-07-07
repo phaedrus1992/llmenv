@@ -526,13 +526,30 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Registered adapters whose binary is present on `PATH`, logging (at debug)
-/// and skipping any that aren't — the shared PATH-gate `run_export` and
-/// `run_regenerate` both apply before materializing an adapter (#543).
-fn installed_adapters() -> impl Iterator<Item = Box<dyn AgentAdapter>> {
+/// Registered adapters whose binary is present on `PATH` and that aren't
+/// named in `config.disabled_engines` (#562), logging (at debug) and skipping
+/// any that fail either check — the shared gate `run_export`, `run_regenerate`,
+/// and `llmenv doctor` all apply before materializing or inspecting an
+/// adapter (#543).
+///
+/// A `disabled_engines` entry that matches no registered adapter (a typo)
+/// prints a warning here rather than failing silently — this is the only
+/// gate all three call sites route through, and `llmenv validate` alone
+/// isn't run on every export/regenerate/doctor invocation.
+fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdapter>> + '_ {
+    let known_ids = crate::adapter::known_engine_ids();
+    for engine in &config.disabled_engines {
+        if !known_ids.contains(engine) {
+            eprintln!(
+                "warning: disabled_engines references unknown engine: {engine} \
+                 (known: {}) — it has no effect",
+                known_ids.join(", ")
+            );
+        }
+    }
     crate::adapter::registered_adapters()
         .into_iter()
-        .filter(|adapter| {
+        .filter(move |adapter| {
             let on_path = crate::adapter::binary_on_path(adapter.binary_name());
             if !on_path {
                 tracing::debug!(
@@ -540,8 +557,18 @@ fn installed_adapters() -> impl Iterator<Item = Box<dyn AgentAdapter>> {
                     binary = adapter.binary_name(),
                     "adapter binary not on PATH — skipping"
                 );
+                return false;
             }
-            on_path
+            let disabled = config
+                .disabled_engines
+                .contains(&crate::adapter::engine_id(adapter.as_ref()));
+            if disabled {
+                tracing::debug!(
+                    adapter = adapter.name(),
+                    "adapter disabled via config.disabled_engines — skipping"
+                );
+            }
+            !disabled
         })
 }
 
@@ -644,7 +671,7 @@ fn run_export(
         firing: &firing,
     };
     let mut any_adapter_failed = false;
-    for adapter in installed_adapters() {
+    for adapter in installed_adapters(&config) {
         match build_and_materialize(adapter.as_ref(), materialize_ctx, compress) {
             Ok(Some((ref cache_path, ref extra_vars))) => {
                 tracing::debug!(
@@ -817,7 +844,7 @@ fn run_regenerate() -> anyhow::Result<()> {
     };
     let mut materialized_any = false;
     let mut any_adapter_failed = false;
-    for adapter in installed_adapters() {
+    for adapter in installed_adapters(&config) {
         match build_and_materialize(adapter.as_ref(), materialize_ctx, false) {
             Ok(Some((cache_path, _))) => {
                 materialized_any = true;
@@ -900,18 +927,13 @@ fn tag_active(when: &[String], active: &std::collections::BTreeSet<String>) -> b
 /// [`crate::adapter::AgentAdapter::name`] is the hyphenated cache-dir form
 /// (`claude-code`). Normalise before comparing so the baked-in default matches.
 fn warn_if_unknown_engine(engine: &str) {
-    let known = crate::adapter::registered_adapters();
-    let engine_id = |a: &dyn crate::adapter::AgentAdapter| a.name().replace('-', "_");
-    if !known.iter().any(|a| engine_id(a.as_ref()) == engine) {
+    let known = crate::adapter::known_engine_ids();
+    if !known.iter().any(|id| id == engine) {
         tracing::warn!(
             engine,
             "unrecognised engine name — no registered adapter matches; \
              did you mean one of: {}?",
-            known
-                .iter()
-                .map(|a| engine_id(a.as_ref()))
-                .collect::<Vec<_>>()
-                .join(", ")
+            known.join(", ")
         );
     }
 }
@@ -2652,6 +2674,17 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
             }
         }
     }
+    let known_engines = crate::adapter::known_engine_ids();
+    for engine in &config.disabled_engines {
+        if !known_engines.contains(engine) {
+            eprintln!(
+                "{fail} disabled_engines references unknown engine: {engine} \
+                 (known: {})",
+                known_engines.join(", ")
+            );
+            valid = false;
+        }
+    }
     if valid {
         eprintln!("{pass} config valid ({} bundle(s))", config.bundle.len());
     } else {
@@ -3014,6 +3047,25 @@ mod tests {
         assert_eq!(
             firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
             vec!["rust-dev"]
+        );
+    }
+
+    #[test]
+    fn installed_adapters_skips_engines_in_disabled_engines() {
+        // #562: disabling every registered engine must empty the iterator
+        // regardless of which binaries happen to be on this machine's PATH.
+        let disabled_engines = crate::adapter::registered_adapters()
+            .iter()
+            .map(|a| crate::adapter::engine_id(a.as_ref()))
+            .collect();
+        let config = Config {
+            disabled_engines,
+            ..Config::default()
+        };
+        assert_eq!(
+            installed_adapters(&config).count(),
+            0,
+            "disabling every known engine id must yield no installed adapters"
         );
     }
 

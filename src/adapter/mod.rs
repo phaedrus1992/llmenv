@@ -102,6 +102,27 @@ pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     ]
 }
 
+/// Normalise an adapter's identity to the underscore form used by `--engine`
+/// flags, `native.<engine>` config keys, and `disabled_engines` entries.
+/// [`AgentAdapter::name`] is the hyphenated cache-dir form (`claude-code`);
+/// this converts it to `claude_code` for comparison against those
+/// user-facing engine-id strings.
+#[must_use]
+pub(crate) fn engine_id(adapter: &dyn AgentAdapter) -> String {
+    adapter.name().replace('-', "_")
+}
+
+/// Every registered adapter's [`engine_id`], for validating user-facing
+/// engine-id strings (`--engine`, `disabled_engines`) against what's actually
+/// registered.
+#[must_use]
+pub(crate) fn known_engine_ids() -> Vec<String> {
+    registered_adapters()
+        .iter()
+        .map(|a| engine_id(a.as_ref()))
+        .collect()
+}
+
 /// Returns `true` when `name` resolves to an executable on the current `PATH`.
 ///
 /// Uses the platform `which` command so the result matches what a shell would
@@ -169,8 +190,8 @@ pub(crate) fn remote_transport_type_str(transport: crate::config::McpTransport) 
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_on_path, registered_adapters, remote_transport_type_str,
-        resolve_bundle_relative_paths,
+        binary_on_path, engine_id, known_engine_ids, registered_adapters,
+        remote_transport_type_str, resolve_bundle_relative_paths,
     };
 
     #[test]
@@ -227,6 +248,18 @@ mod tests {
     }
 
     #[test]
+    fn engine_id_normalises_hyphen_to_underscore() {
+        let adapters = registered_adapters();
+        assert_eq!(engine_id(adapters[0].as_ref()), "claude_code");
+        assert_eq!(engine_id(adapters[1].as_ref()), "crush");
+    }
+
+    #[test]
+    fn known_engine_ids_matches_registered_adapters() {
+        assert_eq!(known_engine_ids(), vec!["claude_code", "crush"]);
+    }
+
+    #[test]
     fn binary_on_path_true_for_sh() {
         assert!(binary_on_path("sh"), "sh must be on PATH in any POSIX env");
     }
@@ -270,7 +303,7 @@ mod tests {
         assert!(
             adapters
                 .iter()
-                .any(|a| a.name().replace('-', "_") == "claude_code"),
+                .any(|a| engine_id(a.as_ref()) == "claude_code"),
             "no registered adapter's engine id matches the baked --engine default 'claude_code'"
         );
     }
