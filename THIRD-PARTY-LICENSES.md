@@ -3329,7 +3329,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 2.2.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3791,10 +3791,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 2.2.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 2.2.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 2.2.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 2.2.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
@@ -4474,7 +4474,7 @@ SOFTWARE.
 
 Used by:
 - [crossbeam-deque 0.8.6](https://github.com/crossbeam-rs/crossbeam)
-- [crossbeam-epoch 0.9.18](https://github.com/crossbeam-rs/crossbeam)
+- [crossbeam-epoch 0.9.20](https://github.com/crossbeam-rs/crossbeam)
 - [crossbeam-utils 0.8.21](https://github.com/crossbeam-rs/crossbeam)
 
 ```
