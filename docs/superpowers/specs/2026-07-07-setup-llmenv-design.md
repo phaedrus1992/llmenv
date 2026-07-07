@@ -139,3 +139,39 @@ At the end of `llmenv setup`:
 - **Gemini CLI handoff** — same when supported
 - **Automatic re-scan** — `llmenv setup --rescan` re-runs the scan + enumeration without
   recreating the config dir, for existing users who want the skill to re-evaluate
+
+## Testing
+
+The `--no-launch` path is the primary test surface — the AI handoff (claude -p / crush run)
+is tested at integration level only.
+
+### Smoke tests (`--no-launch`)
+
+| Scenario | What it verifies |
+|----------|------------------|
+| Fresh setup to temp dir | Config dir created, config.yaml valid, AGENTS.md written |
+| Setup with `--repo` | Marketplace entry written, overwrite prompt not skipped |
+| Re-run on existing config | Overwrite prompt fires, safe paths on "keep" |
+| Claude Code settings exist | Enumeration JSON includes claude_code.settings with correct keys |
+| Claude Code projects exist | Enumeration JSON includes project entries |
+| Cursor settings exist | Enumeration JSON includes cursor.settings |
+| No existing configs | Enumeration JSON has empty existing_configs |
+| Setup with bad bundle names | `is_unsafe_join_target` rejected, user re-prompted |
+| Enumeration JSON format | JSON is valid, has version field, has all expected sections |
+| Engine probing | `engines_available` list matches which engines are on PATH |
+
+### Integration tests
+
+| Scenario | What it verifies |
+|----------|------------------|
+| Full `--no-launch` run | The CLI completes without error, exits 0 |
+| Skill file installed | `bundles/base/skills/setup-llmenv/SKILL.md` exists and is valid markdown |
+| Config round-trips | `llmenv regenerate` succeeds on the generated config |
+| Engine handoff (smoke) | `claude -p` or `crush run` would be invoked with the right args (dry-run flag) |
+
+### Test implementation
+
+- All smoke tests run in tempdir (`tempfile::TempDir`), no ~/.config contamination
+- Claude Code / Cursor settings are mocked as temporary files in the expected locations
+- Tests use `--no-launch` to skip the interactive handoff
+- Engine probing is tested separately (function that returns `Vec<String>` of found engines)
