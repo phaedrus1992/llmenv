@@ -157,6 +157,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   session handshake the transport requires (400 missing session ID); and the
   `SessionEnd` store action never sent the tool's required `topic` field. All four
   fixed together; verified end-to-end against a live ICM server. (#548)
+- Fix skill materialization rejecting a `SKILL.md` whose `description` contains a colon (e.g.
+  "Triggers on: ..."); `name`/`description` values are now auto-quoted before the strict YAML
+  parse so a single malformed-looking skill no longer takes down the whole adapter (#568)
 
 ## [2.3.0] - 2026-06-30
 
