@@ -124,6 +124,12 @@ jobs:
               echo "::error::Fatal error merging origin/$src into $merge_branch (exit $merge_rc)"
               return 1
             fi
+            # If merge has conflicts, commit the conflicted state so the branch
+            # differs from target (otherwise push fails with "no commits between").
+            if [[ $merge_rc -ne 0 ]]; then
+              git add -A
+              git commit -m "Merge $src into $tgt (unresolved conflicts, needs manual resolution)"
+            fi
             if ! git push origin "$merge_branch" --force-with-lease; then
               echo "::error::Failed to push $merge_branch; cannot open conflict PR"
               return 1
@@ -235,7 +241,14 @@ jobs:
                 break
               fi
 
-              git checkout -B "$MERGE_BRANCH" "origin/$TARGET"
+              # Create branch pointing to current HEAD (the merge commit at line 205),
+              # not origin/$TARGET (which would discard the merge commit).
+              if ! git checkout -B "$MERGE_BRANCH"; then
+                echo "::error::Failed to create merge branch $MERGE_BRANCH"
+                echo "::endgroup::"
+                HALTED="checkout failed at $TARGET"
+                break
+              fi
               if ! git push origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
                 echo "::endgroup::"
@@ -247,9 +260,9 @@ jobs:
                 --title "Forward-merge $CURRENT into $TARGET" \
                 --body "Direct push to $TARGET blocked by branch protection; opening PR."; then
                 echo "::error::Failed to create PR for $MERGE_BRANCH after protected-branch push was rejected"
+              else
+                echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
               fi
-
-              echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
               echo "::endgroup::"
               HALTED="protected branch $TARGET"
               break
