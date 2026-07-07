@@ -270,6 +270,30 @@ fn rejects_skill_with_invalid_yaml_frontmatter() {
     assert!(err.to_string().contains("invalid YAML frontmatter"));
 }
 
+// Issue #568: a description containing "Triggers on: ..." is valid freeform
+// text, not a nested mapping — must not be rejected for the embedded colon.
+#[test]
+fn accepts_skill_with_colon_in_description() {
+    let tmp = tempdir().expect("tempdir");
+    let skills_dir = tmp.path().join("skills");
+    let skill_dir = skills_dir.join("good-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: good-skill\ndescription: Do the thing. Triggers on: foo, bar, baz.\n---\nbody\n",
+    )
+    .expect("write SKILL.md");
+
+    let m = llmenv::merge::MergedManifest {
+        agents_md: String::new(),
+        files: Default::default(),
+        ..Default::default()
+    };
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("colon in description should not fail frontmatter validation");
+}
+
 // Issue #90: Hooks generator — wire bundle hook fragments into settings.json
 #[test]
 fn hooks_generator_renders_bundle_hooks_into_settings_json() {
