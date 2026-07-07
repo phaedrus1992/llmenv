@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 mod doctor;
+mod setup;
 mod status;
 mod style;
 
@@ -153,6 +154,14 @@ enum Command {
         /// Directory to initialize (defaults to the standard config dir)
         path: Option<std::path::PathBuf>,
         /// Repository to clone config from (optional)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Interactive setup wizard for new llmenv users
+    Setup {
+        /// Directory to set up (defaults to the standard config dir)
+        path: Option<std::path::PathBuf>,
+        /// Repository to store config in (optional)
         #[arg(long)]
         repo: Option<String>,
     },
@@ -331,6 +340,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Init { path, repo }) => {
             run_init(path, repo)?;
+        }
+        Some(Command::Setup { path, repo }) => {
+            setup::run_setup(path, repo)?;
         }
         Some(Command::Status { section }) => {
             status::run_status(section, use_color)?;
