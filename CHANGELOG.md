@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix skill materialization rejecting a `SKILL.md` whose `description` contains a colon (e.g.
+  "Triggers on: ..."); `name`/`description` values are now auto-quoted before the strict YAML
+  parse so a single malformed-looking skill no longer takes down the whole adapter (#568)
+
 ## [2.3.0] - 2026-06-30
 
 ### Added

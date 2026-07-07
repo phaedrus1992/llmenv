@@ -411,6 +411,36 @@ fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()
     Ok(())
 }
 
+/// `name`/`description` are freeform one-line text per the SKILL.md spec, never
+/// nested mappings — so a plain scalar value containing `: ` (e.g. `description:
+/// Do X. Triggers on: Y, Z.`) is valid *intent* even though it isn't valid plain
+/// YAML (an unquoted `: ` mid-scalar reads as a nested mapping key). Auto-quote
+/// those two fields' values before reparsing so real-world descriptions aren't
+/// rejected for using a colon (#568).
+fn quote_yaml_scalar(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn requote_name_and_description(frontmatter: &str) -> String {
+    frontmatter
+        .lines()
+        .map(|line| {
+            for key in ["name", "description"] {
+                let Some(value) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) else {
+                    continue;
+                };
+                let value = value.trim_start();
+                if value.is_empty() || matches!(value.as_bytes()[0], b'"' | b'\'' | b'|' | b'>') {
+                    return line.to_string();
+                }
+                return format!("{key}: {}", quote_yaml_scalar(value));
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Validate a single skill's `SKILL.md` frontmatter (name + description present).
 fn validate_skill_frontmatter(skill_md: &Path, skill_dir: &Path) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(skill_md)?;
@@ -425,12 +455,18 @@ fn validate_skill_frontmatter(skill_md: &Path, skill_dir: &Path) -> anyhow::Resu
         );
     };
     let frontmatter_str = &content[3..frontmatter_end];
-    let mapping = serde_yaml::from_str::<serde_yaml::Mapping>(frontmatter_str).map_err(|e| {
-        anyhow::anyhow!(
-            "Skill {} SKILL.md has invalid YAML frontmatter: {e}",
-            skill_dir.display()
-        )
-    })?;
+    let mapping = match serde_yaml::from_str::<serde_yaml::Mapping>(frontmatter_str) {
+        Ok(mapping) => mapping,
+        Err(e) => serde_yaml::from_str::<serde_yaml::Mapping>(&requote_name_and_description(
+            frontmatter_str,
+        ))
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Skill {} SKILL.md has invalid YAML frontmatter: {e}",
+                skill_dir.display()
+            )
+        })?,
+    };
     if mapping.get("name").is_none() || mapping.get("description").is_none() {
         anyhow::bail!(
             "Skill {} SKILL.md missing required frontmatter fields (name and description)",
