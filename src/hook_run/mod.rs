@@ -138,7 +138,9 @@ pub enum HookEvent {
     TurnStart,
     /// Session ends (Claude Code: `SessionEnd`).
     SessionEnd,
-<<<<<<< HEAD
+    /// Post-session consolidation hook (R5). Runs after SessionEnd to
+    /// trigger reflective consolidation on the accumulated conversation.
+    PostSession,
     /// Verbose: the raw prompt submission (Claude Code: `UserPromptSubmit`).
     UserPromptSubmit,
     /// Verbose: before a tool call (Claude Code: `PreToolUse`).
@@ -153,11 +155,6 @@ pub enum HookEvent {
     SubagentStop,
     /// Verbose: about to compact the transcript (Claude Code: `PreCompact`).
     PreCompact,
-=======
-    /// Post-session consolidation hook (R5). Runs after SessionEnd to
-    /// optionally distill episodic memories into semantic rules.
-    PostSession,
->>>>>>> origin/release/2.x
 }
 
 impl FromStr for HookEvent {
@@ -167,8 +164,8 @@ impl FromStr for HookEvent {
             "session_start" => Ok(HookEvent::SessionStart),
             "turn_start" => Ok(HookEvent::TurnStart),
             "session_end" => Ok(HookEvent::SessionEnd),
-<<<<<<< HEAD
             "user_prompt_submit" => Ok(HookEvent::UserPromptSubmit),
+            "post_session" => Ok(HookEvent::PostSession),
             "pre_tool_use" => Ok(HookEvent::PreToolUse),
             "post_tool_use" => Ok(HookEvent::PostToolUse),
             "notification" => Ok(HookEvent::Notification),
@@ -179,11 +176,6 @@ impl FromStr for HookEvent {
                 "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
                  user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
                  subagent_stop|pre_compact)"
-=======
-            "post_session" => Ok(HookEvent::PostSession),
-            other => Err(anyhow::anyhow!(
-                "unknown hook event '{other}' (expected session_start|turn_start|session_end|post_session)"
->>>>>>> origin/release/2.x
             )),
         }
     }
@@ -195,7 +187,6 @@ impl std::fmt::Display for HookEvent {
             HookEvent::SessionStart => "session_start",
             HookEvent::TurnStart => "turn_start",
             HookEvent::SessionEnd => "session_end",
-<<<<<<< HEAD
             HookEvent::UserPromptSubmit => "user_prompt_submit",
             HookEvent::PreToolUse => "pre_tool_use",
             HookEvent::PostToolUse => "post_tool_use",
@@ -203,9 +194,7 @@ impl std::fmt::Display for HookEvent {
             HookEvent::Stop => "stop",
             HookEvent::SubagentStop => "subagent_stop",
             HookEvent::PreCompact => "pre_compact",
-=======
             HookEvent::PostSession => "post_session",
->>>>>>> origin/release/2.x
         };
         f.write_str(s)
     }
@@ -233,7 +222,6 @@ fn dispatch(
             actions
         }
         HookEvent::SessionEnd => vec![Action::Store],
-<<<<<<< HEAD
         HookEvent::UserPromptSubmit
         | HookEvent::PreToolUse
         | HookEvent::PostToolUse
@@ -241,6 +229,7 @@ fn dispatch(
         | HookEvent::Stop
         | HookEvent::SubagentStop
         | HookEvent::PreCompact => vec![],
+        HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
 }
 
@@ -256,6 +245,7 @@ fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
         HookEvent::Stop | HookEvent::SubagentStop => Some((EventKind::Stop, "assistant")),
         HookEvent::PreCompact => Some((EventKind::Notification, "system")),
         HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => None,
+        HookEvent::PostSession => None, // consolidation runs as a separate step
     }
 }
 
@@ -294,9 +284,10 @@ fn verbose_content(event: HookEvent, payload: &serde_json::Value) -> (Option<Str
             None,
             payload["trigger"].as_str().unwrap_or_default().to_string(),
         ),
-        HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => {
-            (None, String::new())
-        }
+        HookEvent::SessionStart
+        | HookEvent::TurnStart
+        | HookEvent::SessionEnd
+        | HookEvent::PostSession => (None, String::new()),
     }
 }
 
@@ -306,9 +297,6 @@ fn json_or_empty(v: &serde_json::Value) -> String {
         String::new()
     } else {
         v.to_string()
-=======
-        HookEvent::PostSession => vec![], // consolidation runs as a separate step
->>>>>>> origin/release/2.x
     }
 }
 
@@ -413,14 +401,12 @@ fn run_inner(
         .map(|u| McpHttpClient::new(u, HOOK_TIMEOUT))
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
-<<<<<<< HEAD
     let state_path = state::state_path()
         .inspect_err(|e| {
             debug!("session_log: cannot resolve state path, correlation disabled: {e}")
         })
         .ok();
     let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd);
-=======
 
     // Dedup: skip Store when the context chunk hasn't changed since the last
     // SessionEnd (R3). Avoids redundant ICM writes when hooks re-run.
@@ -435,7 +421,6 @@ fn run_inner(
             return Ok(String::new());
         }
     }
->>>>>>> origin/release/2.x
 
     // Current-thread runtime: lifecycle hooks run on the agent's hot path (session
     // start + every prompt turn) and only need to `block_on` a short sequence of
@@ -456,23 +441,21 @@ fn run_inner(
         if let Some(client) = &client {
             let actions = dispatch(event, &tag_queries, &bundle_queries);
             out = run_memory_actions(client, actions, &query, &chunk).await?;
-        }
-<<<<<<< HEAD
-        run_session_log(event, &session_log, stdin_payload).await;
-=======
 
-        // PostSession: run reflective consolidation (R5) after the standard
-        // action dispatch. This distills recent episodic memories into
-        // durable semantic rules when consolidation is enabled.
-        if event == HookEvent::PostSession {
-            let cons_text = crate::consolidation::run(&config, &client).await?;
-            if !cons_text.is_empty() {
-                if !out.is_empty() {
-                    out.push_str("\n\n");
+            // PostSession: run reflective consolidation (R5) after the standard
+            // action dispatch. This distills recent episodic memories into
+            // durable semantic rules when consolidation is enabled.
+            if event == HookEvent::PostSession {
+                let cons_text = crate::consolidation::run(&config, client).await?;
+                if !cons_text.is_empty() {
+                    if !out.is_empty() {
+                        out.push_str("\n\n");
+                    }
+                    out.push_str(&cons_text);
                 }
-                out.push_str(&cons_text);
             }
         }
+        run_session_log(event, &session_log, stdin_payload).await;
 
         // Update dedup snapshot *after* the store succeeds (R3). Writing before
         // the store call means a transient MCP failure leaves the snapshot ahead
@@ -484,7 +467,6 @@ fn run_inner(
             crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
         }
 
->>>>>>> origin/release/2.x
         Ok::<String, anyhow::Error>(out)
     })
 }
@@ -749,13 +731,10 @@ fn verbose_session_event(
 /// Mirrors the `build_manifest` merge strategy: top-level config memory is
 /// combined with bundle-contributed memory entries so a daemon declared only
 /// in a `bundle.yaml` is reachable from lifecycle hooks.
-<<<<<<< HEAD
 ///
 /// `pub(crate)`: also called by `session_log::detached::run_record`, the
 /// detached transcript-record child, which re-resolves the same MCP endpoint
 /// independently rather than receiving it as a (process-list-visible) CLI arg.
-=======
->>>>>>> origin/release/2.x
 pub(crate) fn memory_url(
     config: &crate::config::Config,
     config_dir: &std::path::Path,
