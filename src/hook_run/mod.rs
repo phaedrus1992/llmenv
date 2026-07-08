@@ -269,7 +269,7 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
         let dedup_path = state_dir.join("hook_store_chunk");
         let is_unchanged = std::fs::read_to_string(&dedup_path)
             .ok()
-            .map_or(false, |prev| prev == chunk);
+            .is_some_and(|prev| prev == chunk);
         if is_unchanged {
             debug!("chunk unchanged since last store, skipping");
             return Ok(String::new());
@@ -425,18 +425,18 @@ fn apply_memory_config_defaults(
 
     let mut out = chunk.to_string();
 
-    if !chunk.contains("<!-- llmenv-type:") {
-        if let Some(ty) = &mem.default_type {
-            let ty_str = format!("{ty:?}").to_lowercase();
-            out.push_str(&format!("\n<!-- llmenv-type: {ty_str} -->"));
-        }
+    if !chunk.contains("<!-- llmenv-type:")
+        && let Some(ty) = &mem.default_type
+    {
+        let ty_str = format!("{ty:?}").to_lowercase();
+        out.push_str(&format!("\n<!-- llmenv-type: {ty_str} -->"));
     }
 
-    if !chunk.contains("<!-- llmenv-importance:") {
-        if let Some(imp) = &mem.default_importance {
-            let imp_str = format!("{imp:?}").to_lowercase();
-            out.push_str(&format!("\n<!-- llmenv-importance: {imp_str} -->"));
-        }
+    if !chunk.contains("<!-- llmenv-importance:")
+        && let Some(imp) = &mem.default_importance
+    {
+        let imp_str = format!("{imp:?}").to_lowercase();
+        out.push_str(&format!("\n<!-- llmenv-importance: {imp_str} -->"));
     }
 
     out

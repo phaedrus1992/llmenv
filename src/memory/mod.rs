@@ -33,8 +33,7 @@ pub fn stats() -> anyhow::Result<()> {
     let result = std::thread::scope(|s| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build()
-            .expect("tokio runtime");
+            .build()?;
         s.spawn(move || {
             rt.block_on(async {
                 client
@@ -43,7 +42,7 @@ pub fn stats() -> anyhow::Result<()> {
             })
         })
         .join()
-        .expect("thread")
+        .map_err(|_| anyhow::anyhow!("spawned stats thread panicked"))?
     })?;
     println!("{result}");
     Ok(())
@@ -55,8 +54,7 @@ pub fn list() -> anyhow::Result<()> {
     let result = std::thread::scope(|s| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build()
-            .expect("tokio runtime");
+            .build()?;
         s.spawn(move || {
             rt.block_on(async {
                 client
@@ -65,7 +63,7 @@ pub fn list() -> anyhow::Result<()> {
             })
         })
         .join()
-        .expect("thread")
+        .map_err(|_| anyhow::anyhow!("spawned list thread panicked"))?
     })?;
     println!("{result}");
     Ok(())
@@ -81,8 +79,7 @@ pub fn diff() -> anyhow::Result<()> {
         std::thread::scope(|s| {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build()
-                .expect("tokio runtime");
+                .build()?;
             s.spawn(move || {
                 rt.block_on(async {
                     client
@@ -91,7 +88,7 @@ pub fn diff() -> anyhow::Result<()> {
                 })
             })
             .join()
-            .expect("thread")
+            .map_err(|_| anyhow::anyhow!("spawned diff thread panicked"))?
         })?
     };
 
