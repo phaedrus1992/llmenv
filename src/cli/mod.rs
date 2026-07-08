@@ -713,7 +713,9 @@ fn run_export(
         firing: &firing,
     };
     let mut any_adapter_failed = false;
+    let mut any_adapter_eligible = false;
     for adapter in installed_adapters(&config) {
+        any_adapter_eligible = true;
         match build_and_materialize(adapter.as_ref(), materialize_ctx, compress) {
             Ok(Some((ref cache_path, ref extra_vars))) => {
                 tracing::debug!(
@@ -764,6 +766,17 @@ fn run_export(
                 );
             }
         }
+    }
+
+    if !any_adapter_eligible {
+        eprintln!(
+            "warning: no registered adapter binary found on PATH (expected: {})",
+            crate::adapter::registered_adapters()
+                .iter()
+                .map(|a| a.binary_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     // If every attempted adapter failed and none produced env vars, surface
@@ -1086,7 +1099,7 @@ fn build_and_materialize(
     let rendered = crate::materialize::materialize_with_mode(
         &manifest,
         &adapter_root,
-        config.cache.hashing,
+        ctx.config.cache.hashing,
         &shape,
     )?;
     let cache_path = rendered.path;
@@ -1106,7 +1119,7 @@ fn build_and_materialize(
     let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
         .with_selection(tags.clone(), bundles)
         .with_auth_status(auth_status);
-    write_cache_manifest(&cache_path, &current, config.cache.hashing)?;
+    write_cache_manifest(&cache_path, &current, ctx.config.cache.hashing)?;
 
     // Durable state (#175): the state dir is a stable sibling of the hashed
     // config folders (`<adapter_root>/state`), so it survives every hash change.
@@ -1985,6 +1998,7 @@ This directory contains your llmenv configuration.
     }
 
     // Interactive first-run prompts (only when stdin is a TTY).
+    // Intentionally Claude Code-only: Crush has no auth/settings concept yet.
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
         let adapter_root = expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
@@ -2122,6 +2136,7 @@ fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
 /// With `--global`: updates the stable cache (inherited by all future folders).
 fn run_login(global: bool) -> anyhow::Result<()> {
     let config = Config::load(&paths::config_path()?)?;
+    // Intentionally Claude Code-only: Crush has no auth concept yet (#544).
     let adapter_root = expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
 
     if global {
@@ -2823,29 +2838,37 @@ fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Re
 
     // prune runs per adapter subdirectory: the generation/VERSION_TAG folders
     // live under `<cache_dir>/<adapter>/`, not directly under `cache_dir`.
-    let report = crate::materialize::cache::prune(
-        &cache_dir.join(ClaudeCodeAdapter.name()),
-        mode,
-        config.cache.hashing,
-        current_version.as_deref(),
-        dry_run,
-    )?;
+    let mut removed: Vec<std::path::PathBuf> = Vec::new();
+    let mut failed: Vec<std::path::PathBuf> = Vec::new();
+    let mut kept: usize = 0;
+    for adapter in crate::adapter::registered_adapters() {
+        let report = crate::materialize::cache::prune(
+            &cache_dir.join(adapter.name()),
+            mode,
+            config.cache.hashing,
+            current_version.as_deref(),
+            dry_run,
+        )?;
+        removed.extend(report.removed);
+        failed.extend(report.failed);
+        kept += report.kept;
+    }
 
     let verb = if dry_run { "would remove" } else { "removed" };
-    for p in &report.removed {
+    for p in &removed {
         eprintln!("  {verb}: {}", p.display());
     }
-    for p in &report.failed {
+    for p in &failed {
         eprintln!("  failed to remove: {}", p.display());
     }
     eprintln!(
         "prune complete: {} {} entry(ies), kept {}",
         verb,
-        report.removed.len(),
-        report.kept
+        removed.len(),
+        kept
     );
-    if !report.failed.is_empty() {
-        eprintln!("  {} entry(ies) could not be removed", report.failed.len());
+    if !failed.is_empty() {
+        eprintln!("  {} entry(ies) could not be removed", failed.len());
     }
     Ok(())
 }

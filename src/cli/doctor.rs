@@ -1,5 +1,3 @@
-use crate::adapter::AgentAdapter;
-use crate::adapter::claude_code::ClaudeCodeAdapter;
 use crate::config::Config;
 use crate::paths;
 use anyhow::Context;
@@ -132,41 +130,46 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
-    // Check for version skew
-    let adapter_cache = cache_dir.join(ClaudeCodeAdapter.name());
+    // Check for version skew across all registered adapters
     let skew_relevant = !matches!(config.cache.hashing, crate::config::HashingMode::Loose);
-    if let (true, Ok(entries)) = (skew_relevant, std::fs::read_dir(&adapter_cache)) {
-        let mut cached_versions: Vec<String> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if dir_name.ends_with(".tmp") {
-                continue;
-            }
-            let version = match dir_name.rsplit_once('-') {
-                Some((prefix, tail)) if super::is_content_hash(tail) => prefix.to_string(),
-                _ => dir_name.to_string(),
-            };
-            cached_versions.push(version);
-        }
-        cached_versions.sort();
-        cached_versions.dedup();
-        let version_folder = crate::materialize::cache::version_mm();
-        let current_built = |v: &String| v == super::VERSION_TAG || *v == version_folder;
-        if !cached_versions.is_empty() {
-            let cached_versions_str = cached_versions.join(", ");
-            if !cached_versions.iter().any(current_built) {
-                eprintln!(
-                    "{warn} Version skew detected: running llmenv {} but cache has versions [{}]",
-                    super::VERSION_TAG,
-                    cached_versions_str
-                );
-                eprintln!("{warn}   → Fix: cargo install --path . --force");
+    if skew_relevant {
+        for adapter in crate::adapter::registered_adapters() {
+            let adapter_cache = cache_dir.join(adapter.name());
+            if let Ok(entries) = std::fs::read_dir(&adapter_cache) {
+                let mut cached_versions: Vec<String> = Vec::new();
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    if dir_name.ends_with(".tmp") {
+                        continue;
+                    }
+                    let version = match dir_name.rsplit_once('-') {
+                        Some((prefix, tail)) if super::is_content_hash(tail) => prefix.to_string(),
+                        _ => dir_name.to_string(),
+                    };
+                    cached_versions.push(version);
+                }
+                cached_versions.sort();
+                cached_versions.dedup();
+                let version_folder = crate::materialize::cache::version_mm();
+                let current_built = |v: &String| v == super::VERSION_TAG || *v == version_folder;
+                if !cached_versions.is_empty() {
+                    let cached_versions_str = cached_versions.join(", ");
+                    if !cached_versions.iter().any(current_built) {
+                        eprintln!(
+                            "{warn} {} version skew detected: running llmenv {} but cache has versions [{}]",
+                            adapter.name(),
+                            super::VERSION_TAG,
+                            cached_versions_str
+                        );
+                        eprintln!("{warn}   → Fix: cargo install --path . --force");
+                    }
+                }
             }
         }
     }
