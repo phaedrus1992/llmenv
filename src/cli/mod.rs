@@ -550,12 +550,16 @@ fn validate_var_value(value: &str) -> anyhow::Result<()> {
 }
 
 /// Case-insensitive check: true if any item in `list` matches `target` ignoring case.
+///
+/// # Note
+/// Comparison uses `eq_ignore_ascii_case` — only ASCII case-folding is performed.
+/// Engine IDs are expected to be ASCII-only, so this is sufficient.
 fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
     list.iter().any(|item| item.eq_ignore_ascii_case(target))
 }
 
 /// Registered adapters whose binary is present on `PATH` and that aren't
-/// named in `config.disabled_engines` (#562), logging (at debug) and skipping
+/// named in `config.disabled_engines` (#562), logging (at info) and skipping
 /// any that fail either check — the shared gate `run_export`, `run_regenerate`,
 /// and `llmenv doctor` all apply before materializing or inspecting an
 /// adapter (#543).
@@ -564,9 +568,15 @@ fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
 /// prints a warning here rather than failing silently — this is the only
 /// gate all three call sites route through, and `llmenv validate` alone
 /// isn't run on every export/regenerate/doctor invocation.
+///
+/// Empty or whitespace-only entries are silently skipped (#566).
 fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdapter>> + '_ {
     let known_ids = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
+        if engine.trim().is_empty() {
+            tracing::debug!("disabled_engines contains empty or whitespace-only entry — skipping");
+            continue;
+        }
         if !engine_id_matches_any(engine, &known_ids) {
             eprintln!(
                 "warning: disabled_engines references unknown engine: {engine} \
@@ -588,14 +598,19 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
                 return false;
             }
             let adapter_id = crate::adapter::engine_id(adapter.as_ref());
-            let disabled = engine_id_matches_any(&adapter_id, &config.disabled_engines);
-            if disabled {
-                tracing::debug!(
+            if let Some(matched_entry) = config
+                .disabled_engines
+                .iter()
+                .find(|entry| entry.eq_ignore_ascii_case(&adapter_id))
+            {
+                tracing::info!(
                     adapter = adapter.name(),
+                    config_entry = matched_entry.as_str(),
                     "adapter disabled via config.disabled_engines — skipping"
                 );
+                return false;
             }
-            !disabled
+            true
         })
 }
 
@@ -3108,6 +3123,36 @@ mod tests {
             0,
             "disabled_engines with different casing must still disable engines"
         );
+    }
+
+    #[test]
+    fn disabled_engines_empty_entry_does_not_disable_adapters() {
+        // #566: empty or whitespace-only entries must not disable any adapters
+        // and must not print confusing "unknown engine" warnings.
+        let on_path_count = crate::adapter::registered_adapters()
+            .iter()
+            .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
+            .count();
+        let config = Config {
+            disabled_engines: vec!["".to_string(), "  ".to_string(), "\t".to_string()],
+            ..Config::default()
+        };
+        assert_eq!(
+            installed_adapters(&config).count(),
+            on_path_count,
+            "empty/whitespace disabled_engine entries should not disable adapters"
+        );
+    }
+
+    #[test]
+    fn disabled_engines_whitespace_entry_no_crash() {
+        // #566: whitespace-only entries must not panic or emit confusing warnings
+        let config = Config {
+            disabled_engines: vec!["  ".to_string(), "\t\t".to_string()],
+            ..Config::default()
+        };
+        let count = installed_adapters(&config).count();
+        let _ = count;
     }
 
     #[test]
