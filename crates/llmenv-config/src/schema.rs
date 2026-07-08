@@ -548,6 +548,7 @@ fn default_listen_host() -> String {
     "127.0.0.1".to_string()
 }
 
+<<<<<<< HEAD
 /// context-mode built-in feature toggle. Loaded as a Claude Code *plugin*
 /// (not an MCP) because its hooks reference `${CLAUDE_PLUGIN_ROOT}`, which only
 /// resolves inside the plugin system. When enabled, llmenv auto-injects the
@@ -559,6 +560,75 @@ pub struct ContextMode {
     /// Whether the built-in context-mode plugin is wired up.
     #[serde(default)]
     pub enabled: bool,
+=======
+/// Memory type classification for stored memory chunks (R1).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryType {
+    /// Unclassified / generic memory.
+    #[default]
+    Episodic,
+    /// Factual knowledge extracted from experience.
+    Semantic,
+    /// How-to / operational knowledge.
+    Procedural,
+}
+
+impl MemoryType {
+    /// Return the lowercase snake_case string used in HTML-comment markers.
+    /// Matches `#[serde(rename_all = "snake_case")]` — avoids `Debug` formatting
+    /// which would silently diverge for multi-word variants.
+    pub fn as_marker_str(&self) -> &'static str {
+        match self {
+            Self::Episodic => "episodic",
+            Self::Semantic => "semantic",
+            Self::Procedural => "procedural",
+        }
+    }
+}
+
+/// Importance level for stored memory chunks (R3).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportanceLevel {
+    /// Routine / low-priority information.
+    Low,
+    /// Notable but not critical.
+    #[default]
+    Medium,
+    /// Important information worth keeping.
+    High,
+    /// Critical — must not be forgotten.
+    Critical,
+}
+
+impl ImportanceLevel {
+    /// Return the lowercase snake_case string used in HTML-comment markers.
+    /// Matches `#[serde(rename_all = "snake_case")]` — avoids `Debug` formatting.
+    pub fn as_marker_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+/// Post-session consolidation configuration (R5). Opt-in — disabled by default.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ConsolidationConfig {
+    /// Whether consolidation is enabled. Defaults to `false` — opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum number of semantic rules to distill per session.
+    #[serde(default = "default_max_rules")]
+    pub max_rules_per_session: u32,
+}
+
+const fn default_max_rules() -> u32 {
+    10
+>>>>>>> origin/release/2.x
 }
 
 /// llmenv's memory backend topology. One host (`server_host`) runs the daemon
@@ -587,6 +657,24 @@ pub struct Memory {
     /// by rendering today but preserved so config round-trips.
     #[serde(default)]
     pub default_topics: Vec<String>,
+    /// Default memory type when no <!-- llmenv-type: --> marker is present
+    /// in the context chunk (R1).
+    #[serde(default)]
+    pub default_type: Option<MemoryType>,
+    /// Default importance when no <!-- llmenv-importance: --> marker is
+    /// present in the context chunk (R3).
+    #[serde(default)]
+    pub default_importance: Option<ImportanceLevel>,
+    /// Per-type importance overrides. When no inline marker is present and
+    /// the resolved memory type (from marker or default_type) matches a key
+    /// here, the mapped importance is used (R3).
+    #[serde(default)]
+    pub type_importance: std::collections::BTreeMap<MemoryType, ImportanceLevel>,
+    /// Post-session consolidation configuration (R5). When `None`,
+    /// consolidation is unavailable. When `Some(Config)`, gated by
+    /// `consolidation.enabled` (default: false — opt-in).
+    #[serde(default)]
+    pub consolidation: Option<ConsolidationConfig>,
 }
 
 fn default_throttle_cache_ttl() -> u64 {
