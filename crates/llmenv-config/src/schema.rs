@@ -548,7 +548,6 @@ fn default_listen_host() -> String {
     "127.0.0.1".to_string()
 }
 
-<<<<<<< HEAD
 /// context-mode built-in feature toggle. Loaded as a Claude Code *plugin*
 /// (not an MCP) because its hooks reference `${CLAUDE_PLUGIN_ROOT}`, which only
 /// resolves inside the plugin system. When enabled, llmenv auto-injects the
@@ -560,7 +559,8 @@ pub struct ContextMode {
     /// Whether the built-in context-mode plugin is wired up.
     #[serde(default)]
     pub enabled: bool,
-=======
+}
+
 /// Memory type classification for stored memory chunks (R1).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "snake_case")]
@@ -628,7 +628,6 @@ pub struct ConsolidationConfig {
 
 const fn default_max_rules() -> u32 {
     10
->>>>>>> origin/release/2.x
 }
 
 /// llmenv's memory backend topology. One host (`server_host`) runs the daemon
