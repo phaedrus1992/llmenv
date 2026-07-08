@@ -11,7 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-<<<<<<< HEAD
 - `llmenv setup` interactive wizard: scans existing tool configurations
   (`~/.claude`, `~/.cursor`), prompts for GitHub repo and bundle organization,
   and generates a validated `config.yaml` with starter `AGENTS.md`. (#561, #575)
@@ -98,7 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `LLMENV_BASH_BAN` env var and its deny-rule wiring. It was broken as shipped
   (read from llmenv's process env before bundle-declared values landed) and is
   superseded by the built-in context-mode feature. (#490, removes #464)
-=======
 - Add optional `<!-- llmenv-type: episodic|semantic|procedural -->` HTML-comment marker in
   context chunks to classify stored memories by type. Types persist as ICM memory metadata and
   can be filtered in recall. Configurable default via `default_type` on memory server entries (#267)
@@ -111,7 +109,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `consolidation` config section with `enabled` and `max_rules_per_session` fields.
   Wires a diagnostic consolidation hook into the SessionEnd lifecycle; LLM integration
   deferred (#271, #595)
->>>>>>> origin/release/2.x
 
 ### Fixed
 

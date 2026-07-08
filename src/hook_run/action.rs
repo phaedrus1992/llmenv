@@ -120,15 +120,8 @@ impl Action {
                 "project": "",
                 "keyword": q.keyword,
             }),
-<<<<<<< HEAD
-            // icm_memory_store requires `topic` (schema: ["topic", "content"]);
-            // omitting it fails every call with "missing required field: topic",
-            // which the SSRF loopback bug (fixed alongside this) masked entirely
-            // for same-host setups since the call never reached the server.
-            Action::Store => json!({ "topic": "llmenv-scope-context", "content": chunk }),
-=======
             Action::Store => {
-                let mut args = json!({ "content": chunk });
+                let mut args = json!({ "content": chunk, "topic": "llmenv-scope-context" });
                 if let Some(mtyp) = parse_type_marker(chunk) {
                     args["type"] = json!(mtyp);
                 }
@@ -137,7 +130,6 @@ impl Action {
                 }
                 args
             }
->>>>>>> origin/release/2.x
         }
     }
 
