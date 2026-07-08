@@ -43,12 +43,17 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
+        env:
+          # Serialize rustup's component writes; parallel installs trip the
+          # runner's virtualized disk (os error 5, #553).
+          RUSTUP_IO_THREADS: "1"
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
       - name: Install cross-compile target
         env:
           TARGET: ${{ matrix.target }}
+          RUSTUP_IO_THREADS: "1"  # see toolchain step above (#553)
         run: rustup target add "${TARGET}"
       # Cache only the Cargo registry (source tarballs + index), never target/.
       # Registry entries are safe: cargo verifies each .crate file's SHA256
@@ -181,6 +186,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
+        env:
+          # Serialize rustup's component writes; parallel installs trip the
+          # runner's virtualized disk (os error 5, #553).
+          RUSTUP_IO_THREADS: "1"
         with:
           toolchain: stable
       - name: Extract version from tag
