@@ -52,4 +52,26 @@ pub trait AgentAdapter {
     /// * `text` — the injected memory context, placed as `additionalContext`
     ///   inside `hookSpecificOutput`.
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String;
+
+    /// The name of the binary on PATH that indicates this adapter is installed.
+    /// Used by [`binary_on_path`] to gate materialization.
+    fn binary_name(&self) -> &'static str;
+}
+
+/// Every registered adapter, in preference order.
+///
+/// # Extending the registry
+/// Add new adapters here once their crate is wired in.
+pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
+    vec![Box::new(claude_code::ClaudeCodeAdapter)]
+}
+
+/// Check whether `name` is an executable on PATH.
+pub fn binary_on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            let full = dir.join(name);
+            full.is_file()
+        })
+    })
 }

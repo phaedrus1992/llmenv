@@ -47,6 +47,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         "claude-code"
     }
 
+    fn binary_name(&self) -> &'static str {
+        "claude"
+    }
+
     fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
