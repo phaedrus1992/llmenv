@@ -17,8 +17,6 @@ use action::Action;
 use mcp_client::McpHttpClient;
 use tracing::{debug, warn};
 
-use crate::adapter::AgentAdapter;
-use crate::adapter::claude_code::ClaudeCodeAdapter;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, resolve_mcps};
 
@@ -177,20 +175,6 @@ fn dispatch(
     }
 }
 
-/// Detect which adapter is running this hook by checking each registered
-/// adapter's environment signal. Falls back to Claude Code when no signal
-/// is found (backward-compatible default).
-fn active_adapter() -> Box<dyn AgentAdapter> {
-    crate::adapter::registered_adapters()
-        .into_iter()
-        .find(|a| match a.name() {
-            "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
-            "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
-            _ => false,
-        })
-        .unwrap_or_else(|| Box::new(ClaudeCodeAdapter))
-}
-
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
 /// `Ok(())` even when the backend is unreachable.
 pub fn run(event: &str) -> anyhow::Result<()> {
@@ -212,7 +196,7 @@ pub fn run(event: &str) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let adapter = active_adapter();
+    let adapter = crate::adapter::active_adapter();
     match run_inner(parsed) {
         Ok(text) => {
             let out = adapter.emit_hook_context(&hook_event_name, &text);
