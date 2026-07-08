@@ -448,6 +448,19 @@ pub enum MemoryType {
     Procedural,
 }
 
+impl MemoryType {
+    /// Return the lowercase snake_case string used in HTML-comment markers.
+    /// Matches `#[serde(rename_all = "snake_case")]` — avoids `Debug` formatting
+    /// which would silently diverge for multi-word variants.
+    pub fn as_marker_str(&self) -> &'static str {
+        match self {
+            Self::Episodic => "episodic",
+            Self::Semantic => "semantic",
+            Self::Procedural => "procedural",
+        }
+    }
+}
+
 /// Importance level for stored memory chunks (R3).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -461,6 +474,19 @@ pub enum ImportanceLevel {
     High,
     /// Critical — must not be forgotten.
     Critical,
+}
+
+impl ImportanceLevel {
+    /// Return the lowercase snake_case string used in HTML-comment markers.
+    /// Matches `#[serde(rename_all = "snake_case")]` — avoids `Debug` formatting.
+    pub fn as_marker_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
 }
 
 /// Post-session consolidation configuration (R5). Opt-in — disabled by default.

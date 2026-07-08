@@ -266,7 +266,7 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
     // SessionEnd (R3). Avoids redundant ICM writes when hooks re-run.
     if event == HookEvent::SessionEnd {
         let state_dir = crate::paths::state_dir()?;
-        let dedup_path = state_dir.join("hook_store_chunk");
+        let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
         let is_unchanged = std::fs::read_to_string(&dedup_path)
             .ok()
             .is_some_and(|prev| prev == chunk);
@@ -428,15 +428,16 @@ fn apply_memory_config_defaults(
     if !chunk.contains("<!-- llmenv-type:")
         && let Some(ty) = &mem.default_type
     {
-        let ty_str = format!("{ty:?}").to_lowercase();
-        out.push_str(&format!("\n<!-- llmenv-type: {ty_str} -->"));
+        out.push_str(&format!("\n<!-- llmenv-type: {} -->", ty.as_marker_str()));
     }
 
     if !chunk.contains("<!-- llmenv-importance:")
         && let Some(imp) = &mem.default_importance
     {
-        let imp_str = format!("{imp:?}").to_lowercase();
-        out.push_str(&format!("\n<!-- llmenv-importance: {imp_str} -->"));
+        out.push_str(&format!(
+            "\n<!-- llmenv-importance: {} -->",
+            imp.as_marker_str()
+        ));
     }
 
     out
