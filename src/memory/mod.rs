@@ -27,23 +27,28 @@ fn connect() -> anyhow::Result<McpHttpClient> {
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
 }
 
-/// Run the `stats` subcommand: connect to ICM and output memory stats.
-pub fn stats() -> anyhow::Result<()> {
-    let client = connect()?;
-    let result = std::thread::scope(|s| {
+/// Bridge a synchronous CLI context to an async MCP tool call.
+/// Creates a single-threaded tokio runtime inside `thread::scope` to run the
+/// async call, then returns the result.
+fn call_tool_blocking(
+    client: McpHttpClient,
+    tool: &str,
+    args: serde_json::Value,
+) -> anyhow::Result<String> {
+    std::thread::scope(|s| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        s.spawn(move || {
-            rt.block_on(async {
-                client
-                    .call_tool("icm_memory_stats", serde_json::json!({}))
-                    .await
-            })
-        })
-        .join()
-        .map_err(|_| anyhow::anyhow!("spawned stats thread panicked"))?
-    })?;
+        s.spawn(move || rt.block_on(client.call_tool(tool, args)))
+            .join()
+            .map_err(|_| anyhow::anyhow!("call_tool_blocking thread panicked"))?
+    })
+}
+
+/// Run the `stats` subcommand: connect to ICM and output memory stats.
+pub fn stats() -> anyhow::Result<()> {
+    let client = connect()?;
+    let result = call_tool_blocking(client, "icm_memory_stats", serde_json::json!({}))?;
     println!("{result}");
     Ok(())
 }
@@ -51,20 +56,11 @@ pub fn stats() -> anyhow::Result<()> {
 /// Run the `list` subcommand: list stored memories for the active scope.
 pub fn list() -> anyhow::Result<()> {
     let client = connect()?;
-    let result = std::thread::scope(|s| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        s.spawn(move || {
-            rt.block_on(async {
-                client
-                    .call_tool("icm_memory_recall", serde_json::json!({ "query": "" }))
-                    .await
-            })
-        })
-        .join()
-        .map_err(|_| anyhow::anyhow!("spawned list thread panicked"))?
-    })?;
+    let result = call_tool_blocking(
+        client,
+        "icm_memory_recall",
+        serde_json::json!({ "query": "" }),
+    )?;
     println!("{result}");
     Ok(())
 }
@@ -72,24 +68,15 @@ pub fn list() -> anyhow::Result<()> {
 /// Run the `diff` subcommand: compare current state with last snapshot.
 pub fn diff() -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
-    let snapshot_path = state_dir.join("hook_store_chunk");
+    let snapshot_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
 
     let current = {
         let client = connect()?;
-        std::thread::scope(|s| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            s.spawn(move || {
-                rt.block_on(async {
-                    client
-                        .call_tool("icm_memory_recall", serde_json::json!({ "query": "" }))
-                        .await
-                })
-            })
-            .join()
-            .map_err(|_| anyhow::anyhow!("spawned diff thread panicked"))?
-        })?
+        call_tool_blocking(
+            client,
+            "icm_memory_recall",
+            serde_json::json!({ "query": "" }),
+        )?
     };
 
     if !snapshot_path.exists() {
