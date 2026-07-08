@@ -1,12 +1,3 @@
----
-id: changelog
-title: Changelog
-slug: /changelog
-sidebar_label: Changelog
----
-
-{/* GENERATED FILE — do not edit by hand. Regenerate with `scripts/sync-changelog-doc.sh`. */}
-
 # Changelog
 
 All notable changes to this project will be documented in this file.
@@ -14,11 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+<!-- 2.2 next-header -->
 
 ## [Unreleased] - ReleaseDate
 
 ### Fixed
 
+- Fix remaining hardcoded ClaudeCodeAdapter call sites: thread the actual adapter identity through
+  `build_and_materialize`, `run_export`, `run_regenerate`, `run_prune`, `run_doctor`,
+  `run_throttle_inner`, and `hook_run` instead of assuming Claude Code (#544)
 - Fix skill materialization rejecting a `SKILL.md` whose `description` contains a colon (e.g.
   "Triggers on: ..."); `name`/`description` values are now auto-quoted before the strict YAML
   parse so a single malformed-looking skill no longer takes down the whole adapter (#568)
@@ -69,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix `llmenv export --compress` not preserving the final newline, producing non-POSIX output
   (#465)
 
+<!-- 2.1 next-header -->
 
 ## [2.1.0] - 2026-06-23
 
@@ -111,6 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   operations; this option weakened host-key verification (MITM/DNS-hijacking
   exposure) and was unrelated to the timeout feature it was grouped with
 
+<!-- 2.0 next-header -->
 
 ## [2.0.5] - 2026-06-18
 
@@ -285,6 +282,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   logs a `warn` when the plugin manifest is absent after materializing the plugin,
   making broken plugin installs diagnosable (#379)
 
+<!-- 1.0 next-header -->
 
 ## [1.0.10] - 2026-06-11
 
@@ -557,3 +555,27 @@ Aborted release. CI pipeline issue.
 - Validate env var names at source in `build_and_materialize` in addition to
   the final emission loop, preventing injection in the `export NAME=...` shell
   contract (#67)
+
+<!-- next-url -->
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/phaedrus1992/llmenv/compare/v2.2.1...v2.3.0
+[2.2.1]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...v2.2.1
+[2.2.0]: https://github.com/phaedrus1992/llmenv/compare/v2.1.0...v2.2.0
+[2.1.0]: https://github.com/phaedrus1992/llmenv/compare/v2.0.5...v2.1.0
+[2.0.5]: https://github.com/phaedrus1992/llmenv/compare/v2.0.4...v2.0.5
+[2.0.4]: https://github.com/phaedrus1992/llmenv/compare/v2.0.3...v2.0.4
+[2.0.3]: https://github.com/phaedrus1992/llmenv/compare/v2.0.2...v2.0.3
+[2.0.2]: https://github.com/phaedrus1992/llmenv/compare/v2.0.1...v2.0.2
+[2.0.1]: https://github.com/phaedrus1992/llmenv/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/phaedrus1992/llmenv/compare/v1.0.10...v2.0.0
+[1.0.10]: https://github.com/phaedrus1992/llmenv/compare/v1.0.9...v1.0.10
+[1.0.9]: https://github.com/phaedrus1992/llmenv/compare/v1.0.8...v1.0.9
+[1.0.8]: https://github.com/phaedrus1992/llmenv/compare/v1.0.7...v1.0.8
+[1.0.7]: https://github.com/phaedrus1992/llmenv/compare/v1.0.6...v1.0.7
+[1.0.6]: https://github.com/phaedrus1992/llmenv/compare/v1.0.5...v1.0.6
+[1.0.5]: https://github.com/phaedrus1992/llmenv/compare/v1.0.4...v1.0.5
+[1.0.4]: https://github.com/phaedrus1992/llmenv/compare/v1.0.3...v1.0.4
+[1.0.3]: https://github.com/phaedrus1992/llmenv/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/phaedrus1992/llmenv/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/phaedrus1992/llmenv/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/phaedrus1992/llmenv/releases/tag/v1.0.0
