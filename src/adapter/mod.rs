@@ -71,7 +71,38 @@ pub fn binary_on_path(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path).any(|dir| {
             let full = dir.join(name);
-            full.is_file()
+            full.is_file() && is_executable(&full)
         })
     })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &std::path::Path) -> bool {
+    true
+}
+
+/// Detect which adapter is running in the current process by checking each
+/// registered adapter's environment signal. Falls back to Claude Code when
+/// no signal is found (backward-compatible default).
+///
+/// Used by hook-run and throttle subcommands that are invoked as subprocesses
+/// by the LLM CLI and don't receive the adapter identity through stdin.
+#[must_use]
+pub fn active_adapter() -> Box<dyn AgentAdapter> {
+    registered_adapters()
+        .into_iter()
+        .find(|a| match a.name() {
+            "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
+            "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
+            _ => false,
+        })
+        .unwrap_or_else(|| Box::new(claude_code::ClaudeCodeAdapter))
 }

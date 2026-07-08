@@ -599,10 +599,12 @@ fn run_export(
         firing: &firing,
     };
     let mut any_adapter_failed = false;
+    let mut any_adapter_eligible = false;
     for adapter in crate::adapter::registered_adapters() {
         if !crate::adapter::binary_on_path(adapter.binary_name()) {
             continue;
         }
+        any_adapter_eligible = true;
         match build_and_materialize(adapter.as_ref(), materialize_ctx, compress) {
             Ok(Some((ref cache_path, ref extra_vars))) => {
                 tracing::debug!(
@@ -649,6 +651,16 @@ fn run_export(
                 );
             }
         }
+    }
+    if !any_adapter_eligible {
+        eprintln!(
+            "warning: no registered adapter binary found on PATH (expected: {})",
+            crate::adapter::registered_adapters()
+                .iter()
+                .map(|a| a.binary_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     if vars.is_empty() && any_adapter_failed {
         anyhow::bail!("all adapter materializations failed — no env vars to export");
@@ -764,6 +776,7 @@ fn run_regenerate() -> anyhow::Result<()> {
         firing: &firing,
     };
     let mut materialized_any = false;
+    let mut materialize_error = false;
     for adapter in crate::adapter::registered_adapters() {
         if !crate::adapter::binary_on_path(adapter.binary_name()) {
             continue;
@@ -792,6 +805,7 @@ fn run_regenerate() -> anyhow::Result<()> {
             }
             Ok(None) => {}
             Err(e) => {
+                materialize_error = true;
                 eprintln!(
                     "warning: {} adapter materialization failed (skipping): {e:#}",
                     adapter.name()
@@ -799,7 +813,7 @@ fn run_regenerate() -> anyhow::Result<()> {
             }
         }
     }
-    if !materialized_any {
+    if !materialized_any && !materialize_error {
         eprintln!("✓ No bundle content to materialize");
     }
 
