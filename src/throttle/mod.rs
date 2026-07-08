@@ -133,10 +133,20 @@ pub fn run_throttle_hook(event: &str) {
     }
 }
 
-fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> {
-    use crate::adapter::AgentAdapter;
-    use crate::adapter::claude_code::ClaudeCodeAdapter;
+/// Detect which adapter is running this throttle hook by checking each
+/// registered adapter's environment signal. Falls back to Claude Code.
+fn active_adapter() -> Box<dyn crate::adapter::AgentAdapter> {
+    crate::adapter::registered_adapters()
+        .into_iter()
+        .find(|a| match a.name() {
+            "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
+            "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
+            _ => false,
+        })
+        .unwrap_or_else(|| Box::new(crate::adapter::claude_code::ClaudeCodeAdapter))
+}
 
+fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     let path = throttle_state_path(&state_dir);
 
@@ -170,7 +180,8 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
     if event == "prompt" {
         let note = budget_note(&snapshot, &cfg);
         if !note.is_empty() {
-            let out = ClaudeCodeAdapter.emit_hook_context(hook_event_name, &note);
+            let adapter = active_adapter();
+            let out = adapter.emit_hook_context(hook_event_name, &note);
             if !out.is_empty() {
                 use std::io::Write;
                 let _ = writeln!(std::io::stdout(), "{out}");
