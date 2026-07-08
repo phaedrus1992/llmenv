@@ -88,6 +88,24 @@ pub trait AgentAdapter {
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String;
 }
 
+/// Detect which adapter is running in the current process by checking each
+/// registered adapter's environment signal. Falls back to Claude Code when
+/// no signal is found (backward-compatible default).
+///
+/// Used by hook-run and throttle subcommands that are invoked as subprocesses
+/// by the LLM CLI and don't receive the adapter identity through stdin.
+#[must_use]
+pub fn active_adapter() -> Box<dyn AgentAdapter> {
+    registered_adapters()
+        .into_iter()
+        .find(|a| match a.name() {
+            "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
+            "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
+            _ => false,
+        })
+        .unwrap_or_else(|| Box::new(claude_code::ClaudeCodeAdapter))
+}
+
 /// Returns every adapter llmenv ships with, in preference order.
 ///
 /// Callers PATH-gate each entry via [`binary_on_path`] before activating it,

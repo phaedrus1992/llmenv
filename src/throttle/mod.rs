@@ -134,9 +134,6 @@ pub fn run_throttle_hook(event: &str) {
 }
 
 fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> {
-    use crate::adapter::AgentAdapter;
-    use crate::adapter::claude_code::ClaudeCodeAdapter;
-
     let state_dir = crate::paths::state_dir()?;
     let path = throttle_state_path(&state_dir);
 
@@ -170,7 +167,8 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
     if event == "prompt" {
         let note = budget_note(&snapshot, &cfg);
         if !note.is_empty() {
-            let out = ClaudeCodeAdapter.emit_hook_context(hook_event_name, &note);
+            let adapter = crate::adapter::active_adapter();
+            let out = adapter.emit_hook_context(hook_event_name, &note);
             if !out.is_empty() {
                 use std::io::Write;
                 let _ = writeln!(std::io::stdout(), "{out}");

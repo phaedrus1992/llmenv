@@ -319,9 +319,10 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     };
     let null_payload = serde_json::Value::Null;
     let payload = stdin_json.as_ref().unwrap_or(&null_payload);
+    let adapter = crate::adapter::active_adapter();
     match run_inner(parsed, claude_session_id.as_deref(), payload) {
         Ok(text) => {
-            let out = ClaudeCodeAdapter.emit_hook_context(&hook_event_name, &text);
+            let out = adapter.emit_hook_context(&hook_event_name, &text);
             if !out.is_empty()
                 && let Err(e) = writeln!(std::io::stdout(), "{out}")
                 && e.kind() != std::io::ErrorKind::BrokenPipe
