@@ -274,8 +274,6 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
             debug!("chunk unchanged since last store, skipping");
             return Ok(String::new());
         }
-        // Store the current chunk for next comparison (best-effort).
-        let _ = crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes());
     }
 
     // Current-thread runtime: lifecycle hooks run on the agent's hot path (session
@@ -308,6 +306,16 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
                 }
                 out.push_str(&cons_text);
             }
+        }
+
+        // Update dedup snapshot *after* the store succeeds (R3). Writing before
+        // the store call means a transient MCP failure leaves the snapshot ahead
+        // of reality — the next SessionEnd sees the chunk as unchanged and skips
+        // the store, permanently losing the memory. (#594 code review)
+        if event == HookEvent::SessionEnd {
+            let state_dir = crate::paths::state_dir()?;
+            let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
+            crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
         }
 
         Ok::<String, anyhow::Error>(out)
