@@ -24,11 +24,19 @@ pub const CONTEXT_MODE_DATA_ENV: &str = "CONTEXT_MODE_DATA_DIR";
 pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
 pub use schema::{
+<<<<<<< HEAD
     Bundle, Cache, Capabilities, Config, ContextMode, EnvVar, Features, HashingMode, Hook,
     HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, LspServer,
     Marketplace, MarketplaceSource, McpServer, McpTransport, Memory, NativePermissionRules,
     NetworkMatch, NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule,
     Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes, SessionLog, SkillSource,
+=======
+    Bundle, Cache, Capabilities, Config, ConsolidationConfig, EnvVar, Features, HashingMode, Hook,
+    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, ImportanceLevel, InitConfig,
+    Marketplace, MarketplaceSource, McpServer, McpTransport, Memory, MemoryType,
+    NativePermissionRules, NetworkMatch, NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode,
+    PermissionRule, Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes,
+>>>>>>> origin/release/2.x
     StateConfig, StateTool, Throttle, UserMatch, UserScope, classify_source, github_owner_repo,
     is_reserved_official_marketplace, split_plugin_ref,
 };

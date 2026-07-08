@@ -804,6 +804,10 @@ mod tests {
                     listen_host,
                     when,
                     default_topics,
+                    default_type: None,
+                    default_importance: None,
+                    type_importance: std::collections::BTreeMap::new(),
+                    consolidation: None,
                 },
             )
     }
