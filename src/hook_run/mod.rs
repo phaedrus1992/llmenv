@@ -17,8 +17,6 @@ use action::Action;
 use mcp_client::McpHttpClient;
 use tracing::{debug, warn};
 
-use crate::adapter::AgentAdapter;
-use crate::adapter::claude_code::ClaudeCodeAdapter;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, resolve_mcps};
 
@@ -198,9 +196,10 @@ pub fn run(event: &str) -> anyhow::Result<()> {
             return Ok(());
         }
     };
+    let adapter = crate::adapter::active_adapter();
     match run_inner(parsed) {
         Ok(text) => {
-            let out = ClaudeCodeAdapter.emit_hook_context(&hook_event_name, &text);
+            let out = adapter.emit_hook_context(&hook_event_name, &text);
             if !out.is_empty()
                 && let Err(e) = writeln!(std::io::stdout(), "{out}")
                 && e.kind() != std::io::ErrorKind::BrokenPipe

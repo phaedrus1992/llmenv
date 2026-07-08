@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Fix remaining hardcoded ClaudeCodeAdapter call sites: thread the actual adapter identity through
+  `build_and_materialize`, `run_export`, `run_regenerate`, `run_prune`, `run_doctor`,
+  `run_throttle_inner`, and `hook_run` instead of assuming Claude Code (#544)
 - Fix skill materialization rejecting a `SKILL.md` whose `description` contains a colon (e.g.
   "Triggers on: ..."); `name`/`description` values are now auto-quoted before the strict YAML
   parse so a single malformed-looking skill no longer takes down the whole adapter (#568)
