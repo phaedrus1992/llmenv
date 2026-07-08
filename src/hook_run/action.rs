@@ -32,6 +32,44 @@ pub fn bundle_keyword(bundle: &str) -> String {
     format!("{BUNDLE_KEYWORD_PREFIX}{bundle}")
 }
 
+/// Parse `<!-- llmenv-type: X -->` marker from a context chunk (R1).
+/// Returns the type value if found, `None` otherwise.
+///
+/// The marker is an HTML comment in the markdown context chunk:
+/// ```markdown
+/// <!-- llmenv-type: semantic -->
+/// ```
+/// Only the text between the comment delimiters is examined; nested `-->`
+/// within value text is not supported (the first `-->` terminates the match).
+#[must_use]
+pub fn parse_type_marker(chunk: &str) -> Option<&str> {
+    chunk
+        .split("<!--")
+        .skip(1)
+        .filter_map(|s| s.split("-->").next())
+        .find_map(|s| {
+            let s = s.trim();
+            s.strip_prefix("llmenv-type:").map(str::trim)
+        })
+        .filter(|v| !v.is_empty())
+}
+
+/// Parse `<!-- llmenv-importance: X -->` marker from a context chunk (R3).
+/// Returns the importance value if found, `None` otherwise. Semantics and
+/// performance are identical to [`parse_type_marker`].
+#[must_use]
+pub fn parse_importance_marker(chunk: &str) -> Option<&str> {
+    chunk
+        .split("<!--")
+        .skip(1)
+        .filter_map(|s| s.split("-->").next())
+        .find_map(|s| {
+            let s = s.trim();
+            s.strip_prefix("llmenv-importance:").map(str::trim)
+        })
+        .filter(|v| !v.is_empty())
+}
+
 /// One memory action against the ICM MCP backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -88,7 +126,16 @@ impl Action {
                 "project": "",
                 "keyword": q.keyword,
             }),
-            Action::Store => json!({ "content": chunk }),
+            Action::Store => {
+                let mut args = json!({ "content": chunk });
+                if let Some(mtyp) = parse_type_marker(chunk) {
+                    args["type"] = json!(mtyp);
+                }
+                if let Some(imp) = parse_importance_marker(chunk) {
+                    args["importance"] = json!(imp);
+                }
+                args
+            }
         }
     }
 
@@ -142,6 +189,75 @@ mod tests {
     fn store_arguments_carry_content() {
         let args = Action::Store.arguments("query", "## llmenv context\n...");
         assert_eq!(args["content"], serde_json::json!("## llmenv context\n..."));
+    }
+
+    // ===== R1 / R3 marker parsing tests =====
+
+    #[test]
+    fn parse_type_marker_returns_type_when_present() {
+        let chunk = "## context\n<!-- llmenv-type: semantic -->\nmore";
+        assert_eq!(parse_type_marker(chunk), Some("semantic"));
+    }
+
+    #[test]
+    fn parse_type_marker_returns_none_when_absent() {
+        assert_eq!(parse_type_marker("## plain context"), None);
+    }
+
+    #[test]
+    fn parse_type_marker_skips_empty_value() {
+        let chunk = "<!-- llmenv-type: -->";
+        assert_eq!(parse_type_marker(chunk), None);
+    }
+
+    #[test]
+    fn parse_type_marker_handles_multiple_markers() {
+        let chunk = "<!-- llmenv-type: episodic -->\n<!-- llmenv-importance: high -->";
+        assert_eq!(parse_type_marker(chunk), Some("episodic"));
+    }
+
+    #[test]
+    fn parse_importance_marker_returns_importance_when_present() {
+        let chunk = "<!-- llmenv-importance: critical -->";
+        assert_eq!(parse_importance_marker(chunk), Some("critical"));
+    }
+
+    #[test]
+    fn parse_importance_marker_returns_none_when_absent() {
+        assert_eq!(parse_importance_marker("no markers here"), None);
+    }
+
+    #[test]
+    fn store_arguments_include_type_from_marker() {
+        let chunk = "<!-- llmenv-type: procedural -->\ncontext";
+        let args = Action::Store.arguments("query", chunk);
+        assert_eq!(args["type"], serde_json::json!("procedural"));
+        assert!(args.get("importance").is_none());
+    }
+
+    #[test]
+    fn store_arguments_include_importance_from_marker() {
+        let chunk = "<!-- llmenv-importance: critical -->\ncontext";
+        let args = Action::Store.arguments("query", chunk);
+        assert_eq!(args["importance"], serde_json::json!("critical"));
+        assert!(args.get("type").is_none());
+    }
+
+    #[test]
+    fn store_arguments_include_both_markers() {
+        let chunk = "<!-- llmenv-type: semantic -->\n<!-- llmenv-importance: high -->";
+        let args = Action::Store.arguments("query", chunk);
+        assert_eq!(args["type"], serde_json::json!("semantic"));
+        assert_eq!(args["importance"], serde_json::json!("high"));
+    }
+
+    #[test]
+    fn store_arguments_no_markers_passthrough() {
+        let chunk = "## context\nno markers";
+        let args = Action::Store.arguments("query", chunk);
+        assert!(args.get("type").is_none());
+        assert!(args.get("importance").is_none());
+        assert_eq!(args["content"], serde_json::json!(chunk));
     }
 
     #[test]
