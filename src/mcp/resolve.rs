@@ -271,6 +271,10 @@ mod tests {
             listen_host: "127.0.0.1".into(), // mirrors schema::default_listen_host()
             when: vec!["network-home".into()],
             default_topics: vec![],
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            consolidation: None,
         }
     }
 
@@ -368,6 +372,10 @@ mod tests {
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()],
             default_topics: vec![],
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            consolidation: None,
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
@@ -375,6 +383,10 @@ mod tests {
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()], // same tag — ambiguous when both active
             default_topics: vec![],
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            consolidation: None,
         };
         let mut host = base_host();
         host.insert(
@@ -399,6 +411,10 @@ mod tests {
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()],
             default_topics: vec![],
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            consolidation: None,
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
@@ -406,6 +422,10 @@ mod tests {
             listen_host: "127.0.0.1".into(),
             when: vec!["work".into()],
             default_topics: vec![],
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            consolidation: None,
         };
         let mut host = base_host();
         host.insert(
