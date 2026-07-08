@@ -7,12 +7,13 @@ pub const RESERVED_STATE_ENV_VARS: &[&str] = &[STATE_DIR_ENV, "CLAUDE_CONFIG_DIR
 pub const MEMORY_MCP_NAME: &str = "icm";
 
 pub use schema::{
-    Bundle, Cache, Capabilities, Config, EnvVar, Features, HashingMode, Hook, HookHandler,
-    HookHandlerKind, HostEntry, HostMatch, HostScope, InitConfig, Marketplace, MarketplaceSource,
-    McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch, NetworkScope,
-    OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    RESERVED_OFFICIAL_MARKETPLACES, Scopes, StateConfig, StateTool, Throttle, UserMatch, UserScope,
-    classify_source, github_owner_repo, is_reserved_official_marketplace, split_plugin_ref,
+    Bundle, Cache, Capabilities, Config, ConsolidationConfig, EnvVar, Features, HashingMode, Hook,
+    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, ImportanceLevel, InitConfig,
+    Marketplace, MarketplaceSource, McpServer, McpTransport, Memory, MemoryType,
+    NativePermissionRules, NetworkMatch, NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode,
+    PermissionRule, Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes,
+    StateConfig, StateTool, Throttle, UserMatch, UserScope, classify_source, github_owner_repo,
+    is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
 pub use validate::{ValidateError, validate_capabilities_env_key};

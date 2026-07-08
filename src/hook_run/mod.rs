@@ -124,6 +124,9 @@ pub enum HookEvent {
     TurnStart,
     /// Session ends (Claude Code: `SessionEnd`).
     SessionEnd,
+    /// Post-session consolidation hook (R5). Runs after SessionEnd to
+    /// optionally distill episodic memories into semantic rules.
+    PostSession,
 }
 
 impl FromStr for HookEvent {
@@ -133,8 +136,9 @@ impl FromStr for HookEvent {
             "session_start" => Ok(HookEvent::SessionStart),
             "turn_start" => Ok(HookEvent::TurnStart),
             "session_end" => Ok(HookEvent::SessionEnd),
+            "post_session" => Ok(HookEvent::PostSession),
             other => Err(anyhow::anyhow!(
-                "unknown hook event '{other}' (expected session_start|turn_start|session_end)"
+                "unknown hook event '{other}' (expected session_start|turn_start|session_end|post_session)"
             )),
         }
     }
@@ -146,6 +150,7 @@ impl std::fmt::Display for HookEvent {
             HookEvent::SessionStart => "session_start",
             HookEvent::TurnStart => "turn_start",
             HookEvent::SessionEnd => "session_end",
+            HookEvent::PostSession => "post_session",
         };
         f.write_str(s)
     }
@@ -172,6 +177,7 @@ fn dispatch(
             actions
         }
         HookEvent::SessionEnd => vec![Action::Store],
+        HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
 }
 
@@ -247,10 +253,31 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
     let tag_queries = tag_recall_queries(&tags)?;
     let bundle_queries = bundle_recall_queries(&bundles)?;
     let query = tags.join(", ");
-    let chunk = crate::icm::generate_context_chunk(&active, &bundles);
+    let mut chunk = crate::icm::generate_context_chunk(&active, &bundles);
+
+    // Apply default type/importance markers from config (R1, R3) when no explicit
+    // marker is present in the generated chunk.
+    chunk = apply_memory_config_defaults(&chunk, &config, &active);
 
     let client = McpHttpClient::new(url, HOOK_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
+
+    // Dedup: skip Store when the context chunk hasn't changed since the last
+    // SessionEnd (R3). Avoids redundant ICM writes when hooks re-run.
+    if event == HookEvent::SessionEnd {
+        let state_dir = crate::paths::state_dir()?;
+        let dedup_path = state_dir.join("hook_store_chunk");
+        let is_unchanged = std::fs::read_to_string(&dedup_path)
+            .ok()
+            .map_or(false, |prev| prev == chunk);
+        if is_unchanged {
+            debug!("chunk unchanged since last store, skipping");
+            return Ok(String::new());
+        }
+        // Store the current chunk for next comparison (best-effort).
+        let _ = crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes());
+    }
+
     // Current-thread runtime: lifecycle hooks run on the agent's hot path (session
     // start + every prompt turn) and only need to `block_on` a short sequence of
     // HTTP round-trips. A multi-threaded runtime would spin up a worker thread pool
@@ -269,6 +296,20 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
                 out.push_str(&text);
             }
         }
+
+        // PostSession: run reflective consolidation (R5) after the standard
+        // action dispatch. This distills recent episodic memories into
+        // durable semantic rules when consolidation is enabled.
+        if event == HookEvent::PostSession {
+            let cons_text = crate::consolidation::run(&config, &client).await?;
+            if !cons_text.is_empty() {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&cons_text);
+            }
+        }
+
         Ok::<String, anyhow::Error>(out)
     })
 }
@@ -278,7 +319,7 @@ fn run_inner(event: HookEvent) -> anyhow::Result<String> {
 /// Mirrors the `build_manifest` merge strategy: top-level config memory is
 /// combined with bundle-contributed memory entries so a daemon declared only
 /// in a `bundle.yaml` is reachable from lifecycle hooks.
-fn memory_url(
+pub(crate) fn memory_url(
     config: &crate::config::Config,
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
@@ -360,6 +401,47 @@ fn build_hook_bundle_refs(
         .collect()
 }
 
+/// Apply default memory type/importance markers from the active memory config (R1, R3).
+///
+/// If the chunk already contains an `<!-- llmenv-type: -->` or
+/// `<!-- llmenv-importance: -->` marker, the inline value takes precedence and
+/// no default is appended. Otherwise the config's `default_type` /
+/// `default_importance` are appended as markers at the end of the chunk.
+///
+/// ponytail: `type_importance` per-type overrides are not yet applied here —
+/// they will be resolved when the Store action runs against the ICM backend.
+fn apply_memory_config_defaults(
+    chunk: &str,
+    config: &crate::config::Config,
+    active: &crate::scope::ActiveScopes,
+) -> String {
+    let Some(mem) = config.features.as_ref().and_then(|f| {
+        f.memory
+            .iter()
+            .find(|m| m.when.iter().any(|t| active.tags.contains(t)))
+    }) else {
+        return chunk.to_string();
+    };
+
+    let mut out = chunk.to_string();
+
+    if !chunk.contains("<!-- llmenv-type:") {
+        if let Some(ty) = &mem.default_type {
+            let ty_str = format!("{ty:?}").to_lowercase();
+            out.push_str(&format!("\n<!-- llmenv-type: {ty_str} -->"));
+        }
+    }
+
+    if !chunk.contains("<!-- llmenv-importance:") {
+        if let Some(imp) = &mem.default_importance {
+            let imp_str = format!("{imp:?}").to_lowercase();
+            out.push_str(&format!("\n<!-- llmenv-importance: {imp_str} -->"));
+        }
+    }
+
+    out
+}
+
 /// Validate a tag to prevent query injection. Tags must be alphanumeric with
 /// hyphens and underscores only (same as bundle/scope naming).
 fn validate_tag(tag: &str) -> anyhow::Result<()> {
@@ -415,6 +497,10 @@ mod tests {
             "session_end".parse::<HookEvent>().unwrap(),
             HookEvent::SessionEnd
         );
+        assert_eq!(
+            "post_session".parse::<HookEvent>().unwrap(),
+            HookEvent::PostSession
+        );
     }
 
     #[test]
@@ -435,6 +521,11 @@ mod tests {
         assert_eq!(
             dispatch(HookEvent::SessionEnd, &[], &[]),
             vec![Action::Store]
+        );
+        assert_eq!(
+            dispatch(HookEvent::PostSession, &[], &[]),
+            vec![],
+            "PostSession defers to consolidation module, no dispatch actions"
         );
     }
 

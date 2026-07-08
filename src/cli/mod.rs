@@ -263,6 +263,28 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Inspect ICM memory state (R2).
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+}
+
+/// `llmenv memory` sub-subcommands (R2).
+#[derive(Subcommand)]
+enum MemoryCommand {
+    /// Show memory stats (record counts by tag/bundle/type, last-written).
+    Stats,
+    /// List stored memories for the active scope.
+    List,
+    /// Show what changed since the last session.
+    Diff,
+    /// Preview or apply TTL-based forgetting. Currently a placeholder.
+    Prune {
+        /// Preview without applying
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn run_deprecated_shim(
@@ -372,6 +394,12 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Login { global }) => {
             run_login(global)?;
         }
+        Some(Command::Memory { command }) => match command {
+            MemoryCommand::Stats => crate::memory::stats()?,
+            MemoryCommand::List => crate::memory::list()?,
+            MemoryCommand::Diff => crate::memory::diff()?,
+            MemoryCommand::Prune { dry_run } => crate::memory::prune(dry_run)?,
+        },
         Some(Command::Prune {
             all,
             older_than,
@@ -2911,6 +2939,10 @@ mod tests {
                     listen_host: listen_host.to_string(),
                     when: vec!["mem".to_string()],
                     default_topics: vec![],
+                    default_type: None,
+                    default_importance: None,
+                    type_importance: std::collections::BTreeMap::new(),
+                    consolidation: None,
                 }],
                 throttle: vec![],
             }),
