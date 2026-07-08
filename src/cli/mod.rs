@@ -2718,6 +2718,9 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
     }
     let known_engines = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
+        if engine.trim().is_empty() {
+            continue;
+        }
         if !engine_id_matches_any(engine, &known_engines) {
             eprintln!(
                 "{fail} disabled_engines references unknown engine: {engine} \
