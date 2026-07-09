@@ -217,16 +217,17 @@ pub(crate) fn resolve_command_paths_against_files(
         if i > 0 {
             result.push(' ');
         }
-        if token.contains('/') && !crate::paths::is_unsafe_join_target(token) {
-            if let Some(rel) = known_files.keys().find(|rel| {
+        if token.contains('/')
+            && !crate::paths::is_unsafe_join_target(token)
+            && let Some(rel) = known_files.keys().find(|rel| {
                 let rel_str = rel.to_string_lossy();
                 token.ends_with(rel_str.as_ref())
-            }) {
-                let abs_path = cache_dir.join(rel);
-                result.push_str(&abs_path.to_string_lossy());
-                resolved = true;
-                continue;
-            }
+            })
+        {
+            let abs_path = cache_dir.join(rel);
+            result.push_str(&abs_path.to_string_lossy());
+            resolved = true;
+            continue;
         }
         result.push_str(token);
     }
