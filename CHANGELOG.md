@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.0.0-rc.2] - 2026-07-09
+
 ### Added
 
 - `llmenv setup` interactive wizard: scans existing tool configurations
@@ -759,7 +761,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.1...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...HEAD
+[3.0.0-rc.2]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.1...v3.0.0-rc.2
 [3.0.0-rc.1]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...v3.0.0-rc.1
 [2.3.0]: https://github.com/phaedrus1992/llmenv/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...v2.2.1
