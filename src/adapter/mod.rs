@@ -195,10 +195,11 @@ pub(crate) fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) ->
 /// paths that `resolve_bundle_relative_paths` cannot match.
 ///
 /// For each whitespace-delimited token that contains `/`, checks whether the
-/// token **ends with** any relative path in `known_files`. When it does, the
-/// matched suffix is replaced with `cache_dir.join(rel)`, re-anchoring the
-/// reference to the materialized copy. Tokens that don't match any known file
-/// are left untouched.
+/// token **ends with** any relative path in `known_files` at a path-component
+/// boundary. When it does, the matched suffix is replaced with
+/// `cache_dir.join(rel)`, re-anchoring the reference to the materialized copy.
+/// When multiple known files match the same token, the **longest** suffix wins.
+/// Tokens that don't match any known file are left untouched.
 ///
 /// This handles cases like:
 /// ```text
@@ -211,19 +212,47 @@ pub(crate) fn resolve_command_paths_against_files(
     cache_dir: &Path,
     known_files: &std::collections::BTreeMap<PathBuf, PathBuf>,
 ) -> Option<String> {
+    // Pre-compute string representations once so the inner loop stays O(1)
+    // per candidate rather than O(files) allocations.
+    // Sort by key length descending so the first filter+max_by_key pass
+    // naturally prefers the longest (most specific) suffix.
+    let mut candidates: Vec<(&Path, String)> = known_files
+        .keys()
+        .map(|k| {
+            let s = k.to_string_lossy().into_owned();
+            (k.as_path(), s)
+        })
+        .collect();
+    candidates.sort_by_key(|(_, b)| std::cmp::Reverse(b.len()));
+
     let mut resolved = false;
     let mut result = String::new();
     for (i, token) in command.split_whitespace().enumerate() {
         if i > 0 {
             result.push(' ');
         }
+        // Unlike resolve_bundle_relative_paths, we never join the token
+        // itself — the join operand is `rel`, a trusted key from known_files.
+        // So is_unsafe_join_target on the token is not needed here; absolute
+        // paths and even `../`-prefixed paths can be safely suffix-matched.
         if token.contains('/')
-            && !crate::paths::is_unsafe_join_target(token)
-            && let Some(rel) = known_files.keys().find(|rel| {
-                let rel_str = rel.to_string_lossy();
-                token.ends_with(rel_str.as_ref())
+            && let Some((rel, _suffix)) = candidates.iter().find(|(_, s)| {
+                // Require a path-component boundary before the suffix:
+                // the suffix starts at position 0 in the token, or the
+                // character immediately before it is '/'.
+                let prefix_len = token.len().saturating_sub(s.len());
+                token.ends_with(s.as_str())
+                    && (prefix_len == 0 || token.as_bytes().get(prefix_len - 1) == Some(&b'/'))
             })
         {
+            // Defense in depth: rel is trusted (it came from a filesystem
+            // walk + strip_prefix), but guard against future changes that add
+            // user-supplied paths to known_files.
+            debug_assert!(
+                !crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()),
+                "known_files key contains traversal: {}",
+                rel.display()
+            );
             let abs_path = cache_dir.join(rel);
             result.push_str(&abs_path.to_string_lossy());
             resolved = true;
@@ -251,9 +280,12 @@ pub(crate) fn remote_transport_type_str(transport: crate::config::McpTransport) 
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::{
         binary_on_path, engine_id, known_engine_ids, registered_adapters,
         remote_transport_type_str, resolve_bundle_relative_paths,
+        resolve_command_paths_against_files,
     };
 
     #[test]
@@ -398,6 +430,98 @@ mod tests {
             remote_transport_type_str(McpTransport::Stdio),
             "http",
             "unreachable in practice, but must not panic"
+        );
+    }
+
+    // ---- resolve_command_paths_against_files ----
+
+    fn known_files_from_paths(paths: &[&str]) -> std::collections::BTreeMap<PathBuf, PathBuf> {
+        paths
+            .iter()
+            .map(|p| (PathBuf::from(p), PathBuf::from(format!("/source/{p}"))))
+            .collect()
+    }
+
+    #[test]
+    fn suffix_matches_shell_var_prefixed_token() {
+        let files = known_files_from_paths(&["hooks/guard.sh"]);
+        let cache = Path::new("/cache");
+        let resolved = resolve_command_paths_against_files(
+            "bash ${HOME}/bundles/base/hooks/guard.sh",
+            cache,
+            &files,
+        );
+        assert_eq!(resolved, Some("bash /cache/hooks/guard.sh".to_string()));
+    }
+
+    #[test]
+    fn picks_longest_suffix_when_multiple_match() {
+        let files = known_files_from_paths(&["guard.sh", "hooks/guard.sh"]);
+        let cache = Path::new("/cache");
+        let resolved = resolve_command_paths_against_files(
+            "bash ${HOME}/bundles/base/hooks/guard.sh",
+            cache,
+            &files,
+        );
+        assert_eq!(
+            resolved,
+            Some("bash /cache/hooks/guard.sh".to_string()),
+            "must pick hooks/guard.sh (longer), not guard.sh"
+        );
+    }
+
+    #[test]
+    fn requires_path_component_boundary_before_suffix() {
+        // "my-hooks/guard.sh" ends with "hooks/guard.sh" but the substring
+        // crosses a component boundary — it should not match.
+        let files = known_files_from_paths(&["hooks/guard.sh"]);
+        let cache = Path::new("/cache");
+        let resolved = resolve_command_paths_against_files("bash my-hooks/guard.sh", cache, &files);
+        assert_eq!(
+            resolved, None,
+            "must not match suffix that crosses a path-component boundary"
+        );
+    }
+
+    #[test]
+    fn matches_absolute_path_token() {
+        // Absolute-path tokens are not blocked — the join operand is the
+        // trusted `rel` key, not the untrusted token.
+        let files = known_files_from_paths(&["hooks/guard.sh"]);
+        let cache = Path::new("/cache");
+        let resolved =
+            resolve_command_paths_against_files("bash /abs/path/hooks/guard.sh", cache, &files);
+        assert_eq!(resolved, Some("bash /cache/hooks/guard.sh".to_string()));
+    }
+
+    #[test]
+    fn empty_known_files_never_matches() {
+        let files: std::collections::BTreeMap<PathBuf, PathBuf> = std::collections::BTreeMap::new();
+        let cache = Path::new("/cache");
+        let resolved = resolve_command_paths_against_files("bash hooks/guard.sh", cache, &files);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn token_without_slash_never_matches() {
+        let files = known_files_from_paths(&["guard.sh"]);
+        let cache = Path::new("/cache");
+        let resolved = resolve_command_paths_against_files("bash guard.sh", cache, &files);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolves_multiple_tokens_in_command() {
+        let files = known_files_from_paths(&["hooks/pre.sh", "hooks/post.sh"]);
+        let cache = Path::new("/cache");
+        let resolved = resolve_command_paths_against_files(
+            "bash /some/where/hooks/pre.sh /other/where/hooks/post.sh",
+            cache,
+            &files,
+        );
+        assert_eq!(
+            resolved,
+            Some("bash /cache/hooks/pre.sh /cache/hooks/post.sh".to_string())
         );
     }
 }
