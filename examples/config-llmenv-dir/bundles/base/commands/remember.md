@@ -1,6 +1,3 @@
 Store the following in ICM memory: $ARGUMENTS
 
-Run:
-```bash
-icm store -t "note" -c "$ARGUMENTS"
-```
+Use the `icm_memory_store` MCP tool (requires the ICM MCP server to be configured in llmenv's `memory:` section).

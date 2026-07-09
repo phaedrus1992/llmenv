@@ -10,7 +10,7 @@ Pick which trailofbits plugins run alongside `pre-pr-review` standard agents dur
 
 **mutation-testing** → PR modifies tests or core logic paths (needs high branch coverage).
 
-**slop-scan** → Always run. Invoke via `npx slop-scan scan . --lint` in the standard parallel agent set.
+**slop-scan** → Always run. Invoke via the pinned wrapper script (`bundles/base/scripts/slop-scan.sh scan . --lint`) — never call `npx slop-scan` directly.
 
 ## Skip Rules
 
@@ -21,7 +21,7 @@ Pick which trailofbits plugins run alongside `pre-pr-review` standard agents dur
 
 ## Scheduling
 
-Standard analyzers (code-reviewer, semgrep, code-simplifier, silent-failure-hunter, security-audit, property-test-gap-finder, variant-bug-hunter, slop-scan via `npx slop-scan scan . --lint`) run parallel.
+Standard analyzers (code-reviewer, semgrep, code-simplifier, silent-failure-hunter, security-audit, property-test-gap-finder, variant-bug-hunter, slop-scan via the pinned wrapper) run parallel.
 
 fp-check → after standard agents finish.
 

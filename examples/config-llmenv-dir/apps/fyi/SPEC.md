@@ -44,7 +44,6 @@ apps/fyi/
 {
   "date": "2026-06-22",
   "lastScan": "2026-06-22T13:40:00Z",
-  "topFocus": { "text": "...", "id": "pr:llmenv#1423" },
   "items": [
     {
       "id": "linear:ABC-1473",

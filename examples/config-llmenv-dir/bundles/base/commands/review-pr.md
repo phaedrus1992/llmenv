@@ -1,9 +1,12 @@
 # Review and Fix PR
 
-@description Review an existing PR with parallel agents, fix findings, and push.
-@arguments $PR_NUMBER: GitHub PR number to review and fix
+---
+description: "Review an existing PR with parallel agents, fix findings, and push"
+arguments: |
+  $PR_NUMBER: GitHub PR number to review and fix
+---
 
-Read PR #$PR_NUMBER via `gh pr view`—context: description, linked issues, commits, diff vs base.
+Read PR #$ARGUMENTS via `gh pr view`—context: description, linked issues, commits, diff vs base.
 
 Use `upstream` remote if it exists; else `origin`. Resolve `owner/name` via `git remote get-url`. Use `--repo <owner/name>` on all `gh` commands. Run `git fetch <upstream-remote>` for latest.
 
