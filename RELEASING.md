@@ -195,8 +195,8 @@ cargo release <minor|major> --workspace --execute  # apply: bump all crates + ro
 For pre-releases, use `--version` instead of `minor`/`major`:
 
 ```bash
-cargo release --version 3.0.0-rc.1 --workspace        # dry-run
-cargo release --version 3.0.0-rc.1 --workspace --execute
+cargo release 3.0.0-rc.1 --workspace        # dry-run
+cargo release 3.0.0-rc.1 --workspace --execute
 ```
 
 `cargo release --workspace` bumps all workspace crates to the same version,
