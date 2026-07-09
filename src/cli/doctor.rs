@@ -467,6 +467,28 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled, native_claude_env);
 
+    // When context-mode is enabled, verify the marketplace clone exists so
+    // inject_context_mode can actually resolve the plugin. A missing clone is
+    // the most common reason the auto-wire looks correct in config but fails
+    // at materialize time.
+    if cm_enabled {
+        let mkt_name = crate::config::CONTEXT_MODE_MARKETPLACE;
+        let mkt_path = crate::plugins::cache::marketplace_path(&cache_dir, mkt_name);
+        if !mkt_path.exists() {
+            eprintln!(
+                "{warn} context-mode marketplace '{mkt_name}' not synced — \
+                 run `llmenv plugin-sync` so the auto-wire can find it"
+            );
+        } else if !mkt_path.join("marketplace.json").exists() {
+            eprintln!(
+                "{warn} context-mode marketplace '{mkt_name}' appears broken — \
+                 run `llmenv plugin-sync` to repair"
+            );
+        } else {
+            eprintln!("{pass} context-mode marketplace '{mkt_name}' synced and ready");
+        }
+    }
+
     eprintln!("{pass} Doctor check complete.");
 
     if gc {
