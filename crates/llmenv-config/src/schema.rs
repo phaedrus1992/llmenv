@@ -18,6 +18,7 @@ pub struct InitConfig {
 /// llmenv feature toggles and experimental configuration. Nested under
 /// `features:` in `config.yaml`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Features {
     /// llmenv's memory backend (ICM). A list of tag-scoped topology entries:
     /// each declares one host that runs the daemon and the tag set that
