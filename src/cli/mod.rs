@@ -1158,10 +1158,16 @@ fn build_and_materialize(
         .with_auth_status(auth_status);
     write_cache_manifest(&cache_path, &current, ctx.config.cache.hashing)?;
 
+<<<<<<< HEAD
     // Durable state (#175): the state dir is a stable sibling of the hashed
     // config folders (`<adapter_root>/state`), so it survives every hash change.
     // Compute it early so adapters can route their data-bearing env vars through it
     // instead of the hashed cache_dir (which gets GC'd on every config change).
+=======
+    // Compute the state dir (stable sibling of the hashed config dir) and pass
+    // both to the adapter so it can set per-hash temp vars (#630) and durable
+    // plugin/env-var relocation vars (#632 / #175 / #490).
+>>>>>>> origin/release/2.x
     let state_dir = crate::materialize::state::state_dir(&adapter_root);
     let mut env_vars = adapter.env_vars(&cache_path, &state_dir)?;
 
@@ -1171,6 +1177,7 @@ fn build_and_materialize(
         env_vars.push((key.clone(), value.clone()));
     }
 
+<<<<<<< HEAD
     // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and
     // create the dirs so tools find them on first run. This feature exists for
     // tools that persist runtime state into CLAUDE_CONFIG_DIR (#175), so it's
@@ -1187,6 +1194,14 @@ fn build_and_materialize(
             config.context_mode_enabled(),
         );
         crate::materialize::state::ensure_state_dirs(&state_cfg, &state_dir)
+=======
+    // Durable state (#175): emit LLMENV_STATE_DIR plus each configured tool's
+    // relocation var, and create the dirs so tools find them on first run.
+    // LLMENV_STATE_DIR is shared — emit only for Claude Code to avoid the last
+    // adapter silently winning. Crush keeps its own dedicated CRUSH_GLOBAL_DATA.
+    if adapter.name() == ClaudeCodeAdapter.name() {
+        crate::materialize::state::ensure_state_dirs(&ctx.config.state, &state_dir)
+>>>>>>> origin/release/2.x
             .context("creating durable state directories")?;
         env_vars.extend(crate::materialize::state::state_env_vars(
             &state_cfg, &state_dir,
