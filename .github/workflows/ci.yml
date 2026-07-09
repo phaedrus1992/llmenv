@@ -55,7 +55,7 @@ jobs:
             ~/.rustup/update-hashes
             ~/.rustup/settings.toml
           # Keep toolchain + components in the key in sync with the step below.
-          key: &rustup-cache-key rustup-${{ matrix.os }}-1.95-rustfmt-clippy
+          key: &rustup-cache-key rustup-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: 1.95
