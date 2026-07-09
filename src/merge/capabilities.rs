@@ -1102,19 +1102,15 @@ mod tests {
                 );
             }
 
-            // #357: env merge from arb_list_contributor — conflicting keys resolve to
-            // highest-precedence contributor, leveraging the name-prefixed env keys
-            // in arb_list_contributor to avoid accidental same-precedence collisions.
+            // #357: All env keys from arbitrary contributors survive merge
+            // without loss. Keys are name-prefixed in arb_list_contributor to
+            // prevent accidental same-precedence collisions, so the merge should
+            // retain every key across all contributors.
             #[test]
-            fn env_merge_highest_precedence_wins(
+            fn env_merge_retains_all_keys(
                 contribs in prop::collection::vec(arb_list_contributor(), 2..5),
             ) {
-                // Insert a winner at a higher precedence than any generated contributor
-                // whose env key collides with one in the generated set.
                 let out = merge_capabilities(&contribs).unwrap();
-                // The merge must succeed and produce an env with at least as many keys
-                // as the contributor with the most env entries (keys are unique across
-                // name prefixes, so no collisions possible).
                 let max_keys = contribs.iter().map(|c| c.capabilities.env.len()).max().unwrap_or(0);
                 prop_assert!(
                     out.env.len() >= max_keys,
@@ -1131,9 +1127,20 @@ mod tests {
             ) {
                 // Merge first (the real usage path), then roundtrip the merged result.
                 let merged = merge_capabilities(&contributors).unwrap();
-                let json = serde_json::to_string(&merged).expect("serialize Capabilities");
-                let deserialized: Capabilities =
-                    serde_json::from_str(&json).expect("deserialize Capabilities");
+                let json = serde_json::to_string(&merged);
+                prop_assert!(
+                    json.is_ok(),
+                    "serialize Capabilities: {:?}",
+                    json.err(),
+                );
+                let json = json.unwrap();
+                let deserialized: Result<Capabilities, _> = serde_json::from_str(&json);
+                prop_assert!(
+                    deserialized.is_ok(),
+                    "deserialize Capabilities: {:?}",
+                    deserialized.err(),
+                );
+                let deserialized = deserialized.unwrap();
                 prop_assert_eq!(merged, deserialized);
             }
 
