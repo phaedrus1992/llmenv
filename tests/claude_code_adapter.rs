@@ -1214,7 +1214,12 @@ fn two_bundles_merge_into_deterministic_settings_json() {
 
     // Snapshot pins the full deterministic shape: ordering, dedup, permission
     // union, and native passthrough merge across both bundles.
-    insta::assert_yaml_snapshot!(parsed);
+    // Redact the temp directory so the snapshot is stable across runs.
+    let tmp_dir = tmp.path().to_string_lossy().into_owned();
+    let parsed_str = serde_json::to_string_pretty(&parsed).expect("serialize");
+    let stable = parsed_str.replace(&tmp_dir, "<CACHE_DIR>");
+    let stable_parsed: serde_json::Value = serde_json::from_str(&stable).expect("re-parse");
+    insta::assert_yaml_snapshot!(stable_parsed);
 }
 
 // Issue #336: Empty directories from bundles that contributed no files must be
@@ -1401,10 +1406,12 @@ fn bundle_relative_hook_paths_are_resolved() {
         .as_str()
         .expect("command string");
 
-    // The rendered command should have the path resolved to absolute
+    // The rendered command should have the path resolved to the cache directory
+    // (issue #162), not the source bundle directory.
+    let cache_dir = tmp.path().to_string_lossy();
     assert!(
-        rendered_cmd.contains("with-relative-hook/hooks/test.sh"),
-        "adapter should resolve path to absolute: {}",
+        rendered_cmd.contains(&*cache_dir) && rendered_cmd.contains("hooks/test.sh"),
+        "adapter should resolve path to cache dir, not source bundle: {}",
         rendered_cmd
     );
 }
