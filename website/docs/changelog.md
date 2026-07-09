@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.0.0-rc.2] - 2026-07-09
+
 ### Added
 
 - `llmenv setup` interactive wizard: scans existing tool configurations
