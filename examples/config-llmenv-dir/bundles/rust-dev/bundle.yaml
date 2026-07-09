@@ -25,7 +25,7 @@ hooks:
   # Auto-clippy on every Rust edit. Quiet + head-truncated so the hook
   # doesn't spam terminal output; warnings still surface to the agent.
   - event: PostToolUse
-    matcher: "*.rs"
+    matcher: "^(Edit|Write|MultiEdit)$"
     handler:
       type: command
       command: "cargo clippy --quiet 2>&1 | head -20"
