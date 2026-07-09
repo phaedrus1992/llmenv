@@ -74,10 +74,12 @@ fn claude_md_matches_merged_agents_md() {
 #[test]
 fn env_vars_set_claude_config_dir() {
     let tmp = tempdir().expect("tempdir");
+    let state_tmp = tempdir().expect("tempdir");
     let vars = ClaudeCodeAdapter
-        .env_vars(tmp.path())
+        .env_vars(tmp.path(), state_tmp.path())
         .expect("utf-8 tempdir");
-    assert_eq!(vars.len(), 1);
+    // CLAUDE_CONFIG_DIR + 4 temp vars + 1 plugin cache var = 6
+    assert_eq!(vars.len(), 6);
     assert_eq!(vars[0].0, "CLAUDE_CONFIG_DIR");
     assert_eq!(vars[0].1, tmp.path().to_str().expect("tempdir utf-8"));
 }
@@ -89,8 +91,9 @@ fn env_vars_rejects_non_utf8_cache_dir() {
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     let bad = Path::new(OsStr::from_bytes(b"/tmp/\xff\xfe-not-utf8"));
+    let state_tmp = tempdir().expect("tempdir");
     let err = ClaudeCodeAdapter
-        .env_vars(bad)
+        .env_vars(bad, state_tmp.path())
         .expect_err("should reject non-utf8 cache dir");
     assert!(err.to_string().contains("not valid UTF-8"));
 }

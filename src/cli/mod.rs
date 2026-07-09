@@ -964,7 +964,11 @@ fn build_and_materialize(
         .with_auth_status(auth_status);
     write_cache_manifest(&cache_path, &current, ctx.config.cache.hashing)?;
 
-    let mut env_vars = adapter.env_vars(&cache_path)?;
+    // Compute the state dir (stable sibling of the hashed config dir) and pass
+    // both to the adapter so it can set per-hash temp vars (#630) and durable
+    // plugin/env-var relocation vars (#632 / #175 / #490).
+    let state_dir = crate::materialize::state::state_dir(&adapter_root);
+    let mut env_vars = adapter.env_vars(&cache_path, &state_dir)?;
 
     // Collect env vars from merged bundle Capabilities. Later contributors override
     // earlier ones (enforced by the merge_capabilities function via precedence).
@@ -972,14 +976,11 @@ fn build_and_materialize(
         env_vars.push((key.clone(), value.clone()));
     }
 
-    // Durable state (#175): the state dir is a stable sibling of the hashed
-    // config folders (`<adapter_root>/state`), so it survives every hash change.
-    // Emit LLMENV_STATE_DIR plus each configured tool's relocation var, and
-    // create the dirs so tools find them on first run.
+    // Durable state (#175): emit LLMENV_STATE_DIR plus each configured tool's
+    // relocation var, and create the dirs so tools find them on first run.
     // LLMENV_STATE_DIR is shared — emit only for Claude Code to avoid the last
     // adapter silently winning. Crush keeps its own dedicated CRUSH_GLOBAL_DATA.
     if adapter.name() == ClaudeCodeAdapter.name() {
-        let state_dir = crate::materialize::state::state_dir(&adapter_root);
         crate::materialize::state::ensure_state_dirs(&ctx.config.state, &state_dir)
             .context("creating durable state directories")?;
         env_vars.extend(crate::materialize::state::state_env_vars(

@@ -51,11 +51,43 @@ impl AgentAdapter for ClaudeCodeAdapter {
         "claude"
     }
 
-    fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    fn env_vars(
+        &self,
+        cache_dir: &Path,
+        state_dir: &Path,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
         })?;
-        Ok(vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())])
+        let mut vars = vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())];
+
+        // Per-hash temp dir: CLAUDE_CODE_TMPDIR + standard POSIX temp vars for
+        // subprocess isolation. Claude Code appends /claude-{uid}/ to the value
+        // on Unix; the tmp/ folder is cleaned when the parent hash dir is pruned.
+        let tmp_dir = cache_dir.join("tmp");
+        std::fs::create_dir_all(&tmp_dir)?;
+        let tmp_str = tmp_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cache_dir tmp dir is not valid UTF-8: {}",
+                tmp_dir.display()
+            )
+        })?;
+        vars.push(("CLAUDE_CODE_TMPDIR".into(), tmp_str.to_owned()));
+        vars.push(("TMPDIR".into(), tmp_str.to_owned()));
+        vars.push(("TMP".into(), tmp_str.to_owned()));
+        vars.push(("TEMP".into(), tmp_str.to_owned()));
+
+        // Durable plugin root in the state dir (#632): despite the misleading
+        // "CACHE" in its name, CLAUDE_CODE_PLUGIN_CACHE_DIR controls the ENTIRE
+        // plugins directory (marketplaces/ + cache/ live under it). Pointing it
+        // at the state dir (stable across hash changes) avoids re-downloading
+        // plugins on every scope change.
+        let plugins_dir = state_dir.join("plugins");
+        if let Some(p) = plugins_dir.to_str() {
+            vars.push(("CLAUDE_CODE_PLUGIN_CACHE_DIR".into(), p.to_owned()));
+        }
+
+        Ok(vars)
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {

@@ -21,7 +21,8 @@ pub trait AgentAdapter {
     /// carry arbitrary bytes on all platforms, so callers that surface a
     /// non-UTF-8 cache root should fail loudly rather than emit a lossy
     /// path the agent will silently mis-parse.
-    fn env_vars(&self, cache_dir: &Path) -> anyhow::Result<Vec<(String, String)>>;
+    fn env_vars(&self, cache_dir: &Path, state_dir: &Path)
+    -> anyhow::Result<Vec<(String, String)>>;
 
     /// Write the manifest into `out` in the agent-native layout, returning the
     /// set of paths the adapter wrote, each relative to `out`. The returned set
