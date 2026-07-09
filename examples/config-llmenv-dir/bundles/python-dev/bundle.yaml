@@ -10,7 +10,12 @@ hooks:
   # Auto-ruff on every Python edit, scoped to the enclosing git repo so
   # rules and excludes from that repo's pyproject.toml apply.
   - event: PostToolUse
-    matcher: "*.py"
+    matcher: "^(Edit|Write|MultiEdit)$"
     handler:
       type: command
-      command: "cd $(git rev-parse --show-toplevel) && ruff check --fix --quiet"
+      command: |
+        if git rev-parse --git-dir >/dev/null 2>&1; then
+          cd "$(git rev-parse --show-toplevel)" && ruff check --fix --quiet
+        else
+          ruff check --fix --quiet
+        fi

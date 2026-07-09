@@ -17,9 +17,9 @@ hooks:
   # Runs only on Windows (powershell.exe); no-op on macOS/Linux.
   # ponytail: quiet + head-truncated so hook doesn't spam; warnings surface.
   - event: PostToolUse
-    matcher: "*.ps1"
+    matcher: "^(Edit|Write|MultiEdit)$"
     handler:
       type: command
       command: |
         ps=$(command -v pwsh || command -v powershell) && \
-          "$ps" -Command "Invoke-ScriptAnalyzer -Path '$FILE' 2>&1" | head -20
+          "$ps" -Command "Invoke-ScriptAnalyzer . 2>&1" | head -20

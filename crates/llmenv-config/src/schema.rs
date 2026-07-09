@@ -1251,6 +1251,51 @@ mod tests {
             let back: StateConfig = serde_yaml::from_str(&yaml).expect("deserialize StateConfig");
             prop_assert_eq!(cfg, back);
         }
+
+        // ===== 3.0.0 release PBT backfill =====
+
+        #[test]
+        fn prop_memory_type_serde_roundtrip(
+            v in prop_oneof![
+                Just(MemoryType::Episodic),
+                Just(MemoryType::Semantic),
+                Just(MemoryType::Procedural),
+            ],
+        ) {
+            let json = serde_json::to_string(&v).expect("serialize MemoryType");
+            let back: MemoryType = serde_json::from_str(&json).expect("deserialize MemoryType");
+            prop_assert_eq!(v, back);
+        }
+
+        #[test]
+        fn prop_importance_level_serde_roundtrip(
+            v in prop_oneof![
+                Just(ImportanceLevel::Low),
+                Just(ImportanceLevel::Medium),
+                Just(ImportanceLevel::High),
+                Just(ImportanceLevel::Critical),
+            ],
+        ) {
+            let json = serde_json::to_string(&v).expect("serialize ImportanceLevel");
+            let back: ImportanceLevel =
+                serde_json::from_str(&json).expect("deserialize ImportanceLevel");
+            prop_assert_eq!(v, back);
+        }
+
+        #[test]
+        fn prop_consolidation_config_serde_roundtrip(
+            enabled: bool,
+            max_rules_per_session in 0u32..100,
+        ) {
+            let cfg = ConsolidationConfig {
+                enabled,
+                max_rules_per_session,
+            };
+            let json = serde_json::to_string(&cfg).expect("serialize ConsolidationConfig");
+            let back: ConsolidationConfig =
+                serde_json::from_str(&json).expect("deserialize ConsolidationConfig");
+            prop_assert_eq!(cfg, back);
+        }
     }
 
     #[test]

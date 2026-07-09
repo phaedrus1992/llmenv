@@ -402,4 +402,43 @@ mod tests {
             prop_assert_eq!(&obj["keyword"], &serde_json::json!(bundle_keyword(&bundle)));
         }
     }
+
+    // ===== #593: PBT for marker parsers =====
+
+    /// Arbitrary-looking string, heavy on angle brackets and dashes.
+    fn arb_chunk() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[ -~]{0,60}",
+            "<!-- llmenv-[a-z]+: [a-z]+ -->",
+            "<!-- not-llmenv: value -->",
+            "<!-- llmenv-type: -->",
+            "<!-- llmenv-type:      -->",
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn prop_parse_type_marker_never_panics(chunk in arb_chunk()) {
+            let _ = parse_type_marker(&chunk);
+        }
+
+        #[test]
+        fn prop_parse_importance_marker_never_panics(chunk in arb_chunk()) {
+            let _ = parse_importance_marker(&chunk);
+        }
+
+        #[test]
+        fn prop_parse_type_marker_idempotent(chunk in arb_chunk()) {
+            let first = parse_type_marker(&chunk);
+            let second = parse_type_marker(&chunk);
+            prop_assert_eq!(first, second);
+        }
+
+        #[test]
+        fn prop_parse_importance_marker_idempotent(chunk in arb_chunk()) {
+            let first = parse_importance_marker(&chunk);
+            let second = parse_importance_marker(&chunk);
+            prop_assert_eq!(first, second);
+        }
+    }
 }
