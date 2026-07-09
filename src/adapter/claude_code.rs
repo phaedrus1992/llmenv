@@ -83,9 +83,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // at the state dir (stable across hash changes) avoids re-downloading
         // plugins on every scope change.
         let plugins_dir = state_dir.join("plugins");
-        if let Some(p) = plugins_dir.to_str() {
-            vars.push(("CLAUDE_CODE_PLUGIN_CACHE_DIR".into(), p.to_owned()));
-        }
+        let plugins_str = plugins_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "state_dir plugins dir is not valid UTF-8: {}",
+                plugins_dir.display()
+            )
+        })?;
+        vars.push((
+            "CLAUDE_CODE_PLUGIN_CACHE_DIR".into(),
+            plugins_str.to_owned(),
+        ));
 
         Ok(vars)
     }
