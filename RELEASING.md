@@ -261,8 +261,8 @@ Follow the same release process as a stable release, but **tag the prerelease ve
 
 ```bash
 git switch main && git pull
-cargo release --version 3.0.0-rc.1 --workspace        # dry-run preview (bumps to RC)
-cargo release --version 3.0.0-rc.1 --workspace --execute  # apply: bump all crates + CHANGELOG + commit
+cargo release 3.0.0-rc.1 --workspace        # dry-run preview (bumps to RC)
+cargo release 3.0.0-rc.1 --workspace --execute  # apply: bump all crates + CHANGELOG + commit
 git push -u origin HEAD
 gh pr create --fill  # Create PR w/ title "chore(release): 3.0.0-rc.1"
 # After merge:
