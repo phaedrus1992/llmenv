@@ -28,18 +28,26 @@ pub fn state_dir(adapter_root: &Path) -> PathBuf {
     adapter_root.join(STATE_DIR_NAME)
 }
 
+/// Normalize a path to use forward slashes when emitted as an env var value.
+/// On Windows `Path::display()` uses backslashes, which some tools cannot parse;
+/// on Unix this is a no-op.
+fn normalize_path_for_env(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 /// The env vars that relocate tool state into the durable directory.
 ///
 /// Always includes `LLMENV_STATE_DIR=<state_dir>`. Each configured tool adds
-/// `<env>=<state_dir>/<subdir>`. Pure: computes paths only, performs no I/O.
+/// `<env>=<state_dir>/<subdir>`. Paths are normalized to forward slashes for
+/// cross-platform compatibility. Pure: computes paths only, performs no I/O.
 /// Directory creation is [`ensure_state_dirs`].
 #[must_use]
 pub fn state_env_vars(cfg: &StateConfig, state_dir: &Path) -> Vec<(String, String)> {
     let mut vars = Vec::with_capacity(cfg.tools.len() + 1);
-    vars.push((STATE_DIR_ENV.to_string(), state_dir.display().to_string()));
+    vars.push((STATE_DIR_ENV.to_string(), normalize_path_for_env(state_dir)));
     for tool in &cfg.tools {
         let path = state_dir.join(&tool.subdir);
-        vars.push((tool.env.clone(), path.display().to_string()));
+        vars.push((tool.env.clone(), normalize_path_for_env(&path)));
     }
     vars
 }
