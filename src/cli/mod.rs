@@ -1158,10 +1158,9 @@ fn build_and_materialize(
         .with_auth_status(auth_status);
     write_cache_manifest(&cache_path, &current, ctx.config.cache.hashing)?;
 
-    // Durable state (#175): the state dir is a stable sibling of the hashed
-    // config folders (`<adapter_root>/state`), so it survives every hash change.
-    // Compute it early so adapters can route their data-bearing env vars through it
-    // instead of the hashed cache_dir (which gets GC'd on every config change).
+    // Compute the state dir (stable sibling of the hashed config dir) and pass
+    // both to the adapter so it can set per-hash temp vars (#630) and durable
+    // plugin/env-var relocation vars (#632 / #175 / #490).
     let state_dir = crate::materialize::state::state_dir(&adapter_root);
     let mut env_vars = adapter.env_vars(&cache_path, &state_dir)?;
 

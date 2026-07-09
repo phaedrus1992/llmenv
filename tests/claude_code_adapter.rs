@@ -73,14 +73,41 @@ fn claude_md_matches_merged_agents_md() {
 
 #[test]
 fn env_vars_set_claude_config_dir() {
-    let cache = tempdir().expect("tempdir");
-    let state = tempdir().expect("tempdir");
+    let tmp = tempdir().expect("tempdir");
+    let state_tmp = tempdir().expect("tempdir");
     let vars = ClaudeCodeAdapter
-        .env_vars(cache.path(), state.path())
+        .env_vars(tmp.path(), state_tmp.path())
         .expect("utf-8 tempdir");
-    assert_eq!(vars.len(), 1);
+    // CLAUDE_CONFIG_DIR + 4 temp vars + 1 plugin cache var = 6
+    assert_eq!(vars.len(), 6);
+
+    // 1 — CLAUDE_CONFIG_DIR
     assert_eq!(vars[0].0, "CLAUDE_CONFIG_DIR");
-    assert_eq!(vars[0].1, cache.path().to_str().expect("tempdir utf-8"));
+    assert_eq!(vars[0].1, tmp.path().to_str().expect("tempdir utf-8"));
+
+    // 2–5 — Per-hash temp vars (all point to <cache_dir>/tmp/)
+    let tmp_dir = tmp.path().join("tmp");
+    assert!(tmp_dir.is_dir(), "tmp/ dir must exist");
+    let tmp_str = tmp_dir.to_str().expect("tempdir utf-8").to_owned();
+    assert_eq!(vars[1].0, "CLAUDE_CODE_TMPDIR");
+    assert_eq!(vars[1].1, tmp_str);
+    assert_eq!(vars[2].0, "TMPDIR");
+    assert_eq!(vars[2].1, tmp_str);
+    assert_eq!(vars[3].0, "TMP");
+    assert_eq!(vars[3].1, tmp_str);
+    assert_eq!(vars[4].0, "TEMP");
+    assert_eq!(vars[4].1, tmp_str);
+
+    // 6 — Durable plugin cache dir (points to <state_dir>/plugins/)
+    assert_eq!(vars[5].0, "CLAUDE_CODE_PLUGIN_CACHE_DIR");
+    assert_eq!(
+        vars[5].1,
+        state_tmp
+            .path()
+            .join("plugins")
+            .to_str()
+            .expect("state dir utf-8")
+    );
 }
 
 #[cfg(unix)]
@@ -90,9 +117,9 @@ fn env_vars_rejects_non_utf8_cache_dir() {
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     let bad = Path::new(OsStr::from_bytes(b"/tmp/\xff\xfe-not-utf8"));
-    let state = tempdir().expect("tempdir");
+    let state_tmp = tempdir().expect("tempdir");
     let err = ClaudeCodeAdapter
-        .env_vars(bad, state.path())
+        .env_vars(bad, state_tmp.path())
         .expect_err("should reject non-utf8 cache dir");
     assert!(err.to_string().contains("not valid UTF-8"));
 }
