@@ -898,11 +898,22 @@ mod tests {
                     prop::collection::vec(arb_lsp_server(), 0..3),
                     prop::collection::vec(arb_skill_source(), 0..3),
                     prop::collection::vec(arb_engine_entry, 0..3),
+                    prop::collection::vec(("[a-z]{1,8}", "[a-z]{1,8}"), 0..3),
                 ),
             )
                 .prop_map(
-                    |((name, precedence, allow, plugins), (mcp, lsp, skills, engine_entries))| {
+                    |(
+                        (name, precedence, allow, plugins),
+                        (mcp, lsp, skills, engine_entries, env_entries),
+                    )| {
                         let native = engine_entries.into_iter().collect::<BTreeMap<_, _>>();
+                        // Prefix env keys with the contributor name and an index to
+                        // prevent cross-contributor collisions at the same precedence.
+                        let env: BTreeMap<String, String> = env_entries
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (k, v))| (format!("{name}_{k}_{i}"), v))
+                            .collect();
                         CapabilityContributor {
                             name,
                             precedence,
@@ -916,6 +927,7 @@ mod tests {
                                 lsp,
                                 skills,
                                 native,
+                                env,
                                 ..Default::default()
                             },
                         }
@@ -1088,6 +1100,48 @@ mod tests {
                     Some("winner_val"),
                     "highest-precedence contributor must win for env key KEY"
                 );
+            }
+
+            // #357: All env keys from arbitrary contributors survive merge
+            // without loss. Keys are name-prefixed in arb_list_contributor to
+            // prevent accidental same-precedence collisions, so the merge should
+            // retain every key across all contributors.
+            #[test]
+            fn env_merge_retains_all_keys(
+                contribs in prop::collection::vec(arb_list_contributor(), 2..5),
+            ) {
+                let out = merge_capabilities(&contribs).unwrap();
+                let max_keys = contribs.iter().map(|c| c.capabilities.env.len()).max().unwrap_or(0);
+                prop_assert!(
+                    out.env.len() >= max_keys,
+                    "merged env has {} keys, expected at least {}",
+                    out.env.len(),
+                    max_keys,
+                );
+            }
+
+            // #357: Capabilities with non-empty env survives JSON serde roundtrip.
+            #[test]
+            fn capabilities_env_serde_roundtrip(
+                contributors in prop::collection::vec(arb_list_contributor(), 0..5),
+            ) {
+                // Merge first (the real usage path), then roundtrip the merged result.
+                let merged = merge_capabilities(&contributors).unwrap();
+                let json = serde_json::to_string(&merged);
+                prop_assert!(
+                    json.is_ok(),
+                    "serialize Capabilities: {:?}",
+                    json.err(),
+                );
+                let json = json.unwrap();
+                let deserialized: Result<Capabilities, _> = serde_json::from_str(&json);
+                prop_assert!(
+                    deserialized.is_ok(),
+                    "deserialize Capabilities: {:?}",
+                    deserialized.err(),
+                );
+                let deserialized = deserialized.unwrap();
+                prop_assert_eq!(merged, deserialized);
             }
 
             // The strictly-highest-precedence contributor's default_mode always
