@@ -1335,6 +1335,74 @@ mod tests {
             }
         }
     }
+
+    // ===== #592: apply_memory_config_defaults idempotence =====
+
+    fn memory_config(default_type: Option<llmenv_config::MemoryType>) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.features = Some(crate::config::Features {
+            memory: vec![llmenv_config::Memory {
+                server_host: "test-host".into(),
+                port: 0,
+                listen_host: "127.0.0.1".into(),
+                when: vec!["test".into()],
+                default_topics: vec![],
+                default_type,
+                default_importance: None,
+                type_importance: Default::default(),
+                consolidation: None,
+            }],
+            ..Default::default()
+        });
+        config
+    }
+
+    fn active_with_tag(tag: &str) -> crate::scope::ActiveScopes {
+        let mut tags = std::collections::BTreeSet::new();
+        tags.insert(tag.to_string());
+        crate::scope::ActiveScopes {
+            tags,
+            scopes: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_memory_defaults_idempotent_no_type() {
+        let config = memory_config(None);
+        let active = active_with_tag("test");
+        let input = "## context\nno markers";
+        let once = apply_memory_config_defaults(input, &config, &active);
+        let twice = apply_memory_config_defaults(&once, &config, &active);
+        assert_eq!(once, twice, "applying defaults twice must be idempotent");
+    }
+
+    #[test]
+    fn apply_memory_defaults_adds_type_marker_when_present() {
+        let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
+        let active = active_with_tag("test");
+        let input = "## context";
+        let out = apply_memory_config_defaults(input, &config, &active);
+        assert!(
+            out.contains("<!-- llmenv-type: semantic -->"),
+            "should add semantic type marker: {out}"
+        );
+    }
+
+    #[test]
+    fn apply_memory_defaults_skips_existing_marker() {
+        let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
+        let active = active_with_tag("test");
+        let input = "## context\n<!-- llmenv-type: episodic -->";
+        let out = apply_memory_config_defaults(input, &config, &active);
+        assert!(
+            !out.contains("semantic"),
+            "must not override existing episodic marker"
+        );
+        assert!(
+            out.contains("episodic"),
+            "existing marker must survive: {out}"
+        );
+    }
 }
 
 #[cfg(test)]
