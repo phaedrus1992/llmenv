@@ -178,13 +178,25 @@ Repo prerequisites (already in place, listed so they are not forgotten):
 `main` is protected (PR-only), so the version-bump commit lands through a PR and
 the tag is cut on the merged commit.
 
-### 1. Prepare the bump on a branch
+### 1. Verify the changelog and prepare the bump on a branch
+
+Before running `cargo release`, verify every user-facing change since the last
+tag is listed under `[Unreleased]`. Check for and remove any CI-only, test-only,
+or internal-only entries that don't affect users of the released binary.
 
 ```bash
 git switch main && git pull
+git log --no-merges <last-tag>..HEAD  # review what landed; compare against CHANGELOG.md
 git switch -c chore/release-<next-version>
 cargo release <minor|major> --workspace            # dry-run preview (default)
 cargo release <minor|major> --workspace --execute  # apply: bump all crates + roll CHANGELOG, commit
+```
+
+For pre-releases, use `--version` instead of `minor`/`major`:
+
+```bash
+cargo release --version 3.0.0-rc.1 --workspace        # dry-run
+cargo release --version 3.0.0-rc.1 --workspace --execute
 ```
 
 `cargo release --workspace` bumps all workspace crates to the same version,
@@ -221,6 +233,41 @@ gh run watch
 CI publishes to crates.io, creates the GitHub Release, and updates Homebrew. The
 crates.io publish runs exactly once per tag — re-pushing an existing tag will
 fail at publish because that version already exists on the registry.
+
+Before cutting the tag, confirm `CHANGELOG.md` is complete for the version
+you're shipping — every user-facing change since the last tag must be listed
+under its `[Unreleased]` section. This applies equally to pre-releases (see below).
+
+## Changelog and pre-releases (RC, beta, alpha)
+
+Pre-releases get the same changelog treatment as stable releases — their
+changes matter to testers and should be visible on the release page.
+
+**1. Every pre-release gets its own `CHANGELOG.md` section.** Cut from
+`[Unreleased]` at tag time, same as a stable release. The section stays in the
+file permanently; pre-release sections are not deleted when the final release
+ships. `cargo release --version 3.0.0-rc.1` does this automatically.
+
+**2. The GitHub Release body carries the actual changelog** — not a placeholder.
+After tagging, edit the release with the content from the new `CHANGELOG.md`
+section. The `## Binary Checksums` block added by CI stays; replace the
+placeholder text above it.
+
+When pasting the changelog into the release body, unwrap the hard line breaks
+so each bullet point is a single flowing paragraph — the fixed-width formatting
+in `CHANGELOG.md` is for source readability, not the release page.
+
+**3. On final release, roll up the beta/RC sections into a high-level summary.**
+The final `X.Y.0` changelog section should be an abstracted, readable summary
+of what the release line delivers — not a concatenation of every sub-release's
+granular entries. The individual beta/RC sections remain in the file for
+traceability; the final section is the curated version for new adopters reading
+the changelog top-down. This is a manual editorial step, not automated.
+
+**4. Breaking changes are always called out explicitly** in changelog entries,
+regardless of release stage. Any `### Changed` or `### Removed` entry that
+breaks backward compatibility must carry a `**BREAKING:**` prefix so testers
+and release-note readers can spot it immediately.
 
 ## Why cargo-release does so little
 
