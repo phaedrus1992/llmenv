@@ -187,7 +187,7 @@ impl CacheManifest {
 /// Normalize a relative path to a forward-slash string for stable, portable
 /// storage. Backslashes (Windows separators) are folded to `/` so a manifest
 /// written on one platform reconciles correctly on another.
-fn normalize_rel(p: &Path) -> String {
+pub(crate) fn normalize_rel(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 

@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix `CONTEXT_MODE_DATA_DIR` and other state-directory env vars (from
+  `materialize::state::state_env_vars`) emitting platform-native path separators
+  (`\` on Windows) instead of forward slashes, breaking cross-platform compatibility
+  for consumers that parse paths in these env vars. Normalization consolidated into
+  the existing `normalize_rel` helper. (#497)
+
 ## [3.0.0-rc.2] - 2026-07-09
 
 ### Added
