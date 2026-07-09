@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+- Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
+  `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
+  temporary files to the current content hash (#630)
+- Add durable plugin cache directory: `CLAUDE_CODE_PLUGIN_CACHE_DIR` now points to
+  `<state_dir>/plugins/` so plugins are not re-downloaded on every scope change (#632)
+
 ### Fixed
 
 - Fix `CONTEXT_MODE_DATA_DIR` and other state-directory env vars (from
@@ -70,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `consolidation` config section with `enabled` and `max_rules_per_session` fields.
   Wires a diagnostic consolidation hook into the SessionEnd lifecycle; LLM integration
   deferred. (#271, #595)
+
+### Changed
+
+- Replace stale Claude Code env var table in `docs/env-vars.md` with a link to the
+  [upstream docs](https://code.claude.com/docs/en/env-vars)
 
 ### Fixed
 
