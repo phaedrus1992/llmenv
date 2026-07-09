@@ -35,13 +35,6 @@ there for the canonical list instead of maintaining a stale local copy.
 
 | Variable | Purpose | Tool | Scope |
 |----------|---------|------|-------|
-<<<<<<< HEAD
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | Claude Code context compaction threshold | Claude Code CLI | User session |
-| `BASH_MAX_OUTPUT_LENGTH` | Max bash command output length | Claude Code tool dispatch | User session |
-| `MAX_MCP_OUTPUT_TOKENS` | Max MCP tool output token count | Claude Code integration | User session |
-| `ENABLE_PROMPT_CACHING_1H` | Enable 1-hour prompt caching | Claude API / Claude Code | User session |
-=======
->>>>>>> origin/release/2.x
 | `CONTEXT_MODE_DATA_DIR` | context-mode plugin state directory, normalized to forward slashes for cross-platform compatibility. Set by llmenv's durable-state relocation (#175, #490) | context-mode marketplace plugin | Process |
 | `CRUSH_GLOBAL_CONFIG` | Directory containing `crush.json` (rendered by llmenv) — Crush joins `crush.json` onto this itself | Crush CLI | User session |
 | `CRUSH_GLOBAL_DATA` | Crush state directory (points at `LLMENV_STATE_DIR`) | Crush CLI | User session |
