@@ -73,26 +73,16 @@ fn claude_md_matches_merged_agents_md() {
 
 #[test]
 fn env_vars_set_claude_config_dir() {
-<<<<<<< HEAD
-    let cache = tempdir().expect("tempdir");
-    let state = tempdir().expect("tempdir");
-    let vars = ClaudeCodeAdapter
-        .env_vars(cache.path(), state.path())
-=======
     let tmp = tempdir().expect("tempdir");
     let state_tmp = tempdir().expect("tempdir");
     let vars = ClaudeCodeAdapter
         .env_vars(tmp.path(), state_tmp.path())
->>>>>>> origin/release/2.x
         .expect("utf-8 tempdir");
     // CLAUDE_CONFIG_DIR + 4 temp vars + 1 plugin cache var = 6
     assert_eq!(vars.len(), 6);
 
     // 1 — CLAUDE_CONFIG_DIR
     assert_eq!(vars[0].0, "CLAUDE_CONFIG_DIR");
-<<<<<<< HEAD
-    assert_eq!(vars[0].1, cache.path().to_str().expect("tempdir utf-8"));
-=======
     assert_eq!(vars[0].1, tmp.path().to_str().expect("tempdir utf-8"));
 
     // 2–5 — Per-hash temp vars (all point to <cache_dir>/tmp/)
@@ -118,7 +108,6 @@ fn env_vars_set_claude_config_dir() {
             .to_str()
             .expect("state dir utf-8")
     );
->>>>>>> origin/release/2.x
 }
 
 #[cfg(unix)]
@@ -128,15 +117,9 @@ fn env_vars_rejects_non_utf8_cache_dir() {
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     let bad = Path::new(OsStr::from_bytes(b"/tmp/\xff\xfe-not-utf8"));
-<<<<<<< HEAD
-    let state = tempdir().expect("tempdir");
-    let err = ClaudeCodeAdapter
-        .env_vars(bad, state.path())
-=======
     let state_tmp = tempdir().expect("tempdir");
     let err = ClaudeCodeAdapter
         .env_vars(bad, state_tmp.path())
->>>>>>> origin/release/2.x
         .expect_err("should reject non-utf8 cache dir");
     assert!(err.to_string().contains("not valid UTF-8"));
 }

@@ -51,14 +51,9 @@ pub trait AgentAdapter {
     /// # Errors
     /// Returns an error if either path is not valid UTF-8 — env vars cannot
     /// carry arbitrary bytes on all platforms, so callers that surface a
-<<<<<<< HEAD
     /// non-UTF-8 path should fail loudly rather than emit a lossy path the agent
     /// will silently mis-parse. Also returns an error if creating a required
     /// subdirectory fails.
-=======
-    /// non-UTF-8 cache root should fail loudly rather than emit a lossy
-    /// path the agent will silently mis-parse.
->>>>>>> origin/release/2.x
     fn env_vars(&self, cache_dir: &Path, state_dir: &Path)
     -> anyhow::Result<Vec<(String, String)>>;
 

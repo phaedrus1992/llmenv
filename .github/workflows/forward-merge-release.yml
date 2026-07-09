@@ -98,50 +98,15 @@ jobs:
           # rather than silently leaving downstream targets unmerged.
           HALTED=""
 
-          # Open a conflict PR for a halted hop. Reuses an existing merge branch
-          # rather than force-overwriting it (which would destroy in-progress
-          # resolution work).
-          open_conflict_pr() {
-            local src="$1" tgt="$2" merge_branch="$3"
-            git ls-remote --exit-code --heads origin "$merge_branch" >/dev/null 2>&1
-            local rc=$?
-            if [[ $rc -eq 0 ]]; then
-              # In-progress resolution exists — a handled state, halt cleanly.
-              echo "::warning::$merge_branch already exists; not overwriting in-progress resolution"
-              return 0
-            elif [[ $rc -ne 2 ]]; then
-              echo "::error::Network error checking if $merge_branch exists (exit $rc); halting cascade"
-              return 1
-            fi
-            git checkout -B "$merge_branch" "origin/$tgt"
-            # A conflict (exit 1) is the expected outcome here; a fatal error
-            # (bad ref, corrupt objects → exit >=128) must not be swallowed.
-            # `|| merge_rc=$?` keeps the expected conflict exit from tripping
-            # `set -e` while still capturing the code for the fatal-error check.
-            local merge_rc=0
-            git merge "origin/$src" || merge_rc=$?
-            if [[ $merge_rc -ge 128 ]]; then
-              echo "::error::Fatal error merging origin/$src into $merge_branch (exit $merge_rc)"
-              return 1
-            fi
-            # If merge has conflicts, commit the conflicted state so the branch
-            # differs from target (otherwise push fails with "no commits between").
-            if [[ $merge_rc -ne 0 ]]; then
-              git add -A
-              git commit -m "Merge $src into $tgt (unresolved conflicts, needs manual resolution)"
-            fi
-            if ! git push origin "$merge_branch" --force-with-lease; then
-              echo "::error::Failed to push $merge_branch; cannot open conflict PR"
-              return 1
-            fi
-            local body="Forward-merge conflict between $src and $tgt. Resolve and merge."
-            if ! gh pr create --base "$tgt" --head "$merge_branch" \
-              --title "Merge $src into $tgt (conflicts)" \
-              --body "$body" \
-              --label "forward-merge-conflict"; then
-              echo "::error::Failed to create conflict PR for $merge_branch"
-              return 1
-            fi
+          # Abort on conflict — never commit a broken merge or push a conflict
+          # branch. The cascade exits with a clear error so whoever pushed to the
+          # release branch resolves manually.
+          bail_on_conflict() {
+            local src="$1" tgt="$2"
+            echo "::error::Merge conflict: $src into $tgt has conflicts. Resolve manually:"
+            echo "::error::  git checkout $tgt && git merge $src"
+            echo "::error::Cascade halted; downstream targets not merged"
+            return 1
           }
 
           for TARGET in "${TARGETS[@]}"; do
@@ -179,13 +144,7 @@ jobs:
                 HALTED="merge abort failed at $TARGET"
                 break
               fi
-              if ! open_conflict_pr "$CURRENT" "$TARGET" "$MERGE_BRANCH"; then
-                echo "::error::Failed to open conflict PR"
-                echo "::endgroup::"
-                HALTED="conflict PR creation failed at $TARGET"
-                break
-              fi
-              echo "::error::Cascade halted: conflict merging $CURRENT into $TARGET"
+              bail_on_conflict "$CURRENT" "$TARGET" || true
               echo "::endgroup::"
               HALTED="conflict at $TARGET"
               break

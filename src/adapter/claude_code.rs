@@ -102,7 +102,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
         "claude"
     }
 
-<<<<<<< HEAD
     fn supports_plugins(&self) -> bool {
         true
     }
@@ -115,8 +114,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
         CLAUDE_CODE_HOOK_EVENTS
     }
 
-=======
->>>>>>> origin/release/2.x
     fn env_vars(
         &self,
         cache_dir: &Path,
@@ -125,14 +122,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
         })?;
-<<<<<<< HEAD
-        // Validate state_dir UTF-8 even though Claude Code doesn't consume it yet,
-        // keeping the trait contract uniform across adapters.
-        let _ = state_dir.to_str().ok_or_else(|| {
-            anyhow::anyhow!("state_dir is not valid UTF-8: {}", state_dir.display())
-        })?;
-        Ok(vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())])
-=======
         let mut vars = vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())];
 
         // Per-hash temp dir: CLAUDE_CODE_TMPDIR + standard POSIX temp vars for
@@ -169,7 +158,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
         ));
 
         Ok(vars)
->>>>>>> origin/release/2.x
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
