@@ -102,6 +102,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         "claude"
     }
 
+<<<<<<< HEAD
     fn supports_plugins(&self) -> bool {
         true
     }
@@ -114,6 +115,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
         CLAUDE_CODE_HOOK_EVENTS
     }
 
+=======
+>>>>>>> origin/release/2.x
     fn env_vars(
         &self,
         cache_dir: &Path,
@@ -122,12 +125,51 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
         })?;
+<<<<<<< HEAD
         // Validate state_dir UTF-8 even though Claude Code doesn't consume it yet,
         // keeping the trait contract uniform across adapters.
         let _ = state_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("state_dir is not valid UTF-8: {}", state_dir.display())
         })?;
         Ok(vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())])
+=======
+        let mut vars = vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())];
+
+        // Per-hash temp dir: CLAUDE_CODE_TMPDIR + standard POSIX temp vars for
+        // subprocess isolation. Claude Code appends /claude-{uid}/ to the value
+        // on Unix; the tmp/ folder is cleaned when the parent hash dir is pruned.
+        let tmp_dir = cache_dir.join("tmp");
+        std::fs::create_dir_all(&tmp_dir)?;
+        let tmp_str = tmp_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cache_dir tmp dir is not valid UTF-8: {}",
+                tmp_dir.display()
+            )
+        })?;
+        vars.push(("CLAUDE_CODE_TMPDIR".into(), tmp_str.to_owned()));
+        vars.push(("TMPDIR".into(), tmp_str.to_owned()));
+        vars.push(("TMP".into(), tmp_str.to_owned()));
+        vars.push(("TEMP".into(), tmp_str.to_owned()));
+
+        // Durable plugin root in the state dir (#632): despite the misleading
+        // "CACHE" in its name, CLAUDE_CODE_PLUGIN_CACHE_DIR controls the ENTIRE
+        // plugins directory (marketplaces/ + cache/ live under it). Pointing it
+        // at the state dir (stable across hash changes) avoids re-downloading
+        // plugins on every scope change.
+        let plugins_dir = state_dir.join("plugins");
+        let plugins_str = plugins_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "state_dir plugins dir is not valid UTF-8: {}",
+                plugins_dir.display()
+            )
+        })?;
+        vars.push((
+            "CLAUDE_CODE_PLUGIN_CACHE_DIR".into(),
+            plugins_str.to_owned(),
+        ));
+
+        Ok(vars)
+>>>>>>> origin/release/2.x
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
