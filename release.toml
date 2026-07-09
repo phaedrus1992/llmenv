@@ -37,7 +37,11 @@ shared-version = true
 
 # Sync website/docs/changelog.md from the just-updated CHANGELOG.md so the
 # docs_changelog_in_sync_with_root test passes in the release commit.
-pre-release-hook = ["bash", "-c", "${WORKSPACE_ROOT}/scripts/sync-changelog-doc.sh"]
+# For pre-release versions (rc/beta/alpha), also roll the [Unreleased]
+# CHANGELOG section into a versioned section — cargo-release skips
+# pre-release-replacements for pre-release suffix versions, so the
+# script does the same replacements manually.
+pre-release-hook = ["bash", "-c", "${WORKSPACE_ROOT}/scripts/roll-prerelease-changelog.sh {{version}}; ${WORKSPACE_ROOT}/scripts/sync-changelog-doc.sh"]
 
 # Keep-a-Changelog rollover. On `cargo release <level>` this turns the
 # `[Unreleased]` section into a dated, versioned section and re-seeds a fresh
