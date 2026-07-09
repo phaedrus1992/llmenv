@@ -80,8 +80,34 @@ fn env_vars_set_claude_config_dir() {
         .expect("utf-8 tempdir");
     // CLAUDE_CONFIG_DIR + 4 temp vars + 1 plugin cache var = 6
     assert_eq!(vars.len(), 6);
+
+    // 1 — CLAUDE_CONFIG_DIR
     assert_eq!(vars[0].0, "CLAUDE_CONFIG_DIR");
     assert_eq!(vars[0].1, tmp.path().to_str().expect("tempdir utf-8"));
+
+    // 2–5 — Per-hash temp vars (all point to <cache_dir>/tmp/)
+    let tmp_dir = tmp.path().join("tmp");
+    assert!(tmp_dir.is_dir(), "tmp/ dir must exist");
+    let tmp_str = tmp_dir.to_str().expect("tempdir utf-8").to_owned();
+    assert_eq!(vars[1].0, "CLAUDE_CODE_TMPDIR");
+    assert_eq!(vars[1].1, tmp_str);
+    assert_eq!(vars[2].0, "TMPDIR");
+    assert_eq!(vars[2].1, tmp_str);
+    assert_eq!(vars[3].0, "TMP");
+    assert_eq!(vars[3].1, tmp_str);
+    assert_eq!(vars[4].0, "TEMP");
+    assert_eq!(vars[4].1, tmp_str);
+
+    // 6 — Durable plugin cache dir (points to <state_dir>/plugins/)
+    assert_eq!(vars[5].0, "CLAUDE_CODE_PLUGIN_CACHE_DIR");
+    assert_eq!(
+        vars[5].1,
+        state_tmp
+            .path()
+            .join("plugins")
+            .to_str()
+            .expect("state dir utf-8")
+    );
 }
 
 #[cfg(unix)]
