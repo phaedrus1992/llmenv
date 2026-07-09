@@ -210,6 +210,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Defense in depth: crates-io-auth-action validates internally and will
+          # exit non-zero on failure, but if a future regression produces an empty
+          # token, surface a clear error rather than letting cargo fail with 401.
+          if [[ -z "${CARGO_REGISTRY_TOKEN}" ]]; then
+            echo "::error::crates-io-auth-action succeeded but produced an empty token" >&2
+            exit 1
+          fi
+
           # Fail fast if any workspace crate's version doesn't match the tag.
           # Catches the case where `cargo release --workspace` was not used and
           # sub-crates were left at the old version.
