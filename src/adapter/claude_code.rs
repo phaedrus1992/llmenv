@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::AgentAdapter;
 use super::resolve_bundle_relative_paths;
+use super::resolve_command_paths_against_files;
 use super::skills::create_dir_owner_only;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -730,10 +731,28 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         std::collections::BTreeMap::new();
 
     for hook in &manifest.capabilities.hooks {
-        // Resolve bundle-relative paths if this hook came from a bundle
+        // Resolve bundle-relative paths against the cache directory so hook
+        // commands reference the materialized files, not the source bundle
+        // location (issue #162). Files are already copied into `out` by the
+        // caller; a relative path like `hooks/guard.sh` must resolve to
+        // `{cache_dir}/hooks/guard.sh`, not the original bundle directory.
+        //
+        // Two-pass resolution:
+        // 1. Clean relative paths (e.g. `bash hooks/guard.sh`) — direct join.
+        // 2. Shell-var / absolute prefixes (e.g.
+        //    `bash ${HOME}/.../hooks/guard.sh`) — suffix-match against the
+        //    files we already copied into `out`.
         let resolved_command = if let Some(cmd) = &hook.handler.command {
-            if let Some(bundle_dir) = &hook.bundle_origin {
-                resolve_bundle_relative_paths(cmd, bundle_dir).or_else(|| Some(cmd.clone()))
+            if hook.bundle_origin.is_some() {
+                let resolved = resolve_bundle_relative_paths(cmd, out)
+                    .or_else(|| resolve_command_paths_against_files(cmd, out, &manifest.files));
+                if resolved.is_none() && cmd.contains('/') {
+                    tracing::debug!(
+                        command = %cmd,
+                        "bundle hook path could not be re-anchored to cache directory"
+                    );
+                }
+                resolved.or_else(|| Some(cmd.clone()))
             } else {
                 Some(cmd.clone())
             }
