@@ -1,10 +1,13 @@
 # Fix GitHub Issue
 
-@description End-to-end: plan, implement, test, review, fix, push, and PR for a GitHub issue.
-@arguments $ISSUE_NUMBER: GitHub issue number to fix
+---
+description: "End-to-end: plan, implement, test, review, fix, push, and PR for a GitHub issue"
+arguments: |
+  $ISSUE_NUMBER: GitHub issue number to fix
+---
 
-Read Issue #$ISSUE_NUMBER from canonical repo
-(`gh issue view $ISSUE_NUMBER --repo <owner/name>`).
+Read Issue #$ARGUMENTS from canonical repo
+(`gh issue view $ARGUMENTS --repo <owner/name>`).
 Understand context: problem, acceptance criteria, linked PRs, discussion.
 Follow linked issues, PRs, external docs for complete understanding before planning.
 

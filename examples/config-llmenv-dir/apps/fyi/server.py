@@ -73,13 +73,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global _proc
+        # Reject cross-origin POSTs: only same-origin or curl-style requests
+        # (no Origin header). Prevents arbitrary websites from firing CORS
+        # simple requests at localhost, which could trigger a claude scan.
+        origin = self.headers.get("Origin", "")
+        if origin and not origin.startswith("http://127.0.0.1:") and not origin.startswith("http://localhost:"):
+            return self._send(403, b'{"error":"forbidden"}')
         n = min(int(self.headers.get("Content-Length") or 0), _MAX_BODY)
         raw = self.rfile.read(n)
         if self.path == "/api/toggle":
             try:
                 body = json.loads(raw or b"{}")
                 tid, checked = body["id"], bool(body["checked"])
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # TypeError covers valid-JSON-non-object bodies (5, "hi", [1])
                 return self._send(400, b'{"error":"bad body"}')
             with _lock:
                 d = _read_data()

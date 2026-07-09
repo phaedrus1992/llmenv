@@ -60,7 +60,7 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s ?? 
 function refs(item) {
   if (!item.refs || !item.refs.length) return "";
   return '<span class="refs">' + item.refs.map(r =>
-    `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label)}</a>`).join("") + "</span>";
+    `<a href="${/^https?:\/\//.test(r.url) ? esc(r.url) : "#"}" target="_blank" rel="noopener">${esc(r.label)}</a>`).join("") + "</span>";
 }
 
 function row(item) {
