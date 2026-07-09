@@ -181,6 +181,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix skill materialization rejecting a `SKILL.md` whose `description` contains a colon (e.g.
   "Triggers on: ..."); `name`/`description` values are now auto-quoted before the strict YAML
   parse so a single malformed-looking skill no longer takes down the whole adapter (#568)
+- Fix `emit_hook_context` including `additionalContext` in `SessionStart` and `SessionEnd`
+  hook output; Claude Code's hook schema rejects `additionalContext` for store-only events,
+  so those events now return empty output. (#558)
+- Fix bundle hook paths in generated `settings.json` referencing the source directory instead
+  of the materialized cache directory. Hook paths now resolve against the cache copy via
+  two-pass resolution — direct join for clean relative paths, suffix-match against the
+  materialized manifest for shell-variable/absolute prefixes — with longest-suffix matching
+  and path-boundary checks to prevent ambiguous matches. (#162)
+- Fix memory deduplication snapshot being written before the MCP store call completed.
+  A transient store failure left the snapshot ahead of reality, causing the next
+  `SessionEnd` to skip the store and permanently lose the memory chunk.
+- Fix unknown keys under `features:` silently degrading instead of producing a clear
+  error; `Features` now rejects unknown fields at parse time. (#602)
+- Fix skills with the same name from different bundles colliding in materialization
+  after tag filtering; skills are now deduplicated by name, keeping the first
+  occurrence. (#600)
+- Fix `llmenv doctor` not verifying the context-mode marketplace clone exists when
+  `features.context_mode.enabled` is true; now warns if the marketplace hasn't been
+  synced yet. (#601)
+- Fix example bundle hook matchers using glob patterns (`*.rs`, `*.py`, `*.ps1`)
+  instead of valid tool-name regexes; corrected to `^(Edit|Write|MultiEdit)$`. (#605)
+- Fix example bundle commands containing unsubstituted template placeholders and
+  incorrect ICM CLI usage instead of ICM MCP calls. (#606)
+- Fix example `fyi` app: race-condition in `mkdir` lock in `refresh.sh`, missing
+  `TypeError` in toggle handler, missing `Origin` check on POST endpoints, and
+  phantom `topFocus` in `SPEC.md`. (#607)
+- Fix example plugin augmentation: pinned slop-scan wrapper and cryptic dangling
+  bullet in `general.md`. (#608)
 
 ## [2.3.0] - 2026-06-30
 
