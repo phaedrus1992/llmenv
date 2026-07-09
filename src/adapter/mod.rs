@@ -190,6 +190,49 @@ pub(crate) fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) ->
     if resolved { Some(result) } else { None }
 }
 
+/// Rewrite bundle-authored hook commands that reference files copied into the
+/// cache directory, even when the command uses shell variables or absolute
+/// paths that `resolve_bundle_relative_paths` cannot match.
+///
+/// For each whitespace-delimited token that contains `/`, checks whether the
+/// token **ends with** any relative path in `known_files`. When it does, the
+/// matched suffix is replaced with `cache_dir.join(rel)`, re-anchoring the
+/// reference to the materialized copy. Tokens that don't match any known file
+/// are left untouched.
+///
+/// This handles cases like:
+/// ```text
+/// bash ${HOME}/git/my-llmenv/bundles/base/hooks/guard.sh
+/// ```
+/// where the token `${HOME}/git/my-llmenv/bundles/base/hooks/guard.sh` ends
+/// with `hooks/guard.sh` — a file that was copied into the cache.
+pub(crate) fn resolve_command_paths_against_files(
+    command: &str,
+    cache_dir: &Path,
+    known_files: &std::collections::BTreeMap<PathBuf, PathBuf>,
+) -> Option<String> {
+    let mut resolved = false;
+    let mut result = String::new();
+    for (i, token) in command.split_whitespace().enumerate() {
+        if i > 0 {
+            result.push(' ');
+        }
+        if token.contains('/') && !crate::paths::is_unsafe_join_target(token) {
+            if let Some(rel) = known_files.keys().find(|rel| {
+                let rel_str = rel.to_string_lossy();
+                token.ends_with(rel_str.as_ref())
+            }) {
+                let abs_path = cache_dir.join(rel);
+                result.push_str(&abs_path.to_string_lossy());
+                resolved = true;
+                continue;
+            }
+        }
+        result.push_str(token);
+    }
+    if resolved { Some(result) } else { None }
+}
+
 /// Map a resolved remote transport onto the `type` discriminator string shared
 /// by every engine's remote-MCP config shape (`"http"` / `"sse"`).
 ///
