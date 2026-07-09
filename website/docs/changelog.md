@@ -33,49 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   skipped (with a warning) rather than rendered incorrectly, since the existing
   `filetypes` field (language ids) doesn't reliably convert to Claude's required
   extension-to-language form. (#556)
-- `features.context_mode` built-in feature: enabling `features.context_mode.enabled`
-  auto-wires the context-mode plugin (marketplace, plugin, durable
-  `CONTEXT_MODE_DATA_DIR`, and MCP permission) — the token-efficiency counterpart
-  to the built-in ICM memory feature. Warns when the plugin is also declared manually
-  in a plugin-collection. (#490)
-- ICM-transcript session logging: llmenv records scope + lifecycle (and, with
-  `session_log.verbose`, prompts and tool use) into ICM's transcript store via
-  the ICM MCP, discoverable by `llmenv-tag:` / `llmenv-bundle:` tokens and
-  project. A local JSONL `file` sink mirrors the same stream, independent of
-  ICM reachability. (#382)
-- The Claude Code adapter now auto-registers `SessionStart`/`SessionEnd` hooks
-  running `llmenv hook-run`, fixing a gap where the ICM memory wake-up/store
-  dispatcher existed but was never wired into generated `settings.json` —
-  memory wake-up/store now actually fires. Continuous per-prompt recall
-  (`turn_start`) is still unwired; tracked in #499. (#382)
-- Multi-engine foundation for a second agent engine (Crush): `export`, `hook`,
-  and `regenerate` now iterate a registry of engine adapters, materializing each
-  into its own per-engine cache subtree and skipping any whose binary isn't on
-  `PATH`. Claude-only users see no behavior change. Groundwork for the Crush
-  adapter (#506); no Crush support ships yet. (#502)
-- Add first-class `lsp:` capability: declare language servers (`name`, `when`,
-  `command`, `args`, `env`, `disabled`, `filetypes`, `root_markers`,
-  `init_options`, `timeout`) at the top level or inside a bundle, tag-scoped like
-  `mcp`. Engines with no LSP concept (Claude Code) silently ignore them. (#503)
-- Add first-class `skills:` capability, decoupled from plugins: declare a skill
-  (`name`, `path`, `when`) directly in config or a bundle, tag-scoped, validated
-  with the same frontmatter and path checks as plugin-bundled skills. (#504)
-- Add MCP server field parity: `headers`, `disabled`, `disabled_tools`, and
-  `timeout` on MCP server entries. All optional — existing configs parse
-  unchanged. (#505)
-- `CrushAdapter`: Crush is now a supported engine. `export`/`hook`/`regenerate`
-  render `crush.json` when `crush` is on `PATH`. What maps: permissions →
-  `allowed_tools`/`denied_tools` (lossy, fail-closed — `ask` rules collapse to
-  `denied_tools`, never silently allowed; Crush has no ask concept); hooks →
-  `PreToolUse` only (`mcp_tool`-kind hooks and unsupported hook events are
-  skipped with a warning naming the hook, not fatal to the rest of the render);
-  MCP servers (including `headers`, `disabled_tools`, `timeout`); LSP servers →
-  `lsp.<name>`; first-class skills and plugin-projected skills →
-  `options.skills_paths`. Non-skill plugin content (`agents/`, `commands/`,
-  `hooks/`) is skipped with a warning naming the offending plugin — the rest of
-  the manifest still materializes. `native.crush` / `native_permissions.crush`
-  / `native_hooks.crush` / `native_mcp.crush` merge verbatim — provider/model config
-  lives here until first-class provider config ships (#508). Docs in #507. (#506, #543)
+- `CrushAdapter` hardening: incompatible hook events, `mcp_tool` hooks, and
+  non-skill plugin content (`agents/`, `commands/`, `hooks/`) now warn and skip
+  instead of hard-erroring the entire render — one unsupported piece no longer
+  blocks Crush output altogether. (#543)
 - `llmenv doctor` now reports, by name, every hook event that a `PATH`-detected
   adapter can't materialize (e.g. Crush skipping a `PostToolUse` hook), and its
   token-efficiency checks now count a var as set if it's declared in
@@ -100,29 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Wires a diagnostic consolidation hook into the SessionEnd lifecycle; LLM integration
   deferred. (#271, #595)
 
-### Changed
-
-- **Behavior change (dual-engine export):** `export`, `hook`, and `regenerate`
-  now iterate all registered engine adapters. If `crush` is on `PATH`, a new
-  `crush/` cache subtree is materialized and `CRUSH_GLOBAL_CONFIG` /
-  `CRUSH_GLOBAL_DATA` are exported alongside the existing Claude Code env vars.
-  Claude-only users (no `crush` binary on PATH) see no change. (#502, #506)
-- **BREAKING:** `session_log` is now a mapping (`{ file, transcript, verbose,
-  path, max_content_bytes }`), not a path string. ICM transcript logging is on
-  by default. The pre-3.0 `session_log: "<path>"` form is rejected with a
-  migration hint. (#382)
-
-### Removed
-
-- `LLMENV_BASH_BAN` env var and its deny-rule wiring. It was broken as shipped
-  (read from llmenv's process env before bundle-declared values landed) and is
-  superseded by the built-in context-mode feature. (#490, removes #464)
-
 ### Fixed
 
-- Fix marketplace and plugin-payload sync returning a broken clone with unstable cache key when
-  git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
-  cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 - Fix `export`/`regenerate` never actually materializing Crush output: the internal
   materialization step ignored which adapter was passed in and always rendered Claude
   Code's layout, so `crush.json` and `CRUSH_GLOBAL_CONFIG`/`CRUSH_GLOBAL_DATA` were never
@@ -217,6 +157,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   phantom `topFocus` in `SPEC.md`. (#607)
 - Fix example plugin augmentation: pinned slop-scan wrapper and cryptic dangling
   bullet in `general.md`. (#608)
+
+## [3.0.0-rc.1] - 2026-07-01
+
+### Added
+
+- `features.context_mode` built-in feature: enabling `features.context_mode.enabled`
+  auto-wires the context-mode plugin (marketplace, plugin, durable
+  `CONTEXT_MODE_DATA_DIR`, and MCP permission) — the token-efficiency counterpart
+  to the built-in ICM memory feature. Warns when the plugin is also declared manually
+  in a plugin-collection. (#490)
+- ICM-transcript session logging: llmenv records scope + lifecycle (and, with
+  `session_log.verbose`, prompts and tool use) into ICM's transcript store via
+  the ICM MCP, discoverable by `llmenv-tag:` / `llmenv-bundle:` tokens and
+  project. A local JSONL `file` sink mirrors the same stream, independent of
+  ICM reachability. (#382)
+- The Claude Code adapter now auto-registers `SessionStart`/`SessionEnd` hooks
+  running `llmenv hook-run`, fixing a gap where the ICM memory wake-up/store
+  dispatcher existed but was never wired into generated `settings.json` —
+  memory wake-up/store now actually fires. Continuous per-prompt recall
+  (`turn_start`) is still unwired; tracked in #499. (#382)
+- Multi-engine foundation for a second agent engine (Crush): `export`, `hook`,
+  and `regenerate` now iterate a registry of engine adapters, materializing each
+  into its own per-engine cache subtree and skipping any whose binary isn't on
+  `PATH`. Claude-only users see no behavior change. Groundwork for the Crush
+  adapter (#506); no Crush support ships yet. (#502)
+- Add first-class `lsp:` capability: declare language servers (`name`, `when`,
+  `command`, `args`, `env`, `disabled`, `filetypes`, `root_markers`,
+  `init_options`, `timeout`) at the top level or inside a bundle, tag-scoped like
+  `mcp`. Engines with no LSP concept (Claude Code) silently ignore them. (#503)
+- Add first-class `skills:` capability, decoupled from plugins: declare a skill
+  (`name`, `path`, `when`) directly in config or a bundle, tag-scoped, validated
+  with the same frontmatter and path checks as plugin-bundled skills. (#504)
+- Add MCP server field parity: `headers`, `disabled`, `disabled_tools`, and
+  `timeout` on MCP server entries. All optional — existing configs parse
+  unchanged. (#505)
+- `CrushAdapter`: Crush is now a supported engine. `export`/`hook`/`regenerate`
+  render `crush.json` when `crush` is on `PATH`. What maps: permissions →
+  `allowed_tools`/`denied_tools` (lossy, fail-closed — `ask` rules collapse to
+  `denied_tools`, never silently allowed; Crush has no ask concept); hooks →
+  `PreToolUse` only (`mcp_tool`-kind hooks and unsupported hook events hard-error
+  with an actionable message); MCP servers (including `headers`, `disabled_tools`,
+  `timeout`); LSP servers → `lsp.<name>`; first-class skills and plugin-projected
+  skills → `options.skills_paths`. Non-skill plugin content (`agents/`, `commands/`)
+  hard-errors naming the offending plugin. `native.crush` / `native_permissions.crush`
+  / `native_hooks.crush` / `native_mcp.crush` merge verbatim — provider/model config
+  lives here until first-class provider config ships (#508). Docs in #507. (#506)
+
+### Changed
+
+- **Behavior change (dual-engine export):** `export`, `hook`, and `regenerate`
+  now iterate all registered engine adapters. If `crush` is on `PATH`, a new
+  `crush/` cache subtree is materialized and `CRUSH_GLOBAL_CONFIG` /
+  `CRUSH_GLOBAL_DATA` are exported alongside the existing Claude Code env vars.
+  Claude-only users (no `crush` binary on PATH) see no change. (#502, #506)
+- **BREAKING:** `session_log` is now a mapping (`{ file, transcript, verbose,
+  path, max_content_bytes }`), not a path string. ICM transcript logging is on
+  by default. The pre-3.0 `session_log: "<path>"` form is rejected with a
+  migration hint. (#382)
+
+### Removed
+
+- `LLMENV_BASH_BAN` env var and its deny-rule wiring. It was broken as shipped
+  (read from llmenv's process env before bundle-declared values landed) and is
+  superseded by the built-in context-mode feature. (#490, removes #464)
+
+### Fixed
+
+- Fix marketplace and plugin-payload sync returning a broken clone with unstable cache key when
+  git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
+  cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 ## [2.3.0] - 2026-06-30
 
