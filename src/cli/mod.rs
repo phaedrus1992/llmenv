@@ -1097,6 +1097,15 @@ fn build_and_materialize(
         .lsp
         .retain(|l| tag_active(&l.when, tags));
 
+    // Dedup skills by name: two bundles contributing the same-named skill with
+    // different source paths would collide in write_first_class_skills. First
+    // bundle wins (retain visits in order; skip later duplicates by name).
+    let mut seen_skill_names = std::collections::HashSet::new();
+    manifest
+        .capabilities
+        .skills
+        .retain(|s| seen_skill_names.insert(s.name.clone()));
+
     // Store resolved throttle (top-level + bundle) for hook retrieval.
     if let Err(e) = crate::throttle::store_active_throttle(manifest.throttle.as_ref()) {
         tracing::debug!("failed to store throttle state (non-fatal): {e}");
