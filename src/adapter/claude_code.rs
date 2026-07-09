@@ -744,9 +744,15 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         //    files we already copied into `out`.
         let resolved_command = if let Some(cmd) = &hook.handler.command {
             if hook.bundle_origin.is_some() {
-                resolve_bundle_relative_paths(cmd, out)
-                    .or_else(|| resolve_command_paths_against_files(cmd, out, &manifest.files))
-                    .or_else(|| Some(cmd.clone()))
+                let resolved = resolve_bundle_relative_paths(cmd, out)
+                    .or_else(|| resolve_command_paths_against_files(cmd, out, &manifest.files));
+                if resolved.is_none() && cmd.contains('/') {
+                    tracing::debug!(
+                        command = %cmd,
+                        "bundle hook path could not be re-anchored to cache directory"
+                    );
+                }
+                resolved.or_else(|| Some(cmd.clone()))
             } else {
                 Some(cmd.clone())
             }
