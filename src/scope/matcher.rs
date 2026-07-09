@@ -470,7 +470,7 @@ mod tests {
             for i in 0..depth {
                 deep_path.push(format!("d{i}"));
             }
-            let _ = std::fs::create_dir_all(&deep_path);
+            prop_assume!(std::fs::create_dir_all(&deep_path).is_ok());
 
             // Place marker at root; walk from deep_path should find it.
             write_project_file(root, "id: root-marker\n");
@@ -488,7 +488,7 @@ mod tests {
             for i in 0..depth {
                 deep_work.push(format!("w{i}"));
             }
-            let _ = std::fs::create_dir_all(&deep_work);
+            prop_assume!(std::fs::create_dir_all(&deep_work).is_ok());
             write_project_file(above_home, "id: hostile\n");
 
             let env2 = env_in(&deep_work, &home);
