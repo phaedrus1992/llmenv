@@ -1,8 +1,8 @@
 use crate::config::{Bundle, Config};
 use crate::paths;
 use anyhow::Context;
-<<<<<<< HEAD
 use std::collections::HashSet;
+use std::path::Path;
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -24,10 +24,6 @@ fn effective_token_efficiency_var(
         .or_else(|| value.as_bool().map(|b| b.to_string()))
         .or_else(|| value.as_i64().map(|n| n.to_string()))
 }
-=======
-use std::collections::{BTreeSet, HashSet};
-use std::path::Path;
->>>>>>> origin/release/2.x
 
 pub(super) fn run_doctor_token_efficiency(
     use_color: bool,
