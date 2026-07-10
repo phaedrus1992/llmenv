@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.0.0] - 2026-07-10
+
 ### Major changes since v2.4.1
 
 This release introduces a multi-engine architecture (Crush alongside Claude
