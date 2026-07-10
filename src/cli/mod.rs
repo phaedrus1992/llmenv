@@ -3239,8 +3239,30 @@ mod tests {
     #[test]
     fn installed_adapters_case_insensitive_disabled_engines() {
         // #564: disabled_engines entries should match case-insensitively
+        // Must cover every registered adapter to assert .count() == 0.
+        // Use the free function engine_id() and mangle case so the test exercises
+        // the case-insensitive path rather than an exact match.
+        let all_case_mangled: Vec<String> = crate::adapter::registered_adapters()
+            .iter()
+            .map(|a| {
+                let id = crate::adapter::engine_id(a.as_ref());
+                // First letter upper → last letter upper, remainder middle-case
+                let mangled: String = id
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if i % 2 == 0 {
+                            c.to_ascii_uppercase()
+                        } else {
+                            c.to_ascii_lowercase()
+                        }
+                    })
+                    .collect();
+                mangled
+            })
+            .collect();
         let config = Config {
-            disabled_engines: vec!["Claude_Code".to_string(), "CRUSH".to_string()],
+            disabled_engines: all_case_mangled,
             ..Config::default()
         };
         assert_eq!(

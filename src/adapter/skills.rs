@@ -36,18 +36,40 @@ pub(crate) fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
 /// break whenever `CLAUDE_CONFIG_DIR` points at a materialized llmenv folder
 /// (the normal case). `label` names the offending file in the error.
 ///
+/// References inside backtick-quoted inline spans or fenced code blocks
+/// (e.g. `` `~/.claude/CLAUDE.md` `` or ```` ``` ... ~/.claude ... ``` ````)
+/// are not flagged — they document provenance, not runtime usage.
+///
 /// Suppression:
 /// - `# llmenv-ignore-file: hardcoded-path` anywhere in the file skips the entire file.
 /// - `# llmenv-ignore: hardcoded-path` at the end of a line skips that line only.
-fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()> {
+pub(crate) fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()> {
     if content.contains(IGNORE_FILE) {
         return Ok(());
     }
+
+    let mut in_fenced_block = false;
+
     for line in content.lines() {
         if line.contains(IGNORE_INLINE) {
             continue;
         }
-        if line.contains("~/.claude") || line.contains("$HOME/.claude") {
+
+        // Track fenced code blocks (```) — paths inside them are documentation
+        // examples/test-scenarios, not runtime references. Per the Markdown spec,
+        // a code fence is a line starting with up to 3 spaces of indent followed
+        // by three or more backticks (or tildes).
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fenced_block = !in_fenced_block;
+            continue;
+        }
+
+        if in_fenced_block {
+            continue;
+        }
+
+        if has_unquoted_hardcoded_path(line) {
             anyhow::bail!(
                 "{label} contains hardcoded ~/.claude or $HOME/.claude paths. \
                  Use ${{CLAUDE_PLUGIN_ROOT}} or relative paths instead so it \
@@ -55,7 +77,27 @@ fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()
             );
         }
     }
+
     Ok(())
+}
+
+/// Returns `true` when `line` contains a hardcoded `.claude` config path
+/// (`~/.claude`, `$HOME/.claude`, `${HOME}/.claude`) *outside* backtick-quoted
+/// spans (documentation references are not flagged).
+fn has_unquoted_hardcoded_path(line: &str) -> bool {
+    for pattern in &["~/.claude", "$HOME/.claude", "${HOME}/.claude"] {
+        let mut search_start = 0;
+        while let Some(pos) = line[search_start..].find(pattern) {
+            let abs_pos = search_start + pos;
+            let before = &line[..abs_pos];
+            let backticks_before = before.matches('`').count();
+            if backticks_before.is_multiple_of(2) {
+                return true;
+            }
+            search_start = abs_pos + pattern.len();
+        }
+    }
+    false
 }
 
 /// `name`/`description` are freeform one-line text per the SKILL.md spec, never
