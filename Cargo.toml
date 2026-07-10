@@ -64,6 +64,7 @@ thiserror = "2.0.18"
 anyhow = "1.0.103"
 directories = "6"
 sha2 = "0.11"
+shellexpand = "3.1.2"
 hex = "0.4.3"
 humantime = "2.3.0"
 jiff = { version = "0.2.30", default-features = false, features = ["std"] }
