@@ -35,6 +35,8 @@ there for the canonical list instead of maintaining a stale local copy.
 
 | Variable | Purpose | Tool | Scope |
 |----------|---------|------|-------|
+| `CLAUDE_CODE_PLUGIN_CACHE_DIR` | Plugin cache root for Claude Code (overrides `<CLAUDE_CONFIG_DIR>/plugins/`). Set to `<adapter_root>/state/plugins/` — outside the per-hash config dir so plugins survive agent re-materialization without re-download (#632) | Claude Code | Process |
+| `CLAUDE_CODE_TMPDIR` | Per-hash temp directory for Claude Code intermediate files, session scratch space, and large tool outputs. Set to `<hash_dir>/tmp/` in the per-hash cache folder, so it is automatically garbage-collected by `llmenv prune` (#630). Also exported as `TMPDIR`, `TMP`, and `TEMP` | Claude Code | Process |
 | `CONTEXT_MODE_DATA_DIR` | context-mode plugin state directory, normalized to forward slashes for cross-platform compatibility. Set by llmenv's durable-state relocation (#175, #490) | context-mode marketplace plugin | Process |
 | `CRUSH_GLOBAL_CONFIG` | Directory containing `crush.json` (rendered by llmenv) — Crush joins `crush.json` onto this itself | Crush CLI | User session |
 | `CRUSH_GLOBAL_DATA` | Crush state directory (points at `LLMENV_STATE_DIR`) | Crush CLI | User session |
