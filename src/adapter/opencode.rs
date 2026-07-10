@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use super::AgentAdapter;
 use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
+use crate::util::dedup;
 
 /// Adapter for opencode: writes `AGENTS.md` and `opencode.json` into the
 /// cache dir and exports `OPENCODE_CONFIG_DIR` so opencode discovers them.
@@ -322,6 +323,80 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(doc.get("lsp").is_none());
     }
+
+    #[test]
+    fn materialize_permissions_allow_rule_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.permissions.allow.push(crate::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let allow = doc["permission"]["allow"].as_array().unwrap();
+        assert!(allow.contains(&serde_json::json!("Bash")));
+    }
+
+    #[test]
+    fn materialize_permissions_empty_when_no_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        OpencodeAdapter
+            .materialize(&MergedManifest::default(), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(doc.get("permission").is_none());
+    }
+
+    #[test]
+    fn materialize_native_opencode_merged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec!["Bash(echo*)".into()],
+                ask: vec![],
+                deny: vec![],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let allow = doc["permission"]["allow"].as_array().unwrap();
+        assert!(allow.contains(&serde_json::json!("Bash(echo*)")));
+    }
+
+    #[test]
+    fn materialize_native_opencode_rejects_modeled_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        let frag: serde_yaml::Value =
+            serde_yaml::from_str("permission:\n  allow: [Bash]\n").unwrap();
+        manifest.native.insert("opencode".into(), frag);
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("permission"),
+            "error must name offending key: {err}"
+        );
+        assert!(
+            err.to_string().contains("native_permissions"),
+            "must point at correct channel"
+        );
+    }
 }
 
 impl AgentAdapter for OpencodeAdapter {
@@ -434,7 +509,7 @@ impl AgentAdapter for OpencodeAdapter {
             }
             // Overlay native_mcp.opencode
             let mut mcp_value = serde_json::Value::Object(mcp_obj);
-            overlay_native_json(
+            super::overlay_native_json(
                 &mut mcp_value,
                 manifest.capabilities.native_mcp.get("opencode"),
                 "native_mcp.opencode",
@@ -486,8 +561,79 @@ impl AgentAdapter for OpencodeAdapter {
             doc.insert("instructions".into(), serde_json::json!(instructions));
         }
 
-        // 4. Write opencode.json
-        let json_bytes = serde_json::to_vec_pretty(&doc)?;
+        // 9. Permissions — opencode uses `permission` (singular), with allow/ask/deny
+        let perms = &manifest.capabilities.permissions;
+        let native_perms = manifest.capabilities.native_permissions.get("opencode");
+
+        let render_rules = |rules: &[crate::config::PermissionRule]| -> Vec<String> {
+            rules
+                .iter()
+                .flat_map(|r| {
+                    if let Some(pat) = &r.pattern {
+                        vec![format!("{}({})", r.tool, pat)]
+                    } else if !r.paths.is_empty() {
+                        r.paths
+                            .iter()
+                            .map(|p| format!("{}({})", r.tool, p))
+                            .collect()
+                    } else {
+                        vec![r.tool.clone()]
+                    }
+                })
+                .collect()
+        };
+
+        let allowed = {
+            let mut v = render_rules(&perms.allow);
+            if let Some(n) = native_perms {
+                v.extend(n.allow.iter().cloned());
+            }
+            dedup(&mut v);
+            v
+        };
+        let asked = {
+            let mut v = render_rules(&perms.ask);
+            if let Some(n) = native_perms {
+                v.extend(n.ask.iter().cloned());
+            }
+            dedup(&mut v);
+            v
+        };
+        let denied = {
+            let mut v = render_rules(&perms.deny);
+            if let Some(n) = native_perms {
+                v.extend(n.deny.iter().cloned());
+            }
+            dedup(&mut v);
+            v
+        };
+
+        if !allowed.is_empty() || !asked.is_empty() || !denied.is_empty() {
+            let mut perm_obj = serde_json::Map::new();
+            if !allowed.is_empty() {
+                perm_obj.insert("allow".into(), serde_json::json!(allowed));
+            }
+            if !asked.is_empty() {
+                perm_obj.insert("ask".into(), serde_json::json!(asked));
+            }
+            if !denied.is_empty() {
+                perm_obj.insert("deny".into(), serde_json::json!(denied));
+            }
+            doc.insert("permission".into(), serde_json::Value::Object(perm_obj));
+        }
+
+        // 10. Native overlay — reject modeled keys, then deep-merge
+        const OPENCODE_MODELED_KEYS: &[&str] = &["instructions", "mcp", "lsp", "permission"];
+        if let Some(native) = manifest.native.get("opencode") {
+            super::reject_modeled_native_keys(native, OPENCODE_MODELED_KEYS, "opencode")?;
+        }
+        let mut doc_value = serde_json::Value::Object(doc);
+        super::overlay_native_json(
+            &mut doc_value,
+            manifest.native.get("opencode"),
+            "native.opencode",
+        )?;
+        let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
         let out_path = out.join(OPENCODE_JSON_FILE);
         crate::paths::write_owner_only(&out_path, &json_bytes)?;
         owned.push(PathBuf::from(OPENCODE_JSON_FILE));
@@ -507,19 +653,4 @@ impl AgentAdapter for OpencodeAdapter {
         })
         .to_string()
     }
-}
-
-/// Convert a YAML native_mcp fragment to JSON and deep-merge it into `dst`.
-/// Inline copy of crush.rs `overlay_native_crush` — generalised to `mod.rs` in Task 6.
-fn overlay_native_json(
-    dst: &mut serde_json::Value,
-    fragment: Option<&serde_yaml::Value>,
-    key_name: &str,
-) -> anyhow::Result<()> {
-    if let Some(frag) = fragment {
-        let as_json = serde_json::to_value(frag)
-            .map_err(|e| anyhow::anyhow!("converting {key_name} fragment to JSON: {e}"))?;
-        llmenv_util::merge_json(dst, as_json);
-    }
-    Ok(())
 }
