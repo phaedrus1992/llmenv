@@ -741,6 +741,10 @@ mod tests {
                 args: vec![],
                 env: BTreeMap::new(),
                 url: None,
+                headers: BTreeMap::new(),
+                disabled: false,
+                disabled_tools: vec![],
+                timeout: None,
             }],
             capabilities: Capabilities {
                 native_permissions: BTreeMap::from([(
