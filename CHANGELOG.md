@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.1.0] - 2026-07-10
+
 ### Added
 - Auto-activate OS tag in scope resolution — bundles with OS-specific `when:` tags
   (e.g. `linux`, `macos`, `windows`) now activate automatically without requiring
@@ -851,7 +853,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...v3.0.0
 [3.0.0-rc.2]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.1...v3.0.0-rc.2
 [3.0.0-rc.1]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...v3.0.0-rc.1
