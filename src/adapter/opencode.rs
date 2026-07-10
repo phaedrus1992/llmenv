@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use super::AgentAdapter;
 use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
-use crate::util::dedup;
 
 /// Adapter for opencode: writes `AGENTS.md` and `opencode.json` into the
 /// cache dir and exports `OPENCODE_CONFIG_DIR` so opencode discovers them.
@@ -513,63 +512,97 @@ impl AgentAdapter for OpencodeAdapter {
             doc.insert("instructions".into(), serde_json::json!(instructions));
         }
 
-        // 9. Permissions — opencode uses `permission` (singular), with allow/ask/deny
+        // 9. Permissions — opencode uses `permission` with per-tool pattern→action maps.
+        //     Format: { "bash": { "otool *": "allow", "rm *": "deny" } }
         let perms = &manifest.capabilities.permissions;
         let native_perms = manifest.capabilities.native_permissions.get("opencode");
 
-        let render_rules = |rules: &[crate::config::PermissionRule]| -> Vec<String> {
-            rules
-                .iter()
-                .flat_map(|r| {
-                    if let Some(pat) = &r.pattern {
-                        vec![format!("{}({})", r.tool, pat)]
-                    } else if !r.paths.is_empty() {
-                        r.paths
-                            .iter()
-                            .map(|p| format!("{}({})", r.tool, p))
-                            .collect()
-                    } else {
-                        vec![r.tool.clone()]
-                    }
-                })
-                .collect()
-        };
+        let mut permission_map: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        > = std::collections::BTreeMap::new();
 
-        let allowed = {
-            let mut v = render_rules(&perms.allow);
-            if let Some(n) = native_perms {
-                v.extend(n.allow.iter().cloned());
+        // Convert a PermissionRule into (tool_lowercase, pattern) pairs.
+        // Rules with a pattern use it; rules with paths use each path as a pattern;
+        // bare rules (no pattern, no paths) wildcard-match everything for the tool.
+        fn rule_to_patterns(rule: &crate::config::PermissionRule) -> Vec<(String, String)> {
+            if let Some(pat) = &rule.pattern {
+                vec![(rule.tool.to_ascii_lowercase(), pat.clone())]
+            } else if !rule.paths.is_empty() {
+                rule.paths
+                    .iter()
+                    .map(|p| (rule.tool.to_ascii_lowercase(), p.clone()))
+                    .collect()
+            } else {
+                vec![(rule.tool.to_ascii_lowercase(), "*".to_string())]
             }
-            dedup(&mut v);
-            v
-        };
-        let asked = {
-            let mut v = render_rules(&perms.ask);
-            if let Some(n) = native_perms {
-                v.extend(n.ask.iter().cloned());
-            }
-            dedup(&mut v);
-            v
-        };
-        let denied = {
-            let mut v = render_rules(&perms.deny);
-            if let Some(n) = native_perms {
-                v.extend(n.deny.iter().cloned());
-            }
-            dedup(&mut v);
-            v
-        };
+        }
 
-        if !allowed.is_empty() || !asked.is_empty() || !denied.is_empty() {
+        // Parse a native string like "Bash(otool *)" or bare "Bash" back into
+        // (tool_lowercase, pattern). A bare tool name wildcard-matches everything.
+        fn parse_native_rule(s: &str) -> (String, String) {
+            if let Some(start) = s.find('(') {
+                if let Some(end) = s.rfind(')') {
+                    return (
+                        s[..start].to_ascii_lowercase(),
+                        s[start + 1..end].to_string(),
+                    );
+                }
+            }
+            (s.to_ascii_lowercase(), "*".to_string())
+        }
+
+        // Insert structured rules into the per-tool map. Deny overrides ask
+        // overrides allow for the same tool+pattern (last-write-wins).
+        fn insert_rules(
+            map: &mut std::collections::BTreeMap<
+                String,
+                std::collections::BTreeMap<String, String>,
+            >,
+            rules: &[crate::config::PermissionRule],
+            action: &str,
+        ) {
+            for (tool, pattern) in rules.iter().flat_map(rule_to_patterns) {
+                map.entry(tool)
+                    .or_default()
+                    .insert(pattern, action.to_string());
+            }
+        }
+
+        // Insert native rules (already in llmenv grammar) into the per-tool map.
+        fn insert_native(
+            map: &mut std::collections::BTreeMap<
+                String,
+                std::collections::BTreeMap<String, String>,
+            >,
+            strings: &[String],
+            action: &str,
+        ) {
+            for s in strings {
+                let (tool, pattern) = parse_native_rule(s);
+                map.entry(tool)
+                    .or_default()
+                    .insert(pattern, action.to_string());
+            }
+        }
+
+        insert_rules(&mut permission_map, &perms.allow, "allow");
+        insert_rules(&mut permission_map, &perms.ask, "ask");
+        insert_rules(&mut permission_map, &perms.deny, "deny");
+        if let Some(n) = native_perms {
+            insert_native(&mut permission_map, &n.allow, "allow");
+            insert_native(&mut permission_map, &n.ask, "ask");
+            insert_native(&mut permission_map, &n.deny, "deny");
+        }
+
+        if !permission_map.is_empty() {
             let mut perm_obj = serde_json::Map::new();
-            if !allowed.is_empty() {
-                perm_obj.insert("allow".into(), serde_json::json!(allowed));
-            }
-            if !asked.is_empty() {
-                perm_obj.insert("ask".into(), serde_json::json!(asked));
-            }
-            if !denied.is_empty() {
-                perm_obj.insert("deny".into(), serde_json::json!(denied));
+            for (tool, patterns) in &permission_map {
+                let mut pmap = serde_json::Map::new();
+                for (pattern, action) in patterns {
+                    pmap.insert(pattern.clone(), serde_json::json!(action));
+                }
+                perm_obj.insert(tool.clone(), serde_json::Value::Object(pmap));
             }
             doc.insert("permission".into(), serde_json::Value::Object(perm_obj));
         }
@@ -1144,8 +1177,10 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let allow = doc["permission"]["allow"].as_array().unwrap();
-        assert!(allow.contains(&serde_json::json!("Bash")));
+        // Old format: doc["permission"]["allow"] as array of strings
+        // New format: doc["permission"]["bash"]["*"] = "allow"
+        let bash = &doc["permission"]["bash"];
+        assert_eq!(bash["*"], serde_json::json!("allow"));
     }
 
     #[test]
@@ -1178,8 +1213,61 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let allow = doc["permission"]["allow"].as_array().unwrap();
-        assert!(allow.contains(&serde_json::json!("Bash(echo*)")));
+        // Old format: doc["permission"]["allow"] as array with "Bash(echo*)"
+        // New format: doc["permission"]["bash"]["echo*"] = "allow"
+        let bash = &doc["permission"]["bash"];
+        assert_eq!(bash["echo*"], serde_json::json!("allow"));
+    }
+
+    #[test]
+    fn materialize_permissions_mixed_allow_deny_same_tool() {
+        // Regression test: user config had Bash allow and Bash deny rules with
+        // patterns. Old format emitted flat arrays; OpenCode 1.17.15 expects
+        // per-tool pattern→action maps.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.permissions.allow.push(crate::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("otool *".into()),
+            paths: vec![],
+        });
+        caps.permissions.allow.push(crate::config::PermissionRule {
+            tool: "Read".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        caps.permissions.deny.push(crate::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("rm *".into()),
+            paths: vec![],
+        });
+        caps.permissions.deny.push(crate::config::PermissionRule {
+            tool: "Edit".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // Verify per-tool format: each tool key maps patterns to actions
+        let bash = &doc["permission"]["bash"];
+        assert_eq!(bash["otool *"], serde_json::json!("allow"));
+        assert_eq!(bash["rm *"], serde_json::json!("deny"));
+
+        let read = &doc["permission"]["read"];
+        assert_eq!(read["*"], serde_json::json!("allow"));
+
+        let edit = &doc["permission"]["edit"];
+        assert_eq!(edit["*"], serde_json::json!("deny"));
+
+        // No flat "allow"/"deny"/"ask" arrays at the permission level
+        assert!(doc["permission"].get("allow").is_none());
+        assert!(doc["permission"].get("deny").is_none());
+        assert!(doc["permission"].get("ask").is_none());
     }
 
     #[test]
