@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.4.0] - 2026-07-10
+
 ### Added
 
 - Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
@@ -589,7 +591,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/phaedrus1992/llmenv/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/phaedrus1992/llmenv/compare/v2.1.0...v2.2.0
