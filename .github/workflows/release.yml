@@ -23,12 +23,15 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux builds use musl for fully static binaries — no glibc
+          # version dependency at runtime, so they work on any Linux distro
+          # regardless of glibc age (fixes homebrew-tap glibc mismatch).
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             artifact_name: llmenv
             asset_name: llmenv-linux-x86_64
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             artifact_name: llmenv
             asset_name: llmenv-linux-aarch64
           - os: macos-latest
