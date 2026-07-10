@@ -147,9 +147,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix skill materialization rejecting a `SKILL.md` whose `description` contains a colon (e.g.
   "Triggers on: ..."); `name`/`description` values are now auto-quoted before the strict YAML
   parse so a single malformed-looking skill no longer takes down the whole adapter (#568)
-- Fix `emit_hook_context` including `additionalContext` in `SessionStart` and `SessionEnd`
-  hook output; Claude Code's hook schema rejects `additionalContext` for store-only events,
-  so those events now return empty output. (#558)
 - Fix bundle hook paths in generated `settings.json` referencing the source directory instead
   of the materialized cache directory. Hook paths now resolve against the cache copy via
   two-pass resolution — direct join for clean relative paths, suffix-match against the
@@ -245,6 +242,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix marketplace and plugin-payload sync returning a broken clone with unstable cache key when
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
+
+## [2.4.0] - 2026-07-10
+
+### Fixed
+
+- Fix hook context emission including `additionalContext` content in store-only events
+  (SessionStart, SessionEnd), which Claude Code's hook schema rejects — store-only events now
+  emit empty output instead of triggering a validation error at the end of every session (#558)
 
 ## [2.3.0] - 2026-06-30
 
@@ -788,6 +793,7 @@ Aborted release. CI pipeline issue.
 [Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...HEAD
 [3.0.0-rc.2]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.1...v3.0.0-rc.2
 [3.0.0-rc.1]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...v3.0.0-rc.1
+[2.4.0]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/phaedrus1992/llmenv/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/phaedrus1992/llmenv/compare/v2.1.0...v2.2.0
