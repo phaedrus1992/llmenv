@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Major changes since v2.4.1
+
+This release introduces a multi-engine architecture (Crush alongside Claude
+Code), a built-in persistent memory system via ICM, automatic context-mode
+integration, and a new interactive setup wizard. Full granular changeset in
+the rc.1 and rc.2 sections below.
+
+- **Multi-engine support** — llmenv now drives Crush as a second agent engine
+  alongside Claude Code. `export`/`hook`/`regenerate` iterate all installed
+  adapters. The CrushAdapter renders hooks, MCP servers (stdio/SSE/HTTP), LSP,
+  permissions, and skills against Crush's actual schema.
+- **ICM Memory System** — Built-in persistent memory with session logging
+  (transcript + JSONL file), CLI observability (`llmenv memory stats|list|diff|prune`),
+  importance/type annotations, consolidation groundwork, and `SessionStart`/
+  `SessionEnd` lifecycle hooks that actually wire memory wake-up and store.
+- **Context-mode integration** — Enabling `features.context_mode` auto-wires
+  the context-mode plugin: marketplace clone, MCP server, durable data dir,
+  and permissions. Supersedes the removed `LLMENV_BASH_BAN`.
+- **`llmenv setup` wizard** — Interactive command that scans existing tool
+  configs (`~/.claude`, `~/.cursor`), prompts for preferences, and generates a
+  validated `config.yaml` with starter `AGENTS.md`.
+- **First-class LSP & Skills** — Declare language servers (`name`, `command`,
+  `filetypes`, `init_options`, etc.) and skills directly in config or bundles,
+  tag-scoped and independent of the plugin model.
+- **MCP field parity** — `headers`, `disabled`, `disabled_tools`, and `timeout`
+  on MCP server entries.
+- **Config validation & observability** — `llmenv doctor` warns on dangling
+  bundle dirs, unused marketplace entries, and orphaned `native_permissions`.
+  `disabled_engines` skips rendering for named engines. Token-efficiency checks
+  in `doctor`, `--compress` export flag.
+- **BREAKING:** `session_log` is now a mapping (`{ file, transcript, verbose,
+  path, max_content_bytes }`) instead of a path string. The old string form is
+  rejected with a migration hint.
+- **Removed:** `LLMENV_BASH_BAN` env var; superseded by context-mode.
+
+### Changes since v3.0.0-rc.2
+
+- Forward-merged from 2.4.0: per-hash `CLAUDE_CODE_TMPDIR` temp isolation and
+  `CLAUDE_CODE_PLUGIN_CACHE_DIR` durable plugin cache (#630, #632)
+- Forward-merged from 2.4.0: `CONTEXT_MODE_DATA_DIR` and other state-directory
+  env vars now emit forward-slash paths on all platforms (#497)
+- `llmenv doctor` structural validation: dangling bundle directories, unused
+  marketplace entries, orphaned `native_permissions` keys (#604)
+- CI: trusted publishing to crates.io via OpenID Connect
+
 ## [3.0.0-rc.2] - 2026-07-09
 
 ### Added
