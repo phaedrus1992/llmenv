@@ -1509,7 +1509,8 @@ mod tests {
     }
 
     #[test]
-    fn web_fetch_store_args_handles_missing_url() {
+    fn web_fetch_store_args_handles_missing_url_or_tool_input() {
+        // Missing url key within tool_input.
         let payload = json!({
             "tool_name": "WebFetch",
             "tool_input": {},
@@ -1518,17 +1519,18 @@ mod tests {
         let args = web_fetch_store_args(&payload).expect("should handle missing url");
         let content = args["content"].as_str().unwrap();
         assert!(content.contains("unknown"), "should fall back to 'unknown'");
-    }
 
-    #[test]
-    fn web_fetch_store_args_handles_missing_tool_input() {
-        let payload = json!({
+        // Missing entire tool_input key — same serde_json Null path.
+        let payload2 = json!({
             "tool_name": "WebFetch",
             "tool_response": "content",
         });
-        let args = web_fetch_store_args(&payload).expect("should handle missing tool_input");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("unknown"), "should fall back to 'unknown'");
+        let args2 = web_fetch_store_args(&payload2).expect("should handle missing tool_input");
+        let content2 = args2["content"].as_str().unwrap();
+        assert!(
+            content2.contains("unknown"),
+            "should fall back to 'unknown'"
+        );
     }
 
     #[test]
