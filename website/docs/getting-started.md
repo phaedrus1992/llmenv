@@ -182,3 +182,7 @@ Full per-command reference: [commands.md](commands.md).
 - [Concepts](concepts.md) — how resolution actually works.
 - [Configuration](configuration.md) — the full schema.
 - [MCP & Memory](mcp.md) — wiring MCP servers and the shared memory backend.
+
+## Community
+
+[Join the Discord](https://discord.gg/HvQrGAaGAS) — ask questions, share configs, report bugs, or just hang out.
