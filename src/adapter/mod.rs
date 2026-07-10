@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod crush;
+pub mod opencode;
 pub(crate) mod skills;
 
 use std::path::{Path, PathBuf};
@@ -101,6 +102,7 @@ pub fn active_adapter() -> Box<dyn AgentAdapter> {
         .find(|a| match a.name() {
             "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
             "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
+            "opencode" => std::env::var("OPENCODE_CONFIG_DIR").is_ok(),
             _ => false,
         })
         .unwrap_or_else(|| Box::new(claude_code::ClaudeCodeAdapter))
@@ -117,6 +119,7 @@ pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     vec![
         Box::new(claude_code::ClaudeCodeAdapter),
         Box::new(crush::CrushAdapter),
+        Box::new(opencode::OpencodeAdapter),
     ]
 }
 
@@ -293,11 +296,12 @@ mod tests {
         let adapters = registered_adapters();
         assert_eq!(
             adapters.len(),
-            2,
-            "registry should have exactly two adapters"
+            3,
+            "registry should have exactly three adapters"
         );
         assert_eq!(adapters[0].name(), "claude-code");
         assert_eq!(adapters[1].name(), "crush");
+        assert_eq!(adapters[2].name(), "opencode");
     }
 
     #[test]
@@ -350,7 +354,7 @@ mod tests {
 
     #[test]
     fn known_engine_ids_matches_registered_adapters() {
-        assert_eq!(known_engine_ids(), vec!["claude_code", "crush"]);
+        assert_eq!(known_engine_ids(), vec!["claude_code", "crush", "opencode"]);
     }
 
     #[test]
@@ -383,6 +387,59 @@ mod tests {
         assert!(
             !binary_on_path("sh\techo"),
             "name with tab must be rejected without spawning which"
+        );
+    }
+
+    #[test]
+    fn registry_contains_opencode_adapter() {
+        let adapters = registered_adapters();
+        assert_eq!(adapters.len(), 3, "registry should now have three adapters");
+        let names: Vec<&str> = adapters.iter().map(|a| a.name()).collect();
+        assert!(
+            names.contains(&"opencode"),
+            "registry missing opencode adapter"
+        );
+    }
+
+    #[test]
+    fn opencode_adapter_trait_probes() {
+        let adapters = registered_adapters();
+        let o = adapters
+            .iter()
+            .find(|a| a.name() == "opencode")
+            .expect("opencode adapter must be registered");
+        assert_eq!(o.binary_name(), "opencode");
+        assert!(o.supports_plugins(), "OpencodeAdapter supports plugins");
+        assert!(o.supports_lsp(), "OpencodeAdapter supports LSP");
+        let events = o.supported_hook_events();
+        for expected in [
+            "SessionStart",
+            "SessionEnd",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            assert!(
+                events.contains(&expected),
+                "supported_hook_events missing {expected}"
+            );
+        }
+        // Explicitly verify Claude-only events are NOT supported
+        for claude_only in ["Notification", "SubagentStop", "PreCompact"] {
+            assert!(
+                !events.contains(&claude_only),
+                "OpencodeAdapter must not claim support for {claude_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_engine_ids_includes_opencode() {
+        let ids = known_engine_ids();
+        assert!(
+            ids.contains(&"opencode".to_string()),
+            "known_engine_ids missing opencode"
         );
     }
 
