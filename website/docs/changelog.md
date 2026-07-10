@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix skill materialization rejecting a `SKILL.md` whose `description` contains a colon (e.g.
   "Triggers on: ..."); `name`/`description` values are now auto-quoted before the strict YAML
   parse so a single malformed-looking skill no longer takes down the whole adapter (#568)
+- Fix hook context emission including `additionalContext` content in store-only events
+  (SessionStart, SessionEnd), which Claude Code's hook schema rejects — store-only events now
+  emit empty output instead of triggering a validation error at the end of every session (#558)
 
 ## [2.3.0] - 2026-06-30
 
