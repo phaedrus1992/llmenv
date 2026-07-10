@@ -1117,6 +1117,27 @@ mod tests {
     }
 
     #[test]
+    fn cache_parses_compound_normal_with_major_granularity() {
+        // #651: the compound { normal: { version: major } } form deserializes to
+        // HashingMode::Normal with Major granularity, and roundtrips correctly.
+        let yaml = "cache_dir: ~/.cache/llmenv\nsync_interval_minutes: 60\nhashing:\n  normal:\n    version: major\n";
+        let cache: Cache = serde_yaml::from_str(yaml).expect("parse compound major");
+        assert_eq!(
+            cache.hashing,
+            HashingMode::Normal {
+                version: VersionGranularity::Major
+            }
+        );
+        // Round-trip: serialize back and confirm the compound form is preserved.
+        let serialized = serde_yaml::to_string(&cache.hashing).expect("serialize");
+        let back: HashingMode = serde_yaml::from_str(&serialized).expect("deserialize roundtrip");
+        assert_eq!(
+            cache.hashing, back,
+            "compound form {{ normal: {{ version: major }} }} must round-trip"
+        );
+    }
+
+    #[test]
     fn cache_parses_each_strictness_position() {
         // #246: the single dial accepts loose|normal|strict.
         for (text, expected) in [

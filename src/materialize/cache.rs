@@ -550,6 +550,28 @@ mod tests {
     }
 
     #[test]
+    fn version_major_is_leading_component() {
+        // version_major takes only the leading `major` component of PKG_VERSION.
+        let major = version_major();
+        let expected = PKG_VERSION.split('.').next().unwrap_or("0");
+        assert_eq!(major, expected, "version_major is the leading segment");
+    }
+
+    #[test]
+    fn normal_folder_name_nests_shape_under_version_major() {
+        let s = empty_shape();
+        // Major granularity nests the shape under just the major version.
+        let name = folder_name(
+            &HashingMode::Normal {
+                version: VersionGranularity::Major,
+            },
+            &s,
+            "ignored-hash",
+        );
+        assert_eq!(name, format!("{}/{}", version_major(), s));
+    }
+
+    #[test]
     fn shape_is_deterministic_and_12_hex() {
         let mut tags = BTreeSet::new();
         tags.insert("rust".to_string());
