@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [2.4.1] - 2026-07-10
+
+- CI updates to support trusted publishing to crates.io
+
+## [2.4.0] - 2026-07-10
+
 ### Added
 - Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
   `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping

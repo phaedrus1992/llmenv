@@ -9,21 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
-### Added
-- Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
-  `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
-  temporary files to the current content hash (#630)
-- Add durable plugin cache directory: `CLAUDE_CODE_PLUGIN_CACHE_DIR` now points to
-  `<state_dir>/plugins/` so plugins are not re-downloaded on every scope change (#632)
-
-### Fixed
-
-- Fix `CONTEXT_MODE_DATA_DIR` and other state-directory env vars (from
-  `materialize::state::state_env_vars`) emitting platform-native path separators
-  (`\` on Windows) instead of forward slashes, breaking cross-platform compatibility
-  for consumers that parse paths in these env vars. Normalization consolidated into
-  the existing `normalize_rel` helper. (#497)
-
 ## [3.0.0-rc.2] - 2026-07-09
 
 ### Added
@@ -243,13 +228,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
+## [2.4.1] - 2026-07-10
+
+- CI updates to support trusted publishing to crates.io
+
 ## [2.4.0] - 2026-07-10
+
+### Added
+- Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
+  `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
+  temporary files to the current content hash (#630)
+- Add durable plugin cache directory: `CLAUDE_CODE_PLUGIN_CACHE_DIR` now points to
+  `<state_dir>/plugins/` so plugins are not re-downloaded on every scope change (#632)
 
 ### Fixed
 
 - Fix hook context emission including `additionalContext` content in store-only events
   (SessionStart, SessionEnd), which Claude Code's hook schema rejects — store-only events now
   emit empty output instead of triggering a validation error at the end of every session (#558)
+- Fix `CONTEXT_MODE_DATA_DIR` and other state-directory env vars (from
+  `materialize::state::state_env_vars`) emitting platform-native path separators
+  (`\` on Windows) instead of forward slashes, breaking cross-platform compatibility
+  for consumers that parse paths in these env vars. Normalization consolidated into
+  the existing `normalize_rel` helper. (#497)
 
 ## [2.3.0] - 2026-06-30
 
@@ -793,6 +794,7 @@ Aborted release. CI pipeline issue.
 [Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...HEAD
 [3.0.0-rc.2]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.1...v3.0.0-rc.2
 [3.0.0-rc.1]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...v3.0.0-rc.1
+[2.4.1]: https://github.com/phaedrus1992/llmenv/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/phaedrus1992/llmenv/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/phaedrus1992/llmenv/compare/v2.2.0...v2.2.1
