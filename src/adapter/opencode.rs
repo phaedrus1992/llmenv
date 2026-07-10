@@ -139,6 +139,73 @@ async function spawnHook(event, command, timeoutMs, extra) {
 }
 "#;
 
+// ── Plugin hooks manifest deserialization ──
+
+/// A hooks.json or claude-codex-hooks.json manifest from a plugin hooks/ directory.
+#[derive(serde::Deserialize)]
+struct PluginHooksManifest {
+    hooks: std::collections::HashMap<String, Vec<PluginHookGroup>>,
+}
+
+/// A group of hooks for a single event, with an optional matcher.
+#[derive(serde::Deserialize)]
+struct PluginHookGroup {
+    #[serde(default)]
+    matcher: Option<String>,
+    hooks: Vec<PluginHookEntry>,
+}
+
+/// A single hook entry within a group.
+#[derive(serde::Deserialize)]
+struct PluginHookEntry {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    command: Option<String>,
+}
+
+/// Parse a plugin hooks manifest (hooks.json or claude-codex-hooks.json) into
+/// [`crate::config::Hook`] structs.
+///
+/// Resolves `${CLAUDE_PLUGIN_ROOT}` to `payload_path` and only emits
+/// `command`-type hooks (other types are silently skipped).
+fn parse_plugin_hooks(
+    hooks_path: &Path,
+    payload_path: &Path,
+    _plugin_name: &str,
+) -> anyhow::Result<Vec<crate::config::Hook>> {
+    let source = std::fs::read_to_string(hooks_path)?;
+    let manifest: PluginHooksManifest = serde_json::from_str(&source)?;
+
+    let mut hooks = Vec::new();
+    for (event, groups) in &manifest.hooks {
+        for group in groups {
+            for entry in &group.hooks {
+                let kind = entry.kind.as_deref().unwrap_or("command");
+                if kind != "command" {
+                    continue;
+                }
+                let Some(raw_command) = &entry.command else {
+                    continue;
+                };
+                let resolved =
+                    raw_command.replace("${CLAUDE_PLUGIN_ROOT}", &payload_path.to_string_lossy());
+                hooks.push(crate::config::Hook {
+                    event: event.clone(),
+                    matcher: group.matcher.clone(),
+                    handler: crate::config::HookHandler {
+                        kind: crate::config::HookHandlerKind::Command,
+                        command: Some(resolved),
+                        tool: None,
+                    },
+                    bundle_origin: None,
+                });
+            }
+        }
+    }
+
+    Ok(hooks)
+}
+
 impl AgentAdapter for OpencodeAdapter {
     fn name(&self) -> &'static str {
         "opencode"
@@ -202,30 +269,46 @@ impl AgentAdapter for OpencodeAdapter {
             crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
         owned.extend(skill_owned);
 
-        // 4. Plugin content translation (commands, agents, MCP, skills).
+        // 4. Plugin content translation (commands, agents, MCP, skills, hooks).
         let mut plugin_mcp_entries: std::collections::BTreeMap<String, serde_json::Value> =
             std::collections::BTreeMap::new();
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
+        let mut plugin_hooks: Vec<crate::config::Hook> = Vec::new();
+        // Native opencode TypeScript plugins that ship their own hook/tool
+        // implementations and don't need MCP/hooks translation.
+        let mut native_opencode_plugins: Vec<String> = Vec::new();
 
         for plugin in &manifest.plugins {
             let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
 
-            // 4a. Plugin-provided MCP (LLM_PROVIDER_MCP_JSON)
-            let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
-            if mcp_json_path.exists() {
-                let content = std::fs::read_to_string(&mcp_json_path)?;
-                let yaml_value: serde_yaml::Value =
-                    serde_yaml::from_str(&content).map_err(|e| {
-                        anyhow::anyhow!(
-                            "plugin '{}': failed to parse LLM_PROVIDER_MCP_JSON: {e}",
-                            plugin.plugin
-                        )
-                    })?;
-                if let Some(obj) = yaml_value.as_mapping() {
-                    let json_value: serde_json::Value = serde_json::to_value(obj)?;
-                    if let Some(json_obj) = json_value.as_object() {
-                        for (k, v) in json_obj {
-                            plugin_mcp_entries.insert(k.clone(), v.clone());
+            // Does this plugin provide native opencode support (e.g. a
+            // TypeScript plugin registered via "plugin" key in opencode.json)?
+            // Known: context-mode ships a native opencode plugin.
+            const NATIVE_OPENCODE_PLUGINS: &[&str] = &["context-mode"];
+            let is_native_opencode = NATIVE_OPENCODE_PLUGINS.contains(&plugin.plugin.as_str());
+
+            // 4a. Plugin-provided MCP (LLM_PROVIDER_MCP_JSON). Skip for native
+            //     opencode plugins — they register their own tools internally
+            //     and including MCP entries would duplicate them.
+            if is_native_opencode {
+                native_opencode_plugins.push(plugin.plugin.clone());
+            } else {
+                let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
+                if mcp_json_path.exists() {
+                    let content = std::fs::read_to_string(&mcp_json_path)?;
+                    let yaml_value: serde_yaml::Value =
+                        serde_yaml::from_str(&content).map_err(|e| {
+                            anyhow::anyhow!(
+                                "plugin '{}': failed to parse LLM_PROVIDER_MCP_JSON: {e}",
+                                plugin.plugin
+                            )
+                        })?;
+                    if let Some(obj) = yaml_value.as_mapping() {
+                        let json_value: serde_json::Value = serde_json::to_value(obj)?;
+                        if let Some(json_obj) = json_value.as_object() {
+                            for (k, v) in json_obj {
+                                plugin_mcp_entries.insert(k.clone(), v.clone());
+                            }
                         }
                     }
                 }
@@ -279,15 +362,49 @@ impl AgentAdapter for OpencodeAdapter {
             let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
             plugin_skill_paths.extend(paths);
 
-            // 4e. Warn on hooks/ dir inside a plugin (not used by opencode).
-            let hooks_dir = payload.join("hooks");
-            if hooks_dir.exists() {
-                eprintln!(
-                    "warning: opencode adapter does not support plugin hooks/ \
-                     directories (plugin '{}'). Declare hooks in \
-                     capabilities.hooks instead.",
-                    plugin.plugin
-                );
+            // 4e. Plugin hooks from hooks/ dir — translate to top-level hooks.
+            //     Skip for native opencode plugins — they handle hooks internally.
+            if !is_native_opencode {
+                let hooks_dir = payload.join("hooks");
+                for manifest_name in ["hooks.json", "claude-codex-hooks.json"] {
+                    let hooks_path = hooks_dir.join(manifest_name);
+                    if !hooks_path.exists() {
+                        continue;
+                    }
+                    let Ok(mut parsed) = parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
+                    else {
+                        eprintln!(
+                            "warning: failed to parse '{}' for plugin '{}'",
+                            hooks_path.display(),
+                            plugin.plugin,
+                        );
+                        continue;
+                    };
+                    // Filter to supported events and command-only kinds at collection
+                    // time, same as §11 does for manifest hooks.
+                    parsed.retain(|hook| {
+                        if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
+                            eprintln!(
+                                "warning: opencode adapter does not support hook event \
+                             '{}' from plugin '{}' — skipping. Supported events: {}.",
+                                hook.event,
+                                plugin.plugin,
+                                SUPPORTED_HOOK_EVENTS.join(", ")
+                            );
+                            return false;
+                        }
+                        if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
+                            eprintln!(
+                                "warning: opencode adapter does not support mcp_tool hook \
+                             from plugin '{}' — skipping.",
+                                plugin.plugin,
+                            );
+                            return false;
+                        }
+                        true
+                    });
+                    plugin_hooks.extend(parsed);
+                }
             }
         }
 
@@ -298,6 +415,13 @@ impl AgentAdapter for OpencodeAdapter {
 
         // 6. Build opencode.json with what we have so far
         let mut doc = serde_json::Map::new();
+
+        // Register native opencode TypeScript plugins (e.g. context-mode) that
+        // ship their own hook/tool implementations independent of the llmenv JS
+        // shim. These are resolved by opencode's plugin system at startup.
+        if !native_opencode_plugins.is_empty() {
+            doc.insert("plugin".into(), serde_json::json!(native_opencode_plugins));
+        }
 
         // 7. MCP servers
         if !manifest.mcps.is_empty() || manifest.capabilities.native_mcp.contains_key("opencode") {
@@ -466,8 +590,8 @@ impl AgentAdapter for OpencodeAdapter {
         crate::paths::write_owner_only(&out_path, &json_bytes)?;
         owned.push(PathBuf::from(OPENCODE_JSON_FILE));
 
-        // 11. Hook shim — filter compatible events, warn on unsupported, generate JS plugin
-        let compatible_hooks: Vec<&crate::config::Hook> = manifest
+        // 11. Hook shim — merge manifest hooks + plugin hooks, generate JS plugin
+        let mut all_hooks: Vec<crate::config::Hook> = manifest
             .capabilities
             .hooks
             .iter()
@@ -494,9 +618,11 @@ impl AgentAdapter for OpencodeAdapter {
                 }
                 true
             })
+            .cloned()
             .collect();
+        all_hooks.extend(plugin_hooks);
 
-        let shim_js = generate_shim_js(&compatible_hooks)?;
+        let shim_js = generate_shim_js(&all_hooks)?;
         let plugin_dir = out.join("plugin");
         std::fs::create_dir_all(&plugin_dir)?;
         crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), shim_js.as_bytes())?;
@@ -557,7 +683,7 @@ impl AgentAdapter for OpencodeAdapter {
 /// Each user-defined hook is mapped to its opencode event and bundled with
 /// the three auto-hooks (`check-stale`, `config-context`, `config-guard`)
 /// that always run on `SessionStart` / `PreToolUse`.
-fn generate_shim_js(hooks: &[&crate::config::Hook]) -> anyhow::Result<String> {
+fn generate_shim_js(hooks: &[crate::config::Hook]) -> anyhow::Result<String> {
     let mut by_event: std::collections::BTreeMap<&str, Vec<serde_json::Value>> =
         std::collections::BTreeMap::new();
     for hook in hooks {
