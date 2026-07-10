@@ -605,6 +605,9 @@ mod tests {
             Just(HashingMode::Normal {
                 version: VersionGranularity::Minor
             }),
+            Just(HashingMode::Normal {
+                version: VersionGranularity::Major
+            }),
             Just(HashingMode::Strict),
         ]
     }
