@@ -157,7 +157,9 @@ pub fn active_adapter() -> Box<dyn AgentAdapter> {
         .find(|a| match a.name() {
             "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
             "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
-            "opencode" => std::env::var("OPENCODE_CONFIG_DIR").is_ok(),
+            "opencode" => {
+                std::env::var("OPENCODE_CONFIG_DIR").is_ok() || binary_on_path("opencode")
+            }
             _ => false,
         })
         .unwrap_or_else(|| Box::new(claude_code::ClaudeCodeAdapter))
