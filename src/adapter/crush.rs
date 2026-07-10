@@ -4,6 +4,7 @@ use serde_json::json;
 
 use super::AgentAdapter;
 use super::resolve_bundle_relative_paths;
+use super::resolve_plugin_payload;
 use crate::merge::MergedManifest;
 use crate::util::{dedup, merge_json};
 
@@ -350,41 +351,6 @@ impl AgentAdapter for CrushAdapter {
         })
         .to_string()
     }
-}
-
-/// Resolve the on-disk payload directory for a plugin.
-///
-/// External plugins (`install_path = Some`) use that path directly.
-/// First-party plugins look up their marketplace `install_location`.
-fn resolve_plugin_payload(
-    plugin: &crate::plugins::resolve::ResolvedPlugin,
-    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
-) -> anyhow::Result<PathBuf> {
-    // P2-5/#534: guard before any path join, regardless of which path is taken.
-    if !crate::paths::is_valid_short_name(&plugin.plugin) {
-        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
-    }
-    if let Some(p) = &plugin.install_path {
-        return Ok(PathBuf::from(p));
-    }
-    let mkt = marketplaces
-        .iter()
-        .find(|m| m.name == plugin.marketplace)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
-                plugin.plugin,
-                plugin.marketplace
-            )
-        })?;
-    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
-            plugin.plugin,
-            plugin.marketplace
-        )
-    })?;
-    Ok(PathBuf::from(install_location).join(&plugin.plugin))
 }
 
 /// Build the `lsp` JSON object (keyed by server name) from a slice of LSP servers.

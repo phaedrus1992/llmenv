@@ -266,6 +266,41 @@ pub(crate) fn resolve_command_paths_against_files(
     if resolved { Some(result) } else { None }
 }
 
+/// Resolve the on-disk payload directory for a plugin.
+///
+/// External plugins (`install_path = Some`) use that path directly.
+/// First-party plugins look up their marketplace `install_location`.
+pub(crate) fn resolve_plugin_payload(
+    plugin: &crate::plugins::resolve::ResolvedPlugin,
+    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
+) -> anyhow::Result<PathBuf> {
+    // P2-5/#534: guard before any path join, regardless of which path is taken.
+    if !crate::paths::is_valid_short_name(&plugin.plugin) {
+        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
+    }
+    if let Some(p) = &plugin.install_path {
+        return Ok(PathBuf::from(p));
+    }
+    let mkt = marketplaces
+        .iter()
+        .find(|m| m.name == plugin.marketplace)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
+                plugin.plugin,
+                plugin.marketplace
+            )
+        })?;
+    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
+            plugin.plugin,
+            plugin.marketplace
+        )
+    })?;
+    Ok(PathBuf::from(install_location).join(&plugin.plugin))
+}
+
 /// Map a resolved remote transport onto the `type` discriminator string shared
 /// by every engine's remote-MCP config shape (`"http"` / `"sse"`).
 ///
