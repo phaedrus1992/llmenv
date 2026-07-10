@@ -541,13 +541,13 @@ impl AgentAdapter for OpencodeAdapter {
         // Parse a native string like "Bash(otool *)" or bare "Bash" back into
         // (tool_lowercase, pattern). A bare tool name wildcard-matches everything.
         fn parse_native_rule(s: &str) -> (String, String) {
-            if let Some(start) = s.find('(') {
-                if let Some(end) = s.rfind(')') {
-                    return (
-                        s[..start].to_ascii_lowercase(),
-                        s[start + 1..end].to_string(),
-                    );
-                }
+            if let Some(start) = s.find('(')
+                && let Some(end) = s.rfind(')')
+            {
+                return (
+                    s[..start].to_ascii_lowercase(),
+                    s[start + 1..end].to_string(),
+                );
             }
             (s.to_ascii_lowercase(), "*".to_string())
         }
