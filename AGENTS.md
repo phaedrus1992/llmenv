@@ -57,6 +57,13 @@ Key invariants (full details in `RELEASING.md`):
   older branch's `CHANGELOG.md`) and add any missing forward-merged fix with its
   back-reference. A changelog edit that leaves an inherited fix unlisted is
   incomplete.
+- **When wrapping up `dev-sprint` or `ship-issue`, always evaluate
+  `CHANGELOG.md` — every user-facing change (fix, feature, enhancement, deprecation, breaking, security)
+  from the current work needs an entry under `[Unreleased]` following
+  [keepachangelog](https://keepachangelog.com) formatting. Invoke the
+  `keepachangelog` skill to check and write entries. Don't leave the task
+  without either adding entries or making a deliberate call that the work
+  has no user-facing changes.
 - **Picking a base branch for an issue:** look at the issue's milestone.
   **Bug Fixes** and **Small Enhancements** branch from the newest `release/X.x`
   branch. **Large Features** branch from `main`. Check available release branches
