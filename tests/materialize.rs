@@ -95,10 +95,24 @@ fn normal_mode_reuses_one_folder_across_manifests() {
     )
     .expect("merge both");
     let shape = empty_shape();
-    let r1 = materialize_with_mode(&m_base, tmp.path(), HashingMode::Normal, &shape)
-        .expect("materialize base");
-    let r2 = materialize_with_mode(&m_both, tmp.path(), HashingMode::Normal, &shape)
-        .expect("materialize both");
+    let r1 = materialize_with_mode(
+        &m_base,
+        tmp.path(),
+        HashingMode::Normal {
+            version: llmenv::config::VersionGranularity::Minor,
+        },
+        &shape,
+    )
+    .expect("materialize base");
+    let r2 = materialize_with_mode(
+        &m_both,
+        tmp.path(),
+        HashingMode::Normal {
+            version: llmenv::config::VersionGranularity::Minor,
+        },
+        &shape,
+    )
+    .expect("materialize both");
     assert_eq!(r1.path, r2.path, "normal mode reuses the same folder");
     assert_ne!(r1.hash, r2.hash, "but the content hash still differs");
 }

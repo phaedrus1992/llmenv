@@ -564,6 +564,7 @@ impl Config {
 mod tests {
     use super::*;
     use crate::HashingMode;
+    use crate::schema::VersionGranularity;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
@@ -601,7 +602,9 @@ mod tests {
     fn arb_hashing_mode() -> impl Strategy<Value = HashingMode> {
         prop_oneof![
             Just(HashingMode::Loose),
-            Just(HashingMode::Normal),
+            Just(HashingMode::Normal {
+                version: VersionGranularity::Minor
+            }),
             Just(HashingMode::Strict),
         ]
     }
