@@ -327,7 +327,7 @@ impl AgentAdapter for CrushAdapter {
         // keys have dedicated rendering paths and must not clobber the security output.
         // Use native_permissions.crush / native_hooks.crush / native_mcp.crush instead.
         if let Some(native) = manifest.native.get("crush") {
-            super::reject_modeled_native_keys(native, &CRUSH_MODELED_KEYS, "crush")?;
+            super::reject_modeled_native_keys(native, CRUSH_MODELED_KEYS, "crush")?;
         }
         let mut doc_value = serde_json::Value::Object(doc);
         super::overlay_native_json(&mut doc_value, manifest.native.get("crush"), "native.crush")?;
@@ -1585,7 +1585,7 @@ mod tests {
         for key in CRUSH_MODELED_KEYS {
             let frag: serde_yaml::Value =
                 serde_yaml::from_str(&format!("{key}: anything")).unwrap();
-            let err = reject_modeled_native_keys(&frag, &CRUSH_MODELED_KEYS, "crush").unwrap_err();
+            let err = reject_modeled_native_keys(&frag, CRUSH_MODELED_KEYS, "crush").unwrap_err();
             assert!(
                 err.to_string().contains(key),
                 "error must name the offending key '{key}': {err}"
