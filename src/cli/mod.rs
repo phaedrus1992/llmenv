@@ -302,9 +302,12 @@ enum Command {
         /// Remove ONLY current-version cache folders older than this duration (e.g., "14d", "1w")
         #[arg(long)]
         older_than: Option<String>,
-        /// Preview deletions without removing (applies to both --all and --older-than)
+        /// Preview deletions without removing (applies to --all, --older-than, and --plugin-cache)
         #[arg(long)]
         dry_run: bool,
+        /// Remove the shared plugin cache directory for all adapters (state/<adapter>/state/plugins/)
+        #[arg(long)]
+        plugin_cache: bool,
     },
     /// Inspect ICM memory state (R2).
     Memory {
@@ -469,8 +472,9 @@ pub fn run() -> anyhow::Result<()> {
             all,
             older_than,
             dry_run,
+            plugin_cache,
         }) => {
-            run_prune(all, older_than, dry_run)?;
+            run_prune(all, older_than, dry_run, plugin_cache)?;
         }
         Some(Command::Validate) => {
             run_validate(use_color)?;
@@ -2840,7 +2844,12 @@ fn run_completions(shell: clap_complete::Shell) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Result<()> {
+fn run_prune(
+    all: bool,
+    older_than: Option<String>,
+    dry_run: bool,
+    plugin_cache: bool,
+) -> anyhow::Result<()> {
     use crate::materialize::cache::PruneMode;
 
     // Validate flag combinations
@@ -2862,6 +2871,38 @@ fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Re
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let cache_dir = expand_tilde(&config.cache.cache_dir)?;
+
+    // --plugin-cache: remove shared plugin cache dirs. Independent of other flags.
+    let mut plugin_removed: Vec<std::path::PathBuf> = Vec::new();
+    let mut plugin_failed: Vec<std::path::PathBuf> = Vec::new();
+    if plugin_cache {
+        for adapter in crate::adapter::registered_adapters() {
+            let plugins_dir = cache_dir
+                .join(adapter.name())
+                .join(crate::materialize::state::STATE_DIR_NAME)
+                .join("plugins");
+            if dry_run {
+                // Report as removed but don't actually delete.
+                plugin_removed.push(plugins_dir);
+            } else {
+                match std::fs::remove_dir_all(&plugins_dir) {
+                    Ok(()) => plugin_removed.push(plugins_dir),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Already gone — not a failure.
+                        plugin_removed.push(plugins_dir);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %plugins_dir.display(),
+                            error = %e,
+                            "failed to remove plugin cache"
+                        );
+                        plugin_failed.push(plugins_dir);
+                    }
+                }
+            }
+        }
+    }
 
     // In normal mode the current generation dir (e.g. "1.2") has no
     // `{VERSION_TAG}-` prefix, so StaleOnly must be told its name or it would
@@ -2906,6 +2947,28 @@ fn run_prune(all: bool, older_than: Option<String>, dry_run: bool) -> anyhow::Re
     if !failed.is_empty() {
         eprintln!("  {} entry(ies) could not be removed", failed.len());
     }
+
+    // Report plugin cache results separately (verb is set above).
+    if plugin_cache {
+        for p in &plugin_removed {
+            eprintln!("  {verb} plugin cache: {}", p.display());
+        }
+        for p in &plugin_failed {
+            eprintln!("  failed to remove plugin cache: {}", p.display());
+        }
+        eprintln!(
+            "plugin cache prune: {} {} entry(ies)",
+            verb,
+            plugin_removed.len(),
+        );
+        if !plugin_failed.is_empty() {
+            eprintln!(
+                "  {} plugin cache entry(ies) could not be removed",
+                plugin_failed.len()
+            );
+        }
+    }
+
     Ok(())
 }
 
