@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.1.0] - 2026-07-10
+
+### Added
+- Auto-activate OS tag in scope resolution — bundles with OS-specific `when:` tags
+  (e.g. `linux`, `macos`, `windows`) now activate automatically without requiring
+  manual scope configuration (#638)
+- Create plugin cache directory automatically on export (`CLAUDE_CODE_PLUGIN_CACHE_DIR`),
+  and add `llmenv prune --plugin-cache` flag for explicit shared plugin cache cleanup (#643)
+
+### Fixed
+- Build static Linux binaries with musl (`*-linux-musl`) instead of glibc
+  (`*-linux-gnu`) so the pre-built Homebrew-tap binaries work on any Linux
+  distro regardless of system glibc version (#647)
+- Fix typos in `llmenv prune` output text
+
 ## [3.0.0] - 2026-07-10
 
 ### Major changes since v2.4.1

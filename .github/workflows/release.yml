@@ -71,6 +71,16 @@ jobs:
           restore-keys: cargo-registry-${{ runner.os }}-
       - name: Detect CPU count
         run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
+      - name: Install musl toolchain (Linux musl targets)
+        if: contains(matrix.target, 'linux-musl')
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get --quiet update
+          # musl-tools provides the cross-compiler (x86_64-linux-musl-gcc on x86,
+          # aarch64-linux-musl-gcc on ARM) needed by the cc build-script crate to
+          # compile C dependencies (aws-lc-sys) for the musl C library target.
+          sudo apt-get install --quiet --no-install-recommends -y musl-tools
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
