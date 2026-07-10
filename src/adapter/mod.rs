@@ -1,10 +1,66 @@
 pub mod claude_code;
 pub mod crush;
+pub mod opencode;
 pub(crate) mod skills;
 
 use std::path::{Path, PathBuf};
 
 use crate::merge::MergedManifest;
+
+/// Convert a YAML native fragment to JSON and deep-merge it into `dst`.
+///
+/// Used by adapters to overlay engine-specific catch-all config keys
+/// (e.g. `native.crush`, `native_mcp.opencode`) on top of the structured
+/// rendering. `fragment` is `Option` so callers can pass a `.get()` result
+/// directly without an extra guard.
+///
+/// # Errors
+/// Returns an error if the YAML fragment cannot be serialized to JSON
+/// (should not happen in practice with valid `serde_yaml::Value`).
+pub(crate) fn overlay_native_json(
+    dst: &mut serde_json::Value,
+    fragment: Option<&serde_yaml::Value>,
+    label: &str,
+) -> anyhow::Result<()> {
+    if let Some(frag) = fragment {
+        let as_json = serde_json::to_value(frag)
+            .map_err(|e| anyhow::anyhow!("converting {label} fragment to JSON: {e}"))?;
+        llmenv_util::merge_json(dst, as_json);
+    }
+    Ok(())
+}
+
+/// Reject a native catch-all fragment that carries keys already fully modeled
+/// by the adapter's structured rendering paths.
+///
+/// Each adapter defines its own `MODELED_KEYS` constant. Overlaying these keys
+/// last would silently clobber the security-rendered output (permissions, hooks)
+/// or the structured rendering (mcp, lsp).
+///
+/// # Errors
+/// Returns an error if `fragment` contains any key in `modeled_keys`, with a
+/// message naming the key and suggesting the safe merge channel.
+pub(crate) fn reject_modeled_native_keys(
+    fragment: &serde_yaml::Value,
+    modeled_keys: &[&str],
+    engine: &str,
+) -> anyhow::Result<()> {
+    let Some(map) = fragment.as_mapping() else {
+        return Ok(());
+    };
+    for key in modeled_keys {
+        if map.contains_key(serde_yaml::Value::String((*key).into())) {
+            anyhow::bail!(
+                "top-level `native.{engine}` carries the modeled-feature key `{key}`, \
+                 which would silently clobber the rendered `{key}`. \
+                 Use `native_{key}.{engine}` (or `native_permissions.{engine}` / \
+                 `native_hooks.{engine}` / `native_mcp.{engine}`) instead, \
+                 which merges in the safe direction."
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Per-agent rules for translating a [`MergedManifest`] into an on-disk layout
 /// and a set of environment variables that point the agent at it.
@@ -101,6 +157,9 @@ pub fn active_adapter() -> Box<dyn AgentAdapter> {
         .find(|a| match a.name() {
             "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
             "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
+            "opencode" => {
+                std::env::var("OPENCODE_CONFIG_DIR").is_ok() || binary_on_path("opencode")
+            }
             _ => false,
         })
         .unwrap_or_else(|| Box::new(claude_code::ClaudeCodeAdapter))
@@ -117,6 +176,7 @@ pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     vec![
         Box::new(claude_code::ClaudeCodeAdapter),
         Box::new(crush::CrushAdapter),
+        Box::new(opencode::OpencodeAdapter),
     ]
 }
 
@@ -263,6 +323,41 @@ pub(crate) fn resolve_command_paths_against_files(
     if resolved { Some(result) } else { None }
 }
 
+/// Resolve the on-disk payload directory for a plugin.
+///
+/// External plugins (`install_path = Some`) use that path directly.
+/// First-party plugins look up their marketplace `install_location`.
+pub(crate) fn resolve_plugin_payload(
+    plugin: &crate::plugins::resolve::ResolvedPlugin,
+    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
+) -> anyhow::Result<PathBuf> {
+    // P2-5/#534: guard before any path join, regardless of which path is taken.
+    if !crate::paths::is_valid_short_name(&plugin.plugin) {
+        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
+    }
+    if let Some(p) = &plugin.install_path {
+        return Ok(PathBuf::from(p));
+    }
+    let mkt = marketplaces
+        .iter()
+        .find(|m| m.name == plugin.marketplace)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
+                plugin.plugin,
+                plugin.marketplace
+            )
+        })?;
+    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
+            plugin.plugin,
+            plugin.marketplace
+        )
+    })?;
+    Ok(PathBuf::from(install_location).join(&plugin.plugin))
+}
+
 /// Map a resolved remote transport onto the `type` discriminator string shared
 /// by every engine's remote-MCP config shape (`"http"` / `"sse"`).
 ///
@@ -293,11 +388,12 @@ mod tests {
         let adapters = registered_adapters();
         assert_eq!(
             adapters.len(),
-            2,
-            "registry should have exactly two adapters"
+            3,
+            "registry should have exactly three adapters"
         );
         assert_eq!(adapters[0].name(), "claude-code");
         assert_eq!(adapters[1].name(), "crush");
+        assert_eq!(adapters[2].name(), "opencode");
     }
 
     #[test]
@@ -350,7 +446,7 @@ mod tests {
 
     #[test]
     fn known_engine_ids_matches_registered_adapters() {
-        assert_eq!(known_engine_ids(), vec!["claude_code", "crush"]);
+        assert_eq!(known_engine_ids(), vec!["claude_code", "crush", "opencode"]);
     }
 
     #[test]
@@ -383,6 +479,60 @@ mod tests {
         assert!(
             !binary_on_path("sh\techo"),
             "name with tab must be rejected without spawning which"
+        );
+    }
+
+    #[test]
+    fn registry_contains_opencode_adapter() {
+        let adapters = registered_adapters();
+        assert_eq!(adapters.len(), 3, "registry should now have three adapters");
+        let names: Vec<&str> = adapters.iter().map(|a| a.name()).collect();
+        assert!(
+            names.contains(&"opencode"),
+            "registry missing opencode adapter"
+        );
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "test invariant")]
+    fn opencode_adapter_trait_probes() {
+        let adapters = registered_adapters();
+        let o = adapters
+            .iter()
+            .find(|a| a.name() == "opencode")
+            .expect("opencode adapter must be registered");
+        assert_eq!(o.binary_name(), "opencode");
+        assert!(o.supports_plugins(), "OpencodeAdapter supports plugins");
+        assert!(o.supports_lsp(), "OpencodeAdapter supports LSP");
+        let events = o.supported_hook_events();
+        for expected in [
+            "SessionStart",
+            "SessionEnd",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            assert!(
+                events.contains(&expected),
+                "supported_hook_events missing {expected}"
+            );
+        }
+        // Explicitly verify Claude-only events are NOT supported
+        for claude_only in ["Notification", "SubagentStop", "PreCompact"] {
+            assert!(
+                !events.contains(&claude_only),
+                "OpencodeAdapter must not claim support for {claude_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_engine_ids_includes_opencode() {
+        let ids = known_engine_ids();
+        assert!(
+            ids.contains(&"opencode".to_string()),
+            "known_engine_ids missing opencode"
         );
     }
 

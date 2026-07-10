@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+- opencode engine support — new `opencode` adapter with full parity vs the
+  claude-code adapter: AGENTS.md, rules, skills, MCP (local/remote), LSP,
+  permissions, hook bridging via a generated JS shim plugin, and Claude-plugin
+  content translation (#656, #657)
+
+### Fixed
+- opencode adapter not activating when `OPENCODE_CONFIG_DIR` is unset (now
+  falls back to checking if `opencode` is on PATH) (#657)
+- `llmenv regenerate` false positives on hardcoded `~/.claude` paths inside
+  backtick-quoted inline spans and fenced code blocks (#311)
+
 ## [3.1.0] - 2026-07-10
 
 ### Added
