@@ -245,6 +245,83 @@ mod tests {
             "opencode has no disabled_tools field"
         );
     }
+
+    #[test]
+    fn materialize_lsp_server_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.lsp.push(llmenv_config::LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            args: vec!["--quiet".into()],
+            filetypes: vec!["rust".into()],
+            env: std::collections::BTreeMap::from([("RUST_LOG".into(), "info".into())]),
+            timeout: Some(60),
+            ..Default::default()
+        });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let srv = &doc["lsp"]["rust-analyzer"];
+        let cmd = srv["command"].as_array().unwrap();
+        assert_eq!(cmd[0], serde_json::json!("rust-analyzer"));
+        assert_eq!(cmd[1], serde_json::json!("--quiet"));
+        assert_eq!(srv["env"]["RUST_LOG"], serde_json::json!("info"));
+        let exts = srv["extensions"].as_array().unwrap();
+        assert!(exts.contains(&serde_json::json!("rust")));
+    }
+
+    #[test]
+    fn materialize_lsp_with_init_options() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.lsp.push(llmenv_config::LspServer {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            init_options: Some(serde_yaml::from_str("checkOnSave: true").unwrap()),
+            ..Default::default()
+        });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["lsp"]["rust-analyzer"]["initialization"]["checkOnSave"],
+            serde_json::json!(true)
+        );
+        assert!(
+            doc["lsp"]["rust-analyzer"]
+                .get("initializationOptions")
+                .is_none(),
+            "must use opencode's 'initialization' key"
+        );
+    }
+
+    #[test]
+    fn materialize_lsp_empty_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        OpencodeAdapter
+            .materialize(&MergedManifest::default(), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(doc.get("lsp").is_none());
+    }
+
+    #[test]
+    fn materialize_lsp_disabled_server_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.lsp.push(llmenv_config::LspServer {
+            name: "disabled-srv".into(),
+            command: "some-ls".into(),
+            disabled: true,
+            ..Default::default()
+        });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(doc.get("lsp").is_none());
+    }
 }
 
 impl AgentAdapter for OpencodeAdapter {
@@ -366,6 +443,41 @@ impl AgentAdapter for OpencodeAdapter {
                 doc.insert("mcp".into(), mcp_value);
             }
         }
+
+        // 8. LSP servers
+        if !manifest.capabilities.lsp.is_empty() {
+            let mut lsp_obj = serde_json::Map::new();
+            for srv in &manifest.capabilities.lsp {
+                if srv.disabled {
+                    continue;
+                }
+                let mut cmd: Vec<serde_json::Value> = Vec::with_capacity(1 + srv.args.len());
+                cmd.push(serde_json::json!(srv.command));
+                cmd.extend(srv.args.iter().map(|a| serde_json::json!(a)));
+                let mut e = serde_json::Map::new();
+                e.insert("command".into(), serde_json::json!(cmd));
+                if !srv.filetypes.is_empty() {
+                    e.insert("extensions".into(), serde_json::json!(srv.filetypes));
+                }
+                if !srv.env.is_empty() {
+                    e.insert("env".into(), serde_json::json!(srv.env));
+                }
+                if let Some(opts) = &srv.init_options {
+                    let as_json = serde_json::to_value(opts).map_err(|err| {
+                        anyhow::anyhow!(
+                            "LSP server '{}': failed to convert init_options to JSON: {err}",
+                            srv.name
+                        )
+                    })?;
+                    e.insert("initialization".into(), as_json);
+                }
+                lsp_obj.insert(srv.name.clone(), serde_json::Value::Object(e));
+            }
+            if !lsp_obj.is_empty() {
+                doc.insert("lsp".into(), serde_json::Value::Object(lsp_obj));
+            }
+        }
+
         doc.insert(
             "$schema".into(),
             serde_json::json!("https://opencode.ai/config.json"),
