@@ -52,6 +52,10 @@ pub struct Env {
     /// this boundary so a marker file dropped above $HOME (e.g. `/tmp` on a
     /// shared host) cannot be picked up.
     pub home: Option<std::path::PathBuf>,
+    /// Target OS triple as reported by `std::env::consts::OS`. Used to
+    /// auto-activate the OS as a tag (`linux`, `macos`, `windows`, etc.).
+    /// Empty string when not set (tests, fallback).
+    pub os: String,
 }
 
 impl Env {
@@ -63,6 +67,7 @@ impl Env {
             cwd: String::new(),
             gateway_mac: None,
             home: None,
+            os: String::new(),
         }
     }
 
@@ -92,6 +97,7 @@ impl Env {
             cwd,
             gateway_mac: super::network::detect_gateway_mac(),
             home,
+            os: std::env::consts::OS.to_string(),
         }
     }
 }
@@ -296,6 +302,7 @@ mod tests {
             cwd: cwd.to_string_lossy().to_string(),
             gateway_mac: None,
             home: Some(home.to_path_buf()),
+            os: String::new(),
         }
     }
 
@@ -413,6 +420,7 @@ mod tests {
             cwd: subdir.to_string_lossy().to_string(),
             gateway_mac: None,
             home: None,
+            os: String::new(),
         };
         assert!(
             discover_project(&env).is_none(),
@@ -563,6 +571,7 @@ mod tests {
                 cwd,
                 gateway_mac: None,
                 home: None,
+                os: String::new(),
             };
             let _ = discover_project(&env);
         }

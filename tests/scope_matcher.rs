@@ -243,6 +243,49 @@ fn project_marker_includes_bundles() {
 }
 
 #[test]
+fn os_tag_auto_activated() {
+    let env = Env {
+        hostname: "other".into(),
+        user: "nobody".into(),
+        cwd: "/tmp".into(),
+        os: "linux".into(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg(), &env);
+    assert!(active.tags.contains("linux"));
+}
+
+#[test]
+fn os_tag_empty_when_env_empty() {
+    let env = Env {
+        hostname: "other".into(),
+        user: "nobody".into(),
+        cwd: "/tmp".into(),
+        os: String::new(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg(), &env);
+    assert!(!active.tags.contains("linux"));
+    assert!(!active.tags.contains("macos"));
+    assert!(!active.tags.contains("windows"));
+}
+
+#[test]
+fn os_tag_alongside_configured_tags() {
+    let env = Env {
+        hostname: "fixed".into(),
+        user: "breed".into(),
+        cwd: "/tmp".into(),
+        os: "macos".into(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg(), &env);
+    assert!(active.tags.contains("macos"));
+    assert!(active.tags.contains("icm-server"));
+    assert!(active.tags.contains("base"));
+}
+
+#[test]
 fn project_marker_malformed_yaml_uses_defaults() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(tmp.path().join(".llmenv.yaml"), "not: [valid: yaml").expect("write");

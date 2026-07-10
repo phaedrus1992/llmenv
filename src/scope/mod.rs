@@ -128,6 +128,9 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             unknown_fields: p.unknown_fields,
         });
     }
-    let tags: BTreeSet<String> = scopes.iter().flat_map(|s| s.tags.iter().cloned()).collect();
+    let mut tags: BTreeSet<String> = scopes.iter().flat_map(|s| s.tags.iter().cloned()).collect();
+    if !env.os.is_empty() {
+        tags.insert(env.os.clone());
+    }
     ActiveScopes { scopes, tags }
 }
