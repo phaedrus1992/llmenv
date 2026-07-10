@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.0.0] - 2026-07-10
+
 ### Major changes since v2.4.1
 
 This release introduces a multi-engine architecture (Crush alongside Claude
@@ -836,7 +838,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...v3.0.0
 [3.0.0-rc.2]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.1...v3.0.0-rc.2
 [3.0.0-rc.1]: https://github.com/phaedrus1992/llmenv/compare/v2.3.0...v3.0.0-rc.1
 [2.4.1]: https://github.com/phaedrus1992/llmenv/compare/v2.4.0...v2.4.1
