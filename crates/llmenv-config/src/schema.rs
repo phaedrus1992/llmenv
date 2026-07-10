@@ -226,30 +226,134 @@ impl Default for Cache {
     }
 }
 
+/// Version granularity for normal-mode cache folders (#651). Controls which
+/// version components appear in the on-disk folder path.
+///
+/// - [`VersionGranularity::Minor`] (default): `<version_mm>/<shape>` — `major.minor`
+/// - [`VersionGranularity::Major`]: `<version_major>/<shape>` — just the `major` segment
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionGranularity {
+    /// `<version_mm>/<shape>` — folder includes both major and minor version.
+    #[default]
+    Minor,
+    /// `<version_major>/<shape>` — folder includes only the major version.
+    Major,
+}
+
+/// Serde helper: the `{ normal: { version: … } }` compound form for
+/// [`HashingMode`] when the scalar `"normal"` string doesn't suffice.
+#[derive(Serialize, Deserialize)]
+struct NormalConfig {
+    #[serde(default)]
+    version: VersionGranularity,
+}
+
 /// Cache-folder strictness dial (#246). One knob, three positions, ordered by
 /// how aggressively a folder is reused: `loose` ⊂ `normal` ⊂ `strict`. Default
 /// is [`Self::Normal`] — the common path, isolating by selection *shape* and
-/// binary minor version while still reusing a folder across content edits so a
-/// running agent's in-session state survives a re-render.
+/// binary version (controllable granularity) while still reusing a folder
+/// across content edits so a running agent's in-session state survives a
+/// re-render.
 ///
 /// The *shape* is a 12-hex digest over the active selection (`active_tags ∪
 /// directly_enabled_bundles`), so two different tag/bundle combinations never
 /// collide in one folder (the version-mode overwrite bug that motivated #246).
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
+///
+/// # Serde format
+///
+/// ```yaml
+/// # Scalar form (backward-compat):
+/// hashing: loose       # HashingMode::Loose
+/// hashing: normal      # HashingMode::Normal { version: VersionGranularity::Minor } { version: Minor }
+/// hashing: strict      # HashingMode::Strict
+///
+/// # Compound form (non-default granularity):
+/// hashing:
+///   normal:
+///     version: major   # HashingMode::Normal { version: VersionGranularity::Major }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HashingMode {
     /// Folder = `<adapter>/<shape>`. No version axis: a binary upgrade reuses
     /// the same per-shape folder. Fewest folders; relies on age-based gc to
     /// trim shapes that fall out of use.
     Loose,
-    /// Folder = `<adapter>/<version_mm>/<shape>` (`version_mm` = `major.minor`).
-    /// The default. Content edits re-render into the same folder; a minor
-    /// version bump or a selection change mints a new one.
-    #[default]
-    Normal,
+    /// Folder = `<adapter>/<version>/<shape>` where `version` is `major.minor`
+    /// for [`VersionGranularity::Minor`] or just `major` for
+    /// [`VersionGranularity::Major`]. The default. Content edits re-render into
+    /// the same folder; a version bump or selection change mints a new one.
+    Normal {
+        /// Version components to include in the folder path.
+        version: VersionGranularity,
+    },
     /// Folder = `<adapter>/<VERSION_TAG>-<content_hash>`. Any input change mints
     /// a fresh folder — strongest isolation, most cache churn.
     Strict,
+}
+
+impl Serialize for HashingMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            HashingMode::Loose => serializer.serialize_str("loose"),
+            HashingMode::Normal {
+                version: VersionGranularity::Minor,
+            } => serializer.serialize_str("normal"),
+            HashingMode::Normal {
+                version: VersionGranularity::Major,
+            } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry(
+                    "normal",
+                    &NormalConfig {
+                        version: VersionGranularity::Major,
+                    },
+                )?;
+                map.end()
+            }
+            HashingMode::Strict => serializer.serialize_str("strict"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HashingMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Compound form first (more specific), then scalar.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            Compound { normal: NormalConfig },
+            Scalar(ScalarMode),
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum ScalarMode {
+            Loose,
+            Normal,
+            Strict,
+        }
+
+        Ok(match Helper::deserialize(d)? {
+            Helper::Compound { normal } => HashingMode::Normal {
+                version: normal.version,
+            },
+            Helper::Scalar(ScalarMode::Loose) => HashingMode::Loose,
+            Helper::Scalar(ScalarMode::Normal) => HashingMode::Normal {
+                version: VersionGranularity::Minor,
+            },
+            Helper::Scalar(ScalarMode::Strict) => HashingMode::Strict,
+        })
+    }
+}
+
+impl Default for HashingMode {
+    fn default() -> Self {
+        HashingMode::Normal {
+            version: VersionGranularity::Minor,
+        }
+    }
 }
 
 /// Engine-agnostic capability vocabulary. Identical shape whether declared at the
@@ -997,9 +1101,40 @@ mod tests {
         let cache: Cache =
             serde_yaml::from_str("cache_dir: ~/.cache/llmenv\nsync_interval_minutes: 60\n")
                 .expect("parse minimal cache");
-        assert_eq!(cache.hashing, HashingMode::Normal);
+        assert_eq!(
+            cache.hashing,
+            HashingMode::Normal {
+                version: VersionGranularity::Minor
+            }
+        );
         // The bare Default impl must agree with the parsed-absent behavior.
-        assert_eq!(Cache::default().hashing, HashingMode::Normal);
+        assert_eq!(
+            Cache::default().hashing,
+            HashingMode::Normal {
+                version: VersionGranularity::Minor
+            }
+        );
+    }
+
+    #[test]
+    fn cache_parses_compound_normal_with_major_granularity() {
+        // #651: the compound { normal: { version: major } } form deserializes to
+        // HashingMode::Normal with Major granularity, and roundtrips correctly.
+        let yaml = "cache_dir: ~/.cache/llmenv\nsync_interval_minutes: 60\nhashing:\n  normal:\n    version: major\n";
+        let cache: Cache = serde_yaml::from_str(yaml).expect("parse compound major");
+        assert_eq!(
+            cache.hashing,
+            HashingMode::Normal {
+                version: VersionGranularity::Major
+            }
+        );
+        // Round-trip: serialize back and confirm the compound form is preserved.
+        let serialized = serde_yaml::to_string(&cache.hashing).expect("serialize");
+        let back: HashingMode = serde_yaml::from_str(&serialized).expect("deserialize roundtrip");
+        assert_eq!(
+            cache.hashing, back,
+            "compound form {{ normal: {{ version: major }} }} must round-trip"
+        );
     }
 
     #[test]
@@ -1007,7 +1142,12 @@ mod tests {
         // #246: the single dial accepts loose|normal|strict.
         for (text, expected) in [
             ("loose", HashingMode::Loose),
-            ("normal", HashingMode::Normal),
+            (
+                "normal",
+                HashingMode::Normal {
+                    version: VersionGranularity::Minor,
+                },
+            ),
             ("strict", HashingMode::Strict),
         ] {
             let cache: Cache = serde_yaml::from_str(&format!(

@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Added
+- Cache hashing now supports `version: major` granularity — set
+  `hashing: { normal: { version: major } }` in config.yaml to key cache
+  folders on major version only (e.g. `1/` instead of `1.2/`). Default
+  remains `minor` for full backward compatibility. (#651)
 - opencode engine support — new `opencode` adapter with full parity vs the
   claude-code adapter: AGENTS.md, rules, skills, MCP (local/remote), LSP,
   permissions, hook bridging via a generated JS shim plugin, and Claude-plugin

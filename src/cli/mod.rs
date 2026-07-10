@@ -1140,7 +1140,7 @@ fn build_and_materialize(
     let rendered = crate::materialize::materialize_with_mode(
         &manifest,
         &adapter_root,
-        ctx.config.cache.hashing,
+        ctx.config.cache.hashing.clone(),
         &shape,
     )?;
     let cache_path = rendered.path;
@@ -1160,7 +1160,7 @@ fn build_and_materialize(
     let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
         .with_selection(tags.clone(), bundles)
         .with_auth_status(auth_status);
-    write_cache_manifest(&cache_path, &current, ctx.config.cache.hashing)?;
+    write_cache_manifest(&cache_path, &current, &ctx.config.cache.hashing)?;
 
     // Compute the state dir (stable sibling of the hashed config dir) and pass
     // both to the adapter so it can set per-hash temp vars (#630) and durable
@@ -1252,7 +1252,7 @@ fn inject_cached_auth_if_available(
 fn write_cache_manifest(
     cache_path: &Path,
     current: &crate::materialize::manifest::CacheManifest,
-    mode: crate::config::HashingMode,
+    mode: &crate::config::HashingMode,
 ) -> anyhow::Result<()> {
     use crate::materialize::manifest::CacheManifest;
 
@@ -2908,8 +2908,13 @@ fn run_prune(
     // `{VERSION_TAG}-` prefix, so StaleOnly must be told its name or it would
     // sweep the live config dir. Loose mode has no version axis (every shape is
     // current) and strict mode is identified by the prefix test — both pass None.
-    let current_version = match config.cache.hashing {
-        crate::config::HashingMode::Normal => Some(crate::materialize::cache::version_mm()),
+    let current_version = match &config.cache.hashing {
+        crate::config::HashingMode::Normal {
+            version: crate::config::VersionGranularity::Minor,
+        } => Some(crate::materialize::cache::version_mm()),
+        crate::config::HashingMode::Normal {
+            version: crate::config::VersionGranularity::Major,
+        } => Some(crate::materialize::cache::version_major()),
         crate::config::HashingMode::Loose | crate::config::HashingMode::Strict => None,
     };
 
@@ -2922,7 +2927,7 @@ fn run_prune(
         let report = crate::materialize::cache::prune(
             &cache_dir.join(adapter.name()),
             mode,
-            config.cache.hashing,
+            &config.cache.hashing,
             current_version.as_deref(),
             dry_run,
         )?;
@@ -3332,12 +3337,18 @@ mod tests {
 
     #[test]
     fn write_cache_manifest_writes_dotfile_in_all_modes() {
-        for mode in [HashingMode::Loose, HashingMode::Normal, HashingMode::Strict] {
+        for mode in [
+            HashingMode::Loose,
+            HashingMode::Normal {
+                version: crate::config::VersionGranularity::Minor,
+            },
+            HashingMode::Strict,
+        ] {
             let tmp = tempfile::tempdir().unwrap();
             let cache = tmp.path().join("folder");
             std::fs::create_dir_all(&cache).unwrap();
             let current = built("hash1", &["CLAUDE.md", "a.md"]);
-            write_cache_manifest(&cache, &current, mode).unwrap();
+            write_cache_manifest(&cache, &current, &mode).unwrap();
             let read = CacheManifest::read(&cache).unwrap().unwrap();
             assert_eq!(read.content_hash, "hash1");
             assert!(read.owned.contains("CLAUDE.md"), "adapter-owned recorded");
@@ -3354,7 +3365,12 @@ mod tests {
         // #246: a file owned in render N but not N+1 is deleted on N+1 in every
         // folder-reusing mode (loose + normal), while a foreign (never-owned)
         // file in the same folder survives untouched.
-        for mode in [HashingMode::Loose, HashingMode::Normal] {
+        for mode in [
+            HashingMode::Loose,
+            HashingMode::Normal {
+                version: crate::config::VersionGranularity::Minor,
+            },
+        ] {
             let tmp = tempfile::tempdir().unwrap();
             let cache = tmp.path().join("folder");
             std::fs::create_dir_all(&cache).unwrap();
@@ -3362,14 +3378,14 @@ mod tests {
             // Render N: owns ghost.md + keep.md.
             let ghost = cache.join("ghost.md");
             std::fs::write(&ghost, b"old").unwrap();
-            write_cache_manifest(&cache, &built("h1", &["ghost.md", "keep.md"]), mode).unwrap();
+            write_cache_manifest(&cache, &built("h1", &["ghost.md", "keep.md"]), &mode).unwrap();
 
             // A foreign file Claude/a plugin wrote — never in any owned set.
             let foreign = cache.join("foreign-state.json");
             std::fs::write(&foreign, b"plugin state").unwrap();
 
             // Render N+1: drops ghost.md from the owned set.
-            write_cache_manifest(&cache, &built("h2", &["keep.md"]), mode).unwrap();
+            write_cache_manifest(&cache, &built("h2", &["keep.md"]), &mode).unwrap();
 
             assert!(
                 !ghost.exists(),
@@ -3406,7 +3422,14 @@ mod tests {
         std::fs::write(cache.join(MANIFEST_FILE), tampered).unwrap();
 
         // Re-render dropping the traversal path from the owned set.
-        write_cache_manifest(&cache, &built("new", &[]), HashingMode::Normal).unwrap();
+        write_cache_manifest(
+            &cache,
+            &built("new", &[]),
+            &HashingMode::Normal {
+                version: crate::config::VersionGranularity::Minor,
+            },
+        )
+        .unwrap();
 
         assert!(
             victim.exists(),
@@ -3429,7 +3452,7 @@ mod tests {
         let bystander = cache.join("ghost.md");
         std::fs::write(&bystander, b"x").unwrap();
 
-        write_cache_manifest(&cache, &built("new", &[]), HashingMode::Strict).unwrap();
+        write_cache_manifest(&cache, &built("new", &[]), &HashingMode::Strict).unwrap();
         assert!(
             bystander.exists(),
             "strict mode performs no ghost reconciliation"
