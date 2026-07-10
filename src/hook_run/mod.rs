@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use action::Action;
 use mcp_client::McpHttpClient;
+use serde_json::json;
 use tracing::{debug, warn};
 
 use crate::adapter::AgentAdapter;
@@ -453,6 +454,13 @@ fn run_inner(
                     }
                     out.push_str(&cons_text);
                 }
+            }
+
+            // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
+            // with fast-falloff memory (topic: web-fetch, importance: low) so it
+            // survives session compactions but decays quickly. (#579)
+            if event == HookEvent::PostToolUse {
+                handle_web_fetch_post_tool_use(client, stdin_payload).await;
             }
         }
         run_session_log(event, &session_log, stdin_payload).await;
@@ -893,6 +901,49 @@ fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Build ICM memory store arguments for a WebFetch/WebSearch PostToolUse event.
+/// Returns `None` if the payload is not a WebFetch/WebSearch tool result.
+/// The content includes URL, tool name, fetch timestamp, and a content preview.
+///
+/// # Format
+/// The stored memory carries topic `web-fetch` and importance `low` so it decays
+/// quickly and can be bulk-cleared via `icm_memory_forget_topic("web-fetch")`.
+#[must_use]
+fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    let tool_name = payload["tool_name"].as_str()?;
+    if tool_name != "WebFetch" && tool_name != "WebSearch" {
+        return None;
+    }
+    let url = payload["tool_input"]["url"].as_str().unwrap_or("unknown");
+    let response = payload["tool_response"].as_str().unwrap_or("");
+    // Truncate to a safe preview (char-boundary safe via chars().take()).
+    let truncated: String = response.chars().take(1000).collect();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Some(json!({
+        "content": format!(
+            "URL: {url}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
+        ),
+        "topic": "web-fetch",
+        "importance": "low",
+    }))
+}
+
+/// Handle PostToolUse for WebFetch/WebSearch: auto-store the fetched content in
+/// ICM with fast-falloff memory (importance: low, topic: web-fetch).
+/// Best-effort — failures are logged as warnings but not propagated to the caller.
+async fn handle_web_fetch_post_tool_use(client: &McpHttpClient, payload: &serde_json::Value) {
+    let Some(args) = web_fetch_store_args(payload) else {
+        return;
+    };
+    if let Err(e) = client.call_tool("icm_memory_store", args).await {
+        warn!(error = %e, "failed to auto-store web fetch content in ICM");
+    }
 }
 
 #[cfg(test)]
@@ -1402,6 +1453,123 @@ mod tests {
             out.contains("episodic"),
             "existing marker must survive: {out}"
         );
+    }
+
+    #[test]
+    fn web_fetch_store_args_extracts_url_and_summary() {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "# Hello\n\nThis is fetched content",
+        });
+        let args = web_fetch_store_args(&payload).expect("should detect WebFetch");
+        assert_eq!(args["topic"], "web-fetch");
+        assert_eq!(args["importance"], "low");
+        let content = args["content"].as_str().unwrap();
+        assert!(content.contains("https://example.com"), "url in content");
+        assert!(content.contains("WebFetch"), "tool name in content");
+        assert!(
+            content.contains("Fetched at (epoch)"),
+            "timestamp in content"
+        );
+        assert!(content.contains("Hello"), "content preview in content");
+    }
+
+    #[test]
+    fn web_fetch_store_args_supports_web_search() {
+        let payload = json!({
+            "tool_name": "WebSearch",
+            "tool_input": {"url": "https://example.com/search"},
+            "tool_response": "Search results here",
+        });
+        let args = web_fetch_store_args(&payload).expect("should detect WebSearch");
+        assert_eq!(args["topic"], "web-fetch");
+        let content = args["content"].as_str().unwrap();
+        assert!(content.contains("WebSearch"));
+        assert!(content.contains("Search results"));
+    }
+
+    #[test]
+    fn web_fetch_store_args_ignores_non_web_fetch_tools() {
+        let payload = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": "result",
+        });
+        assert!(
+            web_fetch_store_args(&payload).is_none(),
+            "non-WebFetch tool should return None"
+        );
+    }
+
+    #[test]
+    fn web_fetch_store_args_handles_missing_url() {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {},
+            "tool_response": "content",
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle missing url");
+        let content = args["content"].as_str().unwrap();
+        assert!(content.contains("unknown"), "should fall back to 'unknown'");
+    }
+
+    #[test]
+    fn web_fetch_store_args_handles_missing_tool_input() {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_response": "content",
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle missing tool_input");
+        let content = args["content"].as_str().unwrap();
+        assert!(content.contains("unknown"), "should fall back to 'unknown'");
+    }
+
+    #[test]
+    fn web_fetch_store_args_handles_empty_response() {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "",
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle empty response");
+        let content = args["content"].as_str().unwrap();
+        assert!(
+            content.contains("Content preview:\n"),
+            "empty content after preview header"
+        );
+    }
+
+    #[test]
+    fn web_fetch_store_args_truncates_long_content() {
+        let long = "x".repeat(2000);
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": long,
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle long content");
+        let content = args["content"].as_str().unwrap();
+        let preview = content.split("Content preview:\n").nth(1).unwrap_or("");
+        assert!(
+            preview.len() <= 1000,
+            "content preview should be at most 1000 chars, got {}",
+            preview.len()
+        );
+    }
+
+    #[test]
+    fn web_fetch_store_args_returns_none_for_null_payload() {
+        assert!(web_fetch_store_args(&serde_json::Value::Null).is_none());
+    }
+
+    #[test]
+    fn web_fetch_store_args_returns_none_for_missing_tool_name() {
+        let payload = json!({
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "content",
+        });
+        assert!(web_fetch_store_args(&payload).is_none());
     }
 }
 
