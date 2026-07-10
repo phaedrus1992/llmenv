@@ -30,7 +30,7 @@ pub use schema::{
     McpTransport, Memory, MemoryType, NativePermissionRules, NetworkMatch, NetworkScope,
     OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
     RESERVED_OFFICIAL_MARKETPLACES, Scopes, SessionLog, SkillSource, StateConfig, StateTool,
-    Throttle, UserMatch, UserScope, classify_source, github_owner_repo,
+    Throttle, UserMatch, UserScope, VersionGranularity, classify_source, github_owner_repo,
     is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
