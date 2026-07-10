@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `consolidation` config section with `enabled` and `max_rules_per_session` fields.
   Wires a diagnostic consolidation hook into the SessionEnd lifecycle; LLM integration
   deferred (#271, #595)
+- Add three structural validation checks to `llmenv doctor`: warn on dangling bundle
+  directories (declared but missing on disk), unused marketplace entries (defined but
+  unreferenced), and orphaned `native_permissions` keys (no matching MCP server or
+  engine adapter) (#604)
 
 ### Changed
 
