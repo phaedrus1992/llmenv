@@ -921,7 +921,11 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
         .as_str()
         .map_or_else(|| json_or_empty(&payload["tool_response"]), String::from);
     // Truncate to a safe preview (char-boundary safe via chars().take()).
-    let truncated: String = response.chars().take(1000).collect();
+    let needs_indicator = response.chars().count() > 1000;
+    let mut truncated: String = response.chars().take(1000).collect();
+    if needs_indicator {
+        truncated.push_str("... (truncated)");
+    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1554,9 +1558,14 @@ mod tests {
         let content = args["content"].as_str().unwrap();
         let preview = content.split("Content preview:\n").nth(1).unwrap_or("");
         assert!(
-            preview.len() <= 1000,
-            "content preview should be at most 1000 chars, got {}",
-            preview.len()
+            preview.ends_with("... (truncated)"),
+            "truncation indicator should be present, got: {preview:?}"
+        );
+        let truncated = preview.strip_suffix("... (truncated)").unwrap_or(preview);
+        assert!(
+            truncated.len() <= 1000,
+            "truncated content should be at most 1000 chars, got {}",
+            truncated.len()
         );
     }
 
