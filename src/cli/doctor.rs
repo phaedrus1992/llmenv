@@ -74,7 +74,7 @@ pub(super) fn bundles_with_missing_dirs<'a>(
 ) -> Vec<&'a str> {
     bundles
         .iter()
-        .filter(|b| !bundles_dir.join(&b.name).exists())
+        .filter(|b| !bundles_dir.join(&b.name).is_dir())
         .map(|b| b.name.as_str())
         .collect()
 }
@@ -149,7 +149,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     for key in orphan_native_permission_keys(&config) {
         eprintln!(
-            "{warn} native_permissions key '{key}' does not match any configured MCP server or plugin",
+            "{warn} native_permissions key '{key}' does not match any configured MCP server, engine, or adapter",
         );
     }
 
