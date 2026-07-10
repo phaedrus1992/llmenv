@@ -903,9 +903,12 @@ fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tool name constants for WebFetch and WebSearch tools.
+const TOOL_NAME_WEBFETCH: &str = "WebFetch";
+const TOOL_NAME_WEBSEARCH: &str = "WebSearch";
+
 /// Build ICM memory store arguments for a WebFetch/WebSearch PostToolUse event.
 /// Returns `None` if the payload is not a WebFetch/WebSearch tool result.
-/// The content includes URL, tool name, fetch timestamp, and a content preview.
 ///
 /// # Format
 /// The stored memory carries topic `web-fetch` and importance `low` so it decays
@@ -913,14 +916,13 @@ fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
 #[must_use]
 fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value> {
     let tool_name = payload["tool_name"].as_str()?;
-    if tool_name != "WebFetch" && tool_name != "WebSearch" {
+    if tool_name != TOOL_NAME_WEBFETCH && tool_name != TOOL_NAME_WEBSEARCH {
         return None;
     }
     let url = payload["tool_input"]["url"].as_str().unwrap_or("unknown");
     let response = payload["tool_response"]
         .as_str()
         .map_or_else(|| json_or_empty(&payload["tool_response"]), String::from);
-    // Truncate to a safe preview (char-boundary safe via chars().take()).
     let needs_indicator = response.chars().count() > 1000;
     let mut truncated: String = response.chars().take(1000).collect();
     if needs_indicator {
@@ -1599,8 +1601,44 @@ mod tests {
             "extracted text from object response"
         );
     }
-}
 
+    #[tokio::test]
+    async fn handle_web_fetch_post_tool_use_stores_in_icm() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{ "type": "text", "text": "stored" }]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let payload = serde_json::json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "fetched content",
+        });
+        handle_web_fetch_post_tool_use(&client, &payload).await;
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let has_store_call = requests.iter().any(|r| {
+            r.body_json::<serde_json::Value>()
+                .ok()
+                .and_then(|v| v.get("method").and_then(|m| m.as_str().map(str::to_owned)))
+                .as_deref()
+                == Some("tools/call")
+        });
+        assert!(has_store_call, "handler should have sent an MCP tools/call");
+    }
+}
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod session_log_tests {
