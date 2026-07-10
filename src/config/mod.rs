@@ -8,6 +8,6 @@ pub use llmenv_config::{
     McpServer, McpTransport, Memory, NativePermissionRules, NetworkMatch, NetworkScope,
     OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
     RESERVED_OFFICIAL_MARKETPLACES, Scopes, SessionLog, SkillSource, StateConfig, StateTool,
-    Throttle, UserMatch, UserScope, classify_source, generate_template, github_owner_repo,
-    is_reserved_official_marketplace, split_plugin_ref,
+    Throttle, UserMatch, UserScope, VersionGranularity, classify_source, generate_template,
+    github_owner_repo, is_reserved_official_marketplace, split_plugin_ref,
 };
