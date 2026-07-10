@@ -917,7 +917,9 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
         return None;
     }
     let url = payload["tool_input"]["url"].as_str().unwrap_or("unknown");
-    let response = payload["tool_response"].as_str().unwrap_or("");
+    let response = payload["tool_response"]
+        .as_str()
+        .map_or_else(|| json_or_empty(&payload["tool_response"]), String::from);
     // Truncate to a safe preview (char-boundary safe via chars().take()).
     let truncated: String = response.chars().take(1000).collect();
     let timestamp = std::time::SystemTime::now()
@@ -1570,6 +1572,21 @@ mod tests {
             "tool_response": "content",
         });
         assert!(web_fetch_store_args(&payload).is_none());
+    }
+
+    #[test]
+    fn web_fetch_store_args_handles_object_tool_response() {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": {"content": [{"type": "text", "text": "hello world"}]},
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle object response");
+        let content = args["content"].as_str().unwrap();
+        assert!(
+            content.contains("hello world"),
+            "extracted text from object response"
+        );
     }
 }
 
