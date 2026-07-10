@@ -1,7 +1,8 @@
-use crate::config::Config;
+use crate::config::{Bundle, Config};
 use crate::paths;
 use anyhow::Context;
 use std::collections::HashSet;
+use std::path::Path;
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -92,9 +93,59 @@ pub(super) fn run_doctor_token_efficiency(
     }
 }
 
+/// Returns bundle names whose directory does not exist under `bundles_dir`.
+pub(super) fn bundles_with_missing_dirs<'a>(
+    bundles: &'a [Bundle],
+    bundles_dir: &Path,
+) -> Vec<&'a str> {
+    bundles
+        .iter()
+        .filter(|b| !bundles_dir.join(&b.name).is_dir())
+        .map(|b| b.name.as_str())
+        .collect()
+}
+
+/// Returns marketplace names defined in `config` that no plugin collection references.
+pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
+    use crate::config::split_plugin_ref;
+    let referenced: HashSet<&str> = config
+        .plugin_collection
+        .iter()
+        .flat_map(|c| c.plugins.iter())
+        .filter_map(|p| split_plugin_ref(p))
+        .map(|(m, _)| m)
+        .collect();
+    config
+        .marketplace
+        .iter()
+        .filter(|m| !referenced.contains(m.name.as_str()))
+        .map(|m| m.name.as_str())
+        .collect()
+}
+
+/// Returns `native_permissions` keys that don't match any configured MCP server
+/// or known engine adapter name. The ICM MCP server (`"icm"`) is always present.
+pub(super) fn orphan_native_permission_keys(config: &Config) -> Vec<&str> {
+    let known_mcps: HashSet<&str> = config
+        .mcp
+        .iter()
+        .map(|m| m.name.as_str())
+        .chain(std::iter::once("icm"))
+        .collect();
+    const ENGINE_NAMES: &[&str] = &["claude_code"];
+    config
+        .capabilities
+        .native_permissions
+        .keys()
+        .filter(|k| !known_mcps.contains(k.as_str()) && !ENGINE_NAMES.contains(&k.as_str()))
+        .map(|k| k.as_str())
+        .collect()
+}
+
 pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
+    let info = super::doctor_info(use_color);
 
     eprintln!("Running llmenv doctor...");
 
@@ -105,6 +156,29 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     // Check that config parses
     eprintln!("{pass} Config is valid YAML");
+
+    // Structural validation: bundle directories, marketplace references, permission grants
+    let config_dir = paths::config_dir()?;
+    let bundles_dir = config_dir.join("bundles");
+
+    for name in bundles_with_missing_dirs(&config.bundle, &bundles_dir) {
+        eprintln!(
+            "{info} Bundle '{name}' declared but directory does not exist at {}",
+            bundles_dir.join(name).display(),
+        );
+    }
+
+    for name in unused_marketplaces(&config) {
+        eprintln!(
+            "{warn} Marketplace '{name}' is defined but not referenced by any plugin collection",
+        );
+    }
+
+    for key in orphan_native_permission_keys(&config) {
+        eprintln!(
+            "{warn} native_permissions key '{key}' does not match any configured MCP server, engine, or adapter",
+        );
+    }
 
     // Check cache directory is writable
     let cache_dir = super::expand_tilde(&config.cache.cache_dir)?;
@@ -175,7 +249,6 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     }
 
     // Check git remote is reachable
-    let config_dir = paths::config_dir()?;
     if super::is_git_repo(&config_dir) {
         match super::check_git_remote(&config_dir) {
             Ok(remote) => {
@@ -517,4 +590,195 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        Bundle, Capabilities, Marketplace, McpServer, McpTransport, NativePermissionRules,
+        PluginCollection,
+    };
+    use std::collections::BTreeMap;
+
+    // -- bundles_with_missing_dirs --
+
+    #[test]
+    fn bundles_missing_none_when_all_dirs_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundles_dir = tmp.path().join("bundles");
+        std::fs::create_dir_all(bundles_dir.join("home")).unwrap();
+        std::fs::create_dir_all(bundles_dir.join("work")).unwrap();
+
+        let bundles = vec![
+            Bundle {
+                name: "home".into(),
+                when: vec!["local".into()],
+            },
+            Bundle {
+                name: "work".into(),
+                when: vec!["office".into()],
+            },
+        ];
+        let missing = bundles_with_missing_dirs(&bundles, &bundles_dir);
+        assert!(missing.is_empty(), "expected empty: {missing:?}");
+    }
+
+    #[test]
+    fn bundles_missing_reports_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundles_dir = tmp.path().join("bundles");
+        std::fs::create_dir_all(bundles_dir.join("existing")).unwrap();
+
+        let bundles = vec![
+            Bundle {
+                name: "existing".into(),
+                when: vec!["x".into()],
+            },
+            Bundle {
+                name: "missing".into(),
+                when: vec!["y".into()],
+            },
+        ];
+        let mut missing = bundles_with_missing_dirs(&bundles, &bundles_dir);
+        missing.sort_unstable();
+        assert_eq!(missing, vec!["missing"]);
+    }
+
+    // -- unused_marketplaces --
+
+    #[test]
+    fn unused_marketplaces_none_when_all_referenced() {
+        let config = Config {
+            marketplace: vec![Marketplace {
+                name: "official".into(),
+                source: "https://example.com".into(),
+            }],
+            plugin_collection: vec![PluginCollection {
+                name: "core".into(),
+                when: vec![],
+                plugins: vec!["official:some-plugin".into()],
+            }],
+            ..Config::default()
+        };
+        let unused = unused_marketplaces(&config);
+        assert!(unused.is_empty(), "expected empty: {unused:?}");
+    }
+
+    #[test]
+    fn unused_marketplaces_reports_unreferenced() {
+        let config = Config {
+            marketplace: vec![
+                Marketplace {
+                    name: "used".into(),
+                    source: "https://a.com".into(),
+                },
+                Marketplace {
+                    name: "unused".into(),
+                    source: "https://b.com".into(),
+                },
+            ],
+            plugin_collection: vec![PluginCollection {
+                name: "core".into(),
+                when: vec![],
+                plugins: vec!["used:plugin-a".into()],
+            }],
+            ..Config::default()
+        };
+        let mut unused = unused_marketplaces(&config);
+        unused.sort_unstable();
+        assert_eq!(unused, vec!["unused"]);
+    }
+
+    // -- orphan_native_permission_keys --
+
+    #[test]
+    fn orphan_permissions_none_for_known_engine() {
+        let config = Config {
+            capabilities: Capabilities {
+                native_permissions: BTreeMap::from([(
+                    "claude_code".into(),
+                    NativePermissionRules::default(),
+                )]),
+                ..Capabilities::default()
+            },
+            ..Config::default()
+        };
+        let orphans = orphan_native_permission_keys(&config);
+        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    }
+
+    #[test]
+    fn orphan_permissions_accepts_icm() {
+        let config = Config {
+            capabilities: Capabilities {
+                native_permissions: BTreeMap::from([(
+                    "icm".into(),
+                    NativePermissionRules::default(),
+                )]),
+                ..Capabilities::default()
+            },
+            ..Config::default()
+        };
+        let orphans = orphan_native_permission_keys(&config);
+        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    }
+
+    #[test]
+    fn orphan_permissions_accepts_configured_mcp() {
+        let config = Config {
+            mcp: vec![McpServer {
+                name: "my-server".into(),
+                when: vec![],
+                transport: McpTransport::Stdio,
+                command: Some("echo".into()),
+                args: vec![],
+                env: BTreeMap::new(),
+                url: None,
+                headers: BTreeMap::new(),
+                disabled: false,
+                disabled_tools: vec![],
+                timeout: None,
+            }],
+            capabilities: Capabilities {
+                native_permissions: BTreeMap::from([(
+                    "my-server".into(),
+                    NativePermissionRules::default(),
+                )]),
+                ..Capabilities::default()
+            },
+            ..Config::default()
+        };
+        let orphans = orphan_native_permission_keys(&config);
+        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    }
+
+    #[test]
+    fn orphan_permissions_reports_unknown_key() {
+        let config = Config {
+            capabilities: Capabilities {
+                native_permissions: BTreeMap::from([(
+                    "mcp__unknown-server".into(),
+                    NativePermissionRules::default(),
+                )]),
+                ..Capabilities::default()
+            },
+            ..Config::default()
+        };
+        let orphans = orphan_native_permission_keys(&config);
+        assert_eq!(orphans, vec!["mcp__unknown-server"]);
+    }
+
+    #[test]
+    fn orphan_permissions_empty_no_permissions() {
+        let config = Config::default();
+        let orphans = orphan_native_permission_keys(&config);
+        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    }
 }
