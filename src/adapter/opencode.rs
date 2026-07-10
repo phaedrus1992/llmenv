@@ -598,11 +598,17 @@ impl AgentAdapter for OpencodeAdapter {
         if !permission_map.is_empty() {
             let mut perm_obj = serde_json::Map::new();
             for (tool, patterns) in &permission_map {
-                let mut pmap = serde_json::Map::new();
-                for (pattern, action) in patterns {
-                    pmap.insert(pattern.clone(), serde_json::json!(action));
+                // Bare tool (single wildcard pattern) -> emit action string directly.
+                // Tool with specific patterns -> emit pattern->action object.
+                if patterns.len() == 1 && patterns.contains_key("*") {
+                    perm_obj.insert(tool.clone(), serde_json::json!(patterns["*"]));
+                } else {
+                    let mut pmap = serde_json::Map::new();
+                    for (pattern, action) in patterns {
+                        pmap.insert(pattern.clone(), serde_json::json!(action));
+                    }
+                    perm_obj.insert(tool.clone(), serde_json::Value::Object(pmap));
                 }
-                perm_obj.insert(tool.clone(), serde_json::Value::Object(pmap));
             }
             doc.insert("permission".into(), serde_json::Value::Object(perm_obj));
         }
@@ -1177,10 +1183,9 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        // Old format: doc["permission"]["allow"] as array of strings
-        // New format: doc["permission"]["bash"]["*"] = "allow"
-        let bash = &doc["permission"]["bash"];
-        assert_eq!(bash["*"], serde_json::json!("allow"));
+        // Bare tool (no pattern, no paths) -> emitted as action string directly:
+        // doc["permission"]["bash"] = "allow"
+        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
     }
 
     #[test]
@@ -1254,15 +1259,15 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         // Verify per-tool format: each tool key maps patterns to actions
+
+        // Bash has specific patterns -> emitted as pattern->action object
         let bash = &doc["permission"]["bash"];
         assert_eq!(bash["otool *"], serde_json::json!("allow"));
         assert_eq!(bash["rm *"], serde_json::json!("deny"));
 
-        let read = &doc["permission"]["read"];
-        assert_eq!(read["*"], serde_json::json!("allow"));
-
-        let edit = &doc["permission"]["edit"];
-        assert_eq!(edit["*"], serde_json::json!("deny"));
+        // Bare tools without patterns -> emitted as action string directly
+        assert_eq!(doc["permission"]["read"], serde_json::json!("allow"));
+        assert_eq!(doc["permission"]["edit"], serde_json::json!("deny"));
 
         // No flat "allow"/"deny"/"ask" arrays at the permission level
         assert!(doc["permission"].get("allow").is_none());
