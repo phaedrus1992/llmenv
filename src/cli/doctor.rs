@@ -507,8 +507,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::unreachable,
-    clippy::needless_pass_by_value
+    clippy::unreachable
 )]
 mod tests {
     use super::*;
