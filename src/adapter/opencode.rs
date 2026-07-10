@@ -29,6 +29,8 @@ mod tests {
     use super::*;
     use crate::merge::rules::RuleFile;
 
+    const VALID_FRONTMATTER: &str = "---\nname: x\ndescription: y\n---\nbody\n";
+
     #[test]
     fn materialize_empty_manifest_writes_agents_md_and_json() {
         let tmp = tempfile::tempdir().unwrap();
@@ -78,8 +80,8 @@ mod tests {
         };
         let owned = OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         assert!(
-            tmp.path().join("rules/security.md").exists(),
-            "rules/security.md must exist"
+            owned.contains(&PathBuf::from("rules/security.md")),
+            "owned must include rules/security.md, got: {owned:?}"
         );
         assert!(
             tmp.path().join("rules/style.md").exists(),
@@ -95,6 +97,67 @@ mod tests {
         assert!(
             instr.contains(&serde_json::json!("rules/style.md")),
             "instructions must include rules/style.md"
+        );
+    }
+
+    #[test]
+    fn materialize_first_class_skills() {
+        let out = tempfile::tempdir().unwrap();
+        let skill_src = tempfile::tempdir().unwrap();
+        std::fs::create_dir(skill_src.path().join("subdir")).unwrap();
+        std::fs::write(skill_src.path().join("SKILL.md"), VALID_FRONTMATTER).unwrap();
+        std::fs::write(
+            skill_src.path().join("subdir/helper.sh"),
+            "#!/bin/sh\necho hi\n",
+        )
+        .unwrap();
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.skills = vec![crate::config::SkillSource {
+            name: "my-oc-skill".into(),
+            path: skill_src.path().to_str().unwrap().into(),
+            when: Vec::new(),
+        }];
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+
+        assert!(out.path().join("skills/my-oc-skill/SKILL.md").exists());
+        assert!(
+            out.path()
+                .join("skills/my-oc-skill/subdir/helper.sh")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn materialize_plugin_projected_skills() {
+        let out = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("skills/my-plugin-skill")).unwrap();
+        std::fs::write(
+            plugin_dir.path().join("skills/my-plugin-skill/SKILL.md"),
+            VALID_FRONTMATTER,
+        )
+        .unwrap();
+
+        let mut manifest = MergedManifest::default();
+        manifest.plugins = vec![crate::plugins::resolve::ResolvedPlugin {
+            marketplace: "test".into(),
+            plugin: "my-plugin".into(),
+            collection: String::new(),
+            install_path: Some(plugin_dir.path().to_str().unwrap().into()),
+            git_commit_sha: None,
+        }];
+        manifest.marketplaces = vec![crate::plugins::resolve::ResolvedMarketplace {
+            name: "test".into(),
+            source: String::new(),
+            install_location: None,
+            head: None,
+        }];
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+
+        assert!(
+            out.path().join("skills/my-plugin-skill/SKILL.md").exists(),
+            "plugin-projected skill must exist"
         );
     }
 }
@@ -157,7 +220,22 @@ impl AgentAdapter for OpencodeAdapter {
             owned.push(r.rel.clone());
         }
 
-        // 3. Build opencode.json with what we have so far
+        // 3. First-class skills (declared via `capabilities.skills`).
+        let skill_owned =
+            crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
+        owned.extend(skill_owned);
+
+        // 4. Plugin-projected skills (skills dir inside a plugin payload).
+        for plugin in &manifest.plugins {
+            let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
+            let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
+            owned.extend(paths);
+        }
+
+        // 5. Validate skills (frontmatter + hardcoded-path scan).
+        crate::adapter::skills::validate_skills(out)?;
+
+        // 6. Build opencode.json with what we have so far
         let mut doc = serde_json::Map::new();
         doc.insert(
             "$schema".into(),
