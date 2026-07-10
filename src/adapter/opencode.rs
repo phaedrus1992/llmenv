@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::AgentAdapter;
+use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
 
 /// Adapter for opencode: writes `AGENTS.md` and `opencode.json` into the
@@ -27,6 +28,7 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::resolve::ResolvedMcp;
     use crate::merge::rules::RuleFile;
 
     const VALID_FRONTMATTER: &str = "---\nname: x\ndescription: y\n---\nbody\n";
@@ -160,6 +162,89 @@ mod tests {
             "plugin-projected skill must exist"
         );
     }
+
+    #[test]
+    fn materialize_mcp_local_server_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.mcps.push(ResolvedMcp {
+            name: "local-srv".into(),
+            kind: super::ResolvedKind::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@anthropic-ai/mcp-server".into()],
+                env: std::collections::BTreeMap::from([("FOO".into(), "bar".into())]),
+            },
+            headers: std::collections::BTreeMap::new(),
+            timeout: Some(10_000),
+            disabled_tools: vec![],
+        });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let srv = &doc["mcp"]["local-srv"];
+        assert_eq!(srv["type"], serde_json::json!("local"));
+        let cmd = srv["command"].as_array().unwrap();
+        assert_eq!(cmd[0], serde_json::json!("npx"));
+        assert_eq!(cmd[1], serde_json::json!("-y"));
+        assert_eq!(srv["environment"]["FOO"], serde_json::json!("bar"));
+        assert_eq!(srv["timeout"], serde_json::json!(10_000));
+    }
+
+    #[test]
+    fn materialize_mcp_remote_server_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.mcps.push(ResolvedMcp {
+            name: "remote-srv".into(),
+            kind: super::ResolvedKind::Remote {
+                url: "http://localhost:3000/mcp".into(),
+                transport: crate::config::McpTransport::Http,
+            },
+            headers: std::collections::BTreeMap::from([(
+                "Authorization".into(),
+                "Bearer xyz".into(),
+            )]),
+            timeout: Some(5000),
+            disabled_tools: vec![],
+        });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let srv = &doc["mcp"]["remote-srv"];
+        assert_eq!(srv["type"], serde_json::json!("remote"));
+        assert_eq!(srv["url"], serde_json::json!("http://localhost:3000/mcp"));
+        assert_eq!(
+            srv["headers"]["Authorization"],
+            serde_json::json!("Bearer xyz")
+        );
+    }
+
+    #[test]
+    fn materialize_mcp_optional_fields_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.mcps.push(ResolvedMcp {
+            name: "minimal".into(),
+            kind: super::ResolvedKind::Remote {
+                url: "http://example.com".into(),
+                transport: crate::config::McpTransport::Http,
+            },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
+        });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let srv = &doc["mcp"]["minimal"];
+        assert!(srv.get("headers").is_none());
+        assert!(srv.get("timeout").is_none());
+        assert!(srv.get("cwd").is_none());
+        assert!(
+            srv.get("disabled_tools").is_none(),
+            "opencode has no disabled_tools field"
+        );
+    }
 }
 
 impl AgentAdapter for OpencodeAdapter {
@@ -237,6 +322,50 @@ impl AgentAdapter for OpencodeAdapter {
 
         // 6. Build opencode.json with what we have so far
         let mut doc = serde_json::Map::new();
+
+        // 7. MCP servers
+        if !manifest.mcps.is_empty() || manifest.capabilities.native_mcp.contains_key("opencode") {
+            let mut mcp_obj = serde_json::Map::new();
+            for mcp in &manifest.mcps {
+                let mut e = match &mcp.kind {
+                    ResolvedKind::Stdio { command, args, env } => {
+                        let mut cmd: Vec<serde_json::Value> = Vec::with_capacity(1 + args.len());
+                        cmd.push(serde_json::json!(command));
+                        cmd.extend(args.iter().map(|a| serde_json::json!(a)));
+                        let mut e = serde_json::Map::new();
+                        e.insert("type".into(), serde_json::json!("local"));
+                        e.insert("command".into(), serde_json::json!(cmd));
+                        if !env.is_empty() {
+                            e.insert("environment".into(), serde_json::json!(env));
+                        }
+                        e
+                    }
+                    ResolvedKind::Remote { url, transport: _ } => {
+                        let mut e = serde_json::Map::new();
+                        e.insert("type".into(), serde_json::json!("remote"));
+                        e.insert("url".into(), serde_json::json!(url));
+                        e
+                    }
+                };
+                if !mcp.headers.is_empty() {
+                    e.insert("headers".into(), serde_json::json!(mcp.headers));
+                }
+                if let Some(t) = mcp.timeout {
+                    e.insert("timeout".into(), serde_json::json!(t));
+                }
+                mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
+            }
+            // Overlay native_mcp.opencode
+            let mut mcp_value = serde_json::Value::Object(mcp_obj);
+            overlay_native_json(
+                &mut mcp_value,
+                manifest.capabilities.native_mcp.get("opencode"),
+                "native_mcp.opencode",
+            )?;
+            if !mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
+                doc.insert("mcp".into(), mcp_value);
+            }
+        }
         doc.insert(
             "$schema".into(),
             serde_json::json!("https://opencode.ai/config.json"),
@@ -266,4 +395,19 @@ impl AgentAdapter for OpencodeAdapter {
         })
         .to_string()
     }
+}
+
+/// Convert a YAML native_mcp fragment to JSON and deep-merge it into `dst`.
+/// Inline copy of crush.rs `overlay_native_crush` — generalised to `mod.rs` in Task 6.
+fn overlay_native_json(
+    dst: &mut serde_json::Value,
+    fragment: Option<&serde_yaml::Value>,
+    key_name: &str,
+) -> anyhow::Result<()> {
+    if let Some(frag) = fragment {
+        let as_json = serde_json::to_value(frag)
+            .map_err(|e| anyhow::anyhow!("converting {key_name} fragment to JSON: {e}"))?;
+        llmenv_util::merge_json(dst, as_json);
+    }
+    Ok(())
 }
