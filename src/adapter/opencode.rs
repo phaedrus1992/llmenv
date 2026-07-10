@@ -273,9 +273,13 @@ impl AgentAdapter for OpencodeAdapter {
             std::collections::BTreeMap::new();
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
         let mut plugin_hooks: Vec<crate::config::Hook> = Vec::new();
-        // Native opencode TypeScript plugins that ship their own hook/tool
-        // implementations and don't need MCP/hooks translation.
-        let mut native_opencode_plugins: Vec<String> = Vec::new();
+        // Whether any plugin provides native opencode support (e.g. a
+        // TypeScript plugin registered via "plugin" key in opencode.json).
+        // Known: context-mode ships a native opencode plugin.
+        let mut has_native_opencode = false;
+
+        // Hoisted: command/ dir needed by plugin and bundle sections below.
+        std::fs::create_dir_all(out.join("command"))?;
 
         for plugin in &manifest.plugins {
             let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
@@ -283,14 +287,13 @@ impl AgentAdapter for OpencodeAdapter {
             // Does this plugin provide native opencode support (e.g. a
             // TypeScript plugin registered via "plugin" key in opencode.json)?
             // Known: context-mode ships a native opencode plugin.
-            const NATIVE_OPENCODE_PLUGINS: &[&str] = &["context-mode"];
-            let is_native_opencode = NATIVE_OPENCODE_PLUGINS.contains(&plugin.plugin.as_str());
+            let is_native_opencode = plugin.plugin == "context-mode";
 
             // 4a. Plugin-provided MCP (LLM_PROVIDER_MCP_JSON). Skip for native
             //     opencode plugins — they register their own tools internally
             //     and including MCP entries would duplicate them.
             if is_native_opencode {
-                native_opencode_plugins.push(plugin.plugin.clone());
+                has_native_opencode = true;
             } else {
                 let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
                 if mcp_json_path.exists() {
@@ -322,14 +325,16 @@ impl AgentAdapter for OpencodeAdapter {
                     if path.extension().is_none_or(|e| e != "md") {
                         continue;
                     }
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown");
+                    let name = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "plugin '{}': command file '{}' has no valid file stem",
+                            plugin.plugin,
+                            path.display(),
+                        )
+                    })?;
                     let source = std::fs::read_to_string(&path)?;
                     let translated = translate_command_md(&source, name)?;
                     let out_name = format!("command/__plugin_{name}.md");
-                    std::fs::create_dir_all(out.join("command"))?;
                     crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
                     plugin_skill_paths.push(PathBuf::from(&out_name));
                 }
@@ -344,14 +349,16 @@ impl AgentAdapter for OpencodeAdapter {
                     if path.extension().is_none_or(|e| e != "md") {
                         continue;
                     }
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown");
+                    let name = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "plugin '{}': agent file '{}' has no valid file stem",
+                            plugin.plugin,
+                            path.display(),
+                        )
+                    })?;
                     let source = std::fs::read_to_string(&path)?;
                     let translated = translate_agent_md(&source, name)?;
                     let out_name = format!("command/__plugin_agent_{name}.md");
-                    std::fs::create_dir_all(out.join("command"))?;
                     crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
                     plugin_skill_paths.push(PathBuf::from(&out_name));
                 }
@@ -370,15 +377,14 @@ impl AgentAdapter for OpencodeAdapter {
                     if !hooks_path.exists() {
                         continue;
                     }
-                    let Ok(mut parsed) = parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
-                    else {
-                        eprintln!(
-                            "warning: failed to parse '{}' for plugin '{}'",
-                            hooks_path.display(),
-                            plugin.plugin,
-                        );
-                        continue;
-                    };
+                    let mut parsed = parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to parse '{}' for plugin '{}': {e}",
+                                hooks_path.display(),
+                                plugin.plugin,
+                            )
+                        })?;
                     // Filter to supported events and command-only kinds at collection
                     // time, same as §11 does for manifest hooks.
                     parsed.retain(|hook| {
@@ -403,6 +409,7 @@ impl AgentAdapter for OpencodeAdapter {
                         true
                     });
                     plugin_hooks.extend(parsed);
+                    break; // only process one hooks manifest (no duplicates)
                 }
             }
         }
@@ -418,8 +425,8 @@ impl AgentAdapter for OpencodeAdapter {
         // Register native opencode TypeScript plugins (e.g. context-mode) that
         // ship their own hook/tool implementations independent of the llmenv JS
         // shim. These are resolved by opencode's plugin system at startup.
-        if !native_opencode_plugins.is_empty() {
-            doc.insert("plugin".into(), serde_json::json!(native_opencode_plugins));
+        if has_native_opencode {
+            doc.insert("plugin".into(), serde_json::json!(["context-mode"]));
         }
 
         // 7. MCP servers
@@ -456,6 +463,12 @@ impl AgentAdapter for OpencodeAdapter {
             }
             // Merge plugin-provided MCP entries (from LLM_PROVIDER_MCP_JSON).
             for (k, v) in &plugin_mcp_entries {
+                if mcp_obj.contains_key(k) {
+                    eprintln!(
+                        "warning: duplicate MCP server '{k}' from plugin — \
+                         last definition wins"
+                    );
+                }
                 mcp_obj.insert(k.clone(), v.clone());
             }
             // Overlay native_mcp.opencode
@@ -552,47 +565,62 @@ impl AgentAdapter for OpencodeAdapter {
             (s.to_ascii_lowercase(), "*".to_string())
         }
 
-        // Insert structured rules into the per-tool map. Deny overrides ask
-        // overrides allow for the same tool+pattern (last-write-wins).
-        fn insert_rules(
+        // Insert (tool, pattern) pairs into the per-tool map.
+        // Deny overrides ask overrides allow for the same tool+pattern
+        // (last-write-wins).
+        fn insert_patterns(
             map: &mut std::collections::BTreeMap<
                 String,
                 std::collections::BTreeMap<String, String>,
             >,
-            rules: &[crate::config::PermissionRule],
+            iter: impl Iterator<Item = (String, String)>,
             action: &str,
         ) {
-            for (tool, pattern) in rules.iter().flat_map(rule_to_patterns) {
+            for (tool, pattern) in iter {
                 map.entry(tool)
                     .or_default()
                     .insert(pattern, action.to_string());
             }
         }
 
-        // Insert native rules (already in llmenv grammar) into the per-tool map.
-        fn insert_native(
-            map: &mut std::collections::BTreeMap<
-                String,
-                std::collections::BTreeMap<String, String>,
-            >,
-            strings: &[String],
-            action: &str,
-        ) {
-            for s in strings {
-                let (tool, pattern) = parse_native_rule(s);
-                map.entry(tool)
-                    .or_default()
-                    .insert(pattern, action.to_string());
-            }
-        }
-
-        insert_rules(&mut permission_map, &perms.allow, "allow");
-        insert_rules(&mut permission_map, &perms.ask, "ask");
-        insert_rules(&mut permission_map, &perms.deny, "deny");
+        // Insertion order: structured rules first, then native rules. Native rules
+        // use last-write-wins at the pattern level (BTreeMap insertion),
+        // so a native wildcard `*` for a tool shadows ALL structured patterns
+        // for that tool. If a user has `allow: [Bash(otool *)]` AND a native
+        // `deny: [Bash(*)]`, the final state is `Bash/* -> deny` because the
+        // native insertion runs after the structured one. Use one category
+        // (structured OR native) per tool to avoid unexpected shadowing.
+        insert_patterns(
+            &mut permission_map,
+            perms.allow.iter().flat_map(rule_to_patterns),
+            "allow",
+        );
+        insert_patterns(
+            &mut permission_map,
+            perms.ask.iter().flat_map(rule_to_patterns),
+            "ask",
+        );
+        insert_patterns(
+            &mut permission_map,
+            perms.deny.iter().flat_map(rule_to_patterns),
+            "deny",
+        );
         if let Some(n) = native_perms {
-            insert_native(&mut permission_map, &n.allow, "allow");
-            insert_native(&mut permission_map, &n.ask, "ask");
-            insert_native(&mut permission_map, &n.deny, "deny");
+            insert_patterns(
+                &mut permission_map,
+                n.allow.iter().map(|s| parse_native_rule(s)),
+                "allow",
+            );
+            insert_patterns(
+                &mut permission_map,
+                n.ask.iter().map(|s| parse_native_rule(s)),
+                "ask",
+            );
+            insert_patterns(
+                &mut permission_map,
+                n.deny.iter().map(|s| parse_native_rule(s)),
+                "deny",
+            );
         }
 
         if !permission_map.is_empty() {
@@ -674,13 +702,14 @@ impl AgentAdapter for OpencodeAdapter {
                 let source = std::fs::read_to_string(abs).map_err(|e| {
                     anyhow::anyhow!("failed to read bundle file '{}': {e}", rel.display())
                 })?;
-                let name = rel
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
+                let name = rel.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "bundle command file '{}' has no valid file stem",
+                        rel.display(),
+                    )
+                })?;
                 let translated = translate_command_md(&source, name)?;
                 let out_name = format!("command/__bundle_{name}.md");
-                std::fs::create_dir_all(out.join("command"))?;
                 crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
                 owned.push(PathBuf::from(&out_name));
             }
@@ -688,13 +717,14 @@ impl AgentAdapter for OpencodeAdapter {
                 let source = std::fs::read_to_string(abs).map_err(|e| {
                     anyhow::anyhow!("failed to read bundle file '{}': {e}", rel.display())
                 })?;
-                let name = rel
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
+                let name = rel.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "bundle agent file '{}' has no valid file stem",
+                        rel.display(),
+                    )
+                })?;
                 let translated = translate_agent_md(&source, name)?;
                 let out_name = format!("command/__bundle_agent_{name}.md");
-                std::fs::create_dir_all(out.join("command"))?;
                 crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
                 owned.push(PathBuf::from(&out_name));
             }
