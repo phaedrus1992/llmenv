@@ -492,6 +492,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::expect_used, reason = "test invariant")]
     fn opencode_adapter_trait_probes() {
         let adapters = registered_adapters();
         let o = adapters

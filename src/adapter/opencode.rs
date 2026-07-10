@@ -139,8 +139,569 @@ async function spawnHook(event, command, timeoutMs, extra) {
 }
 "#;
 
+impl AgentAdapter for OpencodeAdapter {
+    fn name(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn binary_name(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn supports_plugins(&self) -> bool {
+        true
+    }
+
+    fn supports_lsp(&self) -> bool {
+        true
+    }
+
+    fn supported_hook_events(&self) -> &'static [&'static str] {
+        SUPPORTED_HOOK_EVENTS
+    }
+
+    fn env_vars(
+        &self,
+        cache_dir: &Path,
+        _state_dir: &Path,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let dir = cache_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
+        })?;
+        Ok(vec![("OPENCODE_CONFIG_DIR".into(), dir.to_owned())])
+    }
+
+    fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        super::skills::create_dir_owner_only(out)?;
+
+        let mut owned: Vec<PathBuf> = Vec::new();
+
+        // 1. AGENTS.md
+        super::skills::reject_hardcoded_config_path(&manifest.agents_md, "AGENTS.md")?;
+        crate::paths::write_owner_only(&out.join("AGENTS.md"), manifest.agents_md.as_bytes())?;
+        owned.push(PathBuf::from("AGENTS.md"));
+
+        // 2. rules/*.md — written verbatim; paths collected for instructions[]
+        let mut instructions: Vec<String> = Vec::new();
+        for r in &manifest.rules {
+            if crate::paths::is_unsafe_join_target(r.rel.to_string_lossy().as_ref()) {
+                anyhow::bail!("path traversal in rules file: {}", r.rel.display());
+            }
+            super::skills::reject_hardcoded_config_path(&r.raw, &r.rel.to_string_lossy())?;
+            let dest = out.join(&r.rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            crate::paths::write_owner_only(&dest, r.raw.as_bytes())?;
+            instructions.push(r.rel.to_string_lossy().into_owned());
+            owned.push(r.rel.clone());
+        }
+
+        // 3. First-class skills (declared via `capabilities.skills`).
+        let skill_owned =
+            crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
+        owned.extend(skill_owned);
+
+        // 4. Plugin content translation (commands, agents, MCP, skills).
+        let mut plugin_mcp_entries: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
+
+        for plugin in &manifest.plugins {
+            let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
+
+            // 4a. Plugin-provided MCP (LLM_PROVIDER_MCP_JSON)
+            let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
+            if mcp_json_path.exists() {
+                let content = std::fs::read_to_string(&mcp_json_path)?;
+                let yaml_value: serde_yaml::Value =
+                    serde_yaml::from_str(&content).map_err(|e| {
+                        anyhow::anyhow!(
+                            "plugin '{}': failed to parse LLM_PROVIDER_MCP_JSON: {e}",
+                            plugin.plugin
+                        )
+                    })?;
+                if let Some(obj) = yaml_value.as_mapping() {
+                    let json_value: serde_json::Value = serde_json::to_value(obj)?;
+                    if let Some(json_obj) = json_value.as_object() {
+                        for (k, v) in json_obj {
+                            plugin_mcp_entries.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+
+            // 4b. Translate commands/ from plugin
+            let cmd_dir = payload.join("commands");
+            if cmd_dir.exists() {
+                for entry in std::fs::read_dir(&cmd_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().is_none_or(|e| e != "md") {
+                        continue;
+                    }
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown");
+                    let source = std::fs::read_to_string(&path)?;
+                    let translated = translate_command_md(&source, name)?;
+                    let out_name = format!("command/__plugin_{name}.md");
+                    std::fs::create_dir_all(out.join("command"))?;
+                    crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
+                    plugin_skill_paths.push(PathBuf::from(&out_name));
+                }
+            }
+
+            // 4c. Translate agents/ from plugin
+            let agent_dir = payload.join("agents");
+            if agent_dir.exists() {
+                for entry in std::fs::read_dir(&agent_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().is_none_or(|e| e != "md") {
+                        continue;
+                    }
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown");
+                    let source = std::fs::read_to_string(&path)?;
+                    let translated = translate_agent_md(&source, name)?;
+                    let out_name = format!("command/__plugin_agent_{name}.md");
+                    std::fs::create_dir_all(out.join("command"))?;
+                    crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
+                    plugin_skill_paths.push(PathBuf::from(&out_name));
+                }
+            }
+
+            // 4d. Plugin-projected skills (skills dir inside a plugin payload).
+            let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
+            plugin_skill_paths.extend(paths);
+
+            // 4e. Warn on hooks/ dir inside a plugin (not used by opencode).
+            let hooks_dir = payload.join("hooks");
+            if hooks_dir.exists() {
+                eprintln!(
+                    "warning: opencode adapter does not support plugin hooks/ \
+                     directories (plugin '{}'). Declare hooks in \
+                     capabilities.hooks instead.",
+                    plugin.plugin
+                );
+            }
+        }
+
+        owned.extend(plugin_skill_paths);
+
+        // 5. Validate skills (frontmatter + hardcoded-path scan).
+        crate::adapter::skills::validate_skills(out)?;
+
+        // 6. Build opencode.json with what we have so far
+        let mut doc = serde_json::Map::new();
+
+        // 7. MCP servers
+        if !manifest.mcps.is_empty() || manifest.capabilities.native_mcp.contains_key("opencode") {
+            let mut mcp_obj = serde_json::Map::new();
+            for mcp in &manifest.mcps {
+                let mut e = match &mcp.kind {
+                    ResolvedKind::Stdio { command, args, env } => {
+                        let mut cmd: Vec<serde_json::Value> = Vec::with_capacity(1 + args.len());
+                        cmd.push(serde_json::json!(command));
+                        cmd.extend(args.iter().map(|a| serde_json::json!(a)));
+                        let mut e = serde_json::Map::new();
+                        e.insert("type".into(), serde_json::json!("local"));
+                        e.insert("command".into(), serde_json::json!(cmd));
+                        if !env.is_empty() {
+                            e.insert("environment".into(), serde_json::json!(env));
+                        }
+                        e
+                    }
+                    ResolvedKind::Remote { url, transport: _ } => {
+                        let mut e = serde_json::Map::new();
+                        e.insert("type".into(), serde_json::json!("remote"));
+                        e.insert("url".into(), serde_json::json!(url));
+                        e
+                    }
+                };
+                if !mcp.headers.is_empty() {
+                    e.insert("headers".into(), serde_json::json!(mcp.headers));
+                }
+                if let Some(t) = mcp.timeout {
+                    e.insert("timeout".into(), serde_json::json!(t));
+                }
+                mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
+            }
+            // Merge plugin-provided MCP entries (from LLM_PROVIDER_MCP_JSON).
+            for (k, v) in &plugin_mcp_entries {
+                mcp_obj.insert(k.clone(), v.clone());
+            }
+            // Overlay native_mcp.opencode
+            let mut mcp_value = serde_json::Value::Object(mcp_obj);
+            super::overlay_native_json(
+                &mut mcp_value,
+                manifest.capabilities.native_mcp.get("opencode"),
+                "native_mcp.opencode",
+            )?;
+            if !mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
+                doc.insert("mcp".into(), mcp_value);
+            }
+        }
+
+        // 8. LSP servers
+        if !manifest.capabilities.lsp.is_empty() {
+            let mut lsp_obj = serde_json::Map::new();
+            for srv in &manifest.capabilities.lsp {
+                if srv.disabled {
+                    continue;
+                }
+                let mut cmd: Vec<serde_json::Value> = Vec::with_capacity(1 + srv.args.len());
+                cmd.push(serde_json::json!(srv.command));
+                cmd.extend(srv.args.iter().map(|a| serde_json::json!(a)));
+                let mut e = serde_json::Map::new();
+                e.insert("command".into(), serde_json::json!(cmd));
+                if !srv.filetypes.is_empty() {
+                    e.insert("extensions".into(), serde_json::json!(srv.filetypes));
+                }
+                if !srv.env.is_empty() {
+                    e.insert("env".into(), serde_json::json!(srv.env));
+                }
+                if let Some(opts) = &srv.init_options {
+                    let as_json = serde_json::to_value(opts).map_err(|err| {
+                        anyhow::anyhow!(
+                            "LSP server '{}': failed to convert init_options to JSON: {err}",
+                            srv.name
+                        )
+                    })?;
+                    e.insert("initialization".into(), as_json);
+                }
+                lsp_obj.insert(srv.name.clone(), serde_json::Value::Object(e));
+            }
+            if !lsp_obj.is_empty() {
+                doc.insert("lsp".into(), serde_json::Value::Object(lsp_obj));
+            }
+        }
+
+        doc.insert(
+            "$schema".into(),
+            serde_json::json!("https://opencode.ai/config.json"),
+        );
+        if !instructions.is_empty() {
+            doc.insert("instructions".into(), serde_json::json!(instructions));
+        }
+
+        // 9. Permissions — opencode uses `permission` (singular), with allow/ask/deny
+        let perms = &manifest.capabilities.permissions;
+        let native_perms = manifest.capabilities.native_permissions.get("opencode");
+
+        let render_rules = |rules: &[crate::config::PermissionRule]| -> Vec<String> {
+            rules
+                .iter()
+                .flat_map(|r| {
+                    if let Some(pat) = &r.pattern {
+                        vec![format!("{}({})", r.tool, pat)]
+                    } else if !r.paths.is_empty() {
+                        r.paths
+                            .iter()
+                            .map(|p| format!("{}({})", r.tool, p))
+                            .collect()
+                    } else {
+                        vec![r.tool.clone()]
+                    }
+                })
+                .collect()
+        };
+
+        let allowed = {
+            let mut v = render_rules(&perms.allow);
+            if let Some(n) = native_perms {
+                v.extend(n.allow.iter().cloned());
+            }
+            dedup(&mut v);
+            v
+        };
+        let asked = {
+            let mut v = render_rules(&perms.ask);
+            if let Some(n) = native_perms {
+                v.extend(n.ask.iter().cloned());
+            }
+            dedup(&mut v);
+            v
+        };
+        let denied = {
+            let mut v = render_rules(&perms.deny);
+            if let Some(n) = native_perms {
+                v.extend(n.deny.iter().cloned());
+            }
+            dedup(&mut v);
+            v
+        };
+
+        if !allowed.is_empty() || !asked.is_empty() || !denied.is_empty() {
+            let mut perm_obj = serde_json::Map::new();
+            if !allowed.is_empty() {
+                perm_obj.insert("allow".into(), serde_json::json!(allowed));
+            }
+            if !asked.is_empty() {
+                perm_obj.insert("ask".into(), serde_json::json!(asked));
+            }
+            if !denied.is_empty() {
+                perm_obj.insert("deny".into(), serde_json::json!(denied));
+            }
+            doc.insert("permission".into(), serde_json::Value::Object(perm_obj));
+        }
+
+        // 10. Native overlay — reject modeled keys, then deep-merge
+        const OPENCODE_MODELED_KEYS: &[&str] = &["instructions", "mcp", "lsp", "permission"];
+        if let Some(native) = manifest.native.get("opencode") {
+            super::reject_modeled_native_keys(native, OPENCODE_MODELED_KEYS, "opencode")?;
+        }
+        let mut doc_value = serde_json::Value::Object(doc);
+        super::overlay_native_json(
+            &mut doc_value,
+            manifest.native.get("opencode"),
+            "native.opencode",
+        )?;
+        let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
+        let out_path = out.join(OPENCODE_JSON_FILE);
+        crate::paths::write_owner_only(&out_path, &json_bytes)?;
+        owned.push(PathBuf::from(OPENCODE_JSON_FILE));
+
+        // 11. Hook shim — filter compatible events, warn on unsupported, generate JS plugin
+        let compatible_hooks: Vec<&crate::config::Hook> = manifest
+            .capabilities
+            .hooks
+            .iter()
+            .filter(|hook| {
+                if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
+                    eprintln!(
+                        "warning: opencode adapter does not support hook event '{}' — \
+                         skipping this hook. Supported events: {}. Remove or move \
+                         this hook to a claude_code-only bundle to silence this warning.",
+                        hook.event,
+                        SUPPORTED_HOOK_EVENTS.join(", ")
+                    );
+                    return false;
+                }
+                if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
+                    eprintln!(
+                        "warning: opencode adapter does not support mcp_tool hooks \
+                         (hook event '{}', tool '{}') — skipping this hook. \
+                         Use a command hook instead.",
+                        hook.event,
+                        hook.handler.tool.as_deref().unwrap_or("<unknown>")
+                    );
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        let shim_js = generate_shim_js(&compatible_hooks)?;
+        let plugin_dir = out.join("plugin");
+        std::fs::create_dir_all(&plugin_dir)?;
+        crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), shim_js.as_bytes())?;
+        owned.push(PathBuf::from("plugin/llmenv.js"));
+
+        // 12. Bundle-level commands/agents from manifest.files
+        for (rel, abs) in &manifest.files {
+            let rel_str = rel.to_string_lossy();
+            if rel_str.starts_with("commands/") && rel_str.ends_with(".md") {
+                let source = std::fs::read_to_string(abs).map_err(|e| {
+                    anyhow::anyhow!("failed to read bundle file '{}': {e}", rel.display())
+                })?;
+                let name = rel
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
+                let translated = translate_command_md(&source, name)?;
+                let out_name = format!("command/__bundle_{name}.md");
+                std::fs::create_dir_all(out.join("command"))?;
+                crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
+                owned.push(PathBuf::from(&out_name));
+            }
+            if rel_str.starts_with("agents/") && rel_str.ends_with(".md") {
+                let source = std::fs::read_to_string(abs).map_err(|e| {
+                    anyhow::anyhow!("failed to read bundle file '{}': {e}", rel.display())
+                })?;
+                let name = rel
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
+                let translated = translate_agent_md(&source, name)?;
+                let out_name = format!("command/__bundle_agent_{name}.md");
+                std::fs::create_dir_all(out.join("command"))?;
+                crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
+                owned.push(PathBuf::from(&out_name));
+            }
+        }
+
+        Ok(owned)
+    }
+
+    fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": hook_event_name,
+                "additionalContext": format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}"),
+            }
+        })
+        .to_string()
+    }
+}
+
+/// Build the JS source for `plugin/llmenv.js` — the hook bridge shim.
+///
+/// Each user-defined hook is mapped to its opencode event and bundled with
+/// the three auto-hooks (`check-stale`, `config-context`, `config-guard`)
+/// that always run on `SessionStart` / `PreToolUse`.
+fn generate_shim_js(hooks: &[&crate::config::Hook]) -> anyhow::Result<String> {
+    let mut by_event: std::collections::BTreeMap<&str, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    for hook in hooks {
+        let resolved_command = hook
+            .handler
+            .command
+            .as_deref()
+            .map(|cmd| match &hook.bundle_origin {
+                Some(bundle_dir) => super::resolve_bundle_relative_paths(cmd, bundle_dir)
+                    .unwrap_or_else(|| cmd.to_string()),
+                None => cmd.to_string(),
+            })
+            .unwrap_or_default();
+        let timeout = 30_000u64;
+        by_event
+            .entry(hook.event.as_str())
+            .or_default()
+            .push(serde_json::json!({ "command": resolved_command, "timeout": timeout }));
+    }
+
+    // Auto-hooks — always present
+    by_event
+        .entry("SessionStart")
+        .or_default()
+        .push(serde_json::json!({
+            "command": "llmenv check-stale --engine opencode",
+            "timeout": 5000,
+        }));
+    by_event
+        .entry("SessionStart")
+        .or_default()
+        .push(serde_json::json!({
+            "command": "llmenv config-context --engine opencode",
+            "timeout": 5000,
+        }));
+    by_event
+        .entry("PreToolUse")
+        .or_default()
+        .push(serde_json::json!({
+            "command": "llmenv config-guard --engine opencode",
+            "timeout": 5000,
+        }));
+
+    let table: Vec<serde_json::Value> = by_event
+        .into_iter()
+        .map(|(event, commands)| {
+            serde_json::json!({
+                "event": event,
+                "commands": commands,
+            })
+        })
+        .collect();
+
+    let table_json = serde_json::to_string(&table)?;
+    Ok(SHIM_TEMPLATE.replace("${HOOK_TABLE}", &table_json))
+}
+
+/// Split markdown source into optional frontmatter and body.
+///
+/// Returns `(parsed_frontmatter_or_None, body_text)`. The body text is the
+/// content after the closing `---` delimiter (leading whitespace trimmed).
+fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &str) {
+    let s = source.trim_start();
+    if !s.starts_with("---") {
+        return (None, source);
+    }
+    let after_opener = &s[3..];
+
+    // Find the closing `\n---` (opener + newline + closing delimiter).
+    if let Some(end) = after_opener.find("\n---") {
+        // `end` is the position of `\n` before the closing `---`.
+        // YAML content is after the opening `---\n` (position 1 of after_opener)
+        // and before the `\n` at position `end`.
+        let fm_raw = if end > 0 { &after_opener[1..end] } else { "" };
+        let body = &after_opener[(end + 4)..];
+        let fm = serde_yaml::from_str(fm_raw).ok();
+        (fm, body.trim_start())
+    } else {
+        (None, source)
+    }
+}
+
+/// Translate a command markdown file from Claude frontmatter to opencode format.
+///
+/// Keeps only `description` from the frontmatter. Drops `model` and
+/// `allowed_tools` with a warning — those are Claude-specific concepts that
+/// opencode does not support for commands.
+fn translate_command_md(source: &str, _name: &str) -> anyhow::Result<String> {
+    let (fm, body) = split_frontmatter(source);
+    let mut new_fm = serde_yaml::Mapping::new();
+
+    if let Some(serde_yaml::Value::Mapping(ref map)) = fm {
+        if let Some(desc) = map.get(serde_yaml::Value::String("description".into())) {
+            new_fm.insert("description".into(), desc.clone());
+        }
+        let dropped: &[&str] = &["model", "allowed_tools"];
+        for key in dropped {
+            if map.contains_key(serde_yaml::Value::String((*key).into())) {
+                eprintln!(
+                    "warning: opencode adapter does not support '{key}' in \
+                     command frontmatter — dropping this field"
+                );
+            }
+        }
+    }
+
+    if new_fm.is_empty() {
+        Ok(body.to_string())
+    } else {
+        let fm_yaml = serde_yaml::to_string(&new_fm)?;
+        Ok(format!("---\n{}---\n{}", fm_yaml, body))
+    }
+}
+
+/// Translate an agent markdown file from Claude frontmatter to opencode format.
+///
+/// Keeps `description`, `model`, `tools` / `allowed_tools`, and adds
+/// `mode: subagent` so opencode runs the agent as a sub-process.
+fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
+    let (fm, body) = split_frontmatter(source);
+    let mut new_fm = serde_yaml::Mapping::new();
+
+    if let Some(serde_yaml::Value::Mapping(ref map)) = fm {
+        let keep: &[&str] = &["description", "model"];
+        for key in keep {
+            if let Some(val) = map.get(serde_yaml::Value::String((*key).into())) {
+                new_fm.insert((*key).into(), val.clone());
+            }
+        }
+        for tool_key in &["tools", "allowed_tools"] {
+            if let Some(val) = map.get(serde_yaml::Value::String((*tool_key).into())) {
+                new_fm.insert((*tool_key).into(), val.clone());
+            }
+        }
+    }
+
+    new_fm.insert("mode".into(), serde_yaml::Value::String("subagent".into()));
+    let fm_yaml = serde_yaml::to_string(&new_fm)?;
+    Ok(format!("---\n{}---\n{}", fm_yaml, body))
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::mcp::resolve::ResolvedMcp;
     use crate::merge::rules::RuleFile;
@@ -165,8 +726,10 @@ mod tests {
     #[test]
     fn materialize_agents_md_content_is_preserved() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        manifest.agents_md = "# Test Rules\n\nSome content here.".to_string();
+        let manifest = MergedManifest {
+            agents_md: "# Test Rules\n\nSome content here.".to_string(),
+            ..Default::default()
+        };
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let content = std::fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap();
         assert_eq!(content, "# Test Rules\n\nSome content here.");
@@ -255,20 +818,22 @@ mod tests {
         )
         .unwrap();
 
-        let mut manifest = MergedManifest::default();
-        manifest.plugins = vec![crate::plugins::resolve::ResolvedPlugin {
-            marketplace: "test".into(),
-            plugin: "my-plugin".into(),
-            collection: String::new(),
-            install_path: Some(plugin_dir.path().to_str().unwrap().into()),
-            git_commit_sha: None,
-        }];
-        manifest.marketplaces = vec![crate::plugins::resolve::ResolvedMarketplace {
-            name: "test".into(),
-            source: String::new(),
-            install_location: None,
-            head: None,
-        }];
+        let manifest = MergedManifest {
+            plugins: vec![crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "test".into(),
+                plugin: "my-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_str().unwrap().into()),
+                git_commit_sha: None,
+            }],
+            marketplaces: vec![crate::plugins::resolve::ResolvedMarketplace {
+                name: "test".into(),
+                source: String::new(),
+                install_location: None,
+                head: None,
+            }],
+            ..Default::default()
+        };
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
 
         assert!(
@@ -570,359 +1135,101 @@ mod tests {
             .unwrap();
         assert!(tmp.path().join("plugin/llmenv.js").exists());
     }
-}
 
-impl AgentAdapter for OpencodeAdapter {
-    fn name(&self) -> &'static str {
-        "opencode"
+    #[test]
+    fn translate_command_md_keeps_description() {
+        let src = "---\ndescription: My test command\nmodel: claude-sonnet-4-20250514\nallowed_tools: [Bash]\n---\n\nRun this command.";
+        let result = translate_command_md(src, "test").unwrap();
+        assert!(result.contains("description: My test command"));
+        assert!(!result.contains("model:"));
+        assert!(!result.contains("allowed_tools:"));
+        assert!(result.contains("Run this command."));
     }
 
-    fn binary_name(&self) -> &'static str {
-        "opencode"
+    #[test]
+    fn translate_command_md_no_frontmatter_passthrough() {
+        let src = "Just raw markdown content.";
+        let result = translate_command_md(src, "test").unwrap();
+        assert_eq!(result, "Just raw markdown content.");
     }
 
-    fn supports_plugins(&self) -> bool {
-        true
+    #[test]
+    fn translate_command_md_empty_description_still_works() {
+        let src = "---\n---\n\nBody only.";
+        let result = translate_command_md(src, "test").unwrap();
+        // No valid frontmatter fields → body returned as-is (no --- wrapper)
+        assert_eq!(result, "Body only.");
     }
 
-    fn supports_lsp(&self) -> bool {
-        true
+    #[test]
+    fn translate_agent_md_keeps_model_description_tools() {
+        let src = "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\ntools: [Bash, Read]\n---\n\nDo things autonomously.";
+        let result = translate_agent_md(src, "test").unwrap();
+        assert!(result.contains("description: My agent"));
+        assert!(result.contains("model: claude-sonnet-4-20250514"));
+        assert!(result.contains("tools:"));
+        assert!(result.contains("mode: subagent"));
+        assert!(result.contains("Do things autonomously."));
     }
 
-    fn supported_hook_events(&self) -> &'static [&'static str] {
-        SUPPORTED_HOOK_EVENTS
+    #[test]
+    fn translate_agent_md_adds_subagent_mode() {
+        let src = "---\ndescription: Just description\n---\n\nBody.";
+        let result = translate_agent_md(src, "test").unwrap();
+        assert!(result.contains("description: Just description"));
+        assert!(result.contains("mode: subagent"));
     }
 
-    fn env_vars(
-        &self,
-        cache_dir: &Path,
-        _state_dir: &Path,
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let dir = cache_dir.to_str().ok_or_else(|| {
-            anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
-        })?;
-        Ok(vec![("OPENCODE_CONFIG_DIR".into(), dir.to_owned())])
+    #[test]
+    fn translate_agent_md_no_frontmatter_passthrough() {
+        let src = "Just raw content.";
+        let result = translate_agent_md(src, "test").unwrap();
+        assert!(result.contains("mode: subagent"));
+        assert!(result.contains("Just raw content."));
     }
 
-    fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
-        super::skills::create_dir_owner_only(out)?;
-
-        let mut owned: Vec<PathBuf> = Vec::new();
-
-        // 1. AGENTS.md
-        super::skills::reject_hardcoded_config_path(&manifest.agents_md, "AGENTS.md")?;
-        crate::paths::write_owner_only(&out.join("AGENTS.md"), manifest.agents_md.as_bytes())?;
-        owned.push(PathBuf::from("AGENTS.md"));
-
-        // 2. rules/*.md — written verbatim; paths collected for instructions[]
-        let mut instructions: Vec<String> = Vec::new();
-        for r in &manifest.rules {
-            if crate::paths::is_unsafe_join_target(r.rel.to_string_lossy().as_ref()) {
-                anyhow::bail!("path traversal in rules file: {}", r.rel.display());
-            }
-            super::skills::reject_hardcoded_config_path(&r.raw, &r.rel.to_string_lossy())?;
-            let dest = out.join(&r.rel);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            crate::paths::write_owner_only(&dest, r.raw.as_bytes())?;
-            instructions.push(r.rel.to_string_lossy().into_owned());
-            owned.push(r.rel.clone());
-        }
-
-        // 3. First-class skills (declared via `capabilities.skills`).
-        let skill_owned =
-            crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
-        owned.extend(skill_owned);
-
-        // 4. Plugin-projected skills (skills dir inside a plugin payload).
-        for plugin in &manifest.plugins {
-            let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
-            let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
-            owned.extend(paths);
-        }
-
-        // 5. Validate skills (frontmatter + hardcoded-path scan).
-        crate::adapter::skills::validate_skills(out)?;
-
-        // 6. Build opencode.json with what we have so far
-        let mut doc = serde_json::Map::new();
-
-        // 7. MCP servers
-        if !manifest.mcps.is_empty() || manifest.capabilities.native_mcp.contains_key("opencode") {
-            let mut mcp_obj = serde_json::Map::new();
-            for mcp in &manifest.mcps {
-                let mut e = match &mcp.kind {
-                    ResolvedKind::Stdio { command, args, env } => {
-                        let mut cmd: Vec<serde_json::Value> = Vec::with_capacity(1 + args.len());
-                        cmd.push(serde_json::json!(command));
-                        cmd.extend(args.iter().map(|a| serde_json::json!(a)));
-                        let mut e = serde_json::Map::new();
-                        e.insert("type".into(), serde_json::json!("local"));
-                        e.insert("command".into(), serde_json::json!(cmd));
-                        if !env.is_empty() {
-                            e.insert("environment".into(), serde_json::json!(env));
-                        }
-                        e
-                    }
-                    ResolvedKind::Remote { url, transport: _ } => {
-                        let mut e = serde_json::Map::new();
-                        e.insert("type".into(), serde_json::json!("remote"));
-                        e.insert("url".into(), serde_json::json!(url));
-                        e
-                    }
-                };
-                if !mcp.headers.is_empty() {
-                    e.insert("headers".into(), serde_json::json!(mcp.headers));
-                }
-                if let Some(t) = mcp.timeout {
-                    e.insert("timeout".into(), serde_json::json!(t));
-                }
-                mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
-            }
-            // Overlay native_mcp.opencode
-            let mut mcp_value = serde_json::Value::Object(mcp_obj);
-            super::overlay_native_json(
-                &mut mcp_value,
-                manifest.capabilities.native_mcp.get("opencode"),
-                "native_mcp.opencode",
-            )?;
-            if !mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
-                doc.insert("mcp".into(), mcp_value);
-            }
-        }
-
-        // 8. LSP servers
-        if !manifest.capabilities.lsp.is_empty() {
-            let mut lsp_obj = serde_json::Map::new();
-            for srv in &manifest.capabilities.lsp {
-                if srv.disabled {
-                    continue;
-                }
-                let mut cmd: Vec<serde_json::Value> = Vec::with_capacity(1 + srv.args.len());
-                cmd.push(serde_json::json!(srv.command));
-                cmd.extend(srv.args.iter().map(|a| serde_json::json!(a)));
-                let mut e = serde_json::Map::new();
-                e.insert("command".into(), serde_json::json!(cmd));
-                if !srv.filetypes.is_empty() {
-                    e.insert("extensions".into(), serde_json::json!(srv.filetypes));
-                }
-                if !srv.env.is_empty() {
-                    e.insert("env".into(), serde_json::json!(srv.env));
-                }
-                if let Some(opts) = &srv.init_options {
-                    let as_json = serde_json::to_value(opts).map_err(|err| {
-                        anyhow::anyhow!(
-                            "LSP server '{}': failed to convert init_options to JSON: {err}",
-                            srv.name
-                        )
-                    })?;
-                    e.insert("initialization".into(), as_json);
-                }
-                lsp_obj.insert(srv.name.clone(), serde_json::Value::Object(e));
-            }
-            if !lsp_obj.is_empty() {
-                doc.insert("lsp".into(), serde_json::Value::Object(lsp_obj));
-            }
-        }
-
-        doc.insert(
-            "$schema".into(),
-            serde_json::json!("https://opencode.ai/config.json"),
-        );
-        if !instructions.is_empty() {
-            doc.insert("instructions".into(), serde_json::json!(instructions));
-        }
-
-        // 9. Permissions — opencode uses `permission` (singular), with allow/ask/deny
-        let perms = &manifest.capabilities.permissions;
-        let native_perms = manifest.capabilities.native_permissions.get("opencode");
-
-        let render_rules = |rules: &[crate::config::PermissionRule]| -> Vec<String> {
-            rules
-                .iter()
-                .flat_map(|r| {
-                    if let Some(pat) = &r.pattern {
-                        vec![format!("{}({})", r.tool, pat)]
-                    } else if !r.paths.is_empty() {
-                        r.paths
-                            .iter()
-                            .map(|p| format!("{}({})", r.tool, p))
-                            .collect()
-                    } else {
-                        vec![r.tool.clone()]
-                    }
-                })
-                .collect()
-        };
-
-        let allowed = {
-            let mut v = render_rules(&perms.allow);
-            if let Some(n) = native_perms {
-                v.extend(n.allow.iter().cloned());
-            }
-            dedup(&mut v);
-            v
-        };
-        let asked = {
-            let mut v = render_rules(&perms.ask);
-            if let Some(n) = native_perms {
-                v.extend(n.ask.iter().cloned());
-            }
-            dedup(&mut v);
-            v
-        };
-        let denied = {
-            let mut v = render_rules(&perms.deny);
-            if let Some(n) = native_perms {
-                v.extend(n.deny.iter().cloned());
-            }
-            dedup(&mut v);
-            v
-        };
-
-        if !allowed.is_empty() || !asked.is_empty() || !denied.is_empty() {
-            let mut perm_obj = serde_json::Map::new();
-            if !allowed.is_empty() {
-                perm_obj.insert("allow".into(), serde_json::json!(allowed));
-            }
-            if !asked.is_empty() {
-                perm_obj.insert("ask".into(), serde_json::json!(asked));
-            }
-            if !denied.is_empty() {
-                perm_obj.insert("deny".into(), serde_json::json!(denied));
-            }
-            doc.insert("permission".into(), serde_json::Value::Object(perm_obj));
-        }
-
-        // 10. Native overlay — reject modeled keys, then deep-merge
-        const OPENCODE_MODELED_KEYS: &[&str] = &["instructions", "mcp", "lsp", "permission"];
-        if let Some(native) = manifest.native.get("opencode") {
-            super::reject_modeled_native_keys(native, OPENCODE_MODELED_KEYS, "opencode")?;
-        }
-        let mut doc_value = serde_json::Value::Object(doc);
-        super::overlay_native_json(
-            &mut doc_value,
-            manifest.native.get("opencode"),
-            "native.opencode",
-        )?;
-        let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
-        let out_path = out.join(OPENCODE_JSON_FILE);
-        crate::paths::write_owner_only(&out_path, &json_bytes)?;
-        owned.push(PathBuf::from(OPENCODE_JSON_FILE));
-
-        // 11. Hook shim — filter compatible events, warn on unsupported, generate JS plugin
-        let compatible_hooks: Vec<&crate::config::Hook> = manifest
-            .capabilities
-            .hooks
-            .iter()
-            .filter(|hook| {
-                if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
-                    eprintln!(
-                        "warning: opencode adapter does not support hook event '{}' — \
-                         skipping this hook. Supported events: {}. Remove or move \
-                         this hook to a claude_code-only bundle to silence this warning.",
-                        hook.event,
-                        SUPPORTED_HOOK_EVENTS.join(", ")
-                    );
-                    return false;
-                }
-                if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
-                    eprintln!(
-                        "warning: opencode adapter does not support mcp_tool hooks \
-                         (hook event '{}', tool '{}') — skipping this hook. \
-                         Use a command hook instead.",
-                        hook.event,
-                        hook.handler.tool.as_deref().unwrap_or("<unknown>")
-                    );
-                    return false;
-                }
-                true
-            })
-            .collect();
-
-        let shim_js = generate_shim_js(&compatible_hooks);
-        let plugin_dir = out.join("plugin");
-        std::fs::create_dir_all(&plugin_dir)?;
-        crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), shim_js.as_bytes())?;
-        owned.push(PathBuf::from("plugin/llmenv.js"));
-
-        Ok(owned)
+    #[test]
+    fn translate_agent_md_accepts_allowed_tools() {
+        let src = "---\ndescription: Agent with allowed tools\nallowed_tools: [Bash]\n---\n\nBody.";
+        let result = translate_agent_md(src, "test").unwrap();
+        assert!(result.contains("allowed_tools:"));
+        assert!(result.contains("mode: subagent"));
     }
 
-    fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        if text.is_empty() {
-            return String::new();
-        }
-        serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": hook_event_name,
-                "additionalContext": format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}"),
-            }
-        })
-        .to_string()
-    }
-}
+    #[test]
+    fn materialize_bundle_command_from_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
 
-/// Build the JS source for `plugin/llmenv.js` — the hook bridge shim.
-///
-/// Each user-defined hook is mapped to its opencode event and bundled with
-/// the three auto-hooks (`check-stale`, `config-context`, `config-guard`)
-/// that always run on `SessionStart` / `PreToolUse`.
-fn generate_shim_js(hooks: &[&crate::config::Hook]) -> String {
-    let mut by_event: std::collections::BTreeMap<&str, Vec<serde_json::Value>> =
-        std::collections::BTreeMap::new();
-    for hook in hooks {
-        let resolved_command = hook
-            .handler
-            .command
-            .as_deref()
-            .map(|cmd| match &hook.bundle_origin {
-                Some(bundle_dir) => super::resolve_bundle_relative_paths(cmd, bundle_dir)
-                    .unwrap_or_else(|| cmd.to_string()),
-                None => cmd.to_string(),
-            })
-            .unwrap_or_default();
-        let timeout = 30_000u64;
-        by_event
-            .entry(hook.event.as_str())
-            .or_default()
-            .push(serde_json::json!({ "command": resolved_command, "timeout": timeout }));
+        let src_dir = tempfile::tempdir().unwrap();
+        let cmd_file = src_dir.path().join("test-cmd.md");
+        std::fs::write(
+            &cmd_file,
+            "---\ndescription: A test command\nmodel: claude-sonnet-4-20250514\n---\n\nRun this thing.",
+        )
+        .unwrap();
+
+        manifest
+            .files
+            .insert(PathBuf::from("commands/test-cmd.md"), cmd_file);
+
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+
+        let out_cmd = tmp.path().join("command/__bundle_test-cmd.md");
+        assert!(out_cmd.exists());
+        let content = std::fs::read_to_string(&out_cmd).unwrap();
+        assert!(content.contains("description: A test command"));
+        assert!(!content.contains("model:")); // dropped for commands
+        assert!(content.contains("Run this thing."));
     }
 
-    // Auto-hooks — always present
-    by_event
-        .entry("SessionStart")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv check-stale --engine opencode",
-            "timeout": 5000,
-        }));
-    by_event
-        .entry("SessionStart")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv config-context --engine opencode",
-            "timeout": 5000,
-        }));
-    by_event
-        .entry("PreToolUse")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv config-guard --engine opencode",
-            "timeout": 5000,
-        }));
-
-    let table: Vec<serde_json::Value> = by_event
-        .into_iter()
-        .map(|(event, commands)| {
-            serde_json::json!({
-                "event": event,
-                "commands": commands,
-            })
-        })
-        .collect();
-
-    let table_json = serde_json::to_string(&table).expect("hook table must be valid JSON");
-    SHIM_TEMPLATE.replace("${HOOK_TABLE}", &table_json)
+    #[test]
+    fn env_vars_returns_opencode_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vars = OpencodeAdapter.env_vars(tmp.path(), tmp.path()).unwrap();
+        assert!(vars.contains(&(
+            "OPENCODE_CONFIG_DIR".into(),
+            tmp.path().to_string_lossy().into_owned()
+        )));
+    }
 }
