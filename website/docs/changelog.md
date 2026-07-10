@@ -18,39 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Added
-<<<<<<< HEAD
-=======
-
->>>>>>> origin/release/2.x
 - Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
   `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
   temporary files to the current content hash (#630)
 - Add durable plugin cache directory: `CLAUDE_CODE_PLUGIN_CACHE_DIR` now points to
   `<state_dir>/plugins/` so plugins are not re-downloaded on every scope change (#632)
-<<<<<<< HEAD
-=======
-- Add optional `<!-- llmenv-type: episodic|semantic|procedural -->` HTML-comment marker in
-  context chunks to classify stored memories by type. Types persist as ICM memory metadata and
-  can be filtered in recall. Configurable default via `default_type` on memory server entries (#267)
-- Add `llmenv memory stats|list|diff|prune` CLI subcommand for ICM store observability. `stats`
-  shows record counts, `list` dumps memories for the active scope, `diff` highlights changes
-  since the last session snapshot (#268)
-- Add optional `<!-- llmenv-importance: low|medium|high|critical -->` marker to tag memory
-  importance at write time. Configurable per-type defaults via `type_importance` map on memory
-  server entries. SessionEnd writes now skip duplicate chunks when unchanged (#269)
-- Add `consolidation` config section with `enabled` and `max_rules_per_session` fields.
-  Wires a diagnostic consolidation hook into the SessionEnd lifecycle; LLM integration
-  deferred (#271, #595)
-- Add three structural validation checks to `llmenv doctor`: warn on dangling bundle
-  directories (declared but missing on disk), unused marketplace entries (defined but
-  unreferenced), and orphaned `native_permissions` keys (no matching MCP server or
-  engine adapter) (#604)
-
-### Changed
-
-- Replace stale Claude Code env var table in `docs/env-vars.md` with a link to the
-  [upstream docs](https://code.claude.com/docs/en/env-vars)
->>>>>>> origin/release/2.x
 
 ### Fixed
 
@@ -105,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `consolidation` config section with `enabled` and `max_rules_per_session` fields.
   Wires a diagnostic consolidation hook into the SessionEnd lifecycle; LLM integration
   deferred. (#271, #595)
+- Add three structural validation checks to `llmenv doctor`: warn on dangling bundle
+  directories (declared but missing on disk), unused marketplace entries (defined but
+  unreferenced), and orphaned `native_permissions` keys (no matching MCP server or
+  engine adapter) (#604)
 
 ### Changed
 
