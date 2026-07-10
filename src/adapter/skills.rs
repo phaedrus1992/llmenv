@@ -91,7 +91,7 @@ fn has_unquoted_hardcoded_path(line: &str) -> bool {
             let abs_pos = search_start + pos;
             let before = &line[..abs_pos];
             let backticks_before = before.matches('`').count();
-            if backticks_before % 2 == 0 {
+            if backticks_before.is_multiple_of(2) {
                 return true;
             }
             search_start = abs_pos + pattern.len();
