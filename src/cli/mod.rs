@@ -2881,12 +2881,24 @@ fn run_prune(
                 .join(adapter.name())
                 .join(crate::materialize::state::STATE_DIR_NAME)
                 .join("plugins");
-            if plugins_dir.exists() {
-                let ok = dry_run || std::fs::remove_dir_all(&plugins_dir).is_ok();
-                if ok {
-                    plugin_removed.push(plugins_dir);
-                } else {
-                    plugin_failed.push(plugins_dir);
+            if dry_run {
+                // Report as removed but don't actually delete.
+                plugin_removed.push(plugins_dir);
+            } else {
+                match std::fs::remove_dir_all(&plugins_dir) {
+                    Ok(()) => plugin_removed.push(plugins_dir),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Already gone — not a failure.
+                        plugin_removed.push(plugins_dir);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %plugins_dir.display(),
+                            error = %e,
+                            "failed to remove plugin cache"
+                        );
+                        plugin_failed.push(plugins_dir);
+                    }
                 }
             }
         }
@@ -2936,23 +2948,22 @@ fn run_prune(
         eprintln!("  {} entry(ies) could not be removed", failed.len());
     }
 
-    // Report plugin cache results separately.
+    // Report plugin cache results separately (verb is set above).
     if plugin_cache {
-        let pverb = if dry_run { "would remove" } else { "removed" };
         for p in &plugin_removed {
-            eprintln!("  {pverb} plugin cache: {}", p.display());
+            eprintln!("  {verb} plugin cache: {}", p.display());
         }
         for p in &plugin_failed {
             eprintln!("  failed to remove plugin cache: {}", p.display());
         }
         eprintln!(
             "plugin cache prune: {} {} entry(ies)",
-            pverb,
+            verb,
             plugin_removed.len(),
         );
         if !plugin_failed.is_empty() {
             eprintln!(
-                "  {} plugin cache entr(ies) could not be removed",
+                "  {} plugin cache entry(ies) could not be removed",
                 plugin_failed.len()
             );
         }
