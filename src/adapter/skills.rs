@@ -39,7 +39,7 @@ pub(crate) fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
 /// Suppression:
 /// - `# llmenv-ignore-file: hardcoded-path` anywhere in the file skips the entire file.
 /// - `# llmenv-ignore: hardcoded-path` at the end of a line skips that line only.
-fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()> {
+pub(crate) fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()> {
     if content.contains(IGNORE_FILE) {
         return Ok(());
     }
