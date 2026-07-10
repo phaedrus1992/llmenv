@@ -179,9 +179,9 @@ jobs:
     needs: build-binaries
     permissions:
       contents: read
-      id-token: write  # trusted publishing to crates.io
-    # Note: Unlike update-homebrew, this job intentionally runs for prerelease tags (v3.0.0-rc.1, etc.)
-    # because crates.io natively supports semver prerelease versions. See RELEASING.md for the prerelease workflow.
+      # Note: Unlike update-homebrew, this job intentionally runs for prerelease tags (v3.0.0-rc.1, etc.)
+      # because crates.io natively supports semver prerelease versions. See RELEASING.md for the prerelease workflow.
+      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
