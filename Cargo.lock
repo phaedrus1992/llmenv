@@ -1263,7 +1263,11 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llmenv"
+<<<<<<< HEAD
 version = "3.0.0-rc.2"
+=======
+version = "2.4.1"
+>>>>>>> origin/release/2.x
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1301,7 +1305,11 @@ dependencies = [
 
 [[package]]
 name = "llmenv-config"
+<<<<<<< HEAD
 version = "3.0.0-rc.2"
+=======
+version = "2.4.1"
+>>>>>>> origin/release/2.x
 dependencies = [
  "anyhow",
  "llmenv-paths",
@@ -1315,7 +1323,11 @@ dependencies = [
 
 [[package]]
 name = "llmenv-git"
+<<<<<<< HEAD
 version = "3.0.0-rc.2"
+=======
+version = "2.4.1"
+>>>>>>> origin/release/2.x
 dependencies = [
  "proptest",
  "tracing",
@@ -1323,7 +1335,11 @@ dependencies = [
 
 [[package]]
 name = "llmenv-paths"
+<<<<<<< HEAD
 version = "3.0.0-rc.2"
+=======
+version = "2.4.1"
+>>>>>>> origin/release/2.x
 dependencies = [
  "anyhow",
  "proptest",
@@ -1332,7 +1348,11 @@ dependencies = [
 
 [[package]]
 name = "llmenv-util"
+<<<<<<< HEAD
 version = "3.0.0-rc.2"
+=======
+version = "2.4.1"
+>>>>>>> origin/release/2.x
 dependencies = [
  "proptest",
  "serde_json",

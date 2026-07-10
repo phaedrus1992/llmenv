@@ -1,6 +1,10 @@
 [package]
 name = "llmenv-paths"
+<<<<<<< HEAD
 version = "3.0.0-rc.2"
+=======
+version = "2.4.1"
+>>>>>>> origin/release/2.x
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"

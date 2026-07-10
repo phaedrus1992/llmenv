@@ -1,6 +1,10 @@
 [package]
 name = "llmenv-config"
+<<<<<<< HEAD
 version = "3.0.0-rc.2"
+=======
+version = "2.4.1"
+>>>>>>> origin/release/2.x
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -12,7 +16,11 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+<<<<<<< HEAD
 llmenv-paths = { path = "../llmenv-paths", version = "3.0.0-rc.2" }
+=======
+llmenv-paths = { path = "../llmenv-paths", version = "2.4.1" }
+>>>>>>> origin/release/2.x
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
