@@ -17,26 +17,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
-## [2.4.1] - 2026-07-10
+### Major changes since v2.4.1
 
-- CI updates to support trusted publishing to crates.io
+This release introduces a multi-engine architecture (Crush alongside Claude
+Code), a built-in persistent memory system via ICM, automatic context-mode
+integration, and a new interactive setup wizard. Full granular changeset in
+the rc.1 and rc.2 sections below.
 
-## [2.4.0] - 2026-07-10
+- **Multi-engine support** — llmenv now drives Crush as a second agent engine
+  alongside Claude Code. `export`/`hook`/`regenerate` iterate all installed
+  adapters. The CrushAdapter renders hooks, MCP servers (stdio/SSE/HTTP), LSP,
+  permissions, and skills against Crush's actual schema.
+- **ICM Memory System** — Built-in persistent memory with session logging
+  (transcript + JSONL file), CLI observability (`llmenv memory stats|list|diff|prune`),
+  importance/type annotations, consolidation groundwork, and `SessionStart`/
+  `SessionEnd` lifecycle hooks that actually wire memory wake-up and store.
+- **Context-mode integration** — Enabling `features.context_mode` auto-wires
+  the context-mode plugin: marketplace clone, MCP server, durable data dir,
+  and permissions. Supersedes the removed `LLMENV_BASH_BAN`.
+- **`llmenv setup` wizard** — Interactive command that scans existing tool
+  configs (`~/.claude`, `~/.cursor`), prompts for preferences, and generates a
+  validated `config.yaml` with starter `AGENTS.md`.
+- **First-class LSP & Skills** — Declare language servers (`name`, `command`,
+  `filetypes`, `init_options`, etc.) and skills directly in config or bundles,
+  tag-scoped and independent of the plugin model.
+- **MCP field parity** — `headers`, `disabled`, `disabled_tools`, and `timeout`
+  on MCP server entries.
+- **Config validation & observability** — `llmenv doctor` warns on dangling
+  bundle dirs, unused marketplace entries, and orphaned `native_permissions`.
+  `disabled_engines` skips rendering for named engines. Token-efficiency checks
+  in `doctor`, `--compress` export flag.
+- **BREAKING:** `session_log` is now a mapping (`{ file, transcript, verbose,
+  path, max_content_bytes }`) instead of a path string. The old string form is
+  rejected with a migration hint.
+- **Removed:** `LLMENV_BASH_BAN` env var; superseded by context-mode.
 
-### Added
-- Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
-  `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
-  temporary files to the current content hash (#630)
-- Add durable plugin cache directory: `CLAUDE_CODE_PLUGIN_CACHE_DIR` now points to
-  `<state_dir>/plugins/` so plugins are not re-downloaded on every scope change (#632)
+### Changes since v3.0.0-rc.2
 
-### Fixed
-
-- Fix `CONTEXT_MODE_DATA_DIR` and other state-directory env vars (from
-  `materialize::state::state_env_vars`) emitting platform-native path separators
-  (`\` on Windows) instead of forward slashes, breaking cross-platform compatibility
-  for consumers that parse paths in these env vars. Normalization consolidated into
-  the existing `normalize_rel` helper. (#497)
+- Forward-merged from 2.4.0: per-hash `CLAUDE_CODE_TMPDIR` temp isolation and
+  `CLAUDE_CODE_PLUGIN_CACHE_DIR` durable plugin cache (#630, #632)
+- Forward-merged from 2.4.0: `CONTEXT_MODE_DATA_DIR` and other state-directory
+  env vars now emit forward-slash paths on all platforms (#497)
+- `llmenv doctor` structural validation: dangling bundle directories, unused
+  marketplace entries, orphaned `native_permissions` keys (#604)
+- CI: trusted publishing to crates.io via OpenID Connect
 
 ## [3.0.0-rc.2] - 2026-07-09
 
@@ -257,13 +281,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
+## [2.4.1] - 2026-07-10
+
+- CI updates to support trusted publishing to crates.io
+
 ## [2.4.0] - 2026-07-10
+
+### Added
+- Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
+  `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
+  temporary files to the current content hash (#630)
+- Add durable plugin cache directory: `CLAUDE_CODE_PLUGIN_CACHE_DIR` now points to
+  `<state_dir>/plugins/` so plugins are not re-downloaded on every scope change (#632)
 
 ### Fixed
 
 - Fix hook context emission including `additionalContext` content in store-only events
   (SessionStart, SessionEnd), which Claude Code's hook schema rejects — store-only events now
   emit empty output instead of triggering a validation error at the end of every session (#558)
+- Fix `CONTEXT_MODE_DATA_DIR` and other state-directory env vars (from
+  `materialize::state::state_env_vars`) emitting platform-native path separators
+  (`\` on Windows) instead of forward slashes, breaking cross-platform compatibility
+  for consumers that parse paths in these env vars. Normalization consolidated into
+  the existing `normalize_rel` helper. (#497)
 
 ## [2.3.0] - 2026-06-30
 
