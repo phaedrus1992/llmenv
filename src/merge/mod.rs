@@ -208,6 +208,12 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
     for rule in permission_rules {
         crate::config::validate_permission_rule(&context, rule)?;
     }
+    for (engine, nr) in &caps.native_permissions {
+        let ctx = format!("bundle '{name}': native_permissions['{engine}']");
+        for s in nr.allow.iter().chain(nr.ask.iter()).chain(nr.deny.iter()) {
+            crate::config::validate_permission_string(&ctx, s)?;
+        }
+    }
 
     // Validate bundle-contributed memory entries with the same checks that
     // Config::validate() applies to top-level features.memory entries.
