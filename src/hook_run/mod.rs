@@ -7,14 +7,19 @@
 //! path and must never block it.
 
 pub(crate) mod action;
+pub(crate) mod detached_consolidation;
+pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 
 use std::io::Write;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use action::Action;
 use mcp_client::McpHttpClient;
+use serde_json::json;
 use tracing::{debug, warn};
 
 use crate::adapter::AgentAdapter;
@@ -351,13 +356,58 @@ pub fn run(event: &str) -> anyhow::Result<()> {
 /// The memory backend (recall/store) and session logging are independent: a
 /// missing/unreachable memory MCP skips memory actions but must not prevent
 /// the file-sink session log from being written (see `handle_session_log`).
+/// Mtime-keyed cache entry for the parsed config. Avoids re-parsing the YAML
+/// file on every hook event when the file hasn't changed (the common case —
+/// consecutive events in one agent turn).
+struct CachedConfig {
+    mtime: SystemTime,
+    config: crate::config::Config,
+}
+
+/// Module-level cache so `run_inner` (called once per hook event) skips
+/// `Config::load` when the file mtime hasn't changed. The lock is held only
+/// during the stat-and-compare or load-and-store window — never across the
+/// rest of `run_inner` or any `.await`.
+static CONFIG_CACHE: Mutex<Option<CachedConfig>> = Mutex::new(None);
+
+/// Load config from `path`, consulting the mtime cache to skip re-parsing
+/// when the file hasn't changed. Falls back to a fresh load on stat errors
+/// or cache-miss.
+fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    if let Some(mtime) = mtime
+        && let Ok(lock) = CONFIG_CACHE.lock()
+        && let Some(cached) = lock.as_ref()
+        && cached.mtime == mtime
+    {
+        return Ok(cached.config.clone());
+    }
+    if mtime.is_some() {
+        // Mutex was poisoned — degraded performance path
+        tracing::debug!("CONFIG_CACHE poisoned, falling back to fresh load");
+    }
+    let config = crate::config::Config::load(path)?;
+    if let Some(mtime) = mtime
+        && let Ok(mut lock) = CONFIG_CACHE.lock()
+    {
+        *lock = Some(CachedConfig {
+            mtime,
+            config: config.clone(),
+        });
+    } else if mtime.is_some() {
+        // Still poisoned after re-load — log once per config access
+        tracing::debug!("CONFIG_CACHE still poisoned after load");
+    }
+    Ok(config)
+}
+
 fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
     stdin_payload: &serde_json::Value,
 ) -> anyhow::Result<String> {
     let config_path = crate::paths::config_path()?;
-    let config = crate::config::Config::load(&config_path)?;
+    let config = load_cached_config(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
     let log_cfg = config.session_log_resolved();
@@ -442,17 +492,19 @@ fn run_inner(
             let actions = dispatch(event, &tag_queries, &bundle_queries);
             out = run_memory_actions(client, actions, &query, &chunk).await?;
 
-            // PostSession: run reflective consolidation (R5) after the standard
-            // action dispatch. This distills recent episodic memories into
-            // durable semantic rules when consolidation is enabled.
+            // PostSession: run reflective consolidation (R5) in a detached
+            // child process so the hook returns immediately instead of
+            // blocking on MCP. The result is fire-and-forget — PostSession is
+            // the final event, so no caller needs its output.
             if event == HookEvent::PostSession {
-                let cons_text = crate::consolidation::run(&config, client).await?;
-                if !cons_text.is_empty() {
-                    if !out.is_empty() {
-                        out.push_str("\n\n");
-                    }
-                    out.push_str(&cons_text);
-                }
+                post_session_consolidation();
+            }
+
+            // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
+            // with fast-falloff memory (topic: web-fetch, importance: low) so it
+            // survives session compactions but decays quickly. (#579)
+            if event == HookEvent::PostToolUse {
+                handle_web_fetch_post_tool_use(stdin_payload);
             }
         }
         run_session_log(event, &session_log, stdin_payload).await;
@@ -893,6 +945,100 @@ fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Tool name constants for WebFetch and WebSearch tools.
+const TOOL_NAME_WEBFETCH: &str = "WebFetch";
+const TOOL_NAME_WEBSEARCH: &str = "WebSearch";
+
+/// Build ICM memory store arguments for a WebFetch/WebSearch PostToolUse event.
+/// Returns `None` if the payload is not a WebFetch/WebSearch tool result.
+///
+/// # Format
+/// The stored memory carries topic `web-fetch` and importance `low` so it decays
+/// quickly and can be bulk-cleared via `icm_memory_forget_topic("web-fetch")`.
+#[must_use]
+fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    let tool_name = payload["tool_name"].as_str()?;
+    if tool_name != TOOL_NAME_WEBFETCH && tool_name != TOOL_NAME_WEBSEARCH {
+        return None;
+    }
+    let url = payload["tool_input"]["url"].as_str().unwrap_or("unknown");
+    let response = payload["tool_response"]
+        .as_str()
+        .map_or_else(|| json_or_empty(&payload["tool_response"]), String::from);
+    let needs_indicator = response.chars().count() > 1000;
+    let mut truncated: String = response.chars().take(1000).collect();
+    if needs_indicator {
+        truncated.push_str("... (truncated)");
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Some(json!({
+        "content": format!(
+            "URL: {url}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
+        ),
+        "topic": "web-fetch",
+        "importance": "low",
+    }))
+}
+
+/// Handle PostToolUse for WebFetch/WebSearch by spawning a detached child
+/// that stores the fetched content in ICM with fast-falloff memory
+/// (importance: low, topic: web-fetch). The hook returns immediately instead of
+/// blocking on the MCP round trip. Best-effort — failures are logged at debug
+/// level and never propagated to the caller.
+fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
+    let Some(args) = web_fetch_store_args(payload) else {
+        return;
+    };
+    let Ok(payload_json) = serde_json::to_string(&args) else {
+        tracing::debug!("icm-store: failed to serialize store args");
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::debug!("icm-store: cannot resolve current_exe for detached store");
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("icm-store")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::mcp::proxy::detach_process_group(&mut cmd);
+    let Ok(mut child) = cmd.spawn() else {
+        tracing::debug!("icm-store: failed to spawn detached store child");
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(e) = stdin.write_all(payload_json.as_bytes())
+    {
+        tracing::debug!("icm-store: failed to pipe args to detached child: {e}");
+    }
+    // Not waited on: the child is process-group-detached and outlives us.
+}
+
+/// Spawn a detached child to run post-session consolidation. Best-effort
+/// fire-and-forget — spawn failures are logged at debug level and the caller
+/// never waits on the child.
+fn post_session_consolidation() {
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::debug!("consolidation-run: cannot resolve current_exe");
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("consolidation-run")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::mcp::proxy::detach_process_group(&mut cmd);
+    if let Err(e) = cmd.spawn() {
+        tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
+    }
+    // Not waited on: the child is process-group-detached and outlives us.
 }
 
 #[cfg(test)]
@@ -1403,8 +1549,165 @@ mod tests {
             "existing marker must survive: {out}"
         );
     }
-}
 
+    #[test]
+    fn web_fetch_store_args_extracts_url_and_summary() {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "# Hello\n\nThis is fetched content",
+        });
+        let args = web_fetch_store_args(&payload).expect("should detect WebFetch");
+        assert_eq!(args["topic"], "web-fetch");
+        assert_eq!(args["importance"], "low");
+        let content = args["content"].as_str().unwrap();
+        assert!(content.contains("https://example.com"), "url in content");
+        assert!(content.contains("WebFetch"), "tool name in content");
+        assert!(
+            content.contains("Fetched at (epoch)"),
+            "timestamp in content"
+        );
+        assert!(content.contains("Hello"), "content preview in content");
+    }
+
+    #[test]
+    fn web_fetch_store_args_supports_web_search() {
+        let payload = json!({
+            "tool_name": "WebSearch",
+            "tool_input": {"url": "https://example.com/search"},
+            "tool_response": "Search results here",
+        });
+        let args = web_fetch_store_args(&payload).expect("should detect WebSearch");
+        assert_eq!(args["topic"], "web-fetch");
+        let content = args["content"].as_str().unwrap();
+        assert!(content.contains("WebSearch"));
+        assert!(content.contains("Search results"));
+    }
+
+    #[test]
+    fn web_fetch_store_args_ignores_non_web_fetch_tools() {
+        let payload = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": "result",
+        });
+        assert!(
+            web_fetch_store_args(&payload).is_none(),
+            "non-WebFetch tool should return None"
+        );
+    }
+
+    #[test]
+    fn web_fetch_store_args_handles_missing_url_or_tool_input() {
+        // Missing url key within tool_input.
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {},
+            "tool_response": "content",
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle missing url");
+        let content = args["content"].as_str().unwrap();
+        assert!(content.contains("unknown"), "should fall back to 'unknown'");
+
+        // Missing entire tool_input key — same serde_json Null path.
+        let payload2 = json!({
+            "tool_name": "WebFetch",
+            "tool_response": "content",
+        });
+        let args2 = web_fetch_store_args(&payload2).expect("should handle missing tool_input");
+        let content2 = args2["content"].as_str().unwrap();
+        assert!(
+            content2.contains("unknown"),
+            "should fall back to 'unknown'"
+        );
+    }
+
+    #[test]
+    fn web_fetch_store_args_handles_empty_response() {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "",
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle empty response");
+        let content = args["content"].as_str().unwrap();
+        assert!(
+            content.contains("Content preview:\n"),
+            "empty content after preview header"
+        );
+    }
+
+    #[test]
+    fn web_fetch_store_args_truncates_long_content() {
+        let long = "x".repeat(2000);
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": long,
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle long content");
+        let content = args["content"].as_str().unwrap();
+        let preview = content.split("Content preview:\n").nth(1).unwrap_or("");
+        assert!(
+            preview.ends_with("... (truncated)"),
+            "truncation indicator should be present, got: {preview:?}"
+        );
+        let truncated = preview.strip_suffix("... (truncated)").unwrap_or(preview);
+        assert!(
+            truncated.len() <= 1000,
+            "truncated content should be at most 1000 chars, got {}",
+            truncated.len()
+        );
+    }
+
+    #[test]
+    fn web_fetch_store_args_returns_none_for_null_payload() {
+        assert!(web_fetch_store_args(&serde_json::Value::Null).is_none());
+    }
+
+    #[test]
+    fn web_fetch_store_args_returns_none_for_missing_tool_name() {
+        let payload = json!({
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "content",
+        });
+        assert!(web_fetch_store_args(&payload).is_none());
+    }
+
+    #[test]
+    fn web_fetch_store_args_handles_object_tool_response() {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": {"content": [{"type": "text", "text": "hello world"}]},
+        });
+        let args = web_fetch_store_args(&payload).expect("should handle object response");
+        let content = args["content"].as_str().unwrap();
+        assert!(
+            content.contains("hello world"),
+            "extracted text from object response"
+        );
+    }
+
+    #[test]
+    fn handle_web_fetch_post_tool_use_does_not_block() {
+        let payload = serde_json::json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "fetched content",
+        });
+        // The child process (re-invoking the current, test-harness executable
+        // with args it doesn't understand) is expected to exit non-zero almost
+        // instantly; the parent never waits on it, so this call itself must
+        // return promptly.
+        let start = std::time::Instant::now();
+        handle_web_fetch_post_tool_use(&payload);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "handle_web_fetch_post_tool_use must not block on the child"
+        );
+    }
+}
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod session_log_tests {
