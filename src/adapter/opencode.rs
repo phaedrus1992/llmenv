@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeMap;
+
 use super::AgentAdapter;
 use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
@@ -13,6 +15,62 @@ use crate::merge::MergedManifest;
 pub struct OpencodeAdapter;
 
 const OPENCODE_JSON_FILE: &str = "opencode.json";
+
+// ── Typed output structs for opencode.json ──
+
+/// Top-level structure for the opencode.json config document.
+/// Constructed from the merged manifest, serialized to Value, then native
+/// overlay keys are deep-merged at the Value level.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct OpencodeConfig {
+    /// Native opencode JS plugins (e.g. context-mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin: Option<Vec<String>>,
+    /// MCP server configs — kept as Value because entries go through
+    /// per-server native_mcp overlay after construction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp: Option<serde_json::Value>,
+    /// LSP server configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lsp: Option<BTreeMap<String, LspServerEntry>>,
+    /// JSON Schema reference.
+    #[serde(rename = "$schema")]
+    schema: String,
+    /// Paths to instruction files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<Vec<String>>,
+    /// Permission rules — per-tool pattern→action maps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permission: Option<BTreeMap<String, PermissionValue>>,
+}
+
+/// An LSP server entry in opencode.json.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct LspServerEntry {
+    /// Command with arguments.
+    command: Vec<String>,
+    /// File extensions this server handles (maps to opencode's `extensions`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extensions: Option<Vec<String>>,
+    /// Environment variables.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<BTreeMap<String, String>>,
+    /// Initialization options (maps to opencode's `initialization` key).
+    #[serde(skip_serializing_if = "Option::is_none", rename = "initialization")]
+    init_options: Option<serde_json::Value>,
+}
+
+/// A permission value — either a bare action string (when the tool has only
+/// a wildcard pattern covering all inputs) or a pattern→action map (when the
+/// tool has specific input patterns with distinct actions).
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum PermissionValue {
+    /// Single action covering all patterns (e.g. `"allow"`).
+    Simple(String),
+    /// Mapping from input patterns to actions (e.g. `{"echo *": "allow", "rm *": "deny"}`).
+    PatternMap(BTreeMap<String, String>),
+}
 
 /// opencode supports exactly these hook events via its JS plugin API.
 /// See spec §3 for the event mapping.
@@ -420,110 +478,131 @@ impl AgentAdapter for OpencodeAdapter {
         crate::adapter::skills::validate_skills(out)?;
 
         // 6. Build opencode.json with what we have so far
-        let mut doc = serde_json::Map::new();
-
         // Register native opencode TypeScript plugins (e.g. context-mode) that
         // ship their own hook/tool implementations independent of the llmenv JS
         // shim. These are resolved by opencode's plugin system at startup.
-        if has_native_opencode {
-            doc.insert("plugin".into(), serde_json::json!(["context-mode"]));
-        }
+        let config_plugin = if has_native_opencode {
+            Some(vec!["context-mode".into()])
+        } else {
+            None
+        };
 
         // 7. MCP servers
-        if !manifest.mcps.is_empty() || manifest.capabilities.native_mcp.contains_key("opencode") {
-            let mut mcp_obj = serde_json::Map::new();
-            for mcp in &manifest.mcps {
-                let mut e = match &mcp.kind {
-                    ResolvedKind::Stdio { command, args, env } => {
-                        let mut cmd: Vec<serde_json::Value> = Vec::with_capacity(1 + args.len());
-                        cmd.push(serde_json::json!(command));
-                        cmd.extend(args.iter().map(|a| serde_json::json!(a)));
-                        let mut e = serde_json::Map::new();
-                        e.insert("type".into(), serde_json::json!("local"));
-                        e.insert("command".into(), serde_json::json!(cmd));
-                        if !env.is_empty() {
-                            e.insert("environment".into(), serde_json::json!(env));
+        let config_mcp = {
+            if !manifest.mcps.is_empty()
+                || manifest.capabilities.native_mcp.contains_key("opencode")
+            {
+                let mut mcp_obj = serde_json::Map::new();
+                for mcp in &manifest.mcps {
+                    let mut e = match &mcp.kind {
+                        ResolvedKind::Stdio { command, args, env } => {
+                            let mut cmd: Vec<serde_json::Value> =
+                                Vec::with_capacity(1 + args.len());
+                            cmd.push(serde_json::json!(command));
+                            cmd.extend(args.iter().map(|a| serde_json::json!(a)));
+                            let mut e = serde_json::Map::new();
+                            e.insert("type".into(), serde_json::json!("local"));
+                            e.insert("command".into(), serde_json::json!(cmd));
+                            if !env.is_empty() {
+                                e.insert("environment".into(), serde_json::json!(env));
+                            }
+                            e
                         }
-                        e
+                        ResolvedKind::Remote { url, transport: _ } => {
+                            let mut e = serde_json::Map::new();
+                            e.insert("type".into(), serde_json::json!("remote"));
+                            e.insert("url".into(), serde_json::json!(url));
+                            e
+                        }
+                    };
+                    if !mcp.headers.is_empty() {
+                        e.insert("headers".into(), serde_json::json!(mcp.headers));
                     }
-                    ResolvedKind::Remote { url, transport: _ } => {
-                        let mut e = serde_json::Map::new();
-                        e.insert("type".into(), serde_json::json!("remote"));
-                        e.insert("url".into(), serde_json::json!(url));
-                        e
+                    if let Some(t) = mcp.timeout {
+                        e.insert("timeout".into(), serde_json::json!(t));
                     }
-                };
-                if !mcp.headers.is_empty() {
-                    e.insert("headers".into(), serde_json::json!(mcp.headers));
+                    mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
                 }
-                if let Some(t) = mcp.timeout {
-                    e.insert("timeout".into(), serde_json::json!(t));
+                // Merge plugin-provided MCP entries (from LLM_PROVIDER_MCP_JSON).
+                for (k, v) in &plugin_mcp_entries {
+                    if mcp_obj.contains_key(k) {
+                        eprintln!(
+                            "warning: duplicate MCP server '{k}' from plugin — \
+                             last definition wins"
+                        );
+                    }
+                    mcp_obj.insert(k.clone(), v.clone());
                 }
-                mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
-            }
-            // Merge plugin-provided MCP entries (from LLM_PROVIDER_MCP_JSON).
-            for (k, v) in &plugin_mcp_entries {
-                if mcp_obj.contains_key(k) {
-                    eprintln!(
-                        "warning: duplicate MCP server '{k}' from plugin — \
-                         last definition wins"
-                    );
+                // Overlay native_mcp.opencode
+                let mut mcp_value = serde_json::Value::Object(mcp_obj);
+                super::overlay_native_json(
+                    &mut mcp_value,
+                    manifest.capabilities.native_mcp.get("opencode"),
+                    "native_mcp.opencode",
+                )?;
+                if mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
+                    None
+                } else {
+                    Some(mcp_value)
                 }
-                mcp_obj.insert(k.clone(), v.clone());
+            } else {
+                None
             }
-            // Overlay native_mcp.opencode
-            let mut mcp_value = serde_json::Value::Object(mcp_obj);
-            super::overlay_native_json(
-                &mut mcp_value,
-                manifest.capabilities.native_mcp.get("opencode"),
-                "native_mcp.opencode",
-            )?;
-            if !mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
-                doc.insert("mcp".into(), mcp_value);
-            }
-        }
+        };
 
         // 8. LSP servers
-        if !manifest.capabilities.lsp.is_empty() {
-            let mut lsp_obj = serde_json::Map::new();
-            for srv in &manifest.capabilities.lsp {
-                if srv.disabled {
-                    continue;
+        let config_lsp = {
+            if !manifest.capabilities.lsp.is_empty() {
+                let mut lsp_entries: BTreeMap<String, LspServerEntry> = BTreeMap::new();
+                for srv in &manifest.capabilities.lsp {
+                    if srv.disabled {
+                        continue;
+                    }
+                    let cmd: Vec<String> = std::iter::once(srv.command.clone())
+                        .chain(srv.args.iter().cloned())
+                        .collect();
+                    let init_options = match &srv.init_options {
+                        Some(opts) => Some(serde_json::to_value(opts).map_err(|err| {
+                            anyhow::anyhow!(
+                                "LSP server '{}': failed to convert init_options to JSON: {err}",
+                                srv.name
+                            )
+                        })?),
+                        None => None,
+                    };
+                    lsp_entries.insert(
+                        srv.name.clone(),
+                        LspServerEntry {
+                            command: cmd,
+                            extensions: if srv.filetypes.is_empty() {
+                                None
+                            } else {
+                                Some(srv.filetypes.clone())
+                            },
+                            env: if srv.env.is_empty() {
+                                None
+                            } else {
+                                Some(srv.env.clone())
+                            },
+                            init_options,
+                        },
+                    );
                 }
-                let mut cmd: Vec<serde_json::Value> = Vec::with_capacity(1 + srv.args.len());
-                cmd.push(serde_json::json!(srv.command));
-                cmd.extend(srv.args.iter().map(|a| serde_json::json!(a)));
-                let mut e = serde_json::Map::new();
-                e.insert("command".into(), serde_json::json!(cmd));
-                if !srv.filetypes.is_empty() {
-                    e.insert("extensions".into(), serde_json::json!(srv.filetypes));
+                if lsp_entries.is_empty() {
+                    None
+                } else {
+                    Some(lsp_entries)
                 }
-                if !srv.env.is_empty() {
-                    e.insert("env".into(), serde_json::json!(srv.env));
-                }
-                if let Some(opts) = &srv.init_options {
-                    let as_json = serde_json::to_value(opts).map_err(|err| {
-                        anyhow::anyhow!(
-                            "LSP server '{}': failed to convert init_options to JSON: {err}",
-                            srv.name
-                        )
-                    })?;
-                    e.insert("initialization".into(), as_json);
-                }
-                lsp_obj.insert(srv.name.clone(), serde_json::Value::Object(e));
+            } else {
+                None
             }
-            if !lsp_obj.is_empty() {
-                doc.insert("lsp".into(), serde_json::Value::Object(lsp_obj));
-            }
-        }
+        };
 
-        doc.insert(
-            "$schema".into(),
-            serde_json::json!("https://opencode.ai/config.json"),
-        );
-        if !instructions.is_empty() {
-            doc.insert("instructions".into(), serde_json::json!(instructions));
-        }
+        let config_instructions = if !instructions.is_empty() {
+            Some(instructions)
+        } else {
+            None
+        };
 
         // 9. Permissions — opencode uses `permission` with per-tool pattern→action maps.
         //     Format: { "bash": { "otool *": "allow", "rm *": "deny" } }
@@ -623,30 +702,41 @@ impl AgentAdapter for OpencodeAdapter {
             );
         }
 
-        if !permission_map.is_empty() {
-            let mut perm_obj = serde_json::Map::new();
+        let config_permission = if !permission_map.is_empty() {
+            let mut perm_entries: BTreeMap<String, PermissionValue> = BTreeMap::new();
             for (tool, patterns) in &permission_map {
                 // Bare tool (single wildcard pattern) -> emit action string directly.
                 // Tool with specific patterns -> emit pattern->action object.
                 if patterns.len() == 1 && patterns.contains_key("*") {
-                    perm_obj.insert(tool.clone(), serde_json::json!(patterns["*"]));
+                    perm_entries
+                        .insert(tool.clone(), PermissionValue::Simple(patterns["*"].clone()));
                 } else {
-                    let mut pmap = serde_json::Map::new();
+                    let mut pmap: BTreeMap<String, String> = BTreeMap::new();
                     for (pattern, action) in patterns {
-                        pmap.insert(pattern.clone(), serde_json::json!(action));
+                        pmap.insert(pattern.clone(), action.clone());
                     }
-                    perm_obj.insert(tool.clone(), serde_json::Value::Object(pmap));
+                    perm_entries.insert(tool.clone(), PermissionValue::PatternMap(pmap));
                 }
             }
-            doc.insert("permission".into(), serde_json::Value::Object(perm_obj));
-        }
+            Some(perm_entries)
+        } else {
+            None
+        };
 
         // 10. Native overlay — reject modeled keys, then deep-merge
         const OPENCODE_MODELED_KEYS: &[&str] = &["instructions", "mcp", "lsp", "permission"];
         if let Some(native) = manifest.native.get("opencode") {
             super::reject_modeled_native_keys(native, OPENCODE_MODELED_KEYS, "opencode")?;
         }
-        let mut doc_value = serde_json::Value::Object(doc);
+        let config = OpencodeConfig {
+            plugin: config_plugin,
+            mcp: config_mcp,
+            lsp: config_lsp,
+            schema: "https://opencode.ai/config.json".into(),
+            instructions: config_instructions,
+            permission: config_permission,
+        };
+        let mut doc_value = serde_json::to_value(&config)?;
         super::overlay_native_json(
             &mut doc_value,
             manifest.native.get("opencode"),
