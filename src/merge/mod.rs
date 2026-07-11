@@ -199,6 +199,21 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
     for key in caps.env.keys() {
         crate::config::validate_capabilities_env_key(&context, key)?;
     }
+    let permission_rules = caps
+        .permissions
+        .allow
+        .iter()
+        .chain(caps.permissions.ask.iter())
+        .chain(caps.permissions.deny.iter());
+    for rule in permission_rules {
+        crate::config::validate_permission_rule(&context, rule)?;
+    }
+    for (engine, nr) in &caps.native_permissions {
+        let ctx = format!("bundle '{name}': native_permissions['{engine}']");
+        for s in nr.allow.iter().chain(nr.ask.iter()).chain(nr.deny.iter()) {
+            crate::config::validate_permission_string(&ctx, s)?;
+        }
+    }
 
     // Validate bundle-contributed memory entries with the same checks that
     // Config::validate() applies to top-level features.memory entries.
@@ -536,6 +551,71 @@ mod tests {
             ),
             "unexpected variant: {ve}"
         );
+    }
+
+    // #664: a bundle-contributed deny pattern with an unmatched `(` (e.g. a
+    // process-substitution pattern like `bash <(curl *`) must be rejected
+    // rather than merged — Claude Code/Crush would otherwise silently drop
+    // the whole rule at settings-load time, defeating the deny.
+    #[test]
+    fn bundle_permission_pattern_unbalanced_parens_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "permissions:\n",
+                "  deny:\n",
+                "    - tool: Bash\n",
+                "      pattern: \"bash <(curl *\"\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(
+                ve,
+                crate::config::ValidateError::PermissionRuleUnbalancedParens { tool, .. }
+                    if tool == "Bash"
+            ),
+            "unexpected variant: {ve}"
+        );
+    }
+
+    // Balanced parens in a bundle-contributed pattern must merge cleanly.
+    #[test]
+    fn bundle_permission_pattern_balanced_parens_is_accepted() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "permissions:\n",
+                "  deny:\n",
+                "    - tool: Bash\n",
+                "      pattern: \"bash <(curl *)*\"\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+        assert_eq!(manifest.capabilities.permissions.deny.len(), 1);
     }
 
     // #335: unknown keys in bundle.yaml must error instead of being silently dropped.

@@ -1,4 +1,4 @@
-use super::Config;
+use super::{Config, PermissionRule};
 use llmenv_paths::has_parent_component;
 use thiserror::Error;
 
@@ -6,8 +6,8 @@ use thiserror::Error;
 use super::{
     Bundle, Cache, Capabilities, Features, Hook, HookHandler, HookHandlerKind, HostEntry,
     HostMatch, HostScope, Marketplace, McpServer, McpTransport, Memory, NativePermissionRules,
-    NetworkMatch, NetworkScope, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    Scopes, Throttle, UserMatch, UserScope,
+    NetworkMatch, NetworkScope, PermissionMode, Permissions, PluginCollection, Scopes, Throttle,
+    UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -154,6 +154,19 @@ pub enum ValidateError {
     SkillEmptyPath(String),
     #[error("skill '{0}' path contains traversal components (..): {1}")]
     SkillPathTraversal(String, String),
+    #[error(
+        "{context}: permission rule tool='{tool}' value '{value}' has unbalanced \
+         parentheses. Adapters that render neutral rules as 'Tool(value)' strings \
+         (Claude Code, Crush) require value's own '('/')' to balance, or the engine's \
+         settings loader silently drops the whole rule at load time — a deny rule with \
+         unbalanced parens fails open with no warning. Fix: balance the parentheses (e.g. \
+         'bash <(curl *)*' instead of 'bash <(curl *'), or avoid parentheses in the pattern."
+    )]
+    PermissionRuleUnbalancedParens {
+        context: String,
+        tool: String,
+        value: String,
+    },
 }
 
 /// A state-tool subdir must be a single safe path component: non-empty, not
@@ -237,6 +250,75 @@ pub fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), Val
         return Err(ValidateError::CapabilitiesInvalidVarName {
             context: context.to_string(),
             key: key.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// A pattern/path is only safe to wrap as `Tool(value)` if its own parentheses
+/// balance — otherwise the wrapped string's parens don't balance either, and
+/// engines that parse the rule by tracking paren depth (Claude Code, Crush)
+/// silently skip the whole rule. `<(` from shell process substitution is the
+/// common trigger (`bash <(curl *` has one unmatched `(`).
+fn has_balanced_parens(s: &str) -> bool {
+    let mut depth: i32 = 0;
+    let mut prev_was_escape = false;
+    for c in s.chars() {
+        if prev_was_escape {
+            prev_was_escape = false;
+            continue;
+        }
+        match c {
+            '\\' => prev_was_escape = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// Validate a single permission rule's `pattern`/`paths` for balanced
+/// parentheses. Returns an error with the given `context` label (e.g.
+/// `"config.yaml: capabilities.permissions"` or `"bundle 'foo'"`) on failure —
+/// see [`ValidateError::PermissionRuleUnbalancedParens`] for why this is
+/// rejected rather than rendered as-is.
+pub fn validate_permission_rule(context: &str, rule: &PermissionRule) -> Result<(), ValidateError> {
+    if let Some(pattern) = &rule.pattern
+        && !has_balanced_parens(pattern)
+    {
+        return Err(ValidateError::PermissionRuleUnbalancedParens {
+            context: context.to_string(),
+            tool: rule.tool.clone(),
+            value: pattern.clone(),
+        });
+    }
+    for path in &rule.paths {
+        if !has_balanced_parens(path) {
+            return Err(ValidateError::PermissionRuleUnbalancedParens {
+                context: context.to_string(),
+                tool: rule.tool.clone(),
+                value: path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate a single native permission rule string (already in `Tool(value)`
+/// format) for balanced parentheses — same rationale as
+/// [`validate_permission_rule`].
+pub fn validate_permission_string(context: &str, raw: &str) -> Result<(), ValidateError> {
+    if !has_balanced_parens(raw) {
+        return Err(ValidateError::PermissionRuleUnbalancedParens {
+            context: context.to_string(),
+            tool: raw.to_string(),
+            value: raw.to_string(),
         });
     }
     Ok(())
@@ -331,6 +413,28 @@ impl Config {
         self.validate_skills()?;
         self.validate_plugins()?;
         self.validate_state()?;
+        self.validate_permissions()?;
+        Ok(())
+    }
+
+    fn validate_permissions(&self) -> Result<(), ValidateError> {
+        let context = "config.yaml: capabilities.permissions";
+        let rules = self
+            .capabilities
+            .permissions
+            .allow
+            .iter()
+            .chain(self.capabilities.permissions.ask.iter())
+            .chain(self.capabilities.permissions.deny.iter());
+        for rule in rules {
+            validate_permission_rule(context, rule)?;
+        }
+        for (engine, nr) in &self.capabilities.native_permissions {
+            let ctx = format!("config.yaml: capabilities.native_permissions['{engine}']");
+            for s in nr.allow.iter().chain(nr.ask.iter()).chain(nr.deny.iter()) {
+                validate_permission_string(&ctx, s)?;
+            }
+        }
         Ok(())
     }
 
@@ -2691,5 +2795,379 @@ mod tests {
             when: vec![],
         }]);
         assert!(cfg.validate().is_ok());
+    }
+
+    // ===== #664: permission rule pattern paren-balance validation =====
+    //
+    // Claude Code and Crush render a neutral rule as `Tool(value)`; both
+    // engines' own settings loaders track paren depth to find the closing
+    // `)` and silently drop the whole rule if it never balances. A deny rule
+    // with an unmatched `(` (e.g. a process-substitution pattern like
+    // `bash <(curl *`) therefore fails open with no warning from the engine.
+    // Reject at config-load time instead.
+
+    fn config_with_permissions(permissions: Permissions) -> crate::Config {
+        crate::Config {
+            capabilities: Capabilities {
+                permissions,
+                ..Default::default()
+            },
+            ..minimal_config()
+        }
+    }
+
+    #[test]
+    fn permission_rule_unmatched_open_paren_in_deny_pattern_rejected() {
+        let cfg = config_with_permissions(Permissions {
+            deny: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("bash <(curl *".into()),
+                paths: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn permission_rule_unmatched_close_paren_rejected() {
+        let cfg = config_with_permissions(Permissions {
+            allow: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("foo)".into()),
+                paths: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn permission_rule_balanced_process_substitution_pattern_accepted() {
+        let cfg = config_with_permissions(Permissions {
+            deny: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("bash <(curl *)*".into()),
+                paths: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn permission_rule_plain_pattern_without_parens_accepted() {
+        let cfg = config_with_permissions(Permissions {
+            allow: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("git diff *".into()),
+                paths: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn permission_rule_unbalanced_path_entry_rejected() {
+        let cfg = config_with_permissions(Permissions {
+            deny: vec![PermissionRule {
+                tool: "Read".into(),
+                pattern: None,
+                paths: vec!["~/weird(dir".into()],
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_permission_rule_error_reports_context_and_tool() {
+        let rule = PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("bash <(curl *".into()),
+            paths: vec![],
+        };
+        let err = validate_permission_rule("bundle 'security'", &rule).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bundle 'security'"), "got: {msg}");
+        assert!(msg.contains("Bash"), "got: {msg}");
+    }
+
+    // ===== NativePermissionRules paren-balance validation =====
+    //
+    // Same failure mode as #664: native permission strings like
+    // `Bash(bash <(curl *)` can be silently dropped by the engine's
+    // settings loader when parens don't balance.
+
+    fn config_with_native_permissions(engine: &str, rules: NativePermissionRules) -> crate::Config {
+        let mut native_permissions = BTreeMap::new();
+        native_permissions.insert(engine.to_string(), rules);
+        crate::Config {
+            capabilities: Capabilities {
+                native_permissions,
+                ..Default::default()
+            },
+            ..minimal_config()
+        }
+    }
+
+    #[test]
+    fn native_permission_balanced_string_accepted() {
+        let cfg = config_with_native_permissions(
+            "claude-code",
+            NativePermissionRules {
+                allow: vec!["Bash(ls -la)".into()],
+                ..Default::default()
+            },
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn native_permission_unbalanced_open_paren_rejected() {
+        let cfg = config_with_native_permissions(
+            "claude-code",
+            NativePermissionRules {
+                allow: vec!["Bash(bash <(curl *)".into()],
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn native_permission_unbalanced_close_paren_in_ask_rejected() {
+        let cfg = config_with_native_permissions(
+            "claude-code",
+            NativePermissionRules {
+                ask: vec!["Read(file))".into()],
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn native_permission_unbalanced_in_deny_rejected() {
+        let cfg = config_with_native_permissions(
+            "claude-code",
+            NativePermissionRules {
+                deny: vec!["Write(/tmp/mydir)".into()], // balanced
+                ..Default::default()
+            },
+        );
+        // This one is balanced — just verifying the setup works
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn native_permission_empty_all_rules_accepted() {
+        let cfg = config_with_native_permissions("claude-code", NativePermissionRules::default());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn native_permission_multiple_engines_all_rejected() {
+        let mut native_permissions = BTreeMap::new();
+        native_permissions.insert(
+            "claude-code".to_string(),
+            NativePermissionRules {
+                deny: vec!["Bash(unbalanced(".into()],
+                ..Default::default()
+            },
+        );
+        native_permissions.insert(
+            "crush".to_string(),
+            NativePermissionRules {
+                deny: vec!["Write(broken)".into()], // balanced
+                ..Default::default()
+            },
+        );
+        let cfg = crate::Config {
+            capabilities: Capabilities {
+                native_permissions,
+                ..Default::default()
+            },
+            ..minimal_config()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn native_permission_escaped_parens_accepted() {
+        let cfg = config_with_native_permissions(
+            "claude-code",
+            NativePermissionRules {
+                allow: vec![r"Bash(echo \(foo\))".into()],
+                ..Default::default()
+            },
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn native_permission_ask_list_unbalanced_rejected() {
+        let cfg = config_with_native_permissions(
+            "claude-code",
+            NativePermissionRules {
+                ask: vec!["Bash(ok)".into(), "Read(unbalanced(".into()],
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn native_permission_deny_list_unbalanced_rejected() {
+        let cfg = config_with_native_permissions(
+            "claude-code",
+            NativePermissionRules {
+                deny: vec!["Edit(path)".into(), "Edit(other)".into()],
+                ..Default::default()
+            },
+        );
+        assert!(cfg.validate().is_ok(), "all balanced should pass");
+    }
+
+    #[test]
+    fn native_permission_validate_permission_string_direct() {
+        // Direct call to validate_permission_string
+        assert!(validate_permission_string("test", "Bash(ls)").is_ok());
+        assert!(validate_permission_string("test", "Bash(unbalanced(").is_err());
+        assert!(validate_permission_string("test", "Bash(w)r)ong").is_err());
+    }
+
+    // ===== Property-based tests for has_balanced_parens =====
+
+    fn arb_balanced_parens() -> impl Strategy<Value = String> {
+        // Generate a string where '(' and ')' always balance.
+        // We start with an alphanumeric base and optionally wrap in parens.
+        prop::string::string_regex("[a-zA-Z0-9_-]{0,10}")
+            .expect("valid balanced base regex")
+            .prop_flat_map(|base| {
+                if base.is_empty() {
+                    prop_oneof![
+                        Just(base.clone()),
+                        (Just("(".to_string()), Just(")".to_string()))
+                            .prop_map(move |(a, b)| a + &base + &b),
+                    ]
+                    .boxed()
+                } else {
+                    // Recursively generate balanced strings: base, (base), ((base)), etc.
+                    (0..3u32, Just(base))
+                        .prop_map(|(depth, b)| {
+                            let mut s = b;
+                            for _ in 0..depth {
+                                s = format!("({s})");
+                            }
+                            s
+                        })
+                        .boxed()
+                }
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn prop_has_balanced_parens_concatenation(
+            a in arb_balanced_parens(),
+            b in arb_balanced_parens(),
+        ) {
+            // Concatenation of two balanced strings is balanced
+            prop_assert!(has_balanced_parens(&format!("{a}{b}")),
+                "concat of balanced strings should be balanced: '{a}' + '{b}'");
+        }
+
+        #[test]
+        fn prop_has_balanced_parens_wrapping(
+            inner in arb_balanced_parens(),
+        ) {
+            // Wrapping a balanced string in parens is balanced
+            prop_assert!(has_balanced_parens(&format!("({inner})")),
+                "wrapping in parens should be balanced: '({inner})'");
+        }
+
+        #[test]
+        fn prop_has_balanced_parens_unmatched_open(
+            balanced in arb_balanced_parens(),
+        ) {
+            // Prepending an extra '(' makes it unbalanced
+            let s = format!("({balanced}");
+            prop_assert!(!has_balanced_parens(&s),
+                "extra open paren should be unbalanced: '{s}'");
+        }
+
+        #[test]
+        fn prop_has_balanced_parens_unmatched_close(
+            balanced in arb_balanced_parens(),
+        ) {
+            // Appending an extra ')' makes it unbalanced
+            // (unless the balanced string already has unmatched closers, which it shouldn't)
+            let s = format!("{balanced})");
+            prop_assert!(!has_balanced_parens(&s),
+                "extra close paren should be unbalanced: '{s}'");
+        }
+
+        #[test]
+        fn prop_has_balanced_parens_no_crash(s in ".{0,40}") {
+            // Any arbitrary string should not panic
+            let _ = has_balanced_parens(&s);
+        }
+
+        #[test]
+        fn prop_has_balanced_parens_escaped_parens(
+            prefix in "[a-zA-Z0-9_-]{0,5}",
+            suffix in "[a-zA-Z0-9_-]{0,5}",
+        ) {
+            // Backslash-escaped parens are not counted
+            let s = format!(r"{prefix}\({suffix}\)");
+            prop_assert!(has_balanced_parens(&s),
+                "escaped parens should be balanced: '{s}'");
+        }
+
+        #[test]
+        fn prop_has_balanced_parens_escaped_and_real(
+            prefix in "[a-zA-Z0-9_-]{0,5}",
+            middle in "[a-zA-Z0-9_-]{0,5}",
+            suffix in "[a-zA-Z0-9_-]{0,5}",
+        ) {
+            // Mixed escaped and real parens — real ones wrap the escaped ones
+            let s = format!("({prefix}\\({middle}\\){suffix})");
+            prop_assert!(has_balanced_parens(&s),
+                "one escaped + one real paren should be balanced: '{s}'");
+        }
+
+        #[test]
+        fn prop_has_balanced_parens_real_nested(
+            inner in arb_balanced_parens(),
+        ) {
+            // Real balanced parens inside a string with many levels
+            // Just verify: (a, (b, ...)), where a/b are balanced
+            let s = format!("(({inner}))");
+            prop_assert!(has_balanced_parens(&s),
+                "nested balanced parens should be balanced: '{s}'");
+        }
     }
 }
