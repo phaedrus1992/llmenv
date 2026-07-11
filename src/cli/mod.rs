@@ -1304,6 +1304,13 @@ fn build_manifest(
     let mut manifest: MergedManifest =
         crate::merge::merge(&config.capabilities, &config.native, &refs)?;
 
+    // Root-level lsp/skills: chain into manifest.capabilities (#661), mirroring memory/throttle.
+    manifest.capabilities.lsp.extend(config.lsp.iter().cloned());
+    manifest
+        .capabilities
+        .skills
+        .extend(config.skills.iter().cloned());
+
     // Combine top-level memory + bundle-contributed memory for resolution.
     let top_memory = config
         .features
@@ -3114,6 +3121,56 @@ mod tests {
         assert_ne!(
             claude_path, crush_path,
             "each adapter must materialize into its own cache subtree"
+        );
+    }
+
+    #[test]
+    fn root_level_lsp_and_skills_chained_into_manifest() {
+        // Regression for #661: root-level `config.lsp` and `config.skills` were
+        // never chained into manifest.capabilities, so they silently disappeared
+        // at materialize time.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+        config.lsp = vec![crate::config::LspServer {
+            name: "test-lsp".to_string(),
+            command: "test-command".to_string(),
+            ..crate::config::LspServer::default()
+        }];
+        config.skills = vec![crate::config::SkillSource {
+            name: "test-skill".to_string(),
+            path: "/tmp/test".to_string(),
+            ..crate::config::SkillSource::default()
+        }];
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+
+        let (manifest, _) = build_manifest(&config, &config_dir, &active, &firing, false)
+            .unwrap()
+            .expect("manifest should be Some with a firing bundle");
+
+        assert!(
+            manifest
+                .capabilities
+                .lsp
+                .iter()
+                .any(|l| l.name == "test-lsp"),
+            "root-level lsp entry 'test-lsp' must appear in manifest capabilities"
+        );
+        assert!(
+            manifest
+                .capabilities
+                .skills
+                .iter()
+                .any(|s| s.name == "test-skill"),
+            "root-level skills entry 'test-skill' must appear in manifest capabilities"
         );
     }
 
