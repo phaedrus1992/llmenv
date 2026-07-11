@@ -2129,5 +2129,60 @@ mod tests {
             let mut dst = serde_json::json!({"existing": "value"});
             let _ = overlay_native_crush(&mut dst, Some(&fragment));
         }
+
+        // ── model_providers ──────────────────────────────────────────────────
+
+        #[test]
+        fn prop_render_model_providers_keys_match_non_disabled(
+            ids in prop::collection::vec("[a-z][a-z0-9-]{0,15}", 0..6),
+            disabled_flags in prop::collection::vec(proptest::bool::ANY, 0..6),
+        ) {
+            let providers: Vec<llmenv_config::ModelProvider> = ids
+                .iter()
+                .zip(disabled_flags.iter())
+                .map(|(id, &d)| llmenv_config::ModelProvider {
+                    id: id.clone(),
+                    disabled: d,
+                    ..Default::default()
+                })
+                .collect();
+            let expected: std::collections::BTreeSet<String> = providers
+                .iter()
+                .filter(|p| !p.disabled)
+                .map(|p| p.id.clone())
+                .collect();
+            let result = super::render_model_providers(&providers).unwrap();
+            let got: std::collections::BTreeSet<String> = result
+                .as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn prop_render_model_providers_no_panic(
+            id in ".*",
+            base_url in prop::option::of(".*"),
+            api_key in prop::option::of(".*"),
+        ) {
+            let provider = llmenv_config::ModelProvider {
+                id,
+                base_url,
+                api_key,
+                ..Default::default()
+            };
+            let _ = super::render_model_providers(std::slice::from_ref(&provider));
+        }
+
+        #[test]
+        fn prop_render_default_models_no_panic(
+            role in ".*",
+            provider in ".*",
+            model in ".*",
+        ) {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert(role, llmenv_config::ModelRef { provider, model });
+            let _ = super::render_default_models(&map);
+        }
     }
 }
