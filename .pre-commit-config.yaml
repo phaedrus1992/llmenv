@@ -18,3 +18,9 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-push]
+      - id: changelog-sync
+        name: changelog sync check
+        entry: bash -c 'scripts/sync-changelog-doc.sh 2>/dev/null; git diff --exit-code website/docs/changelog.md'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
