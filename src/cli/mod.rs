@@ -1304,12 +1304,7 @@ fn build_manifest(
     let mut manifest: MergedManifest =
         crate::merge::merge(&config.capabilities, &config.native, &refs)?;
 
-    // Chain root-level lsp/skills into manifest.capabilities (#661).
-    // These live on `Config` alongside `capabilities.lsp`/`capabilities.skills`
-    // (which come from the `capabilities: { lsp:, skills: }` section in config.yaml
-    // and are already merged above). Both are separate from the bundle-level entries
-    // that flow through merge::merge — but root-level entries were silently dropped.
-    // Mirror the chaining pattern used by features.memory and features.throttle.
+    // Root-level lsp/skills: chain into manifest.capabilities (#661), mirroring memory/throttle.
     manifest.capabilities.lsp.extend(config.lsp.iter().cloned());
     manifest
         .capabilities
