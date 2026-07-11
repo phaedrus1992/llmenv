@@ -8,6 +8,7 @@
 
 use assert_cmd::Command;
 use std::fs;
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn setup_config() -> (TempDir, std::path::PathBuf) {
@@ -29,10 +30,11 @@ fn config_context_places_hook_event_name_inside_hook_specific_output() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
     cmd.env("LLMENV_CONFIG", &config_path)
         .env("LLMENV_CONFIG_DIR", config_dir)
+        .env("LLMENV_STATE_DIR", config_dir)
         .arg("config-context")
         .write_stdin(r#"{"hook_event_name":"SessionStart"}"#);
 
-    let output = cmd.output().unwrap();
+    let output = cmd.timeout(Duration::from_secs(10)).output().unwrap();
     assert!(output.status.success(), "config-context must exit 0");
 
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -64,10 +66,11 @@ fn config_context_exits_zero_on_empty_stdin() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
     cmd.env("LLMENV_CONFIG", &config_path)
         .env("LLMENV_CONFIG_DIR", config_dir)
+        .env("LLMENV_STATE_DIR", config_dir)
         .arg("config-context")
         .write_stdin("");
 
-    let output = cmd.output().unwrap();
+    let output = cmd.timeout(Duration::from_secs(10)).output().unwrap();
     assert!(
         output.status.success(),
         "config-context must exit 0 on empty stdin"
