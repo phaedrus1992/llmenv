@@ -153,6 +153,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         native,
         features,
         host,
+        model_providers: vec![],
+        default_models: std::collections::BTreeMap::new(),
     })
 }
 
