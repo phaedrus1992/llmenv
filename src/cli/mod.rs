@@ -1149,7 +1149,20 @@ fn build_and_materialize(
     // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
     // Returns the paths it owns; we union them with the generic bundle files to
     // form llmenv's complete owned set (#196). Idempotent.
-    let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
+    let mut adapter_owned = adapter.materialize(&manifest, &cache_path)?;
+
+    // Emit JSON Schema sidecar if the adapter supports schema generation.
+    // The sidecar path participates in the owned-set manifest so it is
+    // tracked and cleaned up like any other llmenv-authored file.
+    if let Some(schema) = adapter.config_schema() {
+        let schema_rel = PathBuf::from(format!("{}.schema.json", adapter.name()));
+        let schema_abs = cache_path.join(&schema_rel);
+        crate::paths::write_owner_only(
+            &schema_abs,
+            serde_json::to_vec_pretty(&schema)?.as_slice(),
+        )?;
+        adapter_owned.push(schema_rel);
+    }
 
     let auth_status =
         claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;

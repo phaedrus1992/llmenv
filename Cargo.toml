@@ -18,6 +18,7 @@ tracing = "0.1.44"
 proptest = "1.11.0"
 pulldown-cmark = "0.13.4"
 tempfile = "3.27"
+schemars = { version = "1.2.1", features = [] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -75,6 +76,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls", 
 url = "2.5.8"
 tempfile = "3.27"
 pulldown-cmark = { workspace = true }
+schemars = { workspace = true }
 dialoguer = "0.12.0"
 
 [dev-dependencies]

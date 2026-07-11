@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   claude-code adapter: AGENTS.md, rules, skills, MCP (local/remote), LSP,
   permissions, hook bridging via a generated JS shim plugin, and Claude-plugin
   content translation (#656, #657)
+- JSON Schema generation for materialized configs — adapters that derive
+  `JsonSchema` on their output structs now emit a `{adapter}.schema.json`
+  sidecar alongside the native config file, enabling IDE validation and
+  editor autocompletion for materialized opencode.json files. (#660)
 - `llmenv doctor` checks that config-dependent executables (`icm`,
   `mcp-proxy`/`uvx`, `claude`, `crush`) are available on `PATH`,
   respecting each tool's config conditions (memory entries, disabled
