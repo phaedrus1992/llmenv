@@ -199,11 +199,13 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         }
     }
 
-    // crush — always optional
-    if crate::adapter::binary_on_path("crush") {
-        eprintln!("{pass} crush found on PATH");
-    } else {
-        eprintln!("{info} crush not found on PATH (optional engine)");
+    // crush, opencode — always optional
+    for bin in &["crush", "opencode"] {
+        if crate::adapter::binary_on_path(bin) {
+            eprintln!("{pass} {bin} found on PATH");
+        } else {
+            eprintln!("{info} {bin} not found on PATH (optional engine)");
+        }
     }
 }
 
