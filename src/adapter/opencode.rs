@@ -835,6 +835,12 @@ impl AgentAdapter for OpencodeAdapter {
         })
         .to_string()
     }
+
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        let root = schemars::schema_for!(OpencodeConfig);
+        let value = serde_json::to_value(&root).ok()?;
+        Some(crate::materialize::schema_gen::with_root_additional_properties(value))
+    }
 }
 
 /// Build the JS source for `plugin/llmenv.js` — the hook bridge shim.

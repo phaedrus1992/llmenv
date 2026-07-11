@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod manifest;
+pub mod schema_gen;
 pub mod state;
 
 use std::collections::BTreeSet;
