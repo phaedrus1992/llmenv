@@ -296,6 +296,14 @@ enum Command {
     /// stdin.
     #[command(name = "icm-store", hide = true)]
     IcmStore,
+    /// Run post-session memory consolidation as a detached child process.
+    ///
+    /// Internal plumbing: entrypoint for `hook_run::detached_consolidation::
+    /// run_consolidation`, spawned by the PostSession hook so it returns
+    /// immediately instead of blocking on the consolidation MCP calls. Not
+    /// meant to be invoked directly.
+    #[command(name = "consolidation-run", hide = true)]
+    ConsolidationRun,
     /// Manage auth credentials for materialized folders (#172)
     Login {
         /// Apply to the global auth cache (all future materializations) rather
@@ -473,6 +481,9 @@ pub fn run() -> anyhow::Result<()> {
             let mut payload_json = String::new();
             std::io::stdin().read_to_string(&mut payload_json)?;
             crate::hook_run::detached_store::run_icm_store(&payload_json)?;
+        }
+        Some(Command::ConsolidationRun) => {
+            crate::hook_run::detached_consolidation::run_consolidation()?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
