@@ -7,6 +7,7 @@
 //! path and must never block it.
 
 pub(crate) mod action;
+pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 
@@ -444,17 +445,12 @@ fn run_inner(
             let actions = dispatch(event, &tag_queries, &bundle_queries);
             out = run_memory_actions(client, actions, &query, &chunk).await?;
 
-            // PostSession: run reflective consolidation (R5) after the standard
-            // action dispatch. This distills recent episodic memories into
-            // durable semantic rules when consolidation is enabled.
+            // PostSession: run reflective consolidation (R5) in a detached
+            // child process so the hook returns immediately instead of
+            // blocking on MCP. The result is fire-and-forget — PostSession is
+            // the final event, so no caller needs its output.
             if event == HookEvent::PostSession {
-                let cons_text = crate::consolidation::run(&config, client).await?;
-                if !cons_text.is_empty() {
-                    if !out.is_empty() {
-                        out.push_str("\n\n");
-                    }
-                    out.push_str(&cons_text);
-                }
+                post_session_consolidation();
             }
 
             // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
@@ -974,6 +970,25 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
         tracing::debug!("icm-store: failed to pipe args to detached child: {e}");
+    }
+    // Not waited on: the child is process-group-detached and outlives us.
+}
+
+/// Spawn a detached child to run post-session consolidation. Best-effort
+/// fire-and-forget — spawn failures are logged at debug level and the caller
+/// never waits on the child.
+fn post_session_consolidation() {
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::debug!("consolidation-run: cannot resolve current_exe");
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("consolidation-run")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::mcp::proxy::detach_process_group(&mut cmd);
+    if let Err(e) = cmd.spawn() {
+        tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
     }
     // Not waited on: the child is process-group-detached and outlives us.
 }
