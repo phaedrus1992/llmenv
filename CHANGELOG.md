@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.2.0] - 2026-07-11
+
 ### Changed
 - Move WebFetch/WebSearch ICM storage and PostSession consolidation to background detached child processes, reducing hook latency for common events (#670)
 - Cache parsed config by file mtime in hook-run to avoid redundant YAML parsing on each event (#670)
@@ -891,7 +893,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/phaedrus1992/llmenv/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...v3.0.0
 [3.0.0-rc.2]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.1...v3.0.0-rc.2
