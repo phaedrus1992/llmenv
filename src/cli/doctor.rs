@@ -123,6 +123,83 @@ pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
         .collect()
 }
 
+/// Check whether a host address string is a loopback / local-only address.
+fn is_local_addr(addr: &str) -> bool {
+    matches!(addr, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+}
+
+/// Check that external tools referenced by the active config are available on
+/// `$PATH`. Printed to stderr using the doctor pass/fail/info helpers inline
+/// with the rest of `llmenv doctor`.
+fn run_doctor_tool_availability(use_color: bool, config: &Config) {
+    let pass = super::doctor_pass(use_color);
+    let fail = super::doctor_fail(use_color);
+    let info = super::doctor_info(use_color);
+
+    eprintln!();
+    eprintln!("Tool-availability checks:");
+
+    let has_memory = config
+        .features
+        .as_ref()
+        .is_some_and(|f| !f.memory.is_empty());
+
+    // icm — required when features.memory has entries
+    if has_memory {
+        if crate::adapter::binary_on_path("icm") {
+            eprintln!("{pass} icm found on PATH");
+        } else {
+            eprintln!("{fail} icm not found on PATH (required when features.memory is configured)");
+        }
+    }
+
+    // mcp-proxy or uvx — required when memory server_host is remote
+    if has_memory {
+        let needs_proxy = config.features.as_ref().is_some_and(|f| {
+            f.memory.iter().any(|mem| {
+                config
+                    .host
+                    .get(&mem.server_host)
+                    .is_some_and(|h| !is_local_addr(&h.addr))
+            })
+        });
+        if needs_proxy {
+            if crate::adapter::binary_on_path("mcp-proxy") || crate::adapter::binary_on_path("uvx")
+            {
+                eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
+            } else {
+                eprintln!(
+                    "{fail} neither mcp-proxy nor uvx on PATH \
+                     (remote memory server_host requires one for TCP proxying)"
+                );
+            }
+        }
+    }
+
+    // claude — required when claude_code engine is not disabled
+    let claude_disabled = config
+        .disabled_engines
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case("claude_code"));
+    if !claude_disabled {
+        if crate::adapter::binary_on_path("claude") {
+            eprintln!("{pass} claude found on PATH");
+        } else {
+            eprintln!(
+                "{fail} claude not found on PATH \
+                 (claude_code engine is not disabled, but the `claude` binary is missing)"
+            );
+        }
+    }
+
+    // crush — always optional
+    if crate::adapter::binary_on_path("crush") {
+        eprintln!("{pass} crush found on PATH");
+    } else {
+        eprintln!("{info} crush not found on PATH (optional engine)");
+    }
+}
+
 /// Returns `native_permissions` keys that don't match any configured MCP server
 /// or known engine adapter name. The ICM MCP server (`"icm"`) is always present.
 pub(super) fn orphan_native_permission_keys(config: &Config) -> Vec<&str> {
@@ -540,6 +617,8 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled, native_claude_env);
 
+    run_doctor_tool_availability(use_color, &config);
+
     // When context-mode is enabled, verify the marketplace clone exists so
     // inject_context_mode can actually resolve the plugin. A missing clone is
     // the most common reason the auto-wire looks correct in config but fails
@@ -597,8 +676,8 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 mod tests {
     use super::*;
     use crate::config::{
-        Bundle, Capabilities, Marketplace, McpServer, McpTransport, NativePermissionRules,
-        PluginCollection,
+        Bundle, Capabilities, Features, HostEntry, Marketplace, McpServer, McpTransport, Memory,
+        NativePermissionRules, PluginCollection,
     };
     use std::collections::BTreeMap;
 
@@ -775,5 +854,106 @@ mod tests {
         let config = Config::default();
         let orphans = orphan_native_permission_keys(&config);
         assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    }
+
+    // -- is_local_addr --
+
+    #[test]
+    fn is_local_addr_accepts_localhost() {
+        assert!(is_local_addr("localhost"));
+    }
+
+    #[test]
+    fn is_local_addr_accepts_ipv4_loopback() {
+        assert!(is_local_addr("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_local_addr_accepts_ipv6_loopback() {
+        assert!(is_local_addr("::1"));
+    }
+
+    #[test]
+    fn is_local_addr_rejects_remote_ip() {
+        assert!(!is_local_addr("10.0.0.4"));
+    }
+
+    #[test]
+    fn is_local_addr_rejects_hostname() {
+        assert!(!is_local_addr("still.local"));
+    }
+
+    // -- run_doctor_tool_availability --
+
+    #[test]
+    fn tool_avail_no_crash_default_config() {
+        let config = Config::default();
+        // Should not panic: checks claude + crush (both may warn), no memory entries
+        run_doctor_tool_availability(false, &config);
+    }
+
+    #[test]
+    fn tool_avail_no_crash_with_memory() {
+        let config = Config {
+            features: Some(Features {
+                memory: vec![Memory {
+                    server_host: "local".into(),
+                    port: 4343,
+                    listen_host: "127.0.0.1".into(),
+                    when: vec!["local".into()],
+                    default_topics: vec![],
+                    default_type: None,
+                    default_importance: None,
+                    type_importance: BTreeMap::new(),
+                    consolidation: None,
+                }],
+                ..Features::default()
+            }),
+            host: BTreeMap::from([(
+                "local".into(),
+                HostEntry {
+                    addr: "127.0.0.1".into(),
+                },
+            )]),
+            ..Config::default()
+        };
+        run_doctor_tool_availability(false, &config);
+    }
+
+    #[test]
+    fn tool_avail_no_crash_with_remote_memory() {
+        let config = Config {
+            features: Some(Features {
+                memory: vec![Memory {
+                    server_host: "remote".into(),
+                    port: 4343,
+                    listen_host: "0.0.0.0".into(),
+                    when: vec!["remote".into()],
+                    default_topics: vec![],
+                    default_type: None,
+                    default_importance: None,
+                    type_importance: BTreeMap::new(),
+                    consolidation: None,
+                }],
+                ..Features::default()
+            }),
+            host: BTreeMap::from([(
+                "remote".into(),
+                HostEntry {
+                    addr: "10.0.0.4".into(),
+                },
+            )]),
+            ..Config::default()
+        };
+        run_doctor_tool_availability(false, &config);
+    }
+
+    #[test]
+    fn tool_avail_no_crash_claude_disabled() {
+        let config = Config {
+            disabled_engines: vec!["claude_code".into()],
+            ..Config::default()
+        };
+        run_doctor_tool_availability(false, &config);
     }
 }
