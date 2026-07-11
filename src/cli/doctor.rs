@@ -140,7 +140,7 @@ fn has_remote_memory_host(config: &Config) -> bool {
             config
                 .host
                 .get(&mem.server_host)
-                .map_or(true, |h| !is_local_addr(&h.addr))
+                .is_none_or(|h| !is_local_addr(&h.addr))
         })
     })
 }
