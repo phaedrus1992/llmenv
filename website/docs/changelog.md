@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+- Add model provider configuration
+  (`capabilities.model_providers`) with schema types,
+  validation, merge rules, and CrushAdapter rendering
+  (#526, #527, #528)
+- Add default model selection
+  (`capabilities.default_models`) for role-keyed model
+  resolution across providers (#530)
+
 ## [3.2.0] - 2026-07-11
 
 ### Changed
