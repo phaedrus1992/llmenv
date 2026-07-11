@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.2.0] - 2026-07-11
+
+### Changed
+- Move WebFetch/WebSearch ICM storage and PostSession consolidation to background detached child processes, reducing hook latency for common events (#670)
+- Cache parsed config by file mtime in hook-run to avoid redundant YAML parsing on each event (#670)
+
 ### Added
 - Cache hashing now supports `version: major` granularity — set
   `hashing: { normal: { version: major } }` in config.yaml to key cache
@@ -26,20 +32,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `mcp-proxy`/`uvx`, `claude`, `crush`) are available on `PATH`,
   respecting each tool's config conditions (memory entries, disabled
   engines, optional status). (#655)
+- Add Discord community link to README and getting-started guide
+
 ### Fixed
-- `capabilities.permissions` rules (top-level or bundle-contributed) whose
-  `pattern`/`paths` have unbalanced parentheses — e.g. a process-substitution
-  deny pattern like `bash <(curl *` — are now rejected at config-load time
-  with a fix hint, instead of rendering into a `Tool(pattern)` string that
-  Claude Code/Crush silently drop at settings-load time. This previously left
-  `deny` rules silently non-functional with no warning from `llmenv doctor`
-  or config validation. (#664)
+- `capabilities.permissions` and `native_permissions` rules
+  (top-level or bundle-contributed) whose `pattern`/`paths` have
+  unbalanced parentheses — e.g. a process-substitution deny pattern like
+  `bash <(curl *` — are now rejected at config-load time with a fix hint,
+  instead of rendering into a `Tool(pattern)` string that Claude Code/Crush
+  silently drop at settings-load time. This previously left `deny` rules
+  silently non-functional with no warning from `llmenv doctor` or config
+  validation. (#664)
 - opencode adapter not activating when `OPENCODE_CONFIG_DIR` is unset (now
   falls back to checking if `opencode` is on PATH) (#657)
 - Validate skill-file paths with CommonMark-aware parsing (`pulldown-cmark`)
   instead of fragile heuristics. Fenced/indented code blocks and inline code
   spans containing `~/.claude` no longer falsely trigger configuration-path
   validation errors. (#659)
+- Fix root-level `lsp:` and `skills:` declarations in `config.yaml` not
+  being materialized into the rendered manifest. These were parsed,
+  validated, and documented but silently never reached the output. (#661)
+- Fix false `"marketplace.json broken"` warning from `llmenv doctor` when
+  the context-mode marketplace clone is properly synced but lacks a
+  standalone `marketplace.json` — the marketplace is managed internally
+  and the check was a false positive
+- Fix loopback address detection in the ICM MCP SSRF guard to cover the
+  full `127.0.0.0/8` range, unspecified addresses (`::`, `::0`, `0.0.0.0`),
+  and provide a safer fallback when `needs_proxy` cannot be determined
+- Fix background PostSession consolidation child process inheriting stdin,
+  which could cause hangs; add trace logging for CONFIG_CACHE poison
+  detection
 
 ## [3.1.0] - 2026-07-10
 
@@ -885,7 +907,8 @@ Aborted release. CI pipeline issue.
   contract (#67)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/phaedrus1992/llmenv/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...v3.0.0
 [3.0.0-rc.2]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.1...v3.0.0-rc.2
