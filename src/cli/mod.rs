@@ -287,6 +287,15 @@ enum Command {
     /// as a CLI argument so it isn't visible in the process table).
     #[command(name = "session-log-record", hide = true)]
     SessionLogRecord,
+    /// Store WebFetch/WebSearch content into ICM memory.
+    ///
+    /// Internal plumbing: this is the detached-child entrypoint
+    /// `hook_run::detached_store::run_icm_store` launches so a PostToolUse hook
+    /// can return immediately instead of blocking on the memory-store MCP call.
+    /// Not meant to be invoked directly. Reads the store-args JSON payload from
+    /// stdin.
+    #[command(name = "icm-store", hide = true)]
+    IcmStore,
     /// Manage auth credentials for materialized folders (#172)
     Login {
         /// Apply to the global auth cache (all future materializations) rather
@@ -458,6 +467,12 @@ pub fn run() -> anyhow::Result<()> {
             let mut payload_json = String::new();
             std::io::stdin().read_to_string(&mut payload_json)?;
             crate::session_log::detached::run_record(&payload_json)?;
+        }
+        Some(Command::IcmStore) => {
+            use std::io::Read;
+            let mut payload_json = String::new();
+            std::io::stdin().read_to_string(&mut payload_json)?;
+            crate::hook_run::detached_store::run_icm_store(&payload_json)?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
