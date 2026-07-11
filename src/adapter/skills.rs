@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
 const IGNORE_INLINE: &str = "# llmenv-ignore: hardcoded-path";
 const IGNORE_FILE: &str = "# llmenv-ignore-file: hardcoded-path";
 
@@ -36,23 +38,38 @@ pub(crate) fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
 /// break whenever `CLAUDE_CONFIG_DIR` points at a materialized llmenv folder
 /// (the normal case). `label` names the offending file in the error.
 ///
+/// Uses `pulldown-cmark`'s CommonMark event stream so paths inside fenced code
+/// blocks and inline code spans are correctly skipped — no fragile heuristics.
+///
 /// Suppression:
 /// - `# llmenv-ignore-file: hardcoded-path` anywhere in the file skips the entire file.
 /// - `# llmenv-ignore: hardcoded-path` at the end of a line skips that line only.
-fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()> {
+pub(crate) fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()> {
     if content.contains(IGNORE_FILE) {
         return Ok(());
     }
-    for line in content.lines() {
-        if line.contains(IGNORE_INLINE) {
-            continue;
-        }
-        if line.contains("~/.claude") || line.contains("$HOME/.claude") {
-            anyhow::bail!(
-                "{label} contains hardcoded ~/.claude or $HOME/.claude paths. \
-                 Use ${{CLAUDE_PLUGIN_ROOT}} or relative paths instead so it \
-                 works when CLAUDE_CONFIG_DIR is set to a materialized llmenv folder."
-            );
+
+    let mut in_code_block = false;
+    for event in Parser::new(content) {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(TagEnd::CodeBlock) => in_code_block = false,
+            Event::Code(_) => {} // inline code — skip
+            Event::Text(text) if !in_code_block => {
+                for line in text.lines() {
+                    if line.contains(IGNORE_INLINE) {
+                        continue;
+                    }
+                    if line.contains("~/.claude") || line.contains("$HOME/.claude") {
+                        anyhow::bail!(
+                            "{label} contains hardcoded ~/.claude or $HOME/.claude paths. \
+                             Use ${{CLAUDE_PLUGIN_ROOT}} or relative paths instead so it \
+                             works when CLAUDE_CONFIG_DIR is set to a materialized llmenv folder."
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
