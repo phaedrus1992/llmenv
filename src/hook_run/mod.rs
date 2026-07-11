@@ -13,7 +13,9 @@ pub(crate) mod mcp_client;
 
 use std::io::Write;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use action::Action;
 use mcp_client::McpHttpClient;
@@ -354,13 +356,51 @@ pub fn run(event: &str) -> anyhow::Result<()> {
 /// The memory backend (recall/store) and session logging are independent: a
 /// missing/unreachable memory MCP skips memory actions but must not prevent
 /// the file-sink session log from being written (see `handle_session_log`).
+/// Mtime-keyed cache entry for the parsed config. Avoids re-parsing the YAML
+/// file on every hook event when the file hasn't changed (the common case —
+/// consecutive events in one agent turn).
+struct CachedConfig {
+    mtime: SystemTime,
+    config: crate::config::Config,
+}
+
+/// Module-level cache so `run_inner` (called once per hook event) skips
+/// `Config::load` when the file mtime hasn't changed. The lock is held only
+/// during the stat-and-compare or load-and-store window — never across the
+/// rest of `run_inner` or any `.await`.
+static CONFIG_CACHE: Mutex<Option<CachedConfig>> = Mutex::new(None);
+
+/// Load config from `path`, consulting the mtime cache to skip re-parsing
+/// when the file hasn't changed. Falls back to a fresh load on stat errors
+/// or cache-miss.
+fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    if let Some(mtime) = mtime
+        && let Ok(lock) = CONFIG_CACHE.lock()
+        && let Some(cached) = lock.as_ref()
+        && cached.mtime == mtime
+    {
+        return Ok(cached.config.clone());
+    }
+    let config = crate::config::Config::load(path)?;
+    if let Some(mtime) = mtime
+        && let Ok(mut lock) = CONFIG_CACHE.lock()
+    {
+        *lock = Some(CachedConfig {
+            mtime,
+            config: config.clone(),
+        });
+    }
+    Ok(config)
+}
+
 fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
     stdin_payload: &serde_json::Value,
 ) -> anyhow::Result<String> {
     let config_path = crate::paths::config_path()?;
-    let config = crate::config::Config::load(&config_path)?;
+    let config = load_cached_config(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
     let log_cfg = config.session_log_resolved();
