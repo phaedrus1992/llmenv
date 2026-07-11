@@ -1,8 +1,9 @@
 #![expect(clippy::expect_used, reason = "test scaffolding")]
 //! Test for #173: doctor warns on version skew between running binary and cached materializations
 
+use assert_cmd::Command;
 use std::fs;
-use std::process::Command;
+use std::time::Duration;
 
 fn setup_test_config() -> tempfile::TempDir {
     let tmp = tempfile::TempDir::new().expect("failed to create temp dir");
@@ -29,10 +30,12 @@ plugin_collection: []
 fn test_doctor_runs_without_error() {
     let tmp = setup_test_config();
 
-    let output = Command::new("cargo")
-        .args(["run", "--quiet", "--", "doctor"])
+    let output = Command::cargo_bin("llmenv")
+        .expect("llmenv binary must exist for doctor tests")
         .env("LLMENV_CONFIG_DIR", tmp.path())
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("LLMENV_STATE_DIR", tmp.path())
+        .arg("doctor")
+        .timeout(Duration::from_secs(10))
         .output()
         .expect("failed to run llmenv doctor");
 
@@ -50,10 +53,12 @@ fn test_doctor_runs_without_error() {
 fn test_doctor_version_check_label_exists() {
     let tmp = setup_test_config();
 
-    let output = Command::new("cargo")
-        .args(["run", "--quiet", "--", "doctor"])
+    let output = Command::cargo_bin("llmenv")
+        .expect("llmenv binary must exist for doctor tests")
         .env("LLMENV_CONFIG_DIR", tmp.path())
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("LLMENV_STATE_DIR", tmp.path())
+        .arg("doctor")
+        .timeout(Duration::from_secs(10))
         .output()
         .expect("failed to run llmenv doctor");
 

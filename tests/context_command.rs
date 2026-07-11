@@ -2,6 +2,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::time::Duration;
 use tempfile::TempDir;
 
 /// Get current user for test config
@@ -56,9 +57,11 @@ adapter:
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
     cmd.env("LLMENV_CONFIG", config_path)
         .env("LLMENV_CONFIG_DIR", config_dir)
+        .env("LLMENV_STATE_DIR", config_dir)
         .arg("context");
 
-    cmd.assert()
+    cmd.timeout(Duration::from_secs(10))
+        .assert()
         .success()
         .stdout(predicate::str::contains("Active"));
 }
@@ -107,9 +110,11 @@ adapter:
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
     cmd.env("LLMENV_CONFIG", config_path)
         .env("LLMENV_CONFIG_DIR", config_dir)
+        .env("LLMENV_STATE_DIR", config_dir)
         .arg("context");
 
-    cmd.assert()
+    cmd.timeout(Duration::from_secs(10))
+        .assert()
         .success()
         .stdout(predicate::str::contains("Active"))
         .stdout(predicate::str::contains("Inactive"));
@@ -161,9 +166,11 @@ adapter:
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
     cmd.env("LLMENV_CONFIG", config_path)
         .env("LLMENV_CONFIG_DIR", config_dir)
+        .env("LLMENV_STATE_DIR", config_dir)
         .arg("context");
 
-    cmd.assert()
+    cmd.timeout(Duration::from_secs(10))
+        .assert()
         .success()
         .stdout(predicate::str::contains("Merged Manifest"))
         .stdout(predicate::str::contains("Hooks"))
