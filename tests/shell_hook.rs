@@ -14,11 +14,13 @@
 //! line, so they short-circuit before any render work is done.
 
 use assert_cmd::Command;
+use std::time::Duration;
 
 /// The non-interactive guard must appear inside the zsh hook function.
 #[test]
 fn zsh_hook_has_non_interactive_guard() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "zsh"]).output().unwrap();
 
     assert!(output.status.success(), "llmenv hook zsh should succeed");
@@ -37,6 +39,7 @@ fn zsh_hook_has_non_interactive_guard() {
 #[test]
 fn zsh_hook_has_already_active_guard() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "zsh"]).output().unwrap();
 
     assert!(output.status.success());
@@ -54,6 +57,7 @@ fn zsh_hook_has_already_active_guard() {
 #[test]
 fn zsh_hook_guards_precede_source() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "zsh"]).output().unwrap();
 
     assert!(output.status.success());
@@ -83,6 +87,7 @@ fn zsh_hook_guards_precede_source() {
 #[test]
 fn bash_hook_has_non_interactive_guard() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "bash"]).output().unwrap();
 
     assert!(output.status.success(), "llmenv hook bash should succeed");
@@ -100,6 +105,7 @@ fn bash_hook_has_non_interactive_guard() {
 #[test]
 fn bash_hook_has_already_active_guard() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "bash"]).output().unwrap();
 
     assert!(output.status.success());
@@ -117,6 +123,7 @@ fn bash_hook_has_already_active_guard() {
 #[test]
 fn bash_hook_guards_precede_source() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "bash"]).output().unwrap();
 
     assert!(output.status.success());
@@ -149,6 +156,7 @@ fn bash_hook_guards_precede_source() {
 #[test]
 fn zsh_hook_still_registers_precmd_function() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "zsh"]).output().unwrap();
 
     assert!(output.status.success());
@@ -164,6 +172,7 @@ fn zsh_hook_still_registers_precmd_function() {
 #[test]
 fn bash_hook_still_registers_prompt_command() {
     let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "bash"]).output().unwrap();
 
     assert!(output.status.success());
