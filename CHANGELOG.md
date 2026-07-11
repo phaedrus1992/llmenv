@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Claude Code/Crush silently drop at settings-load time. This previously left
   `deny` rules silently non-functional with no warning from `llmenv doctor`
   or config validation. (#664)
+- Validate skill-file paths with CommonMark-aware parsing (`pulldown-cmark`)
+  instead of fragile heuristics. Fenced/indented code blocks and inline code
+  spans containing `~/.claude` no longer falsely trigger configuration-path
+  validation errors. (#659)
 
 ## [3.1.0] - 2026-07-10
 
