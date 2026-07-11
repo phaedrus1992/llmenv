@@ -167,6 +167,18 @@ pub enum ValidateError {
         tool: String,
         value: String,
     },
+    #[error("model provider has an empty id")]
+    ModelProviderEmptyId,
+    #[error("duplicate model provider id: {0}")]
+    ModelProviderDuplicateId(String),
+    #[error("model provider '{0}' has a model with an empty id")]
+    ModelSourceEmptyId(String),
+    #[error("model provider '{0}': duplicate model id '{1}'")]
+    ModelSourceDuplicateId(String, String),
+    #[error("default_models has an entry with an empty role key")]
+    DefaultModelEmptyRole,
+    #[error("default_models role '{0}' has an empty provider or model")]
+    DefaultModelEmptyRef(String),
 }
 
 /// A state-tool subdir must be a single safe path component: non-empty, not
@@ -411,6 +423,8 @@ impl Config {
         self.validate_mcps()?;
         self.validate_lsp()?;
         self.validate_skills()?;
+        self.validate_model_providers()?;
+        self.validate_default_models()?;
         self.validate_plugins()?;
         self.validate_state()?;
         self.validate_permissions()?;
@@ -624,6 +638,43 @@ impl Config {
             }
             if l.command.is_empty() {
                 return Err(ValidateError::LspEmptyCommand(l.name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_model_providers(&self) -> Result<(), ValidateError> {
+        let mut seen_ids = std::collections::HashSet::new();
+        for p in &self.capabilities.model_providers {
+            if p.id.is_empty() {
+                return Err(ValidateError::ModelProviderEmptyId);
+            }
+            if !seen_ids.insert(&p.id) {
+                return Err(ValidateError::ModelProviderDuplicateId(p.id.clone()));
+            }
+            let mut seen_model_ids = std::collections::HashSet::new();
+            for m in &p.models {
+                if m.id.is_empty() {
+                    return Err(ValidateError::ModelSourceEmptyId(p.id.clone()));
+                }
+                if !seen_model_ids.insert(&m.id) {
+                    return Err(ValidateError::ModelSourceDuplicateId(
+                        p.id.clone(),
+                        m.id.clone(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_default_models(&self) -> Result<(), ValidateError> {
+        for (role, r#ref) in &self.capabilities.default_models {
+            if role.is_empty() {
+                return Err(ValidateError::DefaultModelEmptyRole);
+            }
+            if r#ref.provider.is_empty() || r#ref.model.is_empty() {
+                return Err(ValidateError::DefaultModelEmptyRef(role.clone()));
             }
         }
         Ok(())
@@ -3163,5 +3214,102 @@ mod tests {
             prop_assert!(has_balanced_parens(&s),
                 "nested balanced parens should be balanced: '{s}'");
         }
+    }
+
+    // ===== #508: model_providers / default_models validation =====
+
+    #[test]
+    fn model_provider_duplicate_id_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.model_providers = vec![
+            crate::ModelProvider {
+                id: "ollama".into(),
+                ..Default::default()
+            },
+            crate::ModelProvider {
+                id: "ollama".into(),
+                ..Default::default()
+            },
+        ];
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ValidateError::ModelProviderDuplicateId(ref id) if id == "ollama"));
+    }
+
+    #[test]
+    fn model_provider_empty_id_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.model_providers = vec![crate::ModelProvider {
+            id: String::new(),
+            ..Default::default()
+        }];
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ValidateError::ModelProviderEmptyId));
+    }
+
+    #[test]
+    fn model_source_duplicate_id_within_provider_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.model_providers = vec![crate::ModelProvider {
+            id: "ollama".into(),
+            models: vec![
+                crate::ModelSource {
+                    id: "llama3.1:8b".into(),
+                    ..Default::default()
+                },
+                crate::ModelSource {
+                    id: "llama3.1:8b".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ValidateError::ModelSourceDuplicateId(ref p, ref m)
+                if p == "ollama" && m == "llama3.1:8b"
+        ));
+    }
+
+    #[test]
+    fn model_provider_valid_entry_is_accepted() {
+        let mut cfg = Config::default();
+        cfg.capabilities.model_providers = vec![crate::ModelProvider {
+            id: "ollama".into(),
+            base_url: Some("http://localhost:11434/v1".into()),
+            models: vec![crate::ModelSource {
+                id: "llama3.1:8b".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn default_model_empty_provider_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.default_models.insert(
+            "large".into(),
+            crate::ModelRef {
+                provider: String::new(),
+                model: "gpt-4o".into(),
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ValidateError::DefaultModelEmptyRef(ref role) if role == "large"));
+    }
+
+    #[test]
+    fn default_model_valid_entry_is_accepted() {
+        let mut cfg = Config::default();
+        cfg.capabilities.default_models.insert(
+            "large".into(),
+            crate::ModelRef {
+                provider: "anthropic".into(),
+                model: "claude-opus-4-7".into(),
+            },
+        );
+        assert!(cfg.validate().is_ok());
     }
 }
