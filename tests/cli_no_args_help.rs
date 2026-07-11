@@ -1,13 +1,13 @@
 #![expect(clippy::expect_used, reason = "test scaffolding")]
 //! Test for #180: llmenv with no args should show full help (#180)
 
-use std::process::Command;
+use assert_cmd::Command;
 
 #[test]
 fn test_llmenv_no_args_shows_help() {
     // Run `llmenv` with no subcommand
-    let output = Command::new("cargo")
-        .args(["run", "--quiet", "--"])
+    let output = Command::cargo_bin("llmenv")
+        .expect("llmenv binary must exist for testing")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("failed to run llmenv");
@@ -50,9 +50,10 @@ fn test_llmenv_no_args_shows_help() {
 #[test]
 fn test_llmenv_help_flag_shows_help() {
     // Baseline: --help should work and show full help
-    let output = Command::new("cargo")
-        .args(["run", "--quiet", "--", "--help"])
+    let output = Command::cargo_bin("llmenv")
+        .expect("llmenv binary must exist for testing")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["--help"])
         .output()
         .expect("failed to run llmenv --help");
 

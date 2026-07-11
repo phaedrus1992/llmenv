@@ -20,6 +20,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::time::Duration;
 use tempfile::TempDir;
 
 /// Current OS user, used to make a user scope match in test configs.
@@ -126,7 +127,8 @@ fn hook_cmd(config_dir: &std::path::Path, config_path: &std::path::Path, event: 
 /// Assert the fail-soft contract: exit 0, empty stdout, and a stderr warning
 /// containing `stderr_needle`.
 fn assert_fail_soft(mut cmd: Command, stderr_needle: &str) {
-    cmd.assert()
+    cmd.timeout(Duration::from_secs(10))
+        .assert()
         .success()
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains(stderr_needle));
@@ -219,6 +221,7 @@ fn all_events_fail_soft_without_backend() {
 
     for event in ["session_start", "turn_start", "session_end"] {
         hook_cmd(dir.path(), &config_path, event)
+            .timeout(Duration::from_secs(10))
             .assert()
             .success()
             .stdout(predicate::str::is_empty());
