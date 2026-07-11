@@ -110,6 +110,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         true
     }
 
+    fn supports_model_providers(&self) -> bool {
+        false
+    }
+
     fn supported_hook_events(&self) -> &'static [&'static str] {
         CLAUDE_CODE_HOOK_EVENTS
     }

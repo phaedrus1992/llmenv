@@ -37,6 +37,10 @@ impl AgentAdapter for CrushAdapter {
         true
     }
 
+    fn supports_model_providers(&self) -> bool {
+        true
+    }
+
     fn supported_hook_events(&self) -> &'static [&'static str] {
         SUPPORTED_HOOK_EVENTS
     }
