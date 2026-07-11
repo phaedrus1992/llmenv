@@ -562,11 +562,6 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                 "{warn} context-mode marketplace '{mkt_name}' not synced — \
                  run `llmenv plugin-sync` so the auto-wire can find it"
             );
-        } else if !mkt_path.join("marketplace.json").exists() {
-            eprintln!(
-                "{warn} context-mode marketplace '{mkt_name}' appears broken — \
-                 run `llmenv plugin-sync` to repair"
-            );
         } else {
             eprintln!("{pass} context-mode marketplace '{mkt_name}' synced and ready");
         }

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   content translation (#656, #657)
 
 ### Fixed
+- `capabilities.permissions` rules (top-level or bundle-contributed) whose
+  `pattern`/`paths` have unbalanced parentheses — e.g. a process-substitution
+  deny pattern like `bash <(curl *` — are now rejected at config-load time
+  with a fix hint, instead of rendering into a `Tool(pattern)` string that
+  Claude Code/Crush silently drop at settings-load time. This previously left
+  `deny` rules silently non-functional with no warning from `llmenv doctor`
+  or config validation. (#664)
 - opencode adapter not activating when `OPENCODE_CONFIG_DIR` is unset (now
   falls back to checking if `opencode` is on PATH) (#657)
 - `llmenv regenerate` false positives on hardcoded `~/.claude` paths inside

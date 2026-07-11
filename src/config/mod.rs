@@ -1,5 +1,4 @@
 pub use llmenv_config::ValidateError;
-pub(crate) use llmenv_config::validate_capabilities_env_key;
 pub use llmenv_config::{
     Bundle, CONTEXT_MODE_DATA_ENV, CONTEXT_MODE_MARKETPLACE, CONTEXT_MODE_MCP_PREFIX,
     CONTEXT_MODE_PLUGIN, CONTEXT_MODE_SOURCE, CONTEXT_MODE_STATE_SUBDIR, Cache, Capabilities,
@@ -10,4 +9,7 @@ pub use llmenv_config::{
     RESERVED_OFFICIAL_MARKETPLACES, Scopes, SessionLog, SkillSource, StateConfig, StateTool,
     Throttle, UserMatch, UserScope, VersionGranularity, classify_source, generate_template,
     github_owner_repo, is_reserved_official_marketplace, split_plugin_ref,
+};
+pub(crate) use llmenv_config::{
+    validate_capabilities_env_key, validate_permission_rule, validate_permission_string,
 };
