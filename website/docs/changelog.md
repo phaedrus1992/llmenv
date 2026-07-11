@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+- Move WebFetch/WebSearch ICM storage and PostSession consolidation to background detached child processes, reducing hook latency for common events (#670)
+- Cache parsed config by file mtime in hook-run to avoid redundant YAML parsing on each event (#670)
+
 ### Added
 - `llmenv doctor` checks that config-dependent executables (`icm`,
   `mcp-proxy`/`uvx`, `claude`, `crush`) are available on `PATH`,
