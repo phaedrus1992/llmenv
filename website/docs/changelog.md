@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+- `llmenv doctor` checks that config-dependent executables (`icm`,
+  `mcp-proxy`/`uvx`, `claude`, `crush`) are available on `PATH`,
+  respecting each tool's config conditions (memory entries, disabled
+  engines, optional status). (#655)
+
 ### Fixed
 - `capabilities.permissions` rules (top-level or bundle-contributed) whose
   `pattern`/`paths` have unbalanced parentheses — e.g. a process-substitution
