@@ -8,6 +8,8 @@ use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
 
+const TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Build a `Command` for `llmenv` with `LLMENV_CONFIG_DIR` and `LLMENV_STATE_DIR`
 /// set to `config_dir`.
 fn llmenv_cmd(config_dir: &Path) -> Command {
@@ -48,7 +50,7 @@ fn setup_no_launch_creates_config() {
     llmenv_cmd(dir.path())
         .arg("setup")
         .arg("--no-launch")
-        .timeout(Duration::from_secs(10))
+        .timeout(TIMEOUT)
         .assert()
         .success();
     assert_setup_files(dir.path());
@@ -63,7 +65,7 @@ fn setup_custom_path() {
         .arg("setup")
         .arg(dir.path().to_str().unwrap())
         .arg("--no-launch")
-        .timeout(Duration::from_secs(10))
+        .timeout(TIMEOUT)
         .assert()
         .success();
     assert_setup_files(dir.path());
@@ -79,9 +81,10 @@ fn setup_repo_flag_non_interactive() {
         .arg("--repo")
         .arg(repo_url)
         .arg("--no-launch")
-        .timeout(Duration::from_secs(10))
+        .timeout(TIMEOUT)
         .assert()
         .success();
+    assert_setup_files(dir.path());
     let config = fs::read_to_string(dir.path().join("config.yaml"))
         .expect("config.yaml should exist after setup");
     assert!(
@@ -99,7 +102,7 @@ fn setup_rescan_on_existing() {
     llmenv_cmd(dir.path())
         .arg("setup")
         .arg("--no-launch")
-        .timeout(Duration::from_secs(10))
+        .timeout(TIMEOUT)
         .assert()
         .success();
 
@@ -113,7 +116,7 @@ fn setup_rescan_on_existing() {
         .arg("setup")
         .arg("--rescan")
         .arg("--no-launch")
-        .timeout(Duration::from_secs(10))
+        .timeout(TIMEOUT)
         .assert()
         .success();
 
@@ -140,25 +143,23 @@ fn setup_rescan_on_empty_dir() {
         .arg("setup")
         .arg("--rescan")
         .arg("--no-launch")
-        .timeout(Duration::from_secs(10))
+        .timeout(TIMEOUT)
         .assert()
         .failure()
         .stderr(predicate::str::contains("Run `llmenv setup` first"));
 }
 
-/// A missing `LLMENV_CONFIG_DIR` must not cause a panic.
+/// A missing `LLMENV_CONFIG_DIR` must fail with an error and must not panic.
 #[test]
 fn setup_missing_config_dir() {
     let missing = Path::new("/nonexistent-llmenv-test-path-12345-test");
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_CONFIG_DIR", missing)
-        .env("LLMENV_STATE_DIR", missing)
+    let assert = llmenv_cmd(missing)
         .arg("setup")
         .arg("--no-launch")
-        .timeout(Duration::from_secs(10));
-
-    let assert = cmd.assert();
+        .timeout(TIMEOUT)
+        .assert()
+        .failure();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -174,12 +175,8 @@ fn setup_missing_config_dir() {
 fn setup_non_interactive_no_flags() {
     let dir = TempDir::new().unwrap();
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_CONFIG_DIR", dir.path())
-        .env("LLMENV_STATE_DIR", dir.path())
-        .arg("setup")
-        .write_stdin("")
-        .timeout(Duration::from_secs(10));
+    let mut cmd = llmenv_cmd(dir.path());
+    cmd.arg("setup").write_stdin("").timeout(TIMEOUT);
 
     let assert = cmd.assert();
     let output = assert.get_output();
