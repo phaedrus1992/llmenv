@@ -6,7 +6,7 @@ use serde_json::json;
 use super::AgentAdapter;
 use super::resolve_bundle_relative_paths;
 use super::resolve_command_paths_against_files;
-use super::skills::create_dir_owner_only;
+use super::skills::{create_dir_owner_only, reject_hardcoded_config_path};
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
@@ -512,36 +512,6 @@ fn read_claude_json(path: &Path) -> anyhow::Result<serde_json::Value> {
         }
         Err(e) => Err(anyhow::anyhow!("reading {}: {e}", path.display())),
     }
-}
-
-const IGNORE_INLINE: &str = "# llmenv-ignore: hardcoded-path";
-const IGNORE_FILE: &str = "# llmenv-ignore-file: hardcoded-path";
-
-/// Reject materialized content carrying a hardcoded `~/.claude` / `$HOME/.claude`
-/// path (#311). Such paths resolve against the *default* config dir, so they
-/// break whenever `CLAUDE_CONFIG_DIR` points at a materialized llmenv folder
-/// (the normal case). `label` names the offending file in the error.
-///
-/// Suppression:
-/// - `# llmenv-ignore-file: hardcoded-path` anywhere in the file skips the entire file.
-/// - `# llmenv-ignore: hardcoded-path` at the end of a line skips that line only.
-fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow::Result<()> {
-    if content.contains(IGNORE_FILE) {
-        return Ok(());
-    }
-    for line in content.lines() {
-        if line.contains(IGNORE_INLINE) {
-            continue;
-        }
-        if line.contains("~/.claude") || line.contains("$HOME/.claude") {
-            anyhow::bail!(
-                "{label} contains hardcoded ~/.claude or $HOME/.claude paths. \
-                 Use ${{CLAUDE_PLUGIN_ROOT}} or relative paths instead so it \
-                 works when CLAUDE_CONFIG_DIR is set to a materialized llmenv folder."
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Copy files from a source directory into a destination recursively, writing
@@ -1442,10 +1412,10 @@ mod tests {
         HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, overlay_native, reconcile_settings,
-        reject_hardcoded_config_path, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, seed_install_method,
+        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
+        seed_install_method,
     };
-    use crate::adapter::skills::{arb_yaml_value, validate_skills};
+    use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
