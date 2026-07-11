@@ -34,7 +34,7 @@ pub use schema::{
     is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
-pub use validate::{ValidateError, validate_capabilities_env_key};
+pub use validate::{ValidateError, validate_capabilities_env_key, validate_permission_rule};
 
 use anyhow::Context;
 use std::path::Path;

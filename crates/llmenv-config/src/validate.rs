@@ -1,4 +1,4 @@
-use super::Config;
+use super::{Config, PermissionRule};
 use llmenv_paths::has_parent_component;
 use thiserror::Error;
 
@@ -6,8 +6,8 @@ use thiserror::Error;
 use super::{
     Bundle, Cache, Capabilities, Features, Hook, HookHandler, HookHandlerKind, HostEntry,
     HostMatch, HostScope, Marketplace, McpServer, McpTransport, Memory, NativePermissionRules,
-    NetworkMatch, NetworkScope, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    Scopes, Throttle, UserMatch, UserScope,
+    NetworkMatch, NetworkScope, PermissionMode, Permissions, PluginCollection, Scopes, Throttle,
+    UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -154,6 +154,19 @@ pub enum ValidateError {
     SkillEmptyPath(String),
     #[error("skill '{0}' path contains traversal components (..): {1}")]
     SkillPathTraversal(String, String),
+    #[error(
+        "{context}: permission rule tool='{tool}' value '{value}' has unbalanced \
+         parentheses. Adapters that render neutral rules as 'Tool(value)' strings \
+         (Claude Code, Crush) require value's own '('/')' to balance, or the engine's \
+         settings loader silently drops the whole rule at load time — a deny rule with \
+         unbalanced parens fails open with no warning. Fix: balance the parentheses (e.g. \
+         'bash <(curl *)*' instead of 'bash <(curl *'), or avoid parentheses in the pattern."
+    )]
+    PermissionRuleUnbalancedParens {
+        context: String,
+        tool: String,
+        value: String,
+    },
 }
 
 /// A state-tool subdir must be a single safe path component: non-empty, not
@@ -238,6 +251,55 @@ pub fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), Val
             context: context.to_string(),
             key: key.to_string(),
         });
+    }
+    Ok(())
+}
+
+/// A pattern/path is only safe to wrap as `Tool(value)` if its own parentheses
+/// balance — otherwise the wrapped string's parens don't balance either, and
+/// engines that parse the rule by tracking paren depth (Claude Code, Crush)
+/// silently skip the whole rule. `<(` from shell process substitution is the
+/// common trigger (`bash <(curl *` has one unmatched `(`).
+fn has_balanced_parens(s: &str) -> bool {
+    let mut depth: i32 = 0;
+    for c in s.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// Validate a single permission rule's `pattern`/`paths` for balanced
+/// parentheses. Returns an error with the given `context` label (e.g.
+/// `"config.yaml: capabilities.permissions"` or `"bundle 'foo'"`) on failure —
+/// see [`ValidateError::PermissionRuleUnbalancedParens`] for why this is
+/// rejected rather than rendered as-is.
+pub fn validate_permission_rule(context: &str, rule: &PermissionRule) -> Result<(), ValidateError> {
+    if let Some(pattern) = &rule.pattern
+        && !has_balanced_parens(pattern)
+    {
+        return Err(ValidateError::PermissionRuleUnbalancedParens {
+            context: context.to_string(),
+            tool: rule.tool.clone(),
+            value: pattern.clone(),
+        });
+    }
+    for path in &rule.paths {
+        if !has_balanced_parens(path) {
+            return Err(ValidateError::PermissionRuleUnbalancedParens {
+                context: context.to_string(),
+                tool: rule.tool.clone(),
+                value: path.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -331,6 +393,22 @@ impl Config {
         self.validate_skills()?;
         self.validate_plugins()?;
         self.validate_state()?;
+        self.validate_permissions()?;
+        Ok(())
+    }
+
+    fn validate_permissions(&self) -> Result<(), ValidateError> {
+        let context = "config.yaml: capabilities.permissions";
+        let rules = self
+            .capabilities
+            .permissions
+            .allow
+            .iter()
+            .chain(self.capabilities.permissions.ask.iter())
+            .chain(self.capabilities.permissions.deny.iter());
+        for rule in rules {
+            validate_permission_rule(context, rule)?;
+        }
         Ok(())
     }
 
@@ -2685,5 +2763,111 @@ mod tests {
             when: vec![],
         }]);
         assert!(cfg.validate().is_ok());
+    }
+
+    // ===== #664: permission rule pattern paren-balance validation =====
+    //
+    // Claude Code and Crush render a neutral rule as `Tool(value)`; both
+    // engines' own settings loaders track paren depth to find the closing
+    // `)` and silently drop the whole rule if it never balances. A deny rule
+    // with an unmatched `(` (e.g. a process-substitution pattern like
+    // `bash <(curl *`) therefore fails open with no warning from the engine.
+    // Reject at config-load time instead.
+
+    fn config_with_permissions(permissions: Permissions) -> crate::Config {
+        crate::Config {
+            capabilities: Capabilities {
+                permissions,
+                ..Default::default()
+            },
+            ..minimal_config()
+        }
+    }
+
+    #[test]
+    fn permission_rule_unmatched_open_paren_in_deny_pattern_rejected() {
+        let cfg = config_with_permissions(Permissions {
+            deny: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("bash <(curl *".into()),
+                paths: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn permission_rule_unmatched_close_paren_rejected() {
+        let cfg = config_with_permissions(Permissions {
+            allow: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("foo)".into()),
+                paths: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn permission_rule_balanced_process_substitution_pattern_accepted() {
+        let cfg = config_with_permissions(Permissions {
+            deny: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("bash <(curl *)*".into()),
+                paths: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn permission_rule_plain_pattern_without_parens_accepted() {
+        let cfg = config_with_permissions(Permissions {
+            allow: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("git diff *".into()),
+                paths: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn permission_rule_unbalanced_path_entry_rejected() {
+        let cfg = config_with_permissions(Permissions {
+            deny: vec![PermissionRule {
+                tool: "Read".into(),
+                pattern: None,
+                paths: vec!["~/weird(dir".into()],
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::PermissionRuleUnbalancedParens { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_permission_rule_error_reports_context_and_tool() {
+        let rule = PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("bash <(curl *".into()),
+            paths: vec![],
+        };
+        let err = validate_permission_rule("bundle 'security'", &rule).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bundle 'security'"), "got: {msg}");
+        assert!(msg.contains("Bash"), "got: {msg}");
     }
 }
