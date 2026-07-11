@@ -125,7 +125,24 @@ pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
 
 /// Check whether a host address string is a loopback / local-only address.
 fn is_local_addr(addr: &str) -> bool {
-    matches!(addr, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+    matches!(addr, "localhost" | "0.0.0.0" | "::" | "::0")
+        || addr
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether any memory block references a remote (non-local) server_host.
+/// Returns `true` when a `server_host` maps to a non-local address in the host
+/// table, or when the host table has no entry for it (assume remote).
+fn has_remote_memory_host(config: &Config) -> bool {
+    config.features.as_ref().is_some_and(|f| {
+        f.memory.iter().any(|mem| {
+            config
+                .host
+                .get(&mem.server_host)
+                .map_or(true, |h| !is_local_addr(&h.addr))
+        })
+    })
 }
 
 /// Check that external tools referenced by the active config are available on
@@ -145,25 +162,15 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         .is_some_and(|f| !f.memory.is_empty());
 
     // icm — required when features.memory has entries
+    // mcp-proxy or uvx — required when any memory server_host is remote
     if has_memory {
         if crate::adapter::binary_on_path("icm") {
             eprintln!("{pass} icm found on PATH");
         } else {
             eprintln!("{fail} icm not found on PATH (required when features.memory is configured)");
         }
-    }
 
-    // mcp-proxy or uvx — required when memory server_host is remote
-    if has_memory {
-        let needs_proxy = config.features.as_ref().is_some_and(|f| {
-            f.memory.iter().any(|mem| {
-                config
-                    .host
-                    .get(&mem.server_host)
-                    .is_some_and(|h| !is_local_addr(&h.addr))
-            })
-        });
-        if needs_proxy {
+        if has_remote_memory_host(config) {
             if crate::adapter::binary_on_path("mcp-proxy") || crate::adapter::binary_on_path("uvx")
             {
                 eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
@@ -881,6 +888,24 @@ mod tests {
     #[test]
     fn is_local_addr_rejects_hostname() {
         assert!(!is_local_addr("still.local"));
+    }
+
+    #[test]
+    fn is_local_addr_accepts_ipv6_unspecified() {
+        assert!(is_local_addr("::"));
+        assert!(is_local_addr("::0"));
+    }
+
+    #[test]
+    fn is_local_addr_accepts_broader_loopback() {
+        assert!(is_local_addr("127.0.0.2"));
+        assert!(is_local_addr("127.255.255.254"));
+        assert!(!is_local_addr("128.0.0.1"));
+    }
+
+    #[test]
+    fn is_local_addr_accepts_unspecified_v4() {
+        assert!(is_local_addr("0.0.0.0"));
     }
 
     // -- run_doctor_tool_availability --
