@@ -7,11 +7,15 @@
 //! path and must never block it.
 
 pub(crate) mod action;
+pub(crate) mod detached_consolidation;
+pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 
 use std::io::Write;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use action::Action;
 use mcp_client::McpHttpClient;
@@ -352,13 +356,58 @@ pub fn run(event: &str) -> anyhow::Result<()> {
 /// The memory backend (recall/store) and session logging are independent: a
 /// missing/unreachable memory MCP skips memory actions but must not prevent
 /// the file-sink session log from being written (see `handle_session_log`).
+/// Mtime-keyed cache entry for the parsed config. Avoids re-parsing the YAML
+/// file on every hook event when the file hasn't changed (the common case —
+/// consecutive events in one agent turn).
+struct CachedConfig {
+    mtime: SystemTime,
+    config: crate::config::Config,
+}
+
+/// Module-level cache so `run_inner` (called once per hook event) skips
+/// `Config::load` when the file mtime hasn't changed. The lock is held only
+/// during the stat-and-compare or load-and-store window — never across the
+/// rest of `run_inner` or any `.await`.
+static CONFIG_CACHE: Mutex<Option<CachedConfig>> = Mutex::new(None);
+
+/// Load config from `path`, consulting the mtime cache to skip re-parsing
+/// when the file hasn't changed. Falls back to a fresh load on stat errors
+/// or cache-miss.
+fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    if let Some(mtime) = mtime
+        && let Ok(lock) = CONFIG_CACHE.lock()
+        && let Some(cached) = lock.as_ref()
+        && cached.mtime == mtime
+    {
+        return Ok(cached.config.clone());
+    }
+    if mtime.is_some() {
+        // Mutex was poisoned — degraded performance path
+        tracing::debug!("CONFIG_CACHE poisoned, falling back to fresh load");
+    }
+    let config = crate::config::Config::load(path)?;
+    if let Some(mtime) = mtime
+        && let Ok(mut lock) = CONFIG_CACHE.lock()
+    {
+        *lock = Some(CachedConfig {
+            mtime,
+            config: config.clone(),
+        });
+    } else if mtime.is_some() {
+        // Still poisoned after re-load — log once per config access
+        tracing::debug!("CONFIG_CACHE still poisoned after load");
+    }
+    Ok(config)
+}
+
 fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
     stdin_payload: &serde_json::Value,
 ) -> anyhow::Result<String> {
     let config_path = crate::paths::config_path()?;
-    let config = crate::config::Config::load(&config_path)?;
+    let config = load_cached_config(&config_path)?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
     let log_cfg = config.session_log_resolved();
@@ -443,24 +492,19 @@ fn run_inner(
             let actions = dispatch(event, &tag_queries, &bundle_queries);
             out = run_memory_actions(client, actions, &query, &chunk).await?;
 
-            // PostSession: run reflective consolidation (R5) after the standard
-            // action dispatch. This distills recent episodic memories into
-            // durable semantic rules when consolidation is enabled.
+            // PostSession: run reflective consolidation (R5) in a detached
+            // child process so the hook returns immediately instead of
+            // blocking on MCP. The result is fire-and-forget — PostSession is
+            // the final event, so no caller needs its output.
             if event == HookEvent::PostSession {
-                let cons_text = crate::consolidation::run(&config, client).await?;
-                if !cons_text.is_empty() {
-                    if !out.is_empty() {
-                        out.push_str("\n\n");
-                    }
-                    out.push_str(&cons_text);
-                }
+                post_session_consolidation();
             }
 
             // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
             // with fast-falloff memory (topic: web-fetch, importance: low) so it
             // survives session compactions but decays quickly. (#579)
             if event == HookEvent::PostToolUse {
-                handle_web_fetch_post_tool_use(client, stdin_payload).await;
+                handle_web_fetch_post_tool_use(stdin_payload);
             }
         }
         run_session_log(event, &session_log, stdin_payload).await;
@@ -942,18 +986,60 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
     }))
 }
 
-/// Handle PostToolUse for WebFetch/WebSearch: auto-store the fetched content in
-/// ICM with fast-falloff memory (importance: low, topic: web-fetch).
-/// Best-effort — failures are logged as warnings but not propagated to the caller.
-async fn handle_web_fetch_post_tool_use(client: &McpHttpClient, payload: &serde_json::Value) {
+/// Handle PostToolUse for WebFetch/WebSearch by spawning a detached child
+/// that stores the fetched content in ICM with fast-falloff memory
+/// (importance: low, topic: web-fetch). The hook returns immediately instead of
+/// blocking on the MCP round trip. Best-effort — failures are logged at debug
+/// level and never propagated to the caller.
+fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
     let Some(args) = web_fetch_store_args(payload) else {
         return;
     };
-    if let Err(e) = client.call_tool("icm_memory_store", args).await {
-        warn!(error = %e, "failed to auto-store web fetch content in ICM");
+    let Ok(payload_json) = serde_json::to_string(&args) else {
+        tracing::debug!("icm-store: failed to serialize store args");
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::debug!("icm-store: cannot resolve current_exe for detached store");
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("icm-store")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::mcp::proxy::detach_process_group(&mut cmd);
+    let Ok(mut child) = cmd.spawn() else {
+        tracing::debug!("icm-store: failed to spawn detached store child");
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(e) = stdin.write_all(payload_json.as_bytes())
+    {
+        tracing::debug!("icm-store: failed to pipe args to detached child: {e}");
     }
+    // Not waited on: the child is process-group-detached and outlives us.
 }
 
+/// Spawn a detached child to run post-session consolidation. Best-effort
+/// fire-and-forget — spawn failures are logged at debug level and the caller
+/// never waits on the child.
+fn post_session_consolidation() {
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::debug!("consolidation-run: cannot resolve current_exe");
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("consolidation-run")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::mcp::proxy::detach_process_group(&mut cmd);
+    if let Err(e) = cmd.spawn() {
+        tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
+    }
+    // Not waited on: the child is process-group-detached and outlives us.
+}
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1602,41 +1688,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn handle_web_fetch_post_tool_use_stores_in_icm() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": {
-                    "content": [{ "type": "text", "text": "stored" }]
-                }
-            })))
-            .mount(&server)
-            .await;
-
-        let client =
-            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+    #[test]
+    fn handle_web_fetch_post_tool_use_does_not_block() {
         let payload = serde_json::json!({
             "tool_name": "WebFetch",
             "tool_input": {"url": "https://example.com"},
             "tool_response": "fetched content",
         });
-        handle_web_fetch_post_tool_use(&client, &payload).await;
-
-        let requests = server.received_requests().await.unwrap_or_default();
-        let has_store_call = requests.iter().any(|r| {
-            r.body_json::<serde_json::Value>()
-                .ok()
-                .and_then(|v| v.get("method").and_then(|m| m.as_str().map(str::to_owned)))
-                .as_deref()
-                == Some("tools/call")
-        });
-        assert!(has_store_call, "handler should have sent an MCP tools/call");
+        // The child process (re-invoking the current, test-harness executable
+        // with args it doesn't understand) is expected to exit non-zero almost
+        // instantly; the parent never waits on it, so this call itself must
+        // return promptly.
+        let start = std::time::Instant::now();
+        handle_web_fetch_post_tool_use(&payload);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "handle_web_fetch_post_tool_use must not block on the child"
+        );
     }
 }
 #[cfg(test)]
