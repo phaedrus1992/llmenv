@@ -10,4 +10,6 @@ pub use llmenv_config::{
     Throttle, UserMatch, UserScope, classify_source, generate_template, github_owner_repo,
     is_reserved_official_marketplace, split_plugin_ref,
 };
-pub(crate) use llmenv_config::{validate_capabilities_env_key, validate_permission_rule};
+pub(crate) use llmenv_config::{
+    validate_capabilities_env_key, validate_permission_rule, validate_permission_string,
+};
