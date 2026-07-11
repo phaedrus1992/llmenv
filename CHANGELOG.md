@@ -18,19 +18,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `mcp-proxy`/`uvx`, `claude`, `crush`) are available on `PATH`,
   respecting each tool's config conditions (memory entries, disabled
   engines, optional status). (#655)
+- Add Discord community link to README and getting-started guide
 
 ### Fixed
-- `capabilities.permissions` rules (top-level or bundle-contributed) whose
-  `pattern`/`paths` have unbalanced parentheses — e.g. a process-substitution
-  deny pattern like `bash <(curl *` — are now rejected at config-load time
-  with a fix hint, instead of rendering into a `Tool(pattern)` string that
-  Claude Code/Crush silently drop at settings-load time. This previously left
-  `deny` rules silently non-functional with no warning from `llmenv doctor`
-  or config validation. (#664)
+- `capabilities.permissions` and `native_permissions` rules
+  (top-level or bundle-contributed) whose `pattern`/`paths` have
+  unbalanced parentheses — e.g. a process-substitution deny pattern like
+  `bash <(curl *` — are now rejected at config-load time with a fix hint,
+  instead of rendering into a `Tool(pattern)` string that Claude Code/Crush
+  silently drop at settings-load time. This previously left `deny` rules
+  silently non-functional with no warning from `llmenv doctor` or config
+  validation. (#664)
 - Validate skill-file paths with CommonMark-aware parsing (`pulldown-cmark`)
   instead of fragile heuristics. Fenced/indented code blocks and inline code
   spans containing `~/.claude` no longer falsely trigger configuration-path
   validation errors. (#659)
+- Fix root-level `lsp:` and `skills:` declarations in `config.yaml` not
+  being materialized into the rendered manifest. These were parsed,
+  validated, and documented but silently never reached the output. (#661)
+- Fix false `"marketplace.json broken"` warning from `llmenv doctor` when
+  the context-mode marketplace clone is properly synced but lacks a
+  standalone `marketplace.json` — the marketplace is managed internally
+  and the check was a false positive
+- Fix loopback address detection in the ICM MCP SSRF guard to cover the
+  full `127.0.0.0/8` range, unspecified addresses (`::`, `::0`, `0.0.0.0`),
+  and provide a safer fallback when `needs_proxy` cannot be determined
+- Fix background PostSession consolidation child process inheriting stdin,
+  which could cause hangs; add trace logging for CONFIG_CACHE poison
+  detection
 
 ## [3.1.0] - 2026-07-10
 
