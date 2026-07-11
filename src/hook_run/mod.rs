@@ -382,6 +382,10 @@ fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::C
     {
         return Ok(cached.config.clone());
     }
+    if mtime.is_some() {
+        // Mutex was poisoned — degraded performance path
+        tracing::debug!("CONFIG_CACHE poisoned, falling back to fresh load");
+    }
     let config = crate::config::Config::load(path)?;
     if let Some(mtime) = mtime
         && let Ok(mut lock) = CONFIG_CACHE.lock()
@@ -390,6 +394,9 @@ fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::C
             mtime,
             config: config.clone(),
         });
+    } else if mtime.is_some() {
+        // Still poisoned after re-load — log once per config access
+        tracing::debug!("CONFIG_CACHE still poisoned after load");
     }
     Ok(config)
 }
@@ -1024,6 +1031,7 @@ fn post_session_consolidation() {
     };
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("consolidation-run")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     crate::mcp::proxy::detach_process_group(&mut cmd);
