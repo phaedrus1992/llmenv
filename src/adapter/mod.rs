@@ -142,6 +142,20 @@ pub trait AgentAdapter {
     /// * `text` — the injected memory context, placed as `additionalContext`
     ///   inside `hookSpecificOutput`.
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String;
+
+    /// Return a JSON Schema document for the adapter's native config file, if
+    /// the adapter's output structs derive [`schemars::JsonSchema`].
+    ///
+    /// The returned value is a full draft 2020-12 schema document with
+    /// `"additionalProperties": true` at the root (so user passthrough keys
+    /// never fail validation). The orchestrator writes it as a sidecar file
+    /// at `{adapter_name}.schema.json` (e.g. `opencode.schema.json`).
+    ///
+    /// The default implementation returns `None`, so adapters without typed
+    /// output structs are unaffected.
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Detect which adapter is running in the current process by checking each
