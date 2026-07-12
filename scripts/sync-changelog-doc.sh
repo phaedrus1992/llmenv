@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Derive website/docs/changelog.md from the root CHANGELOG.md.
+# Derive website/docs/changelog.md from per-major-version CHANGELOG-*.md files.
 #
-# Run this whenever CHANGELOG.md changes and commit both files together.
+# Run this whenever a CHANGELOG-*.md changes and commit both files together.
 # The CI test in tests/docs_sync.rs fails if they drift.
 set -euo pipefail
 
@@ -24,13 +24,45 @@ sidebar_label: Changelog
 
 FRONTMATTER
 
-# Drop everything from <!-- next-url --> to EOF (the reference-link footer),
-# strip all versioned next-header sentinel lines, then trim surrounding blank lines.
-perl -0777 -pe '
-  s/<!--\s*next-url\s*-->.*$//ms;  # drop URL block
-  s/^<!--\s*[\d.]+\s+next-header\s*-->\n//mg; # strip sentinel lines
-  s/^\n+//;                          # trim leading blank lines
-  s/\n+$/\n/;                        # trim trailing blank lines (keep one \n)
-' CHANGELOG.md >> website/docs/changelog.md
+# Concatenate CHANGELOG-{1,2,3,4}.md newest-first, stripping:
+# - reference-link footers (after `<!-- next-url -->`)
+# - versioned next-header sentinel lines
+# - preamble text (everything before the first `## [` section header)
+#   from files 2+, so the combined output has only one preamble
+first=true
+for f in CHANGELOG-4.md CHANGELOG-3.md CHANGELOG-2.md CHANGELOG-1.md; do
+  if [[ ! -f "$f" ]]; then
+    continue
+  fi
+  # Skip placeholder files with no actual changelog sections
+  if ! grep -q '^## \[' "$f" 2>/dev/null; then
+    continue
+  fi
+
+  # Insert blank line separator between file groups
+  if [[ "$first" == "false" ]]; then
+    echo "" >> website/docs/changelog.md
+  fi
+
+  if [[ "$first" == "true" ]]; then
+    # First file: keep preamble, strip footer + sentinels
+    perl -0777 -pe '
+      s/<!--\s*next-url\s*-->.*$//ms;                 # drop URL block
+      s/^<!--\s*[\d.]+\s+next-header\s*-->\n//mg;     # strip sentinel lines
+      s/^\n+//;                                        # trim leading blank lines
+      s/\n+$/\n/;                                      # trim trailing blank lines
+    ' "$f" >> website/docs/changelog.md
+    first=false
+  else
+    # Subsequent files: strip preamble (everything before first ## [) too
+    perl -0777 -pe '
+      s/<!--\s*next-url\s*-->.*$//ms;                 # drop URL block
+      s/^.*?\n(?=## \[)//s;                            # strip preamble up to first section
+      s/^<!--\s*[\d.]+\s+next-header\s*-->\n//mg;     # strip sentinel lines
+      s/^\n+//;                                        # trim leading blank lines
+      s/\n+$/\n/;                                      # trim trailing blank lines
+    ' "$f" >> website/docs/changelog.md
+  fi
+done
 
 echo "Done. website/docs/changelog.md regenerated."

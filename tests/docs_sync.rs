@@ -1,10 +1,11 @@
 #![expect(clippy::panic, reason = "test scaffolding")]
-//! Guard that `website/docs/changelog.md` stays in sync with `CHANGELOG.md` (#258).
+//! Guard that `website/docs/changelog.md` stays in sync with per-major-version
+//! `CHANGELOG-*.md` files (#258, #673).
 //!
-//! `website/docs/changelog.md` is a generated artifact derived from the root
-//! `CHANGELOG.md`. The derivation is handled by `scripts/sync-changelog-doc.sh`.
+//! `website/docs/changelog.md` is a generated artifact derived from the per-version
+//! `CHANGELOG-N.md` files. The derivation is handled by `scripts/sync-changelog-doc.sh`.
 //! This test replicates the transformation and asserts the committed file matches,
-//! so a PR that edits `CHANGELOG.md` without re-running the sync script fails CI.
+//! so a PR that edits a `CHANGELOG-*.md` without re-running the sync script fails CI.
 
 use std::fs;
 use std::path::Path;
@@ -29,38 +30,76 @@ sidebar_label: Changelog
 ";
 
 /// Apply the same transformation that `scripts/sync-changelog-doc.sh` applies:
-/// strip cargo-release machine markers and prepend Docusaurus frontmatter.
-fn expected_site_changelog(changelog: &str) -> String {
-    // Drop the URL-block footer (<!-- next-url --> plus all reference links below it).
-    let before_urls = if let Some(idx) = changelog.find("<!-- next-url -->") {
-        &changelog[..idx]
-    } else {
-        changelog
-    };
-    // Strip versioned sentinel lines (<!-- X.Y next-header -->).
-    let stripped = before_urls
-        .lines()
-        .filter(|line| {
-            let t = line.trim();
-            !(t.starts_with("<!--") && t.ends_with("next-header -->"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+/// strip cargo-release machine markers, strip preamble from files 2+,
+/// and prepend Docusaurus frontmatter.
+fn expected_site_changelog() -> String {
+    let mut body_parts: Vec<String> = Vec::new();
+    let mut first = true;
 
-    // Trim leading/trailing blank lines from the body, then append a final newline.
-    let body = stripped.trim();
+    for version in (1..=4).rev() {
+        let fname = format!("CHANGELOG-{version}.md");
+        let content = match fs::read_to_string(Path::new(MANIFEST_DIR).join(&fname)) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Drop the URL-block footer (<!-- next-url --> plus all reference links below it).
+        let before_urls = if let Some(idx) = content.find("<!-- next-url -->") {
+            &content[..idx]
+        } else {
+            &content
+        };
+
+        // Skip placeholder files with no actual changelog sections.
+        if !before_urls
+            .lines()
+            .any(|l| l.trim_start().starts_with("## ["))
+        {
+            continue;
+        }
+
+        // Strip versioned sentinel lines (<!-- X.Y next-header -->).
+        let stripped: Vec<&str> = before_urls
+            .lines()
+            .filter(|line| {
+                let t = line.trim();
+                !(t.starts_with("<!--") && t.ends_with("next-header -->"))
+            })
+            .collect();
+
+        // For files 2+, strip everything before the first `## [` section header
+        // (the preamble / placeholder text). The first file keeps its preamble.
+        let sections: Vec<&str> = if first {
+            stripped
+        } else {
+            stripped
+                .into_iter()
+                .skip_while(|line| !line.trim().starts_with("## ["))
+                .collect()
+        };
+
+        if sections.is_empty() {
+            continue;
+        }
+        first = false;
+
+        // Trim leading blank lines from sections, then join.
+        let content = sections.join("\n").trim().to_string();
+        body_parts.push(content);
+    }
+
+    let body = body_parts.join("\n\n");
     format!("{FRONTMATTER}{body}\n")
 }
 
 #[test]
 fn docs_changelog_in_sync_with_root() {
-    let changelog = read("CHANGELOG.md");
     let site_changelog = read("website/docs/changelog.md");
-    let expected = expected_site_changelog(&changelog);
+    let expected = expected_site_changelog();
 
     assert_eq!(
         site_changelog, expected,
-        "website/docs/changelog.md is out of sync with CHANGELOG.md.\n\
+        "website/docs/changelog.md is out of sync with CHANGELOG-*.md.\n\
          Run `scripts/sync-changelog-doc.sh` and commit the result."
     );
 }
