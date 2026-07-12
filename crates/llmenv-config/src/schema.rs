@@ -1657,6 +1657,7 @@ mod tests {
         assert!(sc.diagnose_command);
         assert!(!sc.explain_before_act);
         assert!(!sc.answer_before_act);
+        assert_eq!(sc.effort_level, None);
     }
 
     // ===== Feature round-trip tests =====
