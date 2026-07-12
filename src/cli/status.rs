@@ -518,7 +518,7 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     if !path_hits.is_empty() {
         // ponytail: simple Vec sort, fine for typical <100 sessions
         let mut sorted: Vec<_> = path_hits.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         println!("    Most re-read files:");
         for (path, hits) in sorted.iter().take(5) {
             println!("      {hits:>6}× {path}");
