@@ -41,6 +41,43 @@ fn setup_config(content: &str) -> (TempDir, std::path::PathBuf) {
 
 /// A valid config whose active user scope carries tag `test`, with no `memory:`
 /// backend. The hook resolves a scope but finds no memory MCP to talk to.
+fn config_with_read_once(mode: &str) -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: test-bundle
+    when: [test]
+
+features:
+  read_once:
+    enabled: true
+    mode: {mode}
+    ttl_seconds: 1200
+    diff: false
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+        mode = mode,
+    )
+}
+
 fn config_no_backend() -> String {
     format!(
         r#"
@@ -219,11 +256,41 @@ fn all_events_fail_soft_without_backend() {
     // The fail-soft contract holds for every lifecycle event, not just one.
     let (dir, config_path) = setup_config(&config_no_backend());
 
-    for event in ["session_start", "turn_start", "session_end"] {
+    for event in ["session_start", "turn_start", "session_end", "pre_tool_use"] {
         hook_cmd(dir.path(), &config_path, event)
             .timeout(Duration::from_secs(10))
             .assert()
             .success()
             .stdout(predicate::str::is_empty());
     }
+}
+
+#[test]
+fn pre_tool_use_without_read_once_config_passes_through() {
+    let (dir, config_path) = setup_config(&config_no_backend());
+    hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn pre_tool_use_with_read_once_warn_config_passes_through() {
+    let (dir, config_path) = setup_config(&config_with_read_once("warn"));
+    hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn pre_tool_use_with_read_once_deny_config_passes_through() {
+    let (dir, config_path) = setup_config(&config_with_read_once("deny"));
+    hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
 }
