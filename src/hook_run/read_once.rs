@@ -274,6 +274,7 @@ pub(crate) fn handle_pre_tool_use_inner(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;
