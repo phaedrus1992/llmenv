@@ -294,3 +294,116 @@ fn pre_tool_use_with_read_once_deny_config_passes_through() {
         .success()
         .stdout(predicate::str::is_empty());
 }
+
+/// Helper: a synthetic PreToolUse payload for a Read tool call.
+fn read_hook_payload(file_path: &str, session_id: &str) -> String {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": session_id,
+        "tool_name": "Read",
+        "tool_input": {
+            "filePath": file_path,
+        },
+    })
+    .to_string()
+}
+
+#[test]
+fn pre_tool_use_read_twice_warn_mode() {
+    let (dir, config_path) = setup_config(&config_with_read_once("warn"));
+
+    // Create a real file in its own temp dir so both subprocess calls see it.
+    let test_file_dir = TempDir::new().unwrap();
+    let file_path = test_file_dir.path().join("read_twice_warn.txt");
+    fs::write(&file_path, b"content for warn mode test").unwrap();
+
+    let session_id = "test-warn-twice";
+    let payload = read_hook_payload(file_path.to_str().unwrap(), session_id);
+
+    // First read — passes through, empty stdout
+    hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    // Second read — warns, non-empty stdout with advisory JSON
+    let output = hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "warn mode second read should exit 0"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.is_empty(),
+        "warn mode second read should produce output"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("warn mode output should be valid JSON");
+    let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("already read"),
+        "warn mode advisory should mention re-read; got: {ctx}"
+    );
+}
+
+#[test]
+fn pre_tool_use_read_twice_deny_mode() {
+    let (dir, config_path) = setup_config(&config_with_read_once("deny"));
+
+    let test_file_dir = TempDir::new().unwrap();
+    let file_path = test_file_dir.path().join("read_twice_deny.txt");
+    fs::write(&file_path, b"content for deny mode test").unwrap();
+
+    let session_id = "test-deny-twice";
+    let payload = read_hook_payload(file_path.to_str().unwrap(), session_id);
+
+    // First read — passes through, empty stdout
+    hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    // Second read — denied, stdout should be a deny JSON envelope
+    let output = hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "deny mode second read should exit 0"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.is_empty(),
+        "deny mode second read should produce output"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny mode output should be valid JSON");
+    let deny = &parsed["hookSpecificOutput"];
+    assert_eq!(
+        deny["permissionDecision"].as_str(),
+        Some("deny"),
+        "should have permissionDecision=deny"
+    );
+    assert_eq!(
+        deny["hookEventName"].as_str(),
+        Some("PreToolUse"),
+        "should have hookEventName=PreToolUse"
+    );
+    let reason = deny["deniedReason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("already read"),
+        "deny reason should mention re-read; got: {reason}"
+    );
+}

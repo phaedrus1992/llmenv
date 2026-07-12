@@ -163,6 +163,19 @@ pub fn handle_pre_tool_use(
     session_id: Option<&str>,
     config: &ReadOnceConfig,
 ) -> String {
+    let Ok(state_dir) = crate::paths::state_dir() else {
+        return String::new();
+    };
+    handle_pre_tool_use_inner(stdin_payload, session_id, config, &state_dir)
+}
+
+/// Like [`handle_pre_tool_use`] but with an injectable `state_dir` for testing.
+pub(crate) fn handle_pre_tool_use_inner(
+    stdin_payload: &serde_json::Value,
+    session_id: Option<&str>,
+    config: &ReadOnceConfig,
+    state_dir: &Path,
+) -> String {
     // Only handle Read tool calls
     if stdin_payload["tool_name"].as_str() != Some("Read") {
         return String::new();
@@ -210,13 +223,6 @@ pub fn handle_pre_tool_use(
     let path_key = canonical.to_string_lossy().to_string();
 
     // Load session cache
-    let state_dir = match crate::paths::state_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("llmenv: failed to resolve state dir for read-once: {e}");
-            return String::new();
-        }
-    };
 
     let mut cache = SessionCache::load(&state_dir, session_id, config.ttl_seconds);
     let now = unix_now();
@@ -498,11 +504,14 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, b"content").unwrap();
 
-        // Even with corrupt cache, the first read should pass through
-        let result = handle_pre_tool_use(
+        // Even with corrupt cache, the first read should pass through.
+        // Uses the inner function with injectable state_dir so the corrupt file
+        // in the TempDir is actually consulted.
+        let result = handle_pre_tool_use_inner(
             &read_payload(file_path.to_str().unwrap()),
             Some("test-session"),
             &test_config_warn(),
+            state_dir,
         );
         assert!(result.is_empty(), "corrupt cache should fail-soft");
     }

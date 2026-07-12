@@ -336,11 +336,18 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     let adapter = crate::adapter::active_adapter();
     match run_inner(parsed, claude_session_id.as_deref(), payload) {
         Ok(text) => {
-            // #318: deny envelope detected — write directly to stdout,
-            // bypassing emit_hook_context so the engine sees the raw
-            // __DENY__: prefix and blocks the tool call.
+            // #318: deny envelope detected — write a proper deny JSON envelope
+            // to stdout so the Claude Code engine blocks the tool call.
             if text.starts_with("__DENY__:") {
-                if let Err(e) = writeln!(std::io::stdout(), "{text}")
+                let reason = text.trim_start_matches("__DENY__:");
+                let envelope = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "deniedReason": reason,
+                    }
+                });
+                if let Err(e) = writeln!(std::io::stdout(), "{envelope}")
                     && e.kind() != std::io::ErrorKind::BrokenPipe
                 {
                     eprintln!("llmenv: failed to write hook output: {e}");
