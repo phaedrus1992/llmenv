@@ -274,6 +274,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         }
     }
@@ -375,6 +377,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         };
         let work = Memory {
@@ -386,6 +390,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         };
         let mut host = base_host();
@@ -414,6 +420,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         };
         let work = Memory {
@@ -425,6 +433,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         };
         let mut host = base_host();

@@ -962,6 +962,8 @@ mod tests {
                     default_type: None,
                     default_importance: None,
                     type_importance: std::collections::BTreeMap::new(),
+                    retention: None,
+                    auto_prune: false,
                     consolidation: None,
                 },
             )
