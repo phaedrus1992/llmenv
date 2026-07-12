@@ -1,42 +1,41 @@
 //! Post-session reflective memory consolidation (R5).
 //!
-//! ## Decision: Direct LLM call (Option B)
+//! ## LLM backends
+//!
+//! Two backends configured via `consolidation.backend`:
+//!
+//! - **`claude-cli`** (default) — calls `claude -p` as a subprocess. Works with
+//!   a Claude subscription; no `ANTHROPIC_API_KEY` needed.
+//! - **`anthropic-api`** — calls the Anthropic Messages API directly via HTTP.
+//!   Requires `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` env vars.
 //!
 //! ICM's `icm_memory_consolidate` MCP tool exists but requires both `topic`
 //! and `summary` parameters and simply merges a topic's memories into one
-//! record with the provided summary string — it does **not** perform any LLM
-//! summarization. To get actual episodic→semantic distillation we must call
-//! the Anthropic Messages API directly (Option B per #595): a single HTTPS
-//! POST with the already-dep reqwest crate. No new SDK dependency.
+//! record — it does **not** perform LLM summarization, so we handle that here.
 //!
 //! The pipeline:
 //! 1. Recall recent memories from ICM (no type filter — broadest recall).
 //! 2. Precondition: ≥3 records, otherwise skip with a diagnostic.
 //! 3. Build ExpeL-inspired prompt from memory summaries.
-//! 4. POST to Anthropic Messages API (non-streaming).
+//! 4. Call the configured LLM backend (120s timeout).
 //! 5. Parse bullet-point rules from the response.
 //! 6. Store each rule as `type: semantic`, `importance: high`.
 //!
 //! All failures are fail-soft: `tracing::warn!`, return `Ok(summary)`.
 
+use std::process::Stdio;
 use std::time::Duration;
 
 use crate::hook_run::mcp_client::McpHttpClient;
 
-/// Anthropic Messages API endpoint (non-streaming).
-const ANTHROPIC_API: &str = "https://api.anthropic.com/v1/messages";
-/// Default model — current cheapest Haiku, verified at time of implementation.
-const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
-/// Hard timeout for the direct Anthropic API call (one POST, no streaming).
-const LLM_TIMEOUT: Duration = Duration::from_secs(60);
+/// Hard timeout for the LLM backend call.
+const LLM_TIMEOUT: Duration = Duration::from_secs(120);
 /// Minimum episodic records needed to trigger consolidation.
 const MIN_RECORDS: usize = 3;
-/// Anthropic API version header value (required by the API).
-const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Maximum character length for a single rule bullet.
 const MAX_RULE_LENGTH: usize = 500;
-/// Max tokens to generate in the Anthropic API response.
-const MAX_TOKENS: u32 = 1024;
+/// Default model for the `anthropic-api` backend.
+const DEFAULT_MODEL: &str = "claude-sonnet-5-20250624";
 
 /// ExpeL-inspired consolidation prompt (spec R5).
 ///
@@ -112,16 +111,56 @@ fn build_prompt(config: &crate::config::Config, summaries: &[String]) -> String 
         .replace("{summaries}", &summaries_text)
 }
 
+/// Call `claude -p` as a subprocess, piping the prompt to stdin.
+///
+/// This works with a Claude subscription (no `ANTHROPIC_API_KEY` needed).
+///
+/// # Errors
+/// Returns `anyhow::Error` if the process fails to start, times out, or exits
+/// with a non-zero status.
+async fn call_claude(prompt: &str) -> anyhow::Result<String> {
+    let mut child = tokio::process::Command::new("claude")
+        .arg("-p")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Write prompt to stdin and close it
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(prompt.as_bytes()).await?;
+        // Drop stdin so the process can read EOF
+        drop(stdin);
+    }
+
+    // Wait for output with timeout
+    let output = tokio::time::timeout(LLM_TIMEOUT, child.wait_with_output()).await??;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("claude -p exited with {}: {stderr}", output.status);
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(stdout.trim().to_string())
+}
+
 /// Make a non-streaming call to the Anthropic Messages API.
+///
+/// Requires `ANTHROPIC_API_KEY` and (optionally) `ANTHROPIC_MODEL` env vars.
 ///
 /// # Errors
 /// Returns `anyhow::Error` on HTTP failure, timeout, or malformed response.
-async fn call_anthropic_api(model: &str, api_key: &str, prompt: &str) -> anyhow::Result<String> {
+async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let model = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
     let client = reqwest::Client::builder().timeout(LLM_TIMEOUT).build()?;
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": 4096,
         "messages": [{
             "role": "user",
             "content": prompt
@@ -129,9 +168,9 @@ async fn call_anthropic_api(model: &str, api_key: &str, prompt: &str) -> anyhow:
     });
 
     let resp = client
-        .post(ANTHROPIC_API)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
         .json(&body)
         .send()
@@ -204,11 +243,9 @@ pub async fn run(config: &crate::config::Config, client: &McpHttpClient) -> anyh
         return Ok(String::new());
     };
 
-    let model = cc.model.as_deref().unwrap_or(DEFAULT_MODEL);
-
     tracing::info!(
         max_rules = cc.max_rules_per_session,
-        model,
+        backend = ?cc.backend,
         "running post-session consolidation"
     );
 
@@ -260,19 +297,15 @@ pub async fn run(config: &crate::config::Config, client: &McpHttpClient) -> anyh
     // Step 3: Build the prompt
     let prompt = build_prompt(config, &summaries);
 
-    // Step 4: Get API key
-    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) => key,
-        Err(e) => {
-            let msg = format!("consolidation: ANTHROPIC_API_KEY not available (fail-soft): {e}");
-            tracing::warn!("{msg}");
-            return Ok(msg);
-        }
-    };
-
-    // Step 4: Call Anthropic API
+    // Step 4: Call the configured LLM backend
     let llm_result = tracing::debug_span!("consolidation_llm_call")
-        .in_scope(|| call_anthropic_api(model, &api_key, &prompt))
+        .in_scope(|| async {
+            use crate::config::ConsolidationBackend;
+            match cc.backend {
+                ConsolidationBackend::ClaudeCli => call_claude(&prompt).await,
+                ConsolidationBackend::AnthropicApi => call_anthropic_api(&prompt).await,
+            }
+        })
         .await;
 
     let llm_output = match llm_result {
@@ -314,9 +347,10 @@ pub async fn run(config: &crate::config::Config, client: &McpHttpClient) -> anyh
 
     let msg = format!(
         "consolidation: distilled {} memory records into {} semantic rule(s) \
-         (model: {model}, rules stored: {stored})",
+         (backend: {:?}, rules stored: {stored})",
         records.len(),
         rules.len(),
+        cc.backend,
     );
     tracing::info!("{msg}");
     Ok(msg)

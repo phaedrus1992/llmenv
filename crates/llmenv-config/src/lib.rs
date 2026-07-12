@@ -24,9 +24,9 @@ pub const CONTEXT_MODE_DATA_ENV: &str = "CONTEXT_MODE_DATA_DIR";
 pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
 pub use schema::{
-    Bundle, Cache, Capabilities, Config, ConsolidationConfig, ContextMode, EnvVar, Features,
-    HashingMode, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope,
-    ImportanceLevel, InitConfig, LspServer, Marketplace, MarketplaceSource, McpServer,
+    Bundle, Cache, Capabilities, Config, ConsolidationBackend, ConsolidationConfig, ContextMode,
+    EnvVar, Features, HashingMode, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch,
+    HostScope, ImportanceLevel, InitConfig, LspServer, Marketplace, MarketplaceSource, McpServer,
     McpTransport, Memory, MemoryType, ModelCost, ModelProvider, ModelRef, ModelSource,
     NativePermissionRules, NetworkMatch, NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode,
     PermissionRule, Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, Scopes,
