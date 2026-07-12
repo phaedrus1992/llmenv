@@ -4,7 +4,9 @@
 //! - `stats`  — record counts by tag/bundle/type
 //! - `list`   — list stored memories for the active scope
 //! - `diff`   — show what changed since last session
-//! - `prune`  — preview candidates for TTL-based forgetting (placeholder)
+//! - `prune`  — TTL-based memory forgetting (R4)
+
+pub mod prune;
 
 use std::time::Duration;
 
@@ -115,10 +117,11 @@ pub fn diff() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run the `prune` subcommand: preview candidates for TTL-based forgetting.
-pub fn prune(_dry_run: bool) -> anyhow::Result<()> {
-    eprintln!("llmenv memory prune: not yet implemented");
-    eprintln!("  TTL-based memory forgetting is a future enhancement (R4).");
-    eprintln!("  Use `llmenv memory list` to inspect current state.");
+/// Run the `prune` subcommand: evaluate and forget expired memories.
+pub fn prune(dry_run: bool) -> anyhow::Result<()> {
+    let result = prune::run(dry_run)?;
+    if result.forgotten > 0 {
+        tracing::info!("memory prune: forgot {} record(s)", result.forgotten);
+    }
     Ok(())
 }
