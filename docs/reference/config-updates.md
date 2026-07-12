@@ -115,6 +115,48 @@ If Claude Code is running, the new config is NOT picked up until you restart the
    ```
 2. Run `llmenv materialize`
 
+### Add a Model Provider
+
+1. Edit `config.yaml` or `bundle.yaml`:
+   ```yaml
+   capabilities:
+     model_providers:
+       - id: ollama
+         name: Local Ollama
+         base_url: http://localhost:11434/v1
+         api_type: openai
+         api_key: "$OLLAMA_KEY"
+         headers:
+           x-custom: value
+         models:
+           - id: llama3.1:8b
+             name: Llama 3.1 8B
+             reasoning: false
+             context_window: 128000
+             max_tokens: 32000
+             cost:
+               input: 0.0
+               output: 0.0
+             modalities:
+               - text
+   ```
+2. Run `llmenv materialize`
+
+### Set a Default Model
+
+1. Edit `config.yaml` or `bundle.yaml`:
+   ```yaml
+   capabilities:
+     default_models:
+       large:
+         provider: anthropic
+         model: claude-opus-4-7
+       small:
+         provider: ollama
+         model: llama3.1:8b
+   ```
+2. Run `llmenv materialize`
+
 ### Enable ICM Memory Backend
 
 1. Edit top-level `config.yaml`:

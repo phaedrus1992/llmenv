@@ -255,7 +255,7 @@ pub enum HashingMode {
 /// Engine-agnostic capability vocabulary. Identical shape whether declared at the
 /// top level of `config.yaml` or in a bundle's `bundle.yaml`. Merged across all
 /// contributors by value shape (see [`crate::merge`]).
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 pub struct Capabilities {
     #[serde(default)]
     pub permissions: Permissions,
@@ -336,6 +336,19 @@ pub struct Capabilities {
     /// collision (same scalar rule as `env`).
     #[serde(default)]
     pub host: std::collections::BTreeMap<String, HostEntry>,
+    /// Custom/self-hosted model provider endpoints declared inside a bundle.
+    /// A list — concatenates across contributors, same model as `mcp`/`lsp`.
+    /// Selected by tag intersection. Engines with
+    /// `supports_model_providers() == false` silently skip these entries.
+    #[serde(default)]
+    pub model_providers: Vec<ModelProvider>,
+    /// Default model selection, keyed by an open-string role ("large",
+    /// "small", etc — matches Crush's real `SelectedModelType` without
+    /// hardcoding to it). Merged per-key: higher-precedence contributor
+    /// wins on collision (same scalar rule as `env`/`host`), not
+    /// tag-intersected like a list — there is only one default per role.
+    #[serde(default)]
+    pub default_models: std::collections::BTreeMap<String, ModelRef>,
 }
 
 impl Capabilities {
@@ -358,6 +371,8 @@ impl Capabilities {
             && self.native.is_empty()
             && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
             && self.host.is_empty()
+            && self.model_providers.is_empty()
+            && self.default_models.is_empty()
     }
 }
 
@@ -812,6 +827,83 @@ pub struct LspServer {
     /// language ids don't reliably convert to file extensions (e.g. `rust` → `.rs`).
     #[serde(default)]
     pub extension_to_language: std::collections::BTreeMap<String, String>,
+}
+
+/// A custom/self-hosted model provider endpoint (Ollama, vLLM, LM Studio, a
+/// proxy, or an override of a built-in provider). Selected by tag
+/// intersection like `mcp`/`lsp`/`skills`. Engines without a multi-provider
+/// concept (`supports_model_providers() == false`) silently skip these —
+/// declaring one in a shared bundle is legitimate; it is simply a no-op for
+/// such adapters.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct ModelProvider {
+    /// Stable identifier, used as the map key when rendered (e.g. "ollama",
+    /// "my-proxy") and as the `provider` field target of `ModelRef`.
+    pub id: String,
+    /// Display name.
+    pub name: Option<String>,
+    /// Tags that activate this provider, intersected with active scope tags.
+    #[serde(default)]
+    pub when: Vec<String>,
+    /// API endpoint URL.
+    pub base_url: Option<String>,
+    /// Wire format, e.g. "openai", "anthropic", "google". Open string, not
+    /// an enum — new wire formats appear faster than llmenv releases.
+    pub api_type: Option<String>,
+    /// Passthrough credential string — may be a literal, or a $VAR/!command
+    /// reference the *target engine* resolves at its own runtime. llmenv
+    /// never interprets this value (resolving it here would write a
+    /// plaintext secret into the materialized cache directory).
+    pub api_key: Option<String>,
+    /// Extra HTTP headers, passthrough (same rationale as `api_key`).
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// When `true` the provider is excluded from the resolved set for all engines.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Models exposed by this provider.
+    #[serde(default)]
+    pub models: Vec<ModelSource>,
+}
+
+/// One model exposed by a `ModelProvider`. All fields but `id` are optional
+/// — mirrors Pi's "only `id` is required for local models" convention.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct ModelSource {
+    pub id: String,
+    pub name: Option<String>,
+    /// Supports extended thinking/reasoning.
+    #[serde(default)]
+    pub reasoning: bool,
+    /// Context window size in tokens.
+    pub context_window: Option<u32>,
+    /// Maximum output tokens.
+    pub max_tokens: Option<u32>,
+    /// Cost per million tokens.
+    pub cost: Option<ModelCost>,
+    /// Input modalities, e.g. `["text"]` or `["text", "image"]`.
+    #[serde(default)]
+    pub modalities: Vec<String>,
+}
+
+/// Cost per million tokens, matching the near-identical shape used by Crush,
+/// Pi, and OpenCode's own model schemas.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Default)]
+pub struct ModelCost {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+}
+
+/// A pointer to a model+provider pair, used for default-model selection.
+/// `provider` may be a `ModelProvider.id` declared alongside it, or an
+/// engine builtin id (e.g. Crush's built-in `"anthropic"`) that llmenv has
+/// no knowledge of and does not validate against.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct ModelRef {
+    pub provider: String,
+    pub model: String,
 }
 
 /// An agent plugin marketplace: a name plus a source the marketplace is fetched
@@ -1501,5 +1593,72 @@ mod tests {
             !caps.is_empty(),
             "is_empty must be false when lsp is non-empty"
         );
+    }
+
+    #[test]
+    fn model_provider_yaml_roundtrip() {
+        let yaml = r#"
+id: ollama
+name: Local Ollama
+base_url: http://localhost:11434/v1
+api_type: openai
+api_key: "$OLLAMA_KEY"
+headers:
+  x-custom: value
+models:
+  - id: llama3.1:8b
+    name: Llama 3.1 8B
+    reasoning: false
+    context_window: 128000
+    max_tokens: 32000
+    cost:
+      input: 0.0
+      output: 0.0
+    modalities:
+      - text
+"#;
+        let provider: ModelProvider = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(provider.id, "ollama");
+        assert_eq!(
+            provider.base_url,
+            Some("http://localhost:11434/v1".to_string())
+        );
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].id, "llama3.1:8b");
+        assert_eq!(
+            provider.models[0].cost,
+            Some(ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: None,
+                cache_write: None
+            })
+        );
+    }
+
+    #[test]
+    fn model_provider_only_id_required() {
+        // Mirrors Pi's "only id is required for local models" convention.
+        let yaml = "id: bare-provider\n";
+        let provider: ModelProvider = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(provider.id, "bare-provider");
+        assert_eq!(provider.name, None);
+        assert!(provider.models.is_empty());
+    }
+
+    #[test]
+    fn default_models_map_yaml_roundtrip() {
+        let yaml = r#"
+large:
+  provider: anthropic
+  model: claude-opus-4-7
+small:
+  provider: ollama
+  model: llama3.1:8b
+"#;
+        let map: std::collections::BTreeMap<String, ModelRef> =
+            serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(map["large"].provider, "anthropic");
+        assert_eq!(map["small"].model, "llama3.1:8b");
     }
 }

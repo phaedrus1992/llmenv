@@ -110,6 +110,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         true
     }
 
+    fn supports_model_providers(&self) -> bool {
+        false
+    }
+
     fn supported_hook_events(&self) -> &'static [&'static str] {
         CLAUDE_CODE_HOOK_EVENTS
     }
@@ -2872,5 +2876,40 @@ mod tests {
         let adapter = ClaudeCodeAdapter;
         let output = adapter.emit_hook_context("SessionEnd", "");
         assert_eq!(output, "", "empty text should produce empty output");
+    }
+
+    #[test]
+    fn model_providers_are_noop_for_claude_code_adapter() {
+        // Plan self-review gap: ClaudeCodeAdapter must not emit model provider
+        // config into settings.json — it only renders via CrushAdapter.
+        let baseline = crate::merge::MergedManifest::default();
+        let baseline_json = render_settings_for_test(&baseline);
+
+        let with_providers = crate::merge::MergedManifest {
+            capabilities: crate::config::Capabilities {
+                model_providers: vec![crate::config::ModelProvider {
+                    id: "test".into(),
+                    base_url: Some("http://localhost:9999/v1".into()),
+                    api_type: Some("openai".into()),
+                    ..Default::default()
+                }],
+                default_models: std::iter::once((
+                    "large".into(),
+                    crate::config::ModelRef {
+                        provider: "test".into(),
+                        model: "test-model".into(),
+                    },
+                ))
+                .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let with_providers_json = render_settings_for_test(&with_providers);
+
+        assert_eq!(
+            baseline_json, with_providers_json,
+            "model_providers/default_models must not affect Claude Code settings.json output"
+        );
     }
 }
