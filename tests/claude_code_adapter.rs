@@ -1227,16 +1227,16 @@ fn two_bundles_merge_into_deterministic_settings_json() {
     let parsed: serde_json::Value =
         serde_json::from_str(&settings_json).expect("parse settings.json");
 
-    // PreToolUse has exactly three entries: the deduped Bash/guard.sh, the
-    // distinct Edit/fmt.sh, and the auto-injected config-guard hook (#289).
-    // If bundle dedup regressed this would be four.
+    // PreToolUse has exactly four entries: the deduped Bash/guard.sh, the
+    // distinct Edit/fmt.sh, the auto-injected config-guard hook (#289), and the
+    // read-once hook (#318). If bundle dedup regressed this would be five.
     let pre = parsed["hooks"]["PreToolUse"]
         .as_array()
         .expect("PreToolUse array");
     assert_eq!(
         pre.len(),
-        3,
-        "guard.sh deduped, fmt.sh survives, config-guard added: {pre:#?}"
+        4,
+        "guard.sh deduped, fmt.sh survives, config-guard + read-once added: {pre:#?}"
     );
 
     // Snapshot pins the full deterministic shape: ordering, dedup, permission
@@ -1751,4 +1751,151 @@ fn lsp_plugin_name_collision_with_first_class_skill_is_rejected() {
         .materialize(&manifest, tmp.path())
         .expect_err("must reject a skill name colliding with the LSP plugin dir");
     assert!(err.to_string().contains("llmenv-lsp"));
+}
+
+// #317: compact_survival fragment appended to CLAUDE.md when slippage is
+// enabled + compact_survival is on.
+#[test]
+fn compact_survival_fragment_appended_to_claude_md() {
+    let caps = llmenv::config::Capabilities {
+        features: Some(llmenv::config::Features {
+            slippage: Some(llmenv::config::SlippageControl {
+                enabled: true,
+                compact_survival: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("read CLAUDE.md");
+    assert!(
+        claude_md.contains("Compaction Survival Guide"),
+        "CLAUDE.md must contain compact_survival fragment when slippage enabled + compact_survival on"
+    );
+    assert!(
+        claude_md.contains("<!-- from slippage control: compact_survival -->"),
+        "fragment must carry provenance marker"
+    );
+    assert!(
+        claude_md.contains("read-before-edit"),
+        "fragment must reference slippage layers"
+    );
+}
+
+// #317: compact_survival fragment NOT appended when slippage disabled.
+#[test]
+fn compact_survival_fragment_absent_when_disabled() {
+    let caps = llmenv::config::Capabilities {
+        features: Some(llmenv::config::Features {
+            slippage: Some(llmenv::config::SlippageControl {
+                enabled: false,
+                compact_survival: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("read CLAUDE.md");
+    assert!(
+        !claude_md.contains("Compaction Survival Guide"),
+        "CLAUDE.md must NOT contain fragment when slippage disabled"
+    );
+}
+
+// #317: diagnose_command skill written when slippage enabled + diagnose_command on.
+#[test]
+fn diagnose_skill_written_when_slippage_enabled() {
+    let caps = llmenv::config::Capabilities {
+        features: Some(llmenv::config::Features {
+            slippage: Some(llmenv::config::SlippageControl {
+                enabled: true,
+                diagnose_command: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let skill_md = tmp.path().join("skills/diagnose/SKILL.md");
+    assert!(
+        skill_md.exists(),
+        "skills/diagnose/SKILL.md must exist when slippage enabled + diagnose_command on"
+    );
+    let content = std::fs::read_to_string(&skill_md).expect("read SKILL.md");
+    assert!(content.contains("name: diagnose"));
+    assert!(content.contains("Collect Symptoms"));
+    assert!(content.contains("Form Hypotheses"));
+    assert!(content.contains("Test Per Hypothesis"));
+}
+
+// #317: diagnose_command skill NOT written when slippage disabled.
+#[test]
+fn diagnose_skill_absent_when_disabled() {
+    let caps = llmenv::config::Capabilities {
+        features: Some(llmenv::config::Features {
+            slippage: Some(llmenv::config::SlippageControl {
+                enabled: false,
+                diagnose_command: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    assert!(
+        !tmp.path().join("skills/diagnose").exists(),
+        "skills/diagnose must NOT exist when slippage disabled"
+    );
+}
+
+// #317: diagnose skill not written when diagnose_command is false.
+#[test]
+fn diagnose_skill_absent_when_diagnose_command_off() {
+    let caps = llmenv::config::Capabilities {
+        features: Some(llmenv::config::Features {
+            slippage: Some(llmenv::config::SlippageControl {
+                enabled: true,
+                diagnose_command: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    assert!(
+        !tmp.path().join("skills/diagnose").exists(),
+        "skills/diagnose must NOT exist when diagnose_command is false"
+    );
 }

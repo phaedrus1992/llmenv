@@ -30,9 +30,9 @@ pub use schema::{
     McpTransport, Memory, MemoryType, ModelCost, ModelProvider, ModelRef, ModelSource,
     NativePermissionRules, NetworkMatch, NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode,
     PermissionRule, Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, ReadOnce,
-    ReadOnceMode, Scopes, SessionLog, SkillSource, StateConfig, StateTool, Throttle, UpgradeConfig,
-    UpgradeTrack, UserMatch, UserScope, classify_source, github_owner_repo,
-    is_reserved_official_marketplace, split_plugin_ref,
+    ReadOnceMode, Scopes, SessionLog, SkillSource, SlippageControl, StateConfig, StateTool,
+    Throttle, UpgradeConfig, UpgradeTrack, UserMatch, UserScope, classify_source,
+    github_owner_repo, is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
 pub use validate::{

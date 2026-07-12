@@ -8,6 +8,7 @@
 //! silently — the optimizer must never block real work.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -86,7 +87,7 @@ impl SessionCache {
         let now = unix_now();
         self.entries.retain(|_, entry| {
             let age = now.saturating_sub(entry.first_read_at);
-            age <= ttl_seconds as i64
+            age < ttl_seconds as i64
         });
     }
 
@@ -183,24 +184,20 @@ pub(crate) fn handle_pre_tool_use_inner(
     if stdin_payload["tool_name"].as_str() != Some("Read") {
         return String::new();
     }
-
     // Parse tool_input for file path and offset/limit
     let tool_input = match stdin_payload["tool_input"].as_object() {
         Some(obj) => obj,
         None => return String::new(),
     };
-
     // Extract file path (PascalCase per Claude Code hook payload convention)
     let file_path = match tool_input.get("filePath").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return String::new(),
     };
-
     // Partial read bypass: if offset or limit are present, never cache
     if tool_input.contains_key("offset") || tool_input.contains_key("limit") {
         return String::new();
     }
-
     // Stat the file
     let path = Path::new(file_path);
     let metadata = match std::fs::metadata(path) {
@@ -213,20 +210,14 @@ pub(crate) fn handle_pre_tool_use_inner(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let file_size = metadata.len();
-
-    // Need a session id to cache
+    let file_size = metadata.len(); // Need a session id to cache
     let session_id = match session_id {
         Some(id) => id,
         None => return String::new(),
     };
-
-    // Canonicalize path for consistent cache key
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let path_key = canonical.to_string_lossy().to_string();
-
     // Load session cache
-
     let mut cache = SessionCache::load(&state_dir, session_id, config.ttl_seconds);
     let now = unix_now();
     let tokens_saved = (file_size / 4) as u64;
@@ -394,10 +385,11 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, b"hello").unwrap();
 
-        let result = handle_pre_tool_use(
+        let result = handle_pre_tool_use_inner(
             &read_payload(file_path.to_str().unwrap()),
             Some("test-session"),
             &test_config_warn(),
+            dir.path(),
         );
         assert!(result.is_empty(), "first read should pass through");
     }
@@ -411,11 +403,13 @@ mod tests {
         let payload = read_payload(file_path.to_str().unwrap());
 
         // First read passes through
-        let result1 = handle_pre_tool_use(&payload, Some("test-warn"), &test_config_warn());
+        let result1 =
+            handle_pre_tool_use_inner(&payload, Some("test-warn"), &test_config_warn(), dir.path());
         assert!(result1.is_empty(), "first read should pass through");
 
         // Second read warns
-        let result2 = handle_pre_tool_use(&payload, Some("test-warn"), &test_config_warn());
+        let result2 =
+            handle_pre_tool_use_inner(&payload, Some("test-warn"), &test_config_warn(), dir.path());
         assert!(!result2.is_empty(), "second read should warn");
         assert!(
             !result2.contains("__DENY__"),
@@ -436,11 +430,13 @@ mod tests {
         let payload = read_payload(file_path.to_str().unwrap());
 
         // First read passes through
-        let result1 = handle_pre_tool_use(&payload, Some("test-deny"), &test_config_deny());
+        let result1 =
+            handle_pre_tool_use_inner(&payload, Some("test-deny"), &test_config_deny(), dir.path());
         assert!(result1.is_empty(), "first read should pass through");
 
         // Second read denies
-        let result2 = handle_pre_tool_use(&payload, Some("test-deny"), &test_config_deny());
+        let result2 =
+            handle_pre_tool_use_inner(&payload, Some("test-deny"), &test_config_deny(), dir.path());
         assert!(!result2.is_empty(), "second read should deny");
         assert!(
             result2.starts_with("__DENY__:"),
@@ -457,7 +453,12 @@ mod tests {
         let payload = read_payload(file_path.to_str().unwrap());
 
         // First read
-        let result1 = handle_pre_tool_use(&payload, Some("test-mtime"), &test_config_warn());
+        let result1 = handle_pre_tool_use_inner(
+            &payload,
+            Some("test-mtime"),
+            &test_config_warn(),
+            dir.path(),
+        );
         assert!(result1.is_empty());
 
         // Sleep to ensure mtime changes (sub-second writes don't always advance mtime
@@ -468,7 +469,12 @@ mod tests {
         fs::write(&file_path, b"v2").unwrap();
 
         // Read again — mtime changed, should pass through even in deny mode
-        let result2 = handle_pre_tool_use(&payload, Some("test-mtime"), &test_config_deny());
+        let result2 = handle_pre_tool_use_inner(
+            &payload,
+            Some("test-mtime"),
+            &test_config_deny(),
+            dir.path(),
+        );
         assert!(result2.is_empty(), "changed file should pass through");
     }
 
@@ -488,11 +494,11 @@ mod tests {
         };
 
         // First read
-        let result1 = handle_pre_tool_use(&payload, Some("test-ttl"), &config);
+        let result1 = handle_pre_tool_use_inner(&payload, Some("test-ttl"), &config, dir.path());
         assert!(result1.is_empty());
 
         // Second read beyond TTL (0 seconds) — passes through
-        let result2 = handle_pre_tool_use(&payload, Some("test-ttl"), &config);
+        let result2 = handle_pre_tool_use_inner(&payload, Some("test-ttl"), &config, dir.path());
         assert!(result2.is_empty(), "expired TTL should pass through");
     }
 
