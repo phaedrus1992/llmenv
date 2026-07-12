@@ -1,7 +1,8 @@
 use crate::config::{Bundle, Config};
+use crate::hook_run::read_once::{SessionCache, read_once_state_dir};
 use crate::paths;
 use anyhow::Context;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum StatusSection {
@@ -452,25 +453,77 @@ fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_read_once_status(use_color: bool) -> anyhow::Result<()> {
+fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     let state_dir = paths::state_dir()?;
-    let ro_dir = crate::hook_run::read_once::read_once_state_dir(&state_dir);
-    let _ = use_color;
-    if ro_dir.exists() {
-        let count = std::fs::read_dir(&ro_dir)
-            .map(|e| {
-                e.flatten()
-                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-                    .count()
-            })
-            .unwrap_or(0);
-        if count > 0 {
-            println!("  ReadOnce: {count} cached session(s)");
-        } else {
-            println!("  ReadOnce: (empty)");
-        }
-    } else {
+    let ro_dir = read_once_state_dir(&state_dir);
+
+    if !ro_dir.exists() {
         println!("  ReadOnce: (none)");
+        return Ok(());
     }
+
+    let mut total_entries: u64 = 0;
+    let mut total_hits: u64 = 0;
+    let mut total_tokens_saved: u64 = 0;
+    let mut session_count: u64 = 0;
+    let mut path_hits: HashMap<String, u64> = HashMap::new();
+
+    let dir_entries = match std::fs::read_dir(&ro_dir) {
+        Ok(e) => e,
+        Err(_) => {
+            println!("  ReadOnce: (none)");
+            return Ok(());
+        }
+    };
+
+    for entry in dir_entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let cache: SessionCache = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        session_count += 1;
+        for entry in cache.entries.values() {
+            total_entries += 1;
+            let hits = entry.hits;
+            if hits > 0 {
+                total_hits += hits;
+                total_tokens_saved += entry.tokens_saved;
+                path_hits
+                    .entry(entry.path.clone())
+                    .and_modify(|h| *h = h.saturating_add(hits))
+                    .or_insert(hits);
+            }
+        }
+    }
+
+    if session_count == 0 {
+        println!("  ReadOnce: (empty)");
+        return Ok(());
+    }
+
+    println!("  ReadOnce:");
+    println!("    Sessions: {session_count}");
+    println!("    Distinct files read: {total_entries}");
+    println!("    Re-read attempts (hits): {total_hits}");
+    println!("    Tokens saved: ~{total_tokens_saved}");
+
+    if !path_hits.is_empty() {
+        // ponytail: simple Vec sort, fine for typical <100 sessions
+        let mut sorted: Vec<_> = path_hits.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("    Most re-read files:");
+        for (path, hits) in sorted.iter().take(5) {
+            println!("      {hits:>6}× {path}");
+        }
+    }
+
     Ok(())
 }
