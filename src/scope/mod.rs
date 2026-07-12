@@ -117,6 +117,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     }
     let cwd = std::path::Path::new(&env.cwd);
     for s in &cfg.scope.content {
+        tracing::trace!(id = %s.id, glob = %s.r#match.glob, "evaluating content scope");
         if cwd.exists() && matcher::matches_content(s, cwd) {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
