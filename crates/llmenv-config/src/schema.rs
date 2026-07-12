@@ -41,6 +41,12 @@ pub struct Features {
     /// (release track).
     #[serde(default)]
     pub upgrade: Option<UpgradeConfig>,
+    /// ReadOnce: avoid re-reading unchanged files within a TTL window.
+    #[serde(default)]
+    pub read_once: Option<ReadOnce>,
+    /// Slippage control: guardrails against model behavior drift.
+    #[serde(default)]
+    pub slippage: Option<SlippageControl>,
 }
 
 /// Self-upgrade configuration, nested under `features.upgrade`.
@@ -405,6 +411,8 @@ impl Capabilities {
             && self.native_mcp.is_empty()
             && self.native.is_empty()
             && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
+            && self.features.as_ref().is_none_or(|f| f.read_once.is_none())
+            && self.features.as_ref().is_none_or(|f| f.slippage.is_none())
             && self.host.is_empty()
             && self.model_providers.is_empty()
             && self.default_models.is_empty()
@@ -610,6 +618,87 @@ pub struct ContextMode {
     /// Whether the built-in context-mode plugin is wired up.
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// ReadOnce mode: what happens when a file that was already read is requested
+/// again within the TTL window.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadOnceMode {
+    /// Emit a warning that the file was already read (default).
+    #[default]
+    Warn,
+    /// Deny re-reading the file entirely.
+    Deny,
+}
+
+/// ReadOnce: avoid re-reading files that haven't changed within a TTL window.
+/// Opt-in (disabled by default).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOnce {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: ReadOnceMode,
+    /// Session-cache TTL fallback in seconds (default 1200 = 20 min).
+    #[serde(default = "default_read_once_ttl")]
+    pub ttl_seconds: u64,
+    /// Changed-file delta mode (phase 2, default false).
+    #[serde(default)]
+    pub diff: bool,
+}
+
+const fn default_read_once_ttl() -> u64 {
+    1200
+}
+
+/// SlippageControl: guardrails against model behavior drift.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SlippageControl {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Effort level injected into generated settings (e.g. "xhigh", "high").
+    #[serde(default)]
+    pub effort_level: Option<String>,
+    #[serde(default = "default_slippage_true")]
+    pub rule_reinjection: bool,
+    #[serde(default = "default_slippage_true")]
+    pub read_before_edit: bool,
+    #[serde(default = "default_slippage_true")]
+    pub self_critique: bool,
+    #[serde(default = "default_slippage_true")]
+    pub metrics: bool,
+    #[serde(default = "default_slippage_true")]
+    pub compact_survival: bool,
+    #[serde(default = "default_slippage_true")]
+    pub diagnose_command: bool,
+    #[serde(default)]
+    pub explain_before_act: bool,
+    #[serde(default)]
+    pub answer_before_act: bool,
+}
+
+const fn default_slippage_true() -> bool {
+    true
+}
+
+impl Default for SlippageControl {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            effort_level: None,
+            rule_reinjection: true,
+            read_before_edit: true,
+            self_critique: true,
+            metrics: true,
+            compact_survival: true,
+            diagnose_command: true,
+            explain_before_act: false,
+            answer_before_act: false,
+        }
+    }
 }
 
 /// Memory type classification for stored memory chunks (R1).
@@ -1495,6 +1584,151 @@ mod tests {
         let yaml = "features:\n  context_mode: {}\n";
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(!cfg.features.unwrap().context_mode.unwrap().enabled);
+    }
+
+    // ===== ReadOnce config tests =====
+
+    #[test]
+    fn read_once_parses_enabled() {
+        let yaml = "features:\n  read_once:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let ro = cfg.features.unwrap().read_once.unwrap();
+        assert!(ro.enabled);
+        assert_eq!(ro.mode, ReadOnceMode::Warn);
+        assert_eq!(ro.ttl_seconds, 1200);
+        assert!(!ro.diff);
+    }
+
+    #[test]
+    fn read_once_parses_mode() {
+        let yaml = "features:\n  read_once:\n    mode: deny\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let ro = cfg.features.unwrap().read_once.unwrap();
+        assert_eq!(ro.mode, ReadOnceMode::Deny);
+    }
+
+    #[test]
+    fn read_once_absent_is_none() {
+        let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
+        assert!(cfg.features.unwrap().read_once.is_none());
+    }
+
+    #[test]
+    fn read_once_defaults_disabled() {
+        let yaml = "features:\n  read_once: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let ro = cfg.features.unwrap().read_once.unwrap();
+        assert!(!ro.enabled);
+        assert_eq!(ro.mode, ReadOnceMode::Warn);
+        assert_eq!(ro.ttl_seconds, 1200);
+        assert!(!ro.diff);
+    }
+
+    // ===== SlippageControl config tests =====
+
+    #[test]
+    fn slippage_parses_enabled() {
+        let yaml = "features:\n  slippage:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let sc = cfg.features.unwrap().slippage.unwrap();
+        assert!(sc.enabled);
+        // All default-true fields default to true
+        assert!(sc.rule_reinjection);
+        assert!(sc.read_before_edit);
+        assert!(sc.self_critique);
+        assert!(sc.metrics);
+        assert!(sc.compact_survival);
+        assert!(sc.diagnose_command);
+        // Default-false fields
+        assert!(!sc.explain_before_act);
+        assert!(!sc.answer_before_act);
+        assert_eq!(sc.effort_level, None);
+    }
+
+    #[test]
+    fn slippage_parses_effort_level() {
+        let yaml = "features:\n  slippage:\n    effort_level: xhigh\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let sc = cfg.features.unwrap().slippage.unwrap();
+        assert_eq!(sc.effort_level.as_deref(), Some("xhigh"));
+        assert!(!sc.enabled);
+    }
+
+    #[test]
+    fn slippage_absent_is_none() {
+        let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
+        assert!(cfg.features.unwrap().slippage.is_none());
+    }
+
+    #[test]
+    fn slippage_defaults() {
+        let yaml = "features:\n  slippage: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let sc = cfg.features.unwrap().slippage.unwrap();
+        assert!(!sc.enabled);
+        assert!(sc.rule_reinjection);
+        assert!(sc.read_before_edit);
+        assert!(sc.self_critique);
+        assert!(sc.metrics);
+        assert!(sc.compact_survival);
+        assert!(sc.diagnose_command);
+        assert!(!sc.explain_before_act);
+        assert!(!sc.answer_before_act);
+        assert_eq!(sc.effort_level, None);
+    }
+
+    /// The manual `Default` impl for SlippageControl must stay in sync with
+    /// serde defaults — if a field is added to the struct with a serde default
+    /// but the manual impl isn't updated, they silently diverge.
+    #[test]
+    fn slippage_default_matches_serde_empty() {
+        let from_serde: SlippageControl =
+            serde_json::from_str("{}").expect("empty object should deserialize");
+        let from_default = SlippageControl::default();
+        assert_eq!(
+            from_default, from_serde,
+            "manual Default impl diverges from serde defaults for SlippageControl"
+        );
+    }
+
+    // ===== Feature round-trip tests =====
+
+    #[test]
+    fn features_roundtrip_read_once() {
+        let original = Features {
+            read_once: Some(ReadOnce {
+                enabled: true,
+                mode: ReadOnceMode::Deny,
+                ttl_seconds: 600,
+                diff: true,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Features = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn features_roundtrip_slippage() {
+        let original = Features {
+            slippage: Some(SlippageControl {
+                enabled: true,
+                effort_level: Some("xhigh".to_string()),
+                rule_reinjection: false,
+                read_before_edit: true,
+                self_critique: false,
+                metrics: true,
+                compact_survival: false,
+                diagnose_command: true,
+                explain_before_act: false,
+                answer_before_act: false,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Features = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
     }
 
     // #505: MCP field parity — new optional fields

@@ -10,6 +10,7 @@ pub(crate) mod action;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
+pub(crate) mod read_once;
 
 use std::io::Write;
 use std::str::FromStr;
@@ -335,12 +336,30 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     let adapter = crate::adapter::active_adapter();
     match run_inner(parsed, claude_session_id.as_deref(), payload) {
         Ok(text) => {
-            let out = adapter.emit_hook_context(&hook_event_name, &text);
-            if !out.is_empty()
-                && let Err(e) = writeln!(std::io::stdout(), "{out}")
-                && e.kind() != std::io::ErrorKind::BrokenPipe
-            {
-                eprintln!("llmenv: failed to write hook output: {e}");
+            // #318: deny envelope detected — write a proper deny JSON envelope
+            // to stdout so the Claude Code engine blocks the tool call.
+            if text.starts_with("__DENY__:") {
+                let reason = text.trim_start_matches("__DENY__:");
+                let envelope = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "deniedReason": reason,
+                    }
+                });
+                if let Err(e) = writeln!(std::io::stdout(), "{envelope}")
+                    && e.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    eprintln!("llmenv: failed to write hook output: {e}");
+                }
+            } else {
+                let out = adapter.emit_hook_context(&hook_event_name, &text);
+                if !out.is_empty()
+                    && let Err(e) = writeln!(std::io::stdout(), "{out}")
+                    && e.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    eprintln!("llmenv: failed to write hook output: {e}");
+                }
             }
         }
         Err(e) => {
@@ -408,6 +427,23 @@ fn run_inner(
 ) -> anyhow::Result<String> {
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
+
+    // #318: read-once file dedup hook — runs before scope/memory resolution
+    // since it doesn't need any of that. Gated on features.read_once.enabled
+    // so an empty hook-run output is emitted when the feature is off (the
+    // PreToolUse Read matcher is registered unconditionally).
+    if event == HookEvent::PreToolUse
+        && let Some(ref features) = config.features
+        && let Some(ref read_once) = features.read_once
+        && read_once.enabled
+    {
+        return Ok(crate::hook_run::read_once::handle_pre_tool_use(
+            stdin_payload,
+            claude_session_id,
+            read_once,
+        ));
+    }
+
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
     let log_cfg = config.session_log_resolved();

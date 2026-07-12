@@ -111,7 +111,19 @@ pub fn merge(
         }
     }
 
-    let merged_caps = merge_capabilities(&contributors)?;
+    let mut merged_caps = merge_capabilities(&contributors)?;
+
+    // #317: if slippage enabled with effort_level and no higher-precedence
+    // effort_level was set, propagate from slippage config.
+    if merged_caps.effort_level.is_none()
+        && let Some(s) = merged_caps
+            .features
+            .as_ref()
+            .and_then(|f| f.slippage.as_ref())
+        && s.enabled
+    {
+        merged_caps.effort_level = s.effort_level.clone();
+    }
 
     // Merge bundle native: blocks (lower precedence) with the top-level native:
     // block (highest precedence). Start with bundle contributions, then overlay
@@ -646,6 +658,74 @@ mod tests {
         assert!(
             err.to_string().contains("typo_key"),
             "error must name the unknown key, got: {err}"
+        );
+    }
+
+    // #317: post-merge — slippage.effort_level propagates when no higher-prec
+    // effort_level is set directly.
+    #[test]
+    fn post_merge_effort_level_from_slippage() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("slippage-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  slippage:\n",
+                "    enabled: true\n",
+                "    effort_level: xhigh\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "slippage-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+        assert_eq!(
+            manifest.capabilities.effort_level.as_deref(),
+            Some("xhigh"),
+            "slippage.effort_level must propagate to capabilities.effort_level"
+        );
+    }
+
+    // #317: post-merge — config.yaml-effort_level wins over slippage.effort_level.
+    #[test]
+    fn post_merge_effort_level_not_override() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("slippage-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  slippage:\n",
+                "    enabled: true\n",
+                "    effort_level: xhigh\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "slippage-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let top_caps = Capabilities {
+            effort_level: Some("low".into()),
+            ..Default::default()
+        };
+
+        let manifest = merge(&top_caps, &BTreeMap::new(), &[bundle]).unwrap();
+        assert_eq!(
+            manifest.capabilities.effort_level.as_deref(),
+            Some("low"),
+            "direct effort_level must win over slippage-derived effort_level"
         );
     }
 }
