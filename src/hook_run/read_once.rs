@@ -61,7 +61,14 @@ impl SessionCache {
                 eprintln!("llmenv: failed to parse read-once cache: {e}");
                 Self::new(session_id)
             }),
-            Err(_) => Self::new(session_id),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
+            Err(e) => {
+                eprintln!(
+                    "llmenv: failed to read read-once cache {}: {e}",
+                    path.display()
+                );
+                Self::new(session_id)
+            }
         };
         cache.prune(ttl_seconds);
         cache
@@ -94,8 +101,13 @@ impl SessionCache {
         let max_age_secs = max_age_days * 86_400;
         let now = unix_now();
         let ro_dir = read_once_state_dir(state_dir);
-        let Ok(entries) = std::fs::read_dir(&ro_dir) else {
-            return; // Directory doesn't exist yet — nothing to prune
+        let entries = match std::fs::read_dir(&ro_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                eprintln!("llmenv: failed to read read-once dir for pruning: {e}");
+                return;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
