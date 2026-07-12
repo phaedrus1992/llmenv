@@ -466,6 +466,7 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     let mut total_hits: u64 = 0;
     let mut total_tokens_saved: u64 = 0;
     let mut session_count: u64 = 0;
+    let mut skipped: u64 = 0;
     let mut path_hits: HashMap<String, u64> = HashMap::new();
 
     let dir_entries = match std::fs::read_dir(&ro_dir) {
@@ -483,11 +484,17 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
         }
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
         let cache: SessionCache = match serde_json::from_str(&content) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
         session_count += 1;
         for entry in cache.entries.values() {
@@ -514,6 +521,9 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     println!("    Distinct files read: {total_entries}");
     println!("    Re-read attempts (hits): {total_hits}");
     println!("    Tokens saved: ~{total_tokens_saved}");
+    if skipped > 0 {
+        println!("    ({} corrupt/unreadable session files skipped)", skipped);
+    }
 
     if !path_hits.is_empty() {
         // ponytail: simple Vec sort, fine for typical <100 sessions
