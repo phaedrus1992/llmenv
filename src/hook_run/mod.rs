@@ -1496,6 +1496,8 @@ mod tests {
                 default_type,
                 default_importance: None,
                 type_importance: Default::default(),
+                retention: None,
+                auto_prune: false,
                 consolidation: None,
             }],
             ..Default::default()
