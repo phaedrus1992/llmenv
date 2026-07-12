@@ -1111,6 +1111,7 @@ mod tests {
                                 memory,
                                 throttle,
                                 context_mode: None,
+                                upgrade: None,
                             })
                         },
                         marketplace,
@@ -1399,6 +1400,7 @@ mod tests {
                 memory: vec![],
                 throttle,
                 context_mode: None,
+                upgrade: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],
