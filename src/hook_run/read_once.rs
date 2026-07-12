@@ -136,6 +136,9 @@ pub fn clear_cache() -> anyhow::Result<()> {
     let ro_dir = read_once_state_dir(&state_dir);
     if ro_dir.exists() {
         std::fs::remove_dir_all(&ro_dir)?;
+        writeln!(std::io::stdout(), "Read-once cache cleared")?;
+    } else {
+        writeln!(std::io::stdout(), "No read-once cache to clear")?;
     }
     Ok(())
 }
