@@ -36,7 +36,28 @@ fn expected_site_changelog() -> String {
     let mut body_parts: Vec<String> = Vec::new();
     let mut first = true;
 
-    for version in (1..=4).rev() {
+    // Discover CHANGELOG-N.md files and process newest-first.
+    let dir = Path::new(MANIFEST_DIR);
+    let mut changelogs: Vec<u32> = Vec::new();
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read changelog dir: {e}")) {
+        let entry = entry.unwrap_or_else(|e| panic!("read entry: {e}"));
+        let fname = entry
+            .path()
+            .file_name()
+            .unwrap_or_else(|| panic!("entry has no filename: {:?}", entry.path()))
+            .to_string_lossy()
+            .to_string();
+        if let Some(rest) = fname
+            .strip_prefix("CHANGELOG-")
+            .and_then(|s| s.strip_suffix(".md"))
+            && let Ok(num) = rest.parse::<u32>()
+        {
+            changelogs.push(num);
+        }
+    }
+    changelogs.sort_unstable_by(|a, b| b.cmp(a)); // newest first
+
+    for version in changelogs {
         let fname = format!("CHANGELOG-{version}.md");
         let content = match fs::read_to_string(Path::new(MANIFEST_DIR).join(&fname)) {
             Ok(c) => c,
