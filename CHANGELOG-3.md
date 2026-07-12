@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Added
+- Add `llmenv upgrade` subcommand for self-upgrade from
+  GitHub releases (`--check`, `--track beta|release`,
+  `features.upgrade.track` config option) (#686)
 - Add model provider configuration
   (`capabilities.model_providers`) with schema types,
   validation, merge rules, and CrushAdapter rendering

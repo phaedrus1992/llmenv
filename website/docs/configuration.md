@@ -20,7 +20,7 @@ The config directory is resolved in this order:
 | `bundle:` | list | Environment-variable + file bundles |
 | `mcp:` | list | MCP server declarations |
 | `lsp:` | list | LSP server declarations (Crush + Claude Code; no-op on engines without an LSP surface) |
-| `features:` | map | Feature flags; holds `memory:` (ICM backend topology) and `throttle:` (usage throttling) |
+| `features:` | map | Feature flags; holds `memory:` (ICM backend topology), `throttle:` (usage throttling), and `upgrade:` (upgrade release track) |
 | `session_log:` | map | Session-activity logging: local JSONL file and/or ICM transcript |
 | `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
 | `marketplace:` | list | Plugin marketplaces (git URL or local path) |
@@ -269,8 +269,9 @@ requires it and `filetypes` language ids don't reliably convert to file extensio
 
 ## `features:`
 
-Feature flags. Holds `memory:` (llmenv's ICM memory backend) and `throttle:`
-(usage throttling). Additional feature flags may be nested here in future versions.
+Feature flags. Holds `memory:` (llmenv's ICM memory backend), `throttle:`
+(usage throttling), and `upgrade:` (upgrade release track). Additional feature
+flags may be nested here in future versions.
 
 ### `features.memory:`
 
@@ -342,6 +343,21 @@ backend-reported penalty window that could be hours long. The `umans` backend
 reads `~/.umans/config.json` for its endpoint and token. Throttling is
 fail-soft: any error (missing config, network failure) skips the delay rather
 than blocking the session.
+
+### `features.upgrade:`
+
+Controls which release track `llmenv upgrade` uses. The CLI `--track` flag
+overrides this on a per-run basis.
+
+```yaml
+features:
+  upgrade:
+    track: beta    # "release" (default) or "beta"
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `track` | no | `"release"` (default) or `"beta"`. `release` uses the GitHub latest-stable endpoint; `beta` uses the first non-draft release from the recent list. |
 
 ## `session_log:`
 
