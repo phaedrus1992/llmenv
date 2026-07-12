@@ -549,6 +549,7 @@ the rc.1 and rc.2 sections below.
 - Fix `pre-release-hook = []` panic in cargo-release 1.1.2: remove empty hook
   arrays from sub-crate configs and update workspace hook to use `${WORKSPACE_ROOT}`
   so it resolves correctly from any sub-crate working directory
+
 ## [2.0.1] - 2026-06-14
 
 ### Fixed
@@ -633,7 +634,6 @@ the rc.1 and rc.2 sections below.
   logs a `warn` when the plugin manifest is absent after materializing the plugin,
   making broken plugin installs diagnosable (#379)
 
-
 ## [1.0.10] - 2026-06-11
 
 ### Added
@@ -711,6 +711,7 @@ the rc.1 and rc.2 sections below.
   top level) is now emitted (#325)
 - Fix `llmenv init` silently replacing non-UTF-8 path bytes with `?`; non-UTF-8
   paths now fail with a clear error (#325)
+
 ## [1.0.6] - 2026-06-05
 
 ### Added

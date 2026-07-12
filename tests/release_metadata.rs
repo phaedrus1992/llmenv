@@ -104,11 +104,24 @@ fn release_version_has_changelog_section() {
     if version.contains('-') {
         return;
     }
-    let changelog = read("CHANGELOG.md");
     let heading = format!("## [{version}]");
+    let mut found = false;
+    for version_file in &[
+        "CHANGELOG-1.md",
+        "CHANGELOG-2.md",
+        "CHANGELOG-3.md",
+        "CHANGELOG-4.md",
+    ] {
+        if let Ok(changelog) = fs::read_to_string(Path::new(MANIFEST_DIR).join(version_file)) {
+            if changelog.contains(&heading) {
+                found = true;
+                break;
+            }
+        }
+    }
     assert!(
-        changelog.contains(&heading),
-        "CHANGELOG.md is missing a `{heading}` section for the current crate version"
+        found,
+        "No CHANGELOG-*.md has a `{heading}` section for the current crate version"
     );
 }
 
