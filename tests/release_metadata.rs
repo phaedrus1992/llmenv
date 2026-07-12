@@ -6,7 +6,7 @@
 //! release setup fails CI instead of surfacing at `cargo release`/publish time:
 //!
 //! 1. The `Cargo.toml` version (when it is a real release, not a prerelease)
-//!    has a matching `## [<version>]` section in `CHANGELOG.md`. Catches the
+//!    has a matching `## [<version>]` section in one of the `CHANGELOG-*.md` files. Catches the
 //!    classic "bumped the crate but forgot the changelog" mistake.
 //! 2. `release.toml` sets `publish = false`. crates.io publishing is owned by
 //!    the `publish-crate` job in `.github/workflows/release.yml`; if
