@@ -115,15 +115,14 @@ pub fn merge(
 
     // #317: if slippage enabled with effort_level and no higher-precedence
     // effort_level was set, propagate from slippage config.
-    if merged_caps.effort_level.is_none() {
-        if let Some(s) = merged_caps
+    if merged_caps.effort_level.is_none()
+        && let Some(s) = merged_caps
             .features
             .as_ref()
             .and_then(|f| f.slippage.as_ref())
-            && s.enabled
-        {
-            merged_caps.effort_level = s.effort_level.clone();
-        }
+        && s.enabled
+    {
+        merged_caps.effort_level = s.effort_level.clone();
     }
 
     // Merge bundle native: blocks (lower precedence) with the top-level native:
