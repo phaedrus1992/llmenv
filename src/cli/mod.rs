@@ -894,6 +894,9 @@ fn run_export(
         tracing::debug!("failed to store ICM tag memory (non-fatal): {e}");
     }
 
+    // Auto-prune: TTL-based memory retention pass after materialization (#270)
+    crate::memory::prune::auto_prune_if_enabled(&config);
+
     if explain {
         let bundle_list = firing
             .iter()
@@ -995,6 +998,9 @@ fn run_regenerate() -> anyhow::Result<()> {
     } else {
         eprintln!("✓ No bundle content to materialize");
     }
+
+    // Auto-prune: TTL-based memory retention pass after materialization (#270)
+    crate::memory::prune::auto_prune_if_enabled(&config);
 
     Ok(())
 }
@@ -3699,6 +3705,8 @@ mod tests {
                     default_type: None,
                     default_importance: None,
                     type_importance: std::collections::BTreeMap::new(),
+                    retention: None,
+                    auto_prune: false,
                     consolidation: None,
                 }],
                 throttle: vec![],

@@ -640,10 +640,40 @@ pub struct ConsolidationConfig {
     /// Maximum number of semantic rules to distill per session.
     #[serde(default = "default_max_rules")]
     pub max_rules_per_session: u32,
+    /// The Anthropic model to use for consolidation. Defaults to the current
+    /// cheapest Haiku (`claude-haiku-4-5-20251001`) when `None`.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 const fn default_max_rules() -> u32 {
     10
+}
+
+/// Per-type retention policy for memory pruning (R4).
+///
+/// Each field is a `humantime`-parseable duration string (e.g. `"30d"`,
+/// `"365d"`, `"90 days"`). A value of `None` means "never prune" for that
+/// type.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RetentionConfig {
+    /// Retention for episodic memories. Defaults to `"30d"`.
+    #[serde(default = "default_retention_episodic")]
+    pub episodic: Option<String>,
+    /// Retention for semantic memories. Defaults to `None` (never prune).
+    #[serde(default)]
+    pub semantic: Option<String>,
+    /// Retention for procedural memories. Defaults to `"365d"`.
+    #[serde(default = "default_retention_procedural")]
+    pub procedural: Option<String>,
+}
+
+fn default_retention_episodic() -> Option<String> {
+    Some("30d".to_string())
+}
+
+fn default_retention_procedural() -> Option<String> {
+    Some("365d".to_string())
 }
 
 /// llmenv's memory backend topology. One host (`server_host`) runs the daemon
@@ -690,6 +720,15 @@ pub struct Memory {
     /// `consolidation.enabled` (default: false — opt-in).
     #[serde(default)]
     pub consolidation: Option<ConsolidationConfig>,
+    /// Per-type retention policy for memory pruning (R4). When `None`,
+    /// pruning is fully disabled. When `Some(Config)`, the per-type
+    /// duration strings drive `llmenv memory prune`.
+    #[serde(default)]
+    pub retention: Option<RetentionConfig>,
+    /// Whether to automatically run `llmenv memory prune` during
+    /// `llmenv materialize`. Defaults to `false` — opt-in.
+    #[serde(default)]
+    pub auto_prune: bool,
 }
 
 fn default_throttle_cache_ttl() -> u64 {
@@ -1382,6 +1421,7 @@ mod tests {
             let cfg = ConsolidationConfig {
                 enabled,
                 max_rules_per_session,
+                model: None,
             };
             let json = serde_json::to_string(&cfg).expect("serialize ConsolidationConfig");
             let back: ConsolidationConfig =
