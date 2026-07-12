@@ -105,16 +105,15 @@ impl SessionCache {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if let Ok(modified) = meta.modified() {
-                    if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-                        let age_secs = now.saturating_sub(duration.as_secs() as i64);
-                        if age_secs > max_age_secs as i64 {
-                            if let Err(e) = std::fs::remove_file(&path) {
-                                eprintln!("llmenv: failed to prune stale read-once cache: {e}");
-                            }
-                        }
-                    }
+            if let Ok(meta) = std::fs::metadata(&path)
+                && let Ok(modified) = meta.modified()
+                && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                let age_secs = now.saturating_sub(duration.as_secs() as i64);
+                if age_secs > max_age_secs as i64
+                    && let Err(e) = std::fs::remove_file(&path)
+                {
+                    eprintln!("llmenv: failed to prune stale read-once cache: {e}");
                 }
             }
         }
@@ -218,7 +217,7 @@ pub(crate) fn handle_pre_tool_use_inner(
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let path_key = canonical.to_string_lossy().to_string();
     // Load session cache
-    let mut cache = SessionCache::load(&state_dir, session_id, config.ttl_seconds);
+    let mut cache = SessionCache::load(state_dir, session_id, config.ttl_seconds);
     let now = unix_now();
     let tokens_saved = (file_size / 4) as u64;
 
@@ -233,7 +232,7 @@ pub(crate) fn handle_pre_tool_use_inner(
             cache.updated_at = now;
 
             // Save updated cache before returning
-            if let Err(e) = cache.save(&state_dir) {
+            if let Err(e) = cache.save(state_dir) {
                 eprintln!("llmenv: failed to save read-once cache: {e}");
             }
 
@@ -267,7 +266,7 @@ pub(crate) fn handle_pre_tool_use_inner(
     }
 
     cache.updated_at = now;
-    if let Err(e) = cache.save(&state_dir) {
+    if let Err(e) = cache.save(state_dir) {
         eprintln!("llmenv: failed to save read-once cache: {e}");
     }
 
