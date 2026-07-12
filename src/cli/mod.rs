@@ -14,6 +14,7 @@ mod doctor;
 mod setup;
 mod status;
 mod style;
+mod upgrade;
 
 pub use style::{
     ColorMode, active_marker, doctor_fail, doctor_info, doctor_pass, doctor_warning,
@@ -331,6 +332,17 @@ enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Self-upgrade from the latest GitHub release.
+    Upgrade {
+        /// Only check for an update without downloading (exit 0 = up to date,
+        /// exit 1 = update available).
+        #[arg(long)]
+        check: bool,
+        /// Release track: "release" (default) or "beta" (includes prereleases).
+        /// Overrides `features.upgrade.track` in config.
+        #[arg(long)]
+        track: Option<String>,
+    },
 }
 
 /// `llmenv memory` sub-subcommands (R2).
@@ -494,6 +506,9 @@ pub fn run() -> anyhow::Result<()> {
             MemoryCommand::Diff => crate::memory::diff()?,
             MemoryCommand::Prune { dry_run } => crate::memory::prune(dry_run)?,
         },
+        Some(Command::Upgrade { check, track }) => {
+            upgrade::run_upgrade(track, check)?;
+        }
         Some(Command::Prune {
             all,
             older_than,
@@ -3711,6 +3726,7 @@ mod tests {
                 }],
                 throttle: vec![],
                 context_mode: None,
+                upgrade: None,
             }),
             host,
             ..Config::default()

@@ -131,6 +131,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             memory,
             throttle,
             context_mode: None,
+            upgrade: None,
         })
     };
 
@@ -1452,6 +1453,7 @@ mod tests {
                     }],
                     throttle: vec![],
                     context_mode: None,
+                    upgrade: None,
                 }),
                 ..Default::default()
             }
@@ -1485,6 +1487,7 @@ mod tests {
                     }],
                     throttle: vec![],
                     context_mode: None,
+                    upgrade: None,
                 }),
                 ..Default::default()
             }
