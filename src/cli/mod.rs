@@ -327,6 +327,11 @@ enum Command {
         #[arg(long)]
         plugin_cache: bool,
     },
+    /// Manage the read-once file dedup cache (#318).
+    ReadOnce {
+        #[command(subcommand)]
+        command: ReadOnceCommand,
+    },
     /// Inspect ICM memory state (R2).
     Memory {
         #[command(subcommand)]
@@ -343,6 +348,13 @@ enum Command {
         #[arg(long)]
         track: Option<String>,
     },
+}
+
+/// `llmenv read-once` subcommands (#318).
+#[derive(Subcommand)]
+enum ReadOnceCommand {
+    /// Clear all cached read-once entries.
+    Clear,
 }
 
 /// `llmenv memory` sub-subcommands (R2).
@@ -500,6 +512,9 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Login { global }) => {
             run_login(global)?;
         }
+        Some(Command::ReadOnce { command }) => match command {
+            ReadOnceCommand::Clear => crate::hook_run::read_once::clear_cache()?,
+        },
         Some(Command::Memory { command }) => match command {
             MemoryCommand::Stats => crate::memory::stats()?,
             MemoryCommand::List => crate::memory::list()?,

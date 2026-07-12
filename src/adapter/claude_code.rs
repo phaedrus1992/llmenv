@@ -817,6 +817,19 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             "hooks": [{ "type": "command", "command": CONFIG_GUARD_COMMAND }],
         }));
 
+    // #318: read-once file dedup hook — warn or deny repeated file reads.
+    // Registered unconditionally (no config gating). The hook-run handler in
+    // `run_inner` checks `features.read_once.enabled` and returns empty
+    // (pass-through) when disabled, so the regex match is the only cost when
+    // the feature is off.
+    hooks_by_event
+        .entry("PreToolUse".to_string())
+        .or_default()
+        .push(json!({
+            "matcher": "^Read$",
+            "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
+        }));
+
     // Throttle hooks: poll usage backend and sleep adaptive delay to avoid rate limits.
     if manifest.throttle.is_some() {
         hooks_by_event
@@ -1874,7 +1887,9 @@ mod tests {
     #[test]
     fn baseline_injects_sessionstart_sessionend_only() {
         // #382: default SessionLog (transcript on, verbose off) — the baseline
-        // hook-run hooks are always present, the verbose ones never appear.
+        // hook-run hooks are always present (SessionStart, SessionEnd), the
+        // verbose ones never appear. PreToolUse carries the unconditional
+        // read-once hook (#318) in addition to the config-guard hooks.
         let manifest = crate::merge::MergedManifest::default();
         let settings = render_settings_for_test(&manifest);
 
@@ -1886,8 +1901,15 @@ mod tests {
             hook_commands_for(&settings, "SessionEnd")
                 .contains(&format!("{HOOK_RUN_COMMAND} session_end"))
         );
+        // PreToolUse now always has a hook-run command for the read-once hook
+        // (#318 unconditional registration).
+        assert!(
+            hook_commands_for(&settings, "PreToolUse")
+                .iter()
+                .any(|c| c.starts_with(HOOK_RUN_COMMAND)),
+            "PreToolUse must carry a hook-run command for read-once"
+        );
         for event in [
-            "PreToolUse",
             "PostToolUse",
             "UserPromptSubmit",
             "Stop",

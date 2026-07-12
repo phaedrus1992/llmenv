@@ -11,6 +11,7 @@ pub enum StatusSection {
     Mcps,
     Plugins,
     Marketplaces,
+    ReadOnce,
     All,
 }
 
@@ -22,13 +23,15 @@ pub fn run_status(section: Option<StatusSection>, use_color: bool) -> anyhow::Re
         Some(StatusSection::Mcps) => run_mcp_ls(use_color),
         Some(StatusSection::Plugins) => run_plugin_ls(use_color),
         Some(StatusSection::Marketplaces) => run_marketplace_ls(use_color),
+        Some(StatusSection::ReadOnce) => run_read_once_status(use_color),
         Some(StatusSection::All) => {
             run_scope_ls(use_color)?;
             run_tag_ls(use_color)?;
             run_bundle_ls(use_color)?;
             run_mcp_ls(use_color)?;
             run_plugin_ls(use_color)?;
-            run_marketplace_ls(use_color)
+            run_marketplace_ls(use_color)?;
+            run_read_once_status(use_color)
         }
         None => run_status_overview(use_color),
     }
@@ -445,6 +448,29 @@ fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
             collection,
             super::annotate(is_active, is_orphan, use_color)
         );
+    }
+    Ok(())
+}
+
+fn run_read_once_status(use_color: bool) -> anyhow::Result<()> {
+    let state_dir = paths::state_dir()?;
+    let ro_dir = crate::hook_run::read_once::read_once_state_dir(&state_dir);
+    let _ = use_color;
+    if ro_dir.exists() {
+        let count = std::fs::read_dir(&ro_dir)
+            .map(|e| {
+                e.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+                    .count()
+            })
+            .unwrap_or(0);
+        if count > 0 {
+            println!("  ReadOnce: {count} cached session(s)");
+        } else {
+            println!("  ReadOnce: (empty)");
+        }
+    } else {
+        println!("  ReadOnce: (none)");
     }
     Ok(())
 }
