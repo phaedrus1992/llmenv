@@ -432,18 +432,16 @@ fn run_inner(
     // since it doesn't need any of that. Gated on features.read_once.enabled
     // so an empty hook-run output is emitted when the feature is off (the
     // PreToolUse Read matcher is registered unconditionally).
-    if event == HookEvent::PreToolUse {
-        if let Some(ref features) = config.features {
-            if let Some(ref read_once) = features.read_once {
-                if read_once.enabled {
-                    return Ok(crate::hook_run::read_once::handle_pre_tool_use(
-                        stdin_payload,
-                        claude_session_id,
-                        read_once,
-                    ));
-                }
-            }
-        }
+    if event == HookEvent::PreToolUse
+        && let Some(ref features) = config.features
+        && let Some(ref read_once) = features.read_once
+        && read_once.enabled
+    {
+        return Ok(crate::hook_run::read_once::handle_pre_tool_use(
+            stdin_payload,
+            claude_session_id,
+            read_once,
+        ));
     }
 
     let env = crate::scope::matcher::Env::detect();

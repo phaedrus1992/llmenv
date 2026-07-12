@@ -342,12 +342,12 @@ mod tests {
 
     #[test]
     fn partial_read_passes_through() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"hello world").unwrap();
+        fs::write(&file_path, b"hello world").expect("test");
 
         let result = handle_pre_tool_use(
-            &partial_read_payload(file_path.to_str().unwrap(), 0, 10),
+            &partial_read_payload(file_path.to_str().expect("test"), 0, 10),
             Some("test-session"),
             &test_config_warn(),
         );
@@ -366,12 +366,12 @@ mod tests {
 
     #[test]
     fn no_session_id_passes_through() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"content").unwrap();
+        fs::write(&file_path, b"content").expect("test");
 
         let result = handle_pre_tool_use(
-            &read_payload(file_path.to_str().unwrap()),
+            &read_payload(file_path.to_str().expect("test")),
             None,
             &test_config_warn(),
         );
@@ -380,12 +380,12 @@ mod tests {
 
     #[test]
     fn first_read_passes_through() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"hello").unwrap();
+        fs::write(&file_path, b"hello").expect("test");
 
         let result = handle_pre_tool_use_inner(
-            &read_payload(file_path.to_str().unwrap()),
+            &read_payload(file_path.to_str().expect("test")),
             Some("test-session"),
             &test_config_warn(),
             dir.path(),
@@ -395,11 +395,11 @@ mod tests {
 
     #[test]
     fn second_read_in_warn_mode_returns_advisory() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"hello world").unwrap();
+        fs::write(&file_path, b"hello world").expect("test");
 
-        let payload = read_payload(file_path.to_str().unwrap());
+        let payload = read_payload(file_path.to_str().expect("test"));
 
         // First read passes through
         let result1 =
@@ -422,11 +422,11 @@ mod tests {
 
     #[test]
     fn second_read_in_deny_mode_returns_deny_marker() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test_deny.txt");
-        fs::write(&file_path, b"hello world").unwrap();
+        fs::write(&file_path, b"hello world").expect("test");
 
-        let payload = read_payload(file_path.to_str().unwrap());
+        let payload = read_payload(file_path.to_str().expect("test"));
 
         // First read passes through
         let result1 =
@@ -445,11 +445,11 @@ mod tests {
 
     #[test]
     fn changed_mtime_passes_through_again() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test_mtime.txt");
-        fs::write(&file_path, b"v1").unwrap();
+        fs::write(&file_path, b"v1").expect("test");
 
-        let payload = read_payload(file_path.to_str().unwrap());
+        let payload = read_payload(file_path.to_str().expect("test"));
 
         // First read
         let result1 = handle_pre_tool_use_inner(
@@ -465,7 +465,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         // Modify file
-        fs::write(&file_path, b"v2").unwrap();
+        fs::write(&file_path, b"v2").expect("test");
 
         // Read again — mtime changed, should pass through even in deny mode
         let result2 = handle_pre_tool_use_inner(
@@ -479,11 +479,11 @@ mod tests {
 
     #[test]
     fn ttl_expiry_passes_through_again() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test_ttl.txt");
-        fs::write(&file_path, b"content").unwrap();
+        fs::write(&file_path, b"content").expect("test");
 
-        let payload = read_payload(file_path.to_str().unwrap());
+        let payload = read_payload(file_path.to_str().expect("test"));
 
         let config = ReadOnceConfig {
             enabled: true,
@@ -503,20 +503,20 @@ mod tests {
 
     #[test]
     fn corrupt_cache_file_fail_soft() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let state_dir = dir.path();
         let ro_dir = read_once_state_dir(state_dir);
-        fs::create_dir_all(&ro_dir).unwrap();
-        fs::write(ro_dir.join("test-session.json"), b"not valid json{}").unwrap();
+        fs::create_dir_all(&ro_dir).expect("test");
+        fs::write(ro_dir.join("test-session.json"), b"not valid json{}").expect("test");
 
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"content").unwrap();
+        fs::write(&file_path, b"content").expect("test");
 
         // Even with corrupt cache, the first read should pass through.
         // Uses the inner function with injectable state_dir so the corrupt file
         // in the TempDir is actually consulted.
         let result = handle_pre_tool_use_inner(
-            &read_payload(file_path.to_str().unwrap()),
+            &read_payload(file_path.to_str().expect("test")),
             Some("test-session"),
             &test_config_warn(),
             state_dir,
@@ -526,9 +526,9 @@ mod tests {
 
     #[test]
     fn session_cache_prune_stale_entries() {
-        let state_dir = TempDir::new().unwrap();
+        let state_dir = TempDir::new().expect("test");
         let ro_dir = read_once_state_dir(state_dir.path());
-        fs::create_dir_all(&ro_dir).unwrap();
+        fs::create_dir_all(&ro_dir).expect("test");
 
         let mut cache = SessionCache::new("test-prune");
         let now = unix_now();
@@ -560,9 +560,9 @@ mod tests {
 
     #[test]
     fn session_cache_save_and_load_roundtrip() {
-        let state_dir = TempDir::new().unwrap();
+        let state_dir = TempDir::new().expect("test");
         let ro_dir = read_once_state_dir(state_dir.path());
-        fs::create_dir_all(&ro_dir).unwrap();
+        fs::create_dir_all(&ro_dir).expect("test");
 
         let mut cache = SessionCache::new("test-rt");
         cache.entries.insert(
@@ -575,12 +575,12 @@ mod tests {
                 tokens_saved: 500,
             },
         );
-        cache.save(state_dir.path()).unwrap();
+        cache.save(state_dir.path()).expect("test");
 
         let loaded = SessionCache::load(state_dir.path(), "test-rt", 3600);
         assert_eq!(loaded.session_id, "test-rt");
         assert_eq!(loaded.entries.len(), 1);
-        let entry = loaded.entries.get("/foo/bar.rs").unwrap();
+        let entry = loaded.entries.get("/foo/bar.rs").expect("test");
         assert_eq!(entry.hits, 2);
         assert_eq!(entry.tokens_saved, 500);
     }
