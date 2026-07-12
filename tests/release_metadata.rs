@@ -1,4 +1,5 @@
 #![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::panic, reason = "test scaffolding")]
 //! Release-hygiene guards (#257).
 //!
@@ -105,14 +106,15 @@ fn release_version_has_changelog_section() {
         return;
     }
     let heading = format!("## [{version}]");
+    let dir = Path::new(MANIFEST_DIR);
     let mut found = false;
-    for version_file in &[
-        "CHANGELOG-1.md",
-        "CHANGELOG-2.md",
-        "CHANGELOG-3.md",
-        "CHANGELOG-4.md",
-    ] {
-        if let Ok(changelog) = fs::read_to_string(Path::new(MANIFEST_DIR).join(version_file))
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let fname = path.file_name().unwrap().to_string_lossy().to_string();
+        if !fname.starts_with("CHANGELOG-") || !fname.ends_with(".md") {
+            continue;
+        }
+        if let Ok(changelog) = fs::read_to_string(&path)
             && changelog.contains(&heading)
         {
             found = true;
