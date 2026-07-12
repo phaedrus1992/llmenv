@@ -1112,6 +1112,8 @@ mod tests {
                                 throttle,
                                 context_mode: None,
                                 upgrade: None,
+                                read_once: None,
+                                slippage: None,
                             })
                         },
                         marketplace,
@@ -1401,6 +1403,8 @@ mod tests {
                 throttle,
                 context_mode: None,
                 upgrade: None,
+                read_once: None,
+                slippage: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],

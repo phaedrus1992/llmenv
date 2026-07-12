@@ -3727,6 +3727,8 @@ mod tests {
                 throttle: vec![],
                 context_mode: None,
                 upgrade: None,
+                read_once: None,
+                slippage: None,
             }),
             host,
             ..Config::default()
