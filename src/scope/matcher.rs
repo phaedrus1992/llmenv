@@ -1,4 +1,4 @@
-use crate::config::{HostScope, NetworkScope, UserScope};
+use crate::config::{ContentScope, HostScope, NetworkScope, UserScope};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -168,6 +168,34 @@ pub fn matches_host(s: &HostScope, env: &Env) -> bool {
 #[must_use]
 pub fn matches_user(s: &UserScope, env: &Env) -> bool {
     s.r#match.user.as_deref().is_some_and(|u| u == env.user)
+}
+
+#[must_use]
+pub fn matches_content(s: &ContentScope, cwd: &std::path::Path) -> bool {
+    let Ok(glob) = globset::Glob::new(&s.r#match.glob) else {
+        tracing::debug!("content scope {}: invalid glob pattern", s.id);
+        return false;
+    };
+    let matcher = glob.compile_matcher();
+
+    let mut walker = walkdir::WalkDir::new(cwd).follow_links(false);
+    if let Some(depth) = s.r#match.depth {
+        walker = walker.max_depth(depth);
+    }
+
+    for entry in walker {
+        let Ok(entry) = entry else { continue };
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(cwd) else {
+            continue;
+        };
+        if matcher.is_match(relative) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Discover project by walking cwd upward looking for `.llmenv.yaml`.

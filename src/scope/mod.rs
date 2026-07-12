@@ -115,6 +115,22 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             });
         }
     }
+    let cwd = std::path::Path::new(&env.cwd);
+    for s in &cfg.scope.content {
+        if cwd.exists() && matcher::matches_content(s, cwd) {
+            scopes.push(ActiveScope {
+                id: s.id.clone(),
+                kind: "content",
+                tags: s.tags.clone(),
+                project_root: None,
+                enable_bundles: Vec::new(),
+                disable_bundles: Vec::new(),
+                name: None,
+                description: None,
+                unknown_fields: Vec::new(),
+            });
+        }
+    }
     if let Some(p) = matcher::discover_project(env) {
         scopes.push(ActiveScope {
             id: p.id,
