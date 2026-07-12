@@ -39,8 +39,6 @@ pub struct SessionCache {
     pub session_id: String,
     /// Entries keyed by canonicalized file path.
     pub entries: HashMap<String, ReadEntry>,
-    /// Last-updated unix timestamp of this cache file.
-    pub updated_at: i64,
 }
 
 impl SessionCache {
@@ -49,7 +47,6 @@ impl SessionCache {
         Self {
             session_id: session_id.to_string(),
             entries: HashMap::new(),
-            updated_at: unix_now(),
         }
     }
 
@@ -229,7 +226,6 @@ pub(crate) fn handle_pre_tool_use_inner(
             // Cache hit within TTL — warn or deny
             entry.hits = entry.hits.saturating_add(1);
             entry.tokens_saved = entry.tokens_saved.saturating_add(tokens_saved);
-            cache.updated_at = now;
 
             // Save updated cache before returning
             if let Err(e) = cache.save(state_dir) {
@@ -265,7 +261,6 @@ pub(crate) fn handle_pre_tool_use_inner(
         );
     }
 
-    cache.updated_at = now;
     if let Err(e) = cache.save(state_dir) {
         eprintln!("llmenv: failed to save read-once cache: {e}");
     }
