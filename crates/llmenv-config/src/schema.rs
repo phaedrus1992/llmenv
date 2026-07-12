@@ -37,6 +37,41 @@ pub struct Features {
     /// (ICM). A simple enable/disable toggle; absent means disabled.
     #[serde(default)]
     pub context_mode: Option<ContextMode>,
+    /// Self-upgrade configuration (`llmenv upgrade`). Absent means defaults
+    /// (release track).
+    #[serde(default)]
+    pub upgrade: Option<UpgradeConfig>,
+}
+
+/// Self-upgrade configuration, nested under `features.upgrade`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpgradeConfig {
+    /// Upgrade track: "release" (non-prerelease) or "beta" (includes prereleases).
+    #[serde(default)]
+    pub track: UpgradeTrack,
+}
+
+/// Which release track to follow for `llmenv upgrade`.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeTrack {
+    /// Stable releases only (non-prerelease GitHub releases).
+    #[default]
+    Release,
+    /// All releases including prereleases (beta/rc).
+    Beta,
+}
+
+impl UpgradeTrack {
+    /// Return the config string for this track.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Beta => "beta",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
