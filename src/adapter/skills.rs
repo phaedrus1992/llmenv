@@ -72,7 +72,6 @@ pub(crate) fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow
             _ => {}
         }
     }
-
     Ok(())
 }
 

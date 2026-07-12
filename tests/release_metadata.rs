@@ -1,4 +1,5 @@
 #![expect(clippy::expect_used, reason = "test scaffolding")]
+#![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::panic, reason = "test scaffolding")]
 //! Release-hygiene guards (#257).
 //!
@@ -6,7 +7,7 @@
 //! release setup fails CI instead of surfacing at `cargo release`/publish time:
 //!
 //! 1. The `Cargo.toml` version (when it is a real release, not a prerelease)
-//!    has a matching `## [<version>]` section in `CHANGELOG.md`. Catches the
+//!    has a matching `## [<version>]` section in one of the `CHANGELOG-*.md` files. Catches the
 //!    classic "bumped the crate but forgot the changelog" mistake.
 //! 2. `release.toml` sets `publish = false`. crates.io publishing is owned by
 //!    the `publish-crate` job in `.github/workflows/release.yml`; if
@@ -104,11 +105,25 @@ fn release_version_has_changelog_section() {
     if version.contains('-') {
         return;
     }
-    let changelog = read("CHANGELOG.md");
     let heading = format!("## [{version}]");
+    let dir = Path::new(MANIFEST_DIR);
+    let mut found = false;
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let fname = path.file_name().unwrap().to_string_lossy().to_string();
+        if !fname.starts_with("CHANGELOG-") || !fname.ends_with(".md") {
+            continue;
+        }
+        if let Ok(changelog) = fs::read_to_string(&path)
+            && changelog.contains(&heading)
+        {
+            found = true;
+            break;
+        }
+    }
     assert!(
-        changelog.contains(&heading),
-        "CHANGELOG.md is missing a `{heading}` section for the current crate version"
+        found,
+        "No CHANGELOG-*.md has a `{heading}` section for the current crate version"
     );
 }
 

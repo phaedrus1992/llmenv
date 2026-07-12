@@ -24,13 +24,14 @@ pub const CONTEXT_MODE_DATA_ENV: &str = "CONTEXT_MODE_DATA_DIR";
 pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
 pub use schema::{
-    Bundle, Cache, Capabilities, Config, ConsolidationConfig, ContextMode, EnvVar, Features,
-    HashingMode, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope,
-    ImportanceLevel, InitConfig, LspServer, Marketplace, MarketplaceSource, McpServer,
-    McpTransport, Memory, MemoryType, NativePermissionRules, NetworkMatch, NetworkScope,
-    OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    RESERVED_OFFICIAL_MARKETPLACES, Scopes, SessionLog, SkillSource, StateConfig, StateTool,
-    Throttle, UserMatch, UserScope, VersionGranularity, classify_source, github_owner_repo,
+    Bundle, Cache, Capabilities, Config, ConsolidationBackend, ConsolidationConfig, ContextMode,
+    EnvVar, Features, HashingMode, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch,
+    HostScope, ImportanceLevel, InitConfig, LspServer, Marketplace, MarketplaceSource, McpServer,
+    McpTransport, Memory, MemoryType, ModelCost, ModelProvider, ModelRef, ModelSource,
+    NativePermissionRules, NetworkMatch, NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode,
+    PermissionRule, Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, ReadOnce,
+    ReadOnceMode, Scopes, SessionLog, SkillSource, StateConfig, StateTool, Throttle, UpgradeConfig,
+    UpgradeTrack, UserMatch, UserScope, classify_source, github_owner_repo,
     is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;

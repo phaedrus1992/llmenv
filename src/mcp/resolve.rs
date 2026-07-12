@@ -12,7 +12,6 @@
 //!   `mcp-proxy`; every agent connects to the *network* endpoint so the resolved
 //!   entry is always a remote HTTP client.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{HostEntry, McpServer, McpTransport, Memory};
@@ -216,25 +215,10 @@ fn stdio_kind(m: &McpServer) -> Result<ResolvedKind, ResolveError> {
             name: m.name.clone(),
         })?;
     Ok(ResolvedKind::Stdio {
-        command: env_expand(&command),
-        args: m.args.iter().map(|a| env_expand(a)).collect(),
-        env: m
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), env_expand(v)))
-            .collect(),
+        command,
+        args: m.args.clone(),
+        env: m.env.clone(),
     })
-}
-
-/// Expand `${VAR}`, `$VAR`, and `~` tokens in a string using the current
-/// process environment via `shellexpand`.
-///
-/// Tokens for undefined variables are left in place so the user sees the
-/// literal `$HOME` in error messages rather than a silently empty path.
-fn env_expand(s: &str) -> String {
-    shellexpand::full(s)
-        .map(Cow::into_owned)
-        .unwrap_or_else(|_| s.to_string())
 }
 
 fn remote_kind(m: &McpServer, transport: McpTransport) -> Result<ResolvedKind, ResolveError> {
@@ -290,6 +274,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         }
     }
@@ -330,144 +316,6 @@ mod tests {
         let resolved = resolve_mcps(&servers, &[], &base_host(), &tags(&["user-ranger"])).unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name, "playwright");
-    }
-
-    // -- env_expand tests ---------------------------------------------------
-
-    #[test]
-    fn env_expand_braced_form() {
-        assert_eq!(env_expand("${HOME}"), std::env::var("HOME").unwrap());
-    }
-
-    #[test]
-    fn env_expand_braced_variable_in_path() {
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(
-            env_expand("${HOME}/.local/bin/tool"),
-            format!("{home}/.local/bin/tool"),
-        );
-    }
-
-    #[test]
-    fn env_expand_unbraced_form() {
-        assert_eq!(env_expand("$HOME"), std::env::var("HOME").unwrap());
-    }
-
-    #[test]
-    fn env_expand_undefined_var_kept_literal() {
-        assert_eq!(
-            env_expand("${NONEXISTENT_VAR_FOR_TEST_XYZ}"),
-            "${NONEXISTENT_VAR_FOR_TEST_XYZ}",
-        );
-        assert_eq!(
-            env_expand("$NONEXISTENT_VAR_FOR_TEST_XYZ"),
-            "$NONEXISTENT_VAR_FOR_TEST_XYZ",
-        );
-    }
-
-    #[test]
-    fn env_expand_mixed_literal_and_vars() {
-        let home = std::env::var("HOME").unwrap();
-        // ~ after = is not at start or after /, so it stays literal
-        assert_eq!(
-            env_expand("path=${HOME}/bin, HOME=~"),
-            format!("path={home}/bin, HOME=~"),
-        );
-    }
-
-    #[test]
-    fn env_expand_dollar_at_end_is_literal() {
-        assert_eq!(env_expand("hello$"), "hello$");
-    }
-
-    #[test]
-    fn env_expand_unclosed_brace_is_literal() {
-        assert_eq!(env_expand("${HOME"), "${HOME");
-    }
-
-    #[test]
-    fn env_expand_non_identifier_after_dollar_is_literal() {
-        assert_eq!(env_expand("$?special"), "$?special");
-    }
-
-    #[test]
-    fn env_expand_tilde_only() {
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(env_expand("~"), home);
-    }
-
-    #[test]
-    fn env_expand_tilde_in_path() {
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(env_expand("~/bin/tool"), format!("{home}/bin/tool"));
-    }
-
-    #[test]
-    fn env_expand_tilde_not_expanded_mid_word() {
-        // Only expands at start or after /
-        assert_eq!(env_expand("foo~"), "foo~");
-    }
-
-    // -- integration tests: env_expand applied in stdio resolution -----------
-
-    #[test]
-    fn stdio_resolve_expands_env_vars_in_command() {
-        let home = std::env::var("HOME").unwrap();
-        let s = stdio_server("test", &["t"], "${HOME}/.local/bin/mcp-server");
-        let resolved = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
-        match &resolved[0].kind {
-            ResolvedKind::Stdio { command, .. } => {
-                assert_eq!(
-                    *command,
-                    format!("{home}/.local/bin/mcp-server"),
-                    "env vars in command path must be expanded during resolution",
-                );
-            }
-            other => panic!("expected Stdio, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn stdio_resolve_expands_env_vars_in_args() {
-        let home = std::env::var("HOME").unwrap();
-        let mut s = stdio_server("test", &["t"], "tool");
-        s.args = vec!["--config".into(), "${HOME}/config.yaml".into()];
-        let resolved = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
-        match &resolved[0].kind {
-            ResolvedKind::Stdio { args, .. } => {
-                assert_eq!(args[1], format!("{home}/config.yaml"));
-            }
-            other => panic!("expected Stdio, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn stdio_resolve_expands_env_vars_in_env_values() {
-        let home = std::env::var("HOME").unwrap();
-        let mut s = stdio_server("test", &["t"], "tool");
-        s.env = BTreeMap::from([("MY_PATH".to_string(), "${HOME}/custom".to_string())]);
-        let resolved = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
-        match &resolved[0].kind {
-            ResolvedKind::Stdio { env, .. } => {
-                assert_eq!(env.get("MY_PATH").unwrap(), &format!("{home}/custom"),);
-            }
-            other => panic!("expected Stdio, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn stdio_resolve_keeps_undefined_var_literal() {
-        let s = stdio_server("test", &["t"], "${UNDEFINED_TEST_VAR_XYZ}/tool");
-        let resolved = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
-        match &resolved[0].kind {
-            ResolvedKind::Stdio { command, .. } => {
-                assert_eq!(
-                    *command, "${UNDEFINED_TEST_VAR_XYZ}/tool",
-                    "undefined env var must be left literal",
-                );
-            }
-            other => panic!("expected Stdio, got {other:?}"),
-        }
     }
 
     #[test]
@@ -529,6 +377,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         };
         let work = Memory {
@@ -540,6 +390,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         };
         let mut host = base_host();
@@ -568,6 +420,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         };
         let work = Memory {
@@ -579,6 +433,8 @@ mod tests {
             default_type: None,
             default_importance: None,
             type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
             consolidation: None,
         };
         let mut host = base_host();

@@ -275,24 +275,14 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     );
 
     // Report the active cache layout so `doctor` explains the folder shape on disk.
-    match &config.cache.hashing {
+    match config.cache.hashing {
         crate::config::HashingMode::Loose => {
             eprintln!("{pass} Cache hashing: loose (folder: <shape>)");
         }
-        crate::config::HashingMode::Normal {
-            version: crate::config::VersionGranularity::Minor,
-        } => {
+        crate::config::HashingMode::Normal => {
             eprintln!(
-                "{pass} Cache hashing: normal (folder: {}/<shape>, minor granularity)",
+                "{pass} Cache hashing: normal (folder: {}/<shape>)",
                 crate::materialize::cache::version_mm()
-            );
-        }
-        crate::config::HashingMode::Normal {
-            version: crate::config::VersionGranularity::Major,
-        } => {
-            eprintln!(
-                "{pass} Cache hashing: normal (folder: {}/<shape>, major-only granularity)",
-                crate::materialize::cache::version_major()
             );
         }
         crate::config::HashingMode::Strict => {
@@ -942,6 +932,8 @@ mod tests {
                     default_type: None,
                     default_importance: None,
                     type_importance: BTreeMap::new(),
+                    retention: None,
+                    auto_prune: false,
                     consolidation: None,
                 }],
                 ..Features::default()
@@ -970,6 +962,8 @@ mod tests {
                     default_type: None,
                     default_importance: None,
                     type_importance: BTreeMap::new(),
+                    retention: None,
+                    auto_prune: false,
                     consolidation: None,
                 }],
                 ..Features::default()

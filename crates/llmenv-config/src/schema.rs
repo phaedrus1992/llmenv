@@ -37,6 +37,47 @@ pub struct Features {
     /// (ICM). A simple enable/disable toggle; absent means disabled.
     #[serde(default)]
     pub context_mode: Option<ContextMode>,
+    /// Self-upgrade configuration (`llmenv upgrade`). Absent means defaults
+    /// (release track).
+    #[serde(default)]
+    pub upgrade: Option<UpgradeConfig>,
+    /// ReadOnce: avoid re-reading unchanged files within a TTL window.
+    #[serde(default)]
+    pub read_once: Option<ReadOnce>,
+    /// Slippage control: guardrails against model behavior drift.
+    #[serde(default)]
+    pub slippage: Option<SlippageControl>,
+}
+
+/// Self-upgrade configuration, nested under `features.upgrade`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpgradeConfig {
+    /// Upgrade track: "release" (non-prerelease) or "beta" (includes prereleases).
+    #[serde(default)]
+    pub track: UpgradeTrack,
+}
+
+/// Which release track to follow for `llmenv upgrade`.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeTrack {
+    /// Stable releases only (non-prerelease GitHub releases).
+    #[default]
+    Release,
+    /// All releases including prereleases (beta/rc).
+    Beta,
+}
+
+impl UpgradeTrack {
+    /// Return the config string for this track.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Beta => "beta",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
@@ -226,140 +267,36 @@ impl Default for Cache {
     }
 }
 
-/// Version granularity for normal-mode cache folders (#651). Controls which
-/// version components appear in the on-disk folder path.
-///
-/// - [`VersionGranularity::Minor`] (default): `<version_mm>/<shape>` — `major.minor`
-/// - [`VersionGranularity::Major`]: `<version_major>/<shape>` — just the `major` segment
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum VersionGranularity {
-    /// `<version_mm>/<shape>` — folder includes both major and minor version.
-    #[default]
-    Minor,
-    /// `<version_major>/<shape>` — folder includes only the major version.
-    Major,
-}
-
-/// Serde helper: the `{ normal: { version: … } }` compound form for
-/// [`HashingMode`] when the scalar `"normal"` string doesn't suffice.
-#[derive(Serialize, Deserialize)]
-struct NormalConfig {
-    #[serde(default)]
-    version: VersionGranularity,
-}
-
 /// Cache-folder strictness dial (#246). One knob, three positions, ordered by
 /// how aggressively a folder is reused: `loose` ⊂ `normal` ⊂ `strict`. Default
 /// is [`Self::Normal`] — the common path, isolating by selection *shape* and
-/// binary version (controllable granularity) while still reusing a folder
-/// across content edits so a running agent's in-session state survives a
-/// re-render.
+/// binary minor version while still reusing a folder across content edits so a
+/// running agent's in-session state survives a re-render.
 ///
 /// The *shape* is a 12-hex digest over the active selection (`active_tags ∪
 /// directly_enabled_bundles`), so two different tag/bundle combinations never
 /// collide in one folder (the version-mode overwrite bug that motivated #246).
-///
-/// # Serde format
-///
-/// ```yaml
-/// # Scalar form (backward-compat):
-/// hashing: loose       # HashingMode::Loose
-/// hashing: normal      # HashingMode::Normal { version: VersionGranularity::Minor } { version: Minor }
-/// hashing: strict      # HashingMode::Strict
-///
-/// # Compound form (non-default granularity):
-/// hashing:
-///   normal:
-///     version: major   # HashingMode::Normal { version: VersionGranularity::Major }
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum HashingMode {
     /// Folder = `<adapter>/<shape>`. No version axis: a binary upgrade reuses
     /// the same per-shape folder. Fewest folders; relies on age-based gc to
     /// trim shapes that fall out of use.
     Loose,
-    /// Folder = `<adapter>/<version>/<shape>` where `version` is `major.minor`
-    /// for [`VersionGranularity::Minor`] or just `major` for
-    /// [`VersionGranularity::Major`]. The default. Content edits re-render into
-    /// the same folder; a version bump or selection change mints a new one.
-    Normal {
-        /// Version components to include in the folder path.
-        version: VersionGranularity,
-    },
+    /// Folder = `<adapter>/<version_mm>/<shape>` (`version_mm` = `major.minor`).
+    /// The default. Content edits re-render into the same folder; a minor
+    /// version bump or a selection change mints a new one.
+    #[default]
+    Normal,
     /// Folder = `<adapter>/<VERSION_TAG>-<content_hash>`. Any input change mints
     /// a fresh folder — strongest isolation, most cache churn.
     Strict,
 }
 
-impl Serialize for HashingMode {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            HashingMode::Loose => serializer.serialize_str("loose"),
-            HashingMode::Normal {
-                version: VersionGranularity::Minor,
-            } => serializer.serialize_str("normal"),
-            HashingMode::Normal {
-                version: VersionGranularity::Major,
-            } => {
-                use serde::ser::SerializeMap;
-                let mut map = serializer.serialize_map(Some(1))?;
-                map.serialize_entry(
-                    "normal",
-                    &NormalConfig {
-                        version: VersionGranularity::Major,
-                    },
-                )?;
-                map.end()
-            }
-            HashingMode::Strict => serializer.serialize_str("strict"),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for HashingMode {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        // Compound form first (more specific), then scalar.
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Helper {
-            Compound { normal: NormalConfig },
-            Scalar(ScalarMode),
-        }
-
-        #[derive(Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        enum ScalarMode {
-            Loose,
-            Normal,
-            Strict,
-        }
-
-        Ok(match Helper::deserialize(d)? {
-            Helper::Compound { normal } => HashingMode::Normal {
-                version: normal.version,
-            },
-            Helper::Scalar(ScalarMode::Loose) => HashingMode::Loose,
-            Helper::Scalar(ScalarMode::Normal) => HashingMode::Normal {
-                version: VersionGranularity::Minor,
-            },
-            Helper::Scalar(ScalarMode::Strict) => HashingMode::Strict,
-        })
-    }
-}
-
-impl Default for HashingMode {
-    fn default() -> Self {
-        HashingMode::Normal {
-            version: VersionGranularity::Minor,
-        }
-    }
-}
-
 /// Engine-agnostic capability vocabulary. Identical shape whether declared at the
 /// top level of `config.yaml` or in a bundle's `bundle.yaml`. Merged across all
 /// contributors by value shape (see [`crate::merge`]).
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 pub struct Capabilities {
     #[serde(default)]
     pub permissions: Permissions,
@@ -440,6 +377,19 @@ pub struct Capabilities {
     /// collision (same scalar rule as `env`).
     #[serde(default)]
     pub host: std::collections::BTreeMap<String, HostEntry>,
+    /// Custom/self-hosted model provider endpoints declared inside a bundle.
+    /// A list — concatenates across contributors, same model as `mcp`/`lsp`.
+    /// Selected by tag intersection. Engines with
+    /// `supports_model_providers() == false` silently skip these entries.
+    #[serde(default)]
+    pub model_providers: Vec<ModelProvider>,
+    /// Default model selection, keyed by an open-string role ("large",
+    /// "small", etc — matches Crush's real `SelectedModelType` without
+    /// hardcoding to it). Merged per-key: higher-precedence contributor
+    /// wins on collision (same scalar rule as `env`/`host`), not
+    /// tag-intersected like a list — there is only one default per role.
+    #[serde(default)]
+    pub default_models: std::collections::BTreeMap<String, ModelRef>,
 }
 
 impl Capabilities {
@@ -461,7 +411,11 @@ impl Capabilities {
             && self.native_mcp.is_empty()
             && self.native.is_empty()
             && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
+            && self.features.as_ref().is_none_or(|f| f.read_once.is_none())
+            && self.features.as_ref().is_none_or(|f| f.slippage.is_none())
             && self.host.is_empty()
+            && self.model_providers.is_empty()
+            && self.default_models.is_empty()
     }
 }
 
@@ -666,6 +620,70 @@ pub struct ContextMode {
     pub enabled: bool,
 }
 
+/// ReadOnce mode: what happens when a file that was already read is requested
+/// again within the TTL window.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadOnceMode {
+    /// Emit a warning that the file was already read (default).
+    #[default]
+    Warn,
+    /// Deny re-reading the file entirely.
+    Deny,
+}
+
+/// ReadOnce: avoid re-reading files that haven't changed within a TTL window.
+/// Opt-in (disabled by default).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOnce {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: ReadOnceMode,
+    /// Session-cache TTL fallback in seconds (default 1200 = 20 min).
+    #[serde(default = "default_read_once_ttl")]
+    pub ttl_seconds: u64,
+    /// Changed-file delta mode (phase 2, default false).
+    #[serde(default)]
+    pub diff: bool,
+}
+
+const fn default_read_once_ttl() -> u64 {
+    1200
+}
+
+/// SlippageControl: guardrails against model behavior drift.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SlippageControl {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Effort level injected into generated settings (e.g. "xhigh", "high").
+    #[serde(default)]
+    pub effort_level: Option<String>,
+    #[serde(default = "default_slippage_true")]
+    pub rule_reinjection: bool,
+    #[serde(default = "default_slippage_true")]
+    pub read_before_edit: bool,
+    #[serde(default = "default_slippage_true")]
+    pub self_critique: bool,
+    #[serde(default = "default_slippage_true")]
+    pub metrics: bool,
+    #[serde(default = "default_slippage_true")]
+    pub compact_survival: bool,
+    #[serde(default = "default_slippage_true")]
+    pub diagnose_command: bool,
+    #[serde(default)]
+    pub explain_before_act: bool,
+    #[serde(default)]
+    pub answer_before_act: bool,
+}
+
+const fn default_slippage_true() -> bool {
+    true
+}
+
 /// Memory type classification for stored memory chunks (R1).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "snake_case")]
@@ -726,6 +744,9 @@ pub struct ConsolidationConfig {
     /// Whether consolidation is enabled. Defaults to `false` — opt-in.
     #[serde(default)]
     pub enabled: bool,
+    /// LLM backend to use for consolidation.
+    #[serde(default)]
+    pub backend: ConsolidationBackend,
     /// Maximum number of semantic rules to distill per session.
     #[serde(default = "default_max_rules")]
     pub max_rules_per_session: u32,
@@ -733,6 +754,44 @@ pub struct ConsolidationConfig {
 
 const fn default_max_rules() -> u32 {
     10
+}
+
+/// LLM backend for post-session consolidation.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ConsolidationBackend {
+    /// Use `claude -p` subprocess (works with Claude subscription, no API key needed).
+    #[default]
+    #[serde(rename = "claude-cli")]
+    ClaudeCli,
+    /// Use Anthropic Messages API directly (requires `ANTHROPIC_API_KEY` env var).
+    #[serde(rename = "anthropic-api")]
+    AnthropicApi,
+}
+
+/// Per-type retention policy for memory pruning (R4).
+///
+/// Each field is a `humantime`-parseable duration string (e.g. `"30d"`,
+/// `"365d"`, `"90 days"`). A value of `None` means "never prune" for that
+/// type.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RetentionConfig {
+    /// Retention for episodic memories. Defaults to `"30d"`.
+    #[serde(default = "default_retention_episodic")]
+    pub episodic: Option<String>,
+    /// Retention for semantic memories. Defaults to `None` (never prune).
+    #[serde(default)]
+    pub semantic: Option<String>,
+    /// Retention for procedural memories. Defaults to `"365d"`.
+    #[serde(default = "default_retention_procedural")]
+    pub procedural: Option<String>,
+}
+
+fn default_retention_episodic() -> Option<String> {
+    Some("30d".to_string())
+}
+
+fn default_retention_procedural() -> Option<String> {
+    Some("365d".to_string())
 }
 
 /// llmenv's memory backend topology. One host (`server_host`) runs the daemon
@@ -779,6 +838,15 @@ pub struct Memory {
     /// `consolidation.enabled` (default: false — opt-in).
     #[serde(default)]
     pub consolidation: Option<ConsolidationConfig>,
+    /// Per-type retention policy for memory pruning (R4). When `None`,
+    /// pruning is fully disabled. When `Some(Config)`, the per-type
+    /// duration strings drive `llmenv memory prune`.
+    #[serde(default)]
+    pub retention: Option<RetentionConfig>,
+    /// Whether to automatically run `llmenv memory prune` during
+    /// `llmenv materialize`. Defaults to `false` — opt-in.
+    #[serde(default)]
+    pub auto_prune: bool,
 }
 
 fn default_throttle_cache_ttl() -> u64 {
@@ -916,6 +984,83 @@ pub struct LspServer {
     /// language ids don't reliably convert to file extensions (e.g. `rust` → `.rs`).
     #[serde(default)]
     pub extension_to_language: std::collections::BTreeMap<String, String>,
+}
+
+/// A custom/self-hosted model provider endpoint (Ollama, vLLM, LM Studio, a
+/// proxy, or an override of a built-in provider). Selected by tag
+/// intersection like `mcp`/`lsp`/`skills`. Engines without a multi-provider
+/// concept (`supports_model_providers() == false`) silently skip these —
+/// declaring one in a shared bundle is legitimate; it is simply a no-op for
+/// such adapters.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct ModelProvider {
+    /// Stable identifier, used as the map key when rendered (e.g. "ollama",
+    /// "my-proxy") and as the `provider` field target of `ModelRef`.
+    pub id: String,
+    /// Display name.
+    pub name: Option<String>,
+    /// Tags that activate this provider, intersected with active scope tags.
+    #[serde(default)]
+    pub when: Vec<String>,
+    /// API endpoint URL.
+    pub base_url: Option<String>,
+    /// Wire format, e.g. "openai", "anthropic", "google". Open string, not
+    /// an enum — new wire formats appear faster than llmenv releases.
+    pub api_type: Option<String>,
+    /// Passthrough credential string — may be a literal, or a $VAR/!command
+    /// reference the *target engine* resolves at its own runtime. llmenv
+    /// never interprets this value (resolving it here would write a
+    /// plaintext secret into the materialized cache directory).
+    pub api_key: Option<String>,
+    /// Extra HTTP headers, passthrough (same rationale as `api_key`).
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// When `true` the provider is excluded from the resolved set for all engines.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Models exposed by this provider.
+    #[serde(default)]
+    pub models: Vec<ModelSource>,
+}
+
+/// One model exposed by a `ModelProvider`. All fields but `id` are optional
+/// — mirrors Pi's "only `id` is required for local models" convention.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct ModelSource {
+    pub id: String,
+    pub name: Option<String>,
+    /// Supports extended thinking/reasoning.
+    #[serde(default)]
+    pub reasoning: bool,
+    /// Context window size in tokens.
+    pub context_window: Option<u32>,
+    /// Maximum output tokens.
+    pub max_tokens: Option<u32>,
+    /// Cost per million tokens.
+    pub cost: Option<ModelCost>,
+    /// Input modalities, e.g. `["text"]` or `["text", "image"]`.
+    #[serde(default)]
+    pub modalities: Vec<String>,
+}
+
+/// Cost per million tokens, matching the near-identical shape used by Crush,
+/// Pi, and OpenCode's own model schemas.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Default)]
+pub struct ModelCost {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+}
+
+/// A pointer to a model+provider pair, used for default-model selection.
+/// `provider` may be a `ModelProvider.id` declared alongside it, or an
+/// engine builtin id (e.g. Crush's built-in `"anthropic"`) that llmenv has
+/// no knowledge of and does not validate against.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct ModelRef {
+    pub provider: String,
+    pub model: String,
 }
 
 /// An agent plugin marketplace: a name plus a source the marketplace is fetched
@@ -1101,40 +1246,9 @@ mod tests {
         let cache: Cache =
             serde_yaml::from_str("cache_dir: ~/.cache/llmenv\nsync_interval_minutes: 60\n")
                 .expect("parse minimal cache");
-        assert_eq!(
-            cache.hashing,
-            HashingMode::Normal {
-                version: VersionGranularity::Minor
-            }
-        );
+        assert_eq!(cache.hashing, HashingMode::Normal);
         // The bare Default impl must agree with the parsed-absent behavior.
-        assert_eq!(
-            Cache::default().hashing,
-            HashingMode::Normal {
-                version: VersionGranularity::Minor
-            }
-        );
-    }
-
-    #[test]
-    fn cache_parses_compound_normal_with_major_granularity() {
-        // #651: the compound { normal: { version: major } } form deserializes to
-        // HashingMode::Normal with Major granularity, and roundtrips correctly.
-        let yaml = "cache_dir: ~/.cache/llmenv\nsync_interval_minutes: 60\nhashing:\n  normal:\n    version: major\n";
-        let cache: Cache = serde_yaml::from_str(yaml).expect("parse compound major");
-        assert_eq!(
-            cache.hashing,
-            HashingMode::Normal {
-                version: VersionGranularity::Major
-            }
-        );
-        // Round-trip: serialize back and confirm the compound form is preserved.
-        let serialized = serde_yaml::to_string(&cache.hashing).expect("serialize");
-        let back: HashingMode = serde_yaml::from_str(&serialized).expect("deserialize roundtrip");
-        assert_eq!(
-            cache.hashing, back,
-            "compound form {{ normal: {{ version: major }} }} must round-trip"
-        );
+        assert_eq!(Cache::default().hashing, HashingMode::Normal);
     }
 
     #[test]
@@ -1142,12 +1256,7 @@ mod tests {
         // #246: the single dial accepts loose|normal|strict.
         for (text, expected) in [
             ("loose", HashingMode::Loose),
-            (
-                "normal",
-                HashingMode::Normal {
-                    version: VersionGranularity::Minor,
-                },
-            ),
+            ("normal", HashingMode::Normal),
             ("strict", HashingMode::Strict),
         ] {
             let cache: Cache = serde_yaml::from_str(&format!(
@@ -1429,6 +1538,7 @@ mod tests {
         ) {
             let cfg = ConsolidationConfig {
                 enabled,
+                backend: Default::default(),
                 max_rules_per_session,
             };
             let json = serde_json::to_string(&cfg).expect("serialize ConsolidationConfig");
@@ -1457,6 +1567,137 @@ mod tests {
         let yaml = "features:\n  context_mode: {}\n";
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(!cfg.features.unwrap().context_mode.unwrap().enabled);
+    }
+
+    // ===== ReadOnce config tests =====
+
+    #[test]
+    fn read_once_parses_enabled() {
+        let yaml = "features:\n  read_once:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let ro = cfg.features.unwrap().read_once.unwrap();
+        assert!(ro.enabled);
+        assert_eq!(ro.mode, ReadOnceMode::Warn);
+        assert_eq!(ro.ttl_seconds, 1200);
+        assert!(!ro.diff);
+    }
+
+    #[test]
+    fn read_once_parses_mode() {
+        let yaml = "features:\n  read_once:\n    mode: deny\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let ro = cfg.features.unwrap().read_once.unwrap();
+        assert_eq!(ro.mode, ReadOnceMode::Deny);
+    }
+
+    #[test]
+    fn read_once_absent_is_none() {
+        let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
+        assert!(cfg.features.unwrap().read_once.is_none());
+    }
+
+    #[test]
+    fn read_once_defaults_disabled() {
+        let yaml = "features:\n  read_once: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let ro = cfg.features.unwrap().read_once.unwrap();
+        assert!(!ro.enabled);
+        assert_eq!(ro.mode, ReadOnceMode::Warn);
+        assert_eq!(ro.ttl_seconds, 1200);
+        assert!(!ro.diff);
+    }
+
+    // ===== SlippageControl config tests =====
+
+    #[test]
+    fn slippage_parses_enabled() {
+        let yaml = "features:\n  slippage:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let sc = cfg.features.unwrap().slippage.unwrap();
+        assert!(sc.enabled);
+        // All default-true fields default to true
+        assert!(sc.rule_reinjection);
+        assert!(sc.read_before_edit);
+        assert!(sc.self_critique);
+        assert!(sc.metrics);
+        assert!(sc.compact_survival);
+        assert!(sc.diagnose_command);
+        // Default-false fields
+        assert!(!sc.explain_before_act);
+        assert!(!sc.answer_before_act);
+        assert_eq!(sc.effort_level, None);
+    }
+
+    #[test]
+    fn slippage_parses_effort_level() {
+        let yaml = "features:\n  slippage:\n    effort_level: xhigh\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let sc = cfg.features.unwrap().slippage.unwrap();
+        assert_eq!(sc.effort_level.as_deref(), Some("xhigh"));
+        assert!(!sc.enabled);
+    }
+
+    #[test]
+    fn slippage_absent_is_none() {
+        let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
+        assert!(cfg.features.unwrap().slippage.is_none());
+    }
+
+    #[test]
+    fn slippage_defaults() {
+        let yaml = "features:\n  slippage: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let sc = cfg.features.unwrap().slippage.unwrap();
+        assert!(!sc.enabled);
+        assert!(sc.rule_reinjection);
+        assert!(sc.read_before_edit);
+        assert!(sc.self_critique);
+        assert!(sc.metrics);
+        assert!(sc.compact_survival);
+        assert!(sc.diagnose_command);
+        assert!(!sc.explain_before_act);
+        assert!(!sc.answer_before_act);
+        assert_eq!(sc.effort_level, None);
+    }
+
+    // ===== Feature round-trip tests =====
+
+    #[test]
+    fn features_roundtrip_read_once() {
+        let original = Features {
+            read_once: Some(ReadOnce {
+                enabled: true,
+                mode: ReadOnceMode::Deny,
+                ttl_seconds: 600,
+                diff: true,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Features = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn features_roundtrip_slippage() {
+        let original = Features {
+            slippage: Some(SlippageControl {
+                enabled: true,
+                effort_level: Some("xhigh".to_string()),
+                rule_reinjection: false,
+                read_before_edit: true,
+                self_critique: false,
+                metrics: true,
+                compact_survival: false,
+                diagnose_command: true,
+                explain_before_act: false,
+                answer_before_act: false,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Features = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
     }
 
     // #505: MCP field parity — new optional fields
@@ -1641,5 +1882,72 @@ mod tests {
             !caps.is_empty(),
             "is_empty must be false when lsp is non-empty"
         );
+    }
+
+    #[test]
+    fn model_provider_yaml_roundtrip() {
+        let yaml = r#"
+id: ollama
+name: Local Ollama
+base_url: http://localhost:11434/v1
+api_type: openai
+api_key: "$OLLAMA_KEY"
+headers:
+  x-custom: value
+models:
+  - id: llama3.1:8b
+    name: Llama 3.1 8B
+    reasoning: false
+    context_window: 128000
+    max_tokens: 32000
+    cost:
+      input: 0.0
+      output: 0.0
+    modalities:
+      - text
+"#;
+        let provider: ModelProvider = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(provider.id, "ollama");
+        assert_eq!(
+            provider.base_url,
+            Some("http://localhost:11434/v1".to_string())
+        );
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].id, "llama3.1:8b");
+        assert_eq!(
+            provider.models[0].cost,
+            Some(ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: None,
+                cache_write: None
+            })
+        );
+    }
+
+    #[test]
+    fn model_provider_only_id_required() {
+        // Mirrors Pi's "only id is required for local models" convention.
+        let yaml = "id: bare-provider\n";
+        let provider: ModelProvider = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(provider.id, "bare-provider");
+        assert_eq!(provider.name, None);
+        assert!(provider.models.is_empty());
+    }
+
+    #[test]
+    fn default_models_map_yaml_roundtrip() {
+        let yaml = r#"
+large:
+  provider: anthropic
+  model: claude-opus-4-7
+small:
+  provider: ollama
+  model: llama3.1:8b
+"#;
+        let map: std::collections::BTreeMap<String, ModelRef> =
+            serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(map["large"].provider, "anthropic");
+        assert_eq!(map["small"].model, "llama3.1:8b");
     }
 }
