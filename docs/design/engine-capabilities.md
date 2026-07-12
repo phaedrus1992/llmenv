@@ -221,6 +221,11 @@ implementation.
 - New `native` top-level map: `BTreeMap<String, serde_yaml::Value>` (opaque
   catch-all passthrough per engine, distinct from the per-feature siblings).
 - New `marketplace` top-level list (absorbs #59).
+- New `Capabilities.model_providers: Vec<ModelProvider>` and
+  `Capabilities.default_models: BTreeMap<String, ModelRef>` — model provider
+  endpoint declarations and role-keyed default model selection. Lists
+  (model_providers) concat+dedup across scopes; scalars (default_models)
+  highest-precedence-wins per role, hard-error on same-precedence collision.
 - `BundleRef`/`merge()` (`src/merge/mod.rs`) gain a `bundle.yaml` read; the
   `MergedManifest` carries merged `Capabilities`.
 - **Rename** `Config.settings` → `Config.cache` (kills the "settings" name
@@ -304,6 +309,7 @@ Tracking the two-layer invariant (generic + per-engine `native`) per feature:
 | Plugins | done | done (`native_plugins.<engine>`) | fragment deep-merged onto settings top-level |
 | MCP servers | done | done (`native_mcp.<engine>`) | `mcpServers` deep-merged into `.claude.json` (read-merge-write); merge runs when resolved servers *or* a fragment exist; native `enabledMcpjsonServers` dropped (#244) |
 | Top-level `native` (catch-all) | n/a | done | `Config.native` threads through `merge()` → `MergedManifest.native` |
+| Model providers + defaults | done | n/a (Crush-only; no native override shape yet) | rendered into `crush.json` (`providers`/`models`) via `CrushAdapter`; `ClaudeCodeAdapter` is true no-op |
 
 All four modeled features now satisfy both layers via the uniform
 `native_<feature>` sibling shape (#97), and the top-level `native` catch-all is

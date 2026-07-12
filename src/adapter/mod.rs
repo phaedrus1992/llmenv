@@ -31,6 +31,11 @@ pub trait AgentAdapter {
     /// not (it has its own built-in language tooling).
     fn supports_lsp(&self) -> bool;
 
+    /// Whether this adapter supports multiple model providers and
+    /// default-model selection. Claude Code does not (Anthropic-only, no
+    /// provider switching).
+    fn supports_model_providers(&self) -> bool;
+
     /// The set of native hook-event names this adapter emits. Callers use this
     /// to guard event registration so events an adapter never fires are not
     /// written into its settings file.
@@ -309,6 +314,10 @@ mod tests {
         assert_eq!(a.binary_name(), "claude");
         assert!(a.supports_plugins(), "ClaudeCodeAdapter supports plugins");
         assert!(a.supports_lsp(), "ClaudeCodeAdapter supports LSP (#556)");
+        assert!(
+            !a.supports_model_providers(),
+            "ClaudeCodeAdapter does not support model providers"
+        );
         let events = a.supported_hook_events();
         for expected in [
             "SessionStart",
@@ -335,6 +344,10 @@ mod tests {
             "CrushAdapter does not support plugins"
         );
         assert!(c.supports_lsp(), "CrushAdapter supports LSP");
+        assert!(
+            c.supports_model_providers(),
+            "CrushAdapter supports model providers"
+        );
         assert!(
             c.supported_hook_events().contains(&"PreToolUse"),
             "CrushAdapter must support PreToolUse"
