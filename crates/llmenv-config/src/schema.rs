@@ -637,17 +637,28 @@ pub struct ConsolidationConfig {
     /// Whether consolidation is enabled. Defaults to `false` — opt-in.
     #[serde(default)]
     pub enabled: bool,
+    /// LLM backend to use for consolidation.
+    #[serde(default)]
+    pub backend: ConsolidationBackend,
     /// Maximum number of semantic rules to distill per session.
     #[serde(default = "default_max_rules")]
     pub max_rules_per_session: u32,
-    /// The Anthropic model to use for consolidation. Defaults to the current
-    /// cheapest Haiku (`claude-haiku-4-5-20251001`) when `None`.
-    #[serde(default)]
-    pub model: Option<String>,
 }
 
 const fn default_max_rules() -> u32 {
     10
+}
+
+/// LLM backend for post-session consolidation.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ConsolidationBackend {
+    /// Use `claude -p` subprocess (works with Claude subscription, no API key needed).
+    #[default]
+    #[serde(rename = "claude-cli")]
+    ClaudeCli,
+    /// Use Anthropic Messages API directly (requires `ANTHROPIC_API_KEY` env var).
+    #[serde(rename = "anthropic-api")]
+    AnthropicApi,
 }
 
 /// Per-type retention policy for memory pruning (R4).
@@ -1420,8 +1431,8 @@ mod tests {
         ) {
             let cfg = ConsolidationConfig {
                 enabled,
+                backend: Default::default(),
                 max_rules_per_session,
-                model: None,
             };
             let json = serde_json::to_string(&cfg).expect("serialize ConsolidationConfig");
             let back: ConsolidationConfig =
