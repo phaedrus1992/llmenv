@@ -112,11 +112,11 @@ fn release_version_has_changelog_section() {
         "CHANGELOG-3.md",
         "CHANGELOG-4.md",
     ] {
-        if let Ok(changelog) = fs::read_to_string(Path::new(MANIFEST_DIR).join(version_file)) {
-            if changelog.contains(&heading) {
-                found = true;
-                break;
-            }
+        if let Ok(changelog) = fs::read_to_string(Path::new(MANIFEST_DIR).join(version_file))
+            && changelog.contains(&heading)
+        {
+            found = true;
+            break;
         }
     }
     assert!(
