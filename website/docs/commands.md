@@ -260,6 +260,30 @@ whether the target path is inside the llmenv cache and prints a redirection hint
 pointing at the source config. Always exits 0 (fail-soft — the write is not
 blocked). Invoked automatically — not normally run by users.
 
+## `upgrade`
+
+```
+llmenv upgrade [--check] [--track beta|release]
+```
+
+Upgrade llmenv to the latest version from GitHub releases. Downloads the
+platform-appropriate pre-built binary, performs a safe install cycle
+(backup → write temp → sync → rename → verify → remove backup), and
+restores the original binary on failure.
+
+- `--check` compares the current version against the latest release and
+  prints the result. Exits 1 if an update is available.
+- `--track beta` uses the first non-draft GitHub release instead of the
+  latest stable release. The track can be configured persistently via
+  `features.upgrade.track` in `config.yaml`:
+  ```yaml
+  features:
+    upgrade:
+      track: beta    # "release" (default) or "beta"
+  ```
+
+Supported platforms: macOS (aarch64, x86_64), Linux (aarch64, x86_64).
+
 ## `doctor`
 
 ```
