@@ -112,6 +112,18 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         .max_by_key(|(p, _)| *p)
         .map(|(_, v)| v);
 
+    // #317: effort_level scalar resolution — same pattern as auto_memory_enabled.
+    let effort_level = contributors
+        .iter()
+        .filter_map(|c| {
+            c.capabilities
+                .effort_level
+                .as_ref()
+                .map(|v| (c.precedence, v.clone()))
+        })
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v);
+
     // Collect memory and throttle entries from all contributors: concat + dedup
     // (same list model as hooks, plugins, mcp). Ambiguity at resolve-time, not merge-time.
     let mut memory: Vec<Memory> = Vec::new();
@@ -124,16 +136,77 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     }
     dedup(&mut memory);
     dedup(&mut throttle);
-    let features = if memory.is_empty() && throttle.is_empty() {
+
+    // #317: resolve feature scalars (slippage, context_mode, upgrade, read_once).
+    // Same highest-precedence-wins pattern as auto_memory_enabled.
+    let slippage = contributors
+        .iter()
+        .filter_map(|c| {
+            c.capabilities
+                .features
+                .as_ref()?
+                .slippage
+                .as_ref()
+                .map(|v| (c.precedence, v.clone()))
+        })
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v);
+
+    let context_mode = contributors
+        .iter()
+        .filter_map(|c| {
+            c.capabilities
+                .features
+                .as_ref()?
+                .context_mode
+                .as_ref()
+                .map(|v| (c.precedence, v.clone()))
+        })
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v);
+
+    let upgrade = contributors
+        .iter()
+        .filter_map(|c| {
+            c.capabilities
+                .features
+                .as_ref()?
+                .upgrade
+                .as_ref()
+                .map(|v| (c.precedence, v.clone()))
+        })
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v);
+
+    let read_once = contributors
+        .iter()
+        .filter_map(|c| {
+            c.capabilities
+                .features
+                .as_ref()?
+                .read_once
+                .as_ref()
+                .map(|v| (c.precedence, v.clone()))
+        })
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v);
+
+    let features = if memory.is_empty()
+        && throttle.is_empty()
+        && slippage.is_none()
+        && context_mode.is_none()
+        && upgrade.is_none()
+        && read_once.is_none()
+    {
         None
     } else {
         Some(Features {
             memory,
             throttle,
-            context_mode: None,
-            upgrade: None,
-            read_once: None,
-            slippage: None,
+            context_mode,
+            upgrade,
+            read_once,
+            slippage,
         })
     };
 
@@ -151,7 +224,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         skills,
         env,
         auto_memory_enabled,
-        effort_level: None,
+        effort_level,
         advisor_size: None,
         native_permissions,
         native_hooks,
@@ -1432,6 +1505,100 @@ mod tests {
             .to_string();
         assert!(err.contains("conflicting host entry"), "got: {err}");
         assert!(err.contains("still"), "got: {err}");
+    }
+
+    // #317: slippage resolved by highest precedence wins.
+    #[test]
+    fn slippage_passthrough_highest_precedence_wins() {
+        use crate::config::SlippageControl;
+        let sc_low = SlippageControl {
+            enabled: true,
+            effort_level: Some("low".into()),
+            ..Default::default()
+        };
+        let sc_high = SlippageControl {
+            enabled: true,
+            effort_level: Some("xhigh".into()),
+            ..Default::default()
+        };
+        let low_caps = Capabilities {
+            features: Some(Features {
+                slippage: Some(sc_low),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let high_caps = Capabilities {
+            features: Some(Features {
+                slippage: Some(sc_high),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[
+            contributor("low", 1, low_caps),
+            contributor("high", 5, high_caps),
+        ])
+        .unwrap();
+        let features = out.features.as_ref().expect("features must be present");
+        let sc = features
+            .slippage
+            .as_ref()
+            .expect("slippage must be present");
+        assert!(sc.enabled);
+        assert_eq!(sc.effort_level.as_deref(), Some("xhigh"));
+    }
+
+    // #317: effort_level scalar resolved by highest precedence wins.
+    #[test]
+    fn effort_level_scalar_resolution() {
+        let low = contributor(
+            "low",
+            1,
+            Capabilities {
+                effort_level: Some("low".into()),
+                ..Default::default()
+            },
+        );
+        let high = contributor(
+            "high",
+            5,
+            Capabilities {
+                effort_level: Some("xhigh".into()),
+                ..Default::default()
+            },
+        );
+        let out = merge_capabilities(&[low, high]).unwrap();
+        assert_eq!(out.effort_level.as_deref(), Some("xhigh"));
+    }
+
+    // #317: effort_level defaults to None when no contributor sets it.
+    #[test]
+    fn effort_level_defaults_to_none() {
+        let a = contributor("a", 1, Capabilities::default());
+        let out = merge_capabilities(&[a]).unwrap();
+        assert_eq!(out.effort_level, None);
+    }
+
+    // #317: features created when any non-memory/non-throttle field is populated.
+    #[test]
+    fn features_created_when_any_field_populated() {
+        use crate::config::SlippageControl;
+        let caps = Capabilities {
+            features: Some(Features {
+                slippage: Some(SlippageControl {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 1, caps)]).unwrap();
+        let features = out.features.as_ref().expect("features must be present");
+        assert!(features.slippage.is_some());
+        assert!(features.memory.is_empty());
+        assert!(features.throttle.is_empty());
     }
 
     // #335: features.memory entries concat across contributors and dedup.

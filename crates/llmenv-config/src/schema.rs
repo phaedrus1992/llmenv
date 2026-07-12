@@ -684,6 +684,23 @@ const fn default_slippage_true() -> bool {
     true
 }
 
+impl Default for SlippageControl {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            effort_level: None,
+            rule_reinjection: true,
+            read_before_edit: true,
+            self_critique: true,
+            metrics: true,
+            compact_survival: true,
+            diagnose_command: true,
+            explain_before_act: false,
+            answer_before_act: false,
+        }
+    }
+}
+
 /// Memory type classification for stored memory chunks (R1).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "snake_case")]
