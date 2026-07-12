@@ -14,6 +14,7 @@ mod doctor;
 mod setup;
 mod status;
 mod style;
+mod upgrade;
 
 pub use style::{
     ColorMode, active_marker, doctor_fail, doctor_info, doctor_pass, doctor_warning,
@@ -326,11 +327,34 @@ enum Command {
         #[arg(long)]
         plugin_cache: bool,
     },
+    /// Manage the read-once file dedup cache (#318).
+    ReadOnce {
+        #[command(subcommand)]
+        command: ReadOnceCommand,
+    },
     /// Inspect ICM memory state (R2).
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Self-upgrade from the latest GitHub release.
+    Upgrade {
+        /// Only check for an update without downloading (exit 0 = up to date,
+        /// exit 1 = update available).
+        #[arg(long)]
+        check: bool,
+        /// Release track: "release" (default) or "beta" (includes prereleases).
+        /// Overrides `features.upgrade.track` in config.
+        #[arg(long)]
+        track: Option<String>,
+    },
+}
+
+/// `llmenv read-once` subcommands (#318).
+#[derive(Subcommand)]
+enum ReadOnceCommand {
+    /// Clear all cached read-once entries.
+    Clear,
 }
 
 /// `llmenv memory` sub-subcommands (R2).
@@ -488,12 +512,18 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Login { global }) => {
             run_login(global)?;
         }
+        Some(Command::ReadOnce { command }) => match command {
+            ReadOnceCommand::Clear => crate::hook_run::read_once::clear_cache()?,
+        },
         Some(Command::Memory { command }) => match command {
             MemoryCommand::Stats => crate::memory::stats()?,
             MemoryCommand::List => crate::memory::list()?,
             MemoryCommand::Diff => crate::memory::diff()?,
             MemoryCommand::Prune { dry_run } => crate::memory::prune(dry_run)?,
         },
+        Some(Command::Upgrade { check, track }) => {
+            upgrade::run_upgrade(track, check)?;
+        }
         Some(Command::Prune {
             all,
             older_than,
@@ -894,6 +924,9 @@ fn run_export(
         tracing::debug!("failed to store ICM tag memory (non-fatal): {e}");
     }
 
+    // Auto-prune: TTL-based memory retention pass after materialization (#270)
+    crate::memory::prune::auto_prune_if_enabled(&config);
+
     if explain {
         let bundle_list = firing
             .iter()
@@ -995,6 +1028,9 @@ fn run_regenerate() -> anyhow::Result<()> {
     } else {
         eprintln!("✓ No bundle content to materialize");
     }
+
+    // Auto-prune: TTL-based memory retention pass after materialization (#270)
+    crate::memory::prune::auto_prune_if_enabled(&config);
 
     Ok(())
 }
@@ -1166,7 +1202,7 @@ fn build_and_materialize(
     let rendered = crate::materialize::materialize_with_mode(
         &manifest,
         &adapter_root,
-        ctx.config.cache.hashing.clone(),
+        ctx.config.cache.hashing,
         &shape,
     )?;
     let cache_path = rendered.path;
@@ -1175,20 +1211,7 @@ fn build_and_materialize(
     // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
     // Returns the paths it owns; we union them with the generic bundle files to
     // form llmenv's complete owned set (#196). Idempotent.
-    let mut adapter_owned = adapter.materialize(&manifest, &cache_path)?;
-
-    // Emit JSON Schema sidecar if the adapter supports schema generation.
-    // The sidecar path participates in the owned-set manifest so it is
-    // tracked and cleaned up like any other llmenv-authored file.
-    if let Some(schema) = adapter.config_schema() {
-        let schema_rel = PathBuf::from(format!("{}.schema.json", adapter.name()));
-        let schema_abs = cache_path.join(&schema_rel);
-        crate::paths::write_owner_only(
-            &schema_abs,
-            serde_json::to_vec_pretty(&schema)?.as_slice(),
-        )?;
-        adapter_owned.push(schema_rel);
-    }
+    let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
 
     let auth_status =
         claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;
@@ -1199,7 +1222,7 @@ fn build_and_materialize(
     let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
         .with_selection(tags.clone(), bundles)
         .with_auth_status(auth_status);
-    write_cache_manifest(&cache_path, &current, &ctx.config.cache.hashing)?;
+    write_cache_manifest(&cache_path, &current, ctx.config.cache.hashing)?;
 
     // Compute the state dir (stable sibling of the hashed config dir) and pass
     // both to the adapter so it can set per-hash temp vars (#630) and durable
@@ -1291,7 +1314,7 @@ fn inject_cached_auth_if_available(
 fn write_cache_manifest(
     cache_path: &Path,
     current: &crate::materialize::manifest::CacheManifest,
-    mode: &crate::config::HashingMode,
+    mode: crate::config::HashingMode,
 ) -> anyhow::Result<()> {
     use crate::materialize::manifest::CacheManifest;
 
@@ -2954,13 +2977,8 @@ fn run_prune(
     // `{VERSION_TAG}-` prefix, so StaleOnly must be told its name or it would
     // sweep the live config dir. Loose mode has no version axis (every shape is
     // current) and strict mode is identified by the prefix test — both pass None.
-    let current_version = match &config.cache.hashing {
-        crate::config::HashingMode::Normal {
-            version: crate::config::VersionGranularity::Minor,
-        } => Some(crate::materialize::cache::version_mm()),
-        crate::config::HashingMode::Normal {
-            version: crate::config::VersionGranularity::Major,
-        } => Some(crate::materialize::cache::version_major()),
+    let current_version = match config.cache.hashing {
+        crate::config::HashingMode::Normal => Some(crate::materialize::cache::version_mm()),
         crate::config::HashingMode::Loose | crate::config::HashingMode::Strict => None,
     };
 
@@ -2973,7 +2991,7 @@ fn run_prune(
         let report = crate::materialize::cache::prune(
             &cache_dir.join(adapter.name()),
             mode,
-            &config.cache.hashing,
+            config.cache.hashing,
             current_version.as_deref(),
             dry_run,
         )?;
@@ -3340,30 +3358,8 @@ mod tests {
     #[test]
     fn installed_adapters_case_insensitive_disabled_engines() {
         // #564: disabled_engines entries should match case-insensitively
-        // Must cover every registered adapter to assert .count() == 0.
-        // Use the free function engine_id() and mangle case so the test exercises
-        // the case-insensitive path rather than an exact match.
-        let all_case_mangled: Vec<String> = crate::adapter::registered_adapters()
-            .iter()
-            .map(|a| {
-                let id = crate::adapter::engine_id(a.as_ref());
-                // First letter upper → last letter upper, remainder middle-case
-                let mangled: String = id
-                    .chars()
-                    .enumerate()
-                    .map(|(i, c)| {
-                        if i % 2 == 0 {
-                            c.to_ascii_uppercase()
-                        } else {
-                            c.to_ascii_lowercase()
-                        }
-                    })
-                    .collect();
-                mangled
-            })
-            .collect();
         let config = Config {
-            disabled_engines: all_case_mangled,
+            disabled_engines: vec!["Claude_Code".to_string(), "CRUSH".to_string()],
             ..Config::default()
         };
         assert_eq!(
@@ -3433,18 +3429,12 @@ mod tests {
 
     #[test]
     fn write_cache_manifest_writes_dotfile_in_all_modes() {
-        for mode in [
-            HashingMode::Loose,
-            HashingMode::Normal {
-                version: crate::config::VersionGranularity::Minor,
-            },
-            HashingMode::Strict,
-        ] {
+        for mode in [HashingMode::Loose, HashingMode::Normal, HashingMode::Strict] {
             let tmp = tempfile::tempdir().unwrap();
             let cache = tmp.path().join("folder");
             std::fs::create_dir_all(&cache).unwrap();
             let current = built("hash1", &["CLAUDE.md", "a.md"]);
-            write_cache_manifest(&cache, &current, &mode).unwrap();
+            write_cache_manifest(&cache, &current, mode).unwrap();
             let read = CacheManifest::read(&cache).unwrap().unwrap();
             assert_eq!(read.content_hash, "hash1");
             assert!(read.owned.contains("CLAUDE.md"), "adapter-owned recorded");
@@ -3461,12 +3451,7 @@ mod tests {
         // #246: a file owned in render N but not N+1 is deleted on N+1 in every
         // folder-reusing mode (loose + normal), while a foreign (never-owned)
         // file in the same folder survives untouched.
-        for mode in [
-            HashingMode::Loose,
-            HashingMode::Normal {
-                version: crate::config::VersionGranularity::Minor,
-            },
-        ] {
+        for mode in [HashingMode::Loose, HashingMode::Normal] {
             let tmp = tempfile::tempdir().unwrap();
             let cache = tmp.path().join("folder");
             std::fs::create_dir_all(&cache).unwrap();
@@ -3474,14 +3459,14 @@ mod tests {
             // Render N: owns ghost.md + keep.md.
             let ghost = cache.join("ghost.md");
             std::fs::write(&ghost, b"old").unwrap();
-            write_cache_manifest(&cache, &built("h1", &["ghost.md", "keep.md"]), &mode).unwrap();
+            write_cache_manifest(&cache, &built("h1", &["ghost.md", "keep.md"]), mode).unwrap();
 
             // A foreign file Claude/a plugin wrote — never in any owned set.
             let foreign = cache.join("foreign-state.json");
             std::fs::write(&foreign, b"plugin state").unwrap();
 
             // Render N+1: drops ghost.md from the owned set.
-            write_cache_manifest(&cache, &built("h2", &["keep.md"]), &mode).unwrap();
+            write_cache_manifest(&cache, &built("h2", &["keep.md"]), mode).unwrap();
 
             assert!(
                 !ghost.exists(),
@@ -3518,14 +3503,7 @@ mod tests {
         std::fs::write(cache.join(MANIFEST_FILE), tampered).unwrap();
 
         // Re-render dropping the traversal path from the owned set.
-        write_cache_manifest(
-            &cache,
-            &built("new", &[]),
-            &HashingMode::Normal {
-                version: crate::config::VersionGranularity::Minor,
-            },
-        )
-        .unwrap();
+        write_cache_manifest(&cache, &built("new", &[]), HashingMode::Normal).unwrap();
 
         assert!(
             victim.exists(),
@@ -3548,7 +3526,7 @@ mod tests {
         let bystander = cache.join("ghost.md");
         std::fs::write(&bystander, b"x").unwrap();
 
-        write_cache_manifest(&cache, &built("new", &[]), &HashingMode::Strict).unwrap();
+        write_cache_manifest(&cache, &built("new", &[]), HashingMode::Strict).unwrap();
         assert!(
             bystander.exists(),
             "strict mode performs no ghost reconciliation"
@@ -3757,10 +3735,15 @@ mod tests {
                     default_type: None,
                     default_importance: None,
                     type_importance: std::collections::BTreeMap::new(),
+                    retention: None,
+                    auto_prune: false,
                     consolidation: None,
                 }],
                 throttle: vec![],
                 context_mode: None,
+                upgrade: None,
+                read_once: None,
+                slippage: None,
             }),
             host,
             ..Config::default()

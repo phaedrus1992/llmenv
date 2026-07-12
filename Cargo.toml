@@ -18,7 +18,6 @@ tracing = "0.1.44"
 proptest = "1.11.0"
 pulldown-cmark = "0.13.4"
 tempfile = "3.27"
-schemars = { version = "1.2.1", features = [] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -66,17 +65,15 @@ thiserror = "2.0.18"
 anyhow = "1.0.103"
 directories = "6"
 sha2 = "0.11"
-shellexpand = "3.1.2"
 hex = "0.4.3"
 humantime = "2.3.0"
 jiff = { version = "0.2.30", default-features = false, features = ["std"] }
 anstyle = "1.0.14"
 glob = "0.3.3"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
 url = "2.5.8"
 tempfile = "3.27"
 pulldown-cmark = { workspace = true }
-schemars = { workspace = true }
 dialoguer = "0.12.0"
 
 [dev-dependencies]

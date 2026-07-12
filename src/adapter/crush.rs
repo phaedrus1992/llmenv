@@ -4,9 +4,8 @@ use serde_json::json;
 
 use super::AgentAdapter;
 use super::resolve_bundle_relative_paths;
-use super::resolve_plugin_payload;
 use crate::merge::MergedManifest;
-use crate::util::dedup;
+use crate::util::{dedup, merge_json};
 
 /// Adapter for Crush: writes `crush.json` into the cache dir and exports
 /// `CRUSH_GLOBAL_CONFIG` / `CRUSH_GLOBAL_DATA` so Crush discovers it.
@@ -35,6 +34,10 @@ impl AgentAdapter for CrushAdapter {
     }
 
     fn supports_lsp(&self) -> bool {
+        true
+    }
+
+    fn supports_model_providers(&self) -> bool {
         true
     }
 
@@ -187,10 +190,9 @@ impl AgentAdapter for CrushAdapter {
                 .map(|(k, v)| (k, json!(v)))
                 .collect(),
         );
-        super::overlay_native_json(
+        overlay_native_crush(
             &mut hooks_value,
             manifest.capabilities.native_hooks.get("crush"),
-            "native_hooks.crush",
         )?;
         // P1-4: validate every event key in the merged hooks object — native_hooks.crush can
         // inject unsupported events (e.g. PostToolUse) that bypass the earlier manifest gate.
@@ -286,10 +288,9 @@ impl AgentAdapter for CrushAdapter {
             }
             // fix 7: overlay native_mcp.crush into the mcp object
             let mut mcp_value = serde_json::Value::Object(mcp_obj);
-            super::overlay_native_json(
+            overlay_native_crush(
                 &mut mcp_value,
                 manifest.capabilities.native_mcp.get("crush"),
-                "native_mcp.crush",
             )?;
             if !mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
                 doc.insert("mcp".into(), mcp_value);
@@ -301,6 +302,24 @@ impl AgentAdapter for CrushAdapter {
             let lsp_value = render_lsp(&manifest.capabilities.lsp)?;
             if lsp_value.as_object().is_some_and(|o| !o.is_empty()) {
                 doc.insert("lsp".into(), lsp_value);
+            }
+        }
+
+        // Model providers (fix 1 pattern): skip disabled providers; omit
+        // "providers" key if none remain. The JSON tags here match catwalk's
+        // Provider/Model struct tags (confirmed in Task 5 of the spec).
+        if !manifest.capabilities.model_providers.is_empty() {
+            let providers_value = render_model_providers(&manifest.capabilities.model_providers)?;
+            if providers_value.as_object().is_some_and(|o| !o.is_empty()) {
+                doc.insert("providers".into(), providers_value);
+            }
+        }
+
+        // Default models (fix 1 pattern): omit "models" key if none.
+        if !manifest.capabilities.default_models.is_empty() {
+            let models_value = render_default_models(&manifest.capabilities.default_models);
+            if models_value.as_object().is_some_and(|o| !o.is_empty()) {
+                doc.insert("models".into(), models_value);
             }
         }
 
@@ -327,10 +346,10 @@ impl AgentAdapter for CrushAdapter {
         // keys have dedicated rendering paths and must not clobber the security output.
         // Use native_permissions.crush / native_hooks.crush / native_mcp.crush instead.
         if let Some(native) = manifest.native.get("crush") {
-            super::reject_modeled_native_keys(native, CRUSH_MODELED_KEYS, "crush")?;
+            reject_modeled_keys_in_native_crush(native)?;
         }
         let mut doc_value = serde_json::Value::Object(doc);
-        super::overlay_native_json(&mut doc_value, manifest.native.get("crush"), "native.crush")?;
+        overlay_native_crush(&mut doc_value, manifest.native.get("crush"))?;
 
         // 7. Write crush.json
         let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
@@ -353,6 +372,41 @@ impl AgentAdapter for CrushAdapter {
         })
         .to_string()
     }
+}
+
+/// Resolve the on-disk payload directory for a plugin.
+///
+/// External plugins (`install_path = Some`) use that path directly.
+/// First-party plugins look up their marketplace `install_location`.
+fn resolve_plugin_payload(
+    plugin: &crate::plugins::resolve::ResolvedPlugin,
+    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
+) -> anyhow::Result<PathBuf> {
+    // P2-5/#534: guard before any path join, regardless of which path is taken.
+    if !crate::paths::is_valid_short_name(&plugin.plugin) {
+        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
+    }
+    if let Some(p) = &plugin.install_path {
+        return Ok(PathBuf::from(p));
+    }
+    let mkt = marketplaces
+        .iter()
+        .find(|m| m.name == plugin.marketplace)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
+                plugin.plugin,
+                plugin.marketplace
+            )
+        })?;
+    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
+            plugin.plugin,
+            plugin.marketplace
+        )
+    })?;
+    Ok(PathBuf::from(install_location).join(&plugin.plugin))
 }
 
 /// Build the `lsp` JSON object (keyed by server name) from a slice of LSP servers.
@@ -398,13 +452,145 @@ fn render_lsp(servers: &[llmenv_config::LspServer]) -> anyhow::Result<serde_json
     Ok(serde_json::Value::Object(lsp_obj))
 }
 
+/// Build the `providers` JSON object (keyed by provider id) from a slice of model providers.
+///
+/// Disabled providers (`disabled == true`) are skipped entirely. The JSON tags match
+/// catwalk's Provider/Model struct tags (confirmed in Task 5 of the spec).
+fn render_model_providers(
+    providers: &[llmenv_config::ModelProvider],
+) -> anyhow::Result<serde_json::Value> {
+    let mut obj = serde_json::Map::new();
+    for p in providers {
+        if p.disabled {
+            continue;
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), json!(p.id));
+        if let Some(name) = &p.name {
+            entry.insert("name".into(), json!(name));
+        }
+        if let Some(base_url) = &p.base_url {
+            entry.insert("api_endpoint".into(), json!(base_url));
+        }
+        if let Some(api_type) = &p.api_type {
+            entry.insert("type".into(), json!(api_type));
+        }
+        if let Some(api_key) = &p.api_key {
+            entry.insert("api_key".into(), json!(api_key));
+        }
+        if !p.headers.is_empty() {
+            entry.insert("default_headers".into(), json!(p.headers));
+        }
+        if !p.models.is_empty() {
+            let models: Vec<serde_json::Value> = p.models.iter().map(render_model_source).collect();
+            entry.insert("models".into(), json!(models));
+        }
+        obj.insert(p.id.clone(), serde_json::Value::Object(entry));
+    }
+    Ok(serde_json::Value::Object(obj))
+}
+
+/// Render a single model source as a JSON object matching catwalk's Model struct.
+///
+/// catwalk.Model field-name mapping (confirmed Task 5):
+///   ModelSource.id            → "id"
+///   ModelSource.name          → "name"           (optional)
+///   ModelSource.reasoning     → "can_reason"     (if true)
+///   ModelSource.context_window → "context_window" (optional)
+///   ModelSource.max_tokens    → "default_max_tokens" (optional)
+///   ModelSource.cost.input    → "cost_per_1m_in"
+///   ModelSource.cost.output   → "cost_per_1m_out"
+///   ModelSource.cost.cache_read  → "cost_per_1m_in_cached"  (optional)
+///   ModelSource.cost.cache_write → "cost_per_1m_out_cached" (optional)
+///
+/// Cost fields are flat on the Model struct (not nested under "cost"), matching
+/// catwalk's `CostPer1MIn` / `CostPer1MOut` / `CostPer1MInCached` / `CostPer1MOutCached`.
+fn render_model_source(m: &llmenv_config::ModelSource) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), json!(m.id));
+    if let Some(name) = &m.name {
+        entry.insert("name".into(), json!(name));
+    }
+    if m.reasoning {
+        entry.insert("can_reason".into(), json!(true));
+    }
+    if let Some(ctx) = m.context_window {
+        entry.insert("context_window".into(), json!(ctx));
+    }
+    if let Some(max) = m.max_tokens {
+        entry.insert("default_max_tokens".into(), json!(max));
+    }
+    if let Some(cost) = &m.cost {
+        entry.insert("cost_per_1m_in".into(), json!(cost.input));
+        entry.insert("cost_per_1m_out".into(), json!(cost.output));
+        if let Some(cr) = cost.cache_read {
+            entry.insert("cost_per_1m_in_cached".into(), json!(cr));
+        }
+        if let Some(cw) = cost.cache_write {
+            entry.insert("cost_per_1m_out_cached".into(), json!(cw));
+        }
+    }
+    serde_json::Value::Object(entry)
+}
+
+/// Build the `models` JSON object (keyed by scope role) for per-scope default model selection.
+///
+/// Each value is `{"provider": "<id>", "model": "<model-id>"}` matching the shape
+/// consumed by Crush for default-model routing.
+fn render_default_models(
+    models: &std::collections::BTreeMap<String, llmenv_config::ModelRef>,
+) -> serde_json::Value {
+    let obj: serde_json::Map<String, serde_json::Value> = models
+        .iter()
+        .map(|(role, r#ref)| {
+            (
+                role.clone(),
+                json!({ "provider": r#ref.provider, "model": r#ref.model }),
+            )
+        })
+        .collect();
+    serde_json::Value::Object(obj)
+}
+
 /// Keys that are fully modeled by CrushAdapter and must not appear in the `native.crush`
 /// catch-all fragment. Overlaying them last would silently clobber the security-rendered
-/// output (permissions, hooks) or the structured rendering (mcp, lsp).
+/// output (permissions, hooks) or the structured rendering (mcp, lsp, providers, models).
 ///
 /// Use the dedicated `native_permissions.crush` / `native_hooks.crush` / `native_mcp.crush`
 /// channels instead, which merge in the safe direction.
-const CRUSH_MODELED_KEYS: &[&str] = &["permissions", "hooks", "mcp", "lsp"];
+const CRUSH_MODELED_KEYS: &[&str] = &["permissions", "hooks", "mcp", "lsp", "providers", "models"];
+
+/// P1-3: Reject `native.crush` fragments that carry modeled-feature keys.
+fn reject_modeled_keys_in_native_crush(fragment: &serde_yaml::Value) -> anyhow::Result<()> {
+    let Some(map) = fragment.as_mapping() else {
+        return Ok(());
+    };
+    for key in CRUSH_MODELED_KEYS {
+        if map.contains_key(serde_yaml::Value::String((*key).into())) {
+            anyhow::bail!(
+                "top-level `native.crush` carries the modeled-feature key `{key}`, \
+                 which would silently clobber the rendered `{key}` \
+                 (a security regression for permissions). \
+                 Use `native_{key}.crush` (or `native_permissions.crush` / \
+                 `native_hooks.crush` / `native_mcp.crush`) instead, \
+                 which merges in the safe direction."
+            );
+        }
+    }
+    Ok(())
+}
+
+fn overlay_native_crush(
+    dst: &mut serde_json::Value,
+    fragment: Option<&serde_yaml::Value>,
+) -> anyhow::Result<()> {
+    if let Some(frag) = fragment {
+        let as_json = serde_json::to_value(frag)
+            .map_err(|e| anyhow::anyhow!("converting native crush fragment to JSON: {e}"))?;
+        merge_json(dst, as_json);
+    }
+    Ok(())
+}
 
 fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
     rules.iter().flat_map(render_permission_rule).collect()
@@ -429,11 +615,9 @@ fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
 mod tests {
     use super::{
         CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter, SUPPORTED_HOOK_EVENTS,
-        render_permission_rule,
+        overlay_native_crush, reject_modeled_keys_in_native_crush, render_permission_rule,
     };
     use crate::adapter::AgentAdapter;
-    use crate::adapter::overlay_native_json;
-    use crate::adapter::reject_modeled_native_keys;
     use crate::adapter::skills::arb_yaml_value;
     use crate::config::{
         Capabilities, Hook, HookHandler, HookHandlerKind, NativePermissionRules, PermissionRule,
@@ -901,21 +1085,21 @@ mod tests {
         );
     }
 
-    // ── overlay_native_json ───────────────────────────────────────────────────
+    // ── overlay_native_crush ──────────────────────────────────────────────────
 
     #[test]
-    fn overlay_native_json_none_is_noop() {
+    fn overlay_native_crush_none_is_noop() {
         let mut dst = serde_json::json!({ "k": 1 });
         let before = dst.clone();
-        overlay_native_json(&mut dst, None, "test").unwrap();
+        overlay_native_crush(&mut dst, None).unwrap();
         assert_eq!(dst, before);
     }
 
     #[test]
-    fn overlay_native_json_merges_keys() {
+    fn overlay_native_crush_merges_keys() {
         let mut dst = serde_json::json!({ "a": 1 });
         let frag: serde_yaml::Value = serde_yaml::from_str("b: 2").unwrap();
-        overlay_native_json(&mut dst, Some(&frag), "test").unwrap();
+        overlay_native_crush(&mut dst, Some(&frag)).unwrap();
         assert_eq!(dst["a"], serde_json::json!(1));
         assert_eq!(dst["b"], serde_json::json!(2));
     }
@@ -1286,6 +1470,182 @@ mod tests {
         );
     }
 
+    // ── materialize: model providers (fix 1 pattern) ──────────────────────
+
+    #[test]
+    fn materialize_model_provider_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.model_providers.push(llmenv_config::ModelProvider {
+            id: "ollama".into(),
+            base_url: Some("http://localhost:11434/v1".into()),
+            api_type: Some("openai".into()),
+            models: vec![llmenv_config::ModelSource {
+                id: "llama3.1:8b".into(),
+                context_window: Some(128_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // Provider-level fields use catwalk's JSON tags (confirmed Task 5)
+        assert_eq!(
+            doc["providers"]["ollama"]["api_endpoint"],
+            serde_json::json!("http://localhost:11434/v1"),
+            "provider api_endpoint must be written"
+        );
+        assert_eq!(
+            doc["providers"]["ollama"]["type"],
+            serde_json::json!("openai"),
+            "provider type must be written"
+        );
+        // Model-level fields use catwalk's Model struct tags
+        assert_eq!(
+            doc["providers"]["ollama"]["models"][0]["id"],
+            serde_json::json!("llama3.1:8b"),
+            "model id must be written"
+        );
+        assert_eq!(
+            doc["providers"]["ollama"]["models"][0]["context_window"],
+            serde_json::json!(128_000),
+            "model context_window must be written"
+        );
+    }
+
+    #[test]
+    fn materialize_model_provider_disabled_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.model_providers.push(llmenv_config::ModelProvider {
+            id: "disabled-provider".into(),
+            disabled: true,
+            ..Default::default()
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("providers").is_none(),
+            "\"providers\" key must be absent when all providers are disabled"
+        );
+    }
+
+    #[test]
+    fn materialize_model_provider_empty_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        CrushAdapter
+            .materialize(&empty_manifest(), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("providers").is_none(),
+            "\"providers\" key must be absent when no model providers configured"
+        );
+    }
+
+    #[test]
+    fn materialize_model_source_optional_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.model_providers.push(llmenv_config::ModelProvider {
+            id: "test".into(),
+            name: Some("Test Provider".into()),
+            api_key: Some("sk-test".into()),
+            models: vec![llmenv_config::ModelSource {
+                id: "test-model".into(),
+                name: Some("Test Model".into()),
+                reasoning: true,
+                context_window: Some(128_000),
+                max_tokens: Some(16_384),
+                cost: Some(llmenv_config::ModelCost {
+                    input: 0.15,
+                    output: 0.60,
+                    cache_read: Some(0.075),
+                    cache_write: Some(0.15),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let model = &doc["providers"]["test"]["models"][0];
+
+        assert_eq!(model["name"], serde_json::json!("Test Model"));
+        assert_eq!(model["can_reason"], serde_json::json!(true));
+        assert_eq!(model["default_max_tokens"], serde_json::json!(16_384));
+        // Cost fields are flat on the model, not nested under "cost"
+        assert_eq!(model["cost_per_1m_in"], serde_json::json!(0.15));
+        assert_eq!(model["cost_per_1m_out"], serde_json::json!(0.60));
+        assert_eq!(model["cost_per_1m_in_cached"], serde_json::json!(0.075));
+        assert_eq!(model["cost_per_1m_out_cached"], serde_json::json!(0.15));
+    }
+
+    #[test]
+    fn materialize_default_model_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.default_models.insert(
+            "large".into(),
+            llmenv_config::ModelRef {
+                provider: "anthropic".into(),
+                model: "claude-opus-4-7".into(),
+            },
+        );
+        caps.default_models.insert(
+            "small".into(),
+            llmenv_config::ModelRef {
+                provider: "anthropic".into(),
+                model: "claude-haiku-4-5".into(),
+            },
+        );
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["models"]["large"]["provider"],
+            serde_json::json!("anthropic")
+        );
+        assert_eq!(
+            doc["models"]["large"]["model"],
+            serde_json::json!("claude-opus-4-7")
+        );
+        assert_eq!(
+            doc["models"]["small"]["provider"],
+            serde_json::json!("anthropic")
+        );
+        assert_eq!(
+            doc["models"]["small"]["model"],
+            serde_json::json!("claude-haiku-4-5")
+        );
+    }
+
+    #[test]
+    fn materialize_default_model_empty_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        CrushAdapter
+            .materialize(&empty_manifest(), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("models").is_none(),
+            "\"models\" key must be absent when no default models configured"
+        );
+    }
+
     // ── materialize: first-class skills (fix 2) ───────────────────────────────
 
     #[test]
@@ -1581,11 +1941,11 @@ mod tests {
     }
 
     #[test]
-    fn reject_modeled_keys_all_modeled_keys_rejected() {
+    fn reject_modeled_keys_in_native_crush_all_modeled_keys_rejected() {
         for key in CRUSH_MODELED_KEYS {
             let frag: serde_yaml::Value =
                 serde_yaml::from_str(&format!("{key}: anything")).unwrap();
-            let err = reject_modeled_native_keys(&frag, CRUSH_MODELED_KEYS, "crush").unwrap_err();
+            let err = reject_modeled_keys_in_native_crush(&frag).unwrap_err();
             assert!(
                 err.to_string().contains(key),
                 "error must name the offending key '{key}': {err}"
@@ -1744,30 +2104,85 @@ mod tests {
             let _ = render_permission_rule(&rule);
         }
 
-        // ── P2: overlay_native_json ──────────────────────────────────────────
+        // ── P2: overlay_native_crush ─────────────────────────────────────────
 
         #[test]
-        fn prop_overlay_native_json_idempotent(
+        fn prop_overlay_native_crush_idempotent(
             fragment in prop::collection::hash_map("[a-z]{1,8}", 0i64..1000, 0..5),
         ) {
             let frag_yaml: serde_yaml::Value = serde_yaml::to_value(&fragment).unwrap();
 
             let mut once = serde_json::json!({});
-            overlay_native_json(&mut once, Some(&frag_yaml), "test").unwrap();
+            overlay_native_crush(&mut once, Some(&frag_yaml)).unwrap();
 
             let mut twice = serde_json::json!({});
-            overlay_native_json(&mut twice, Some(&frag_yaml), "test").unwrap();
-            overlay_native_json(&mut twice, Some(&frag_yaml), "test").unwrap();
+            overlay_native_crush(&mut twice, Some(&frag_yaml)).unwrap();
+            overlay_native_crush(&mut twice, Some(&frag_yaml)).unwrap();
 
             prop_assert_eq!(once, twice, "applying the same fragment twice must equal applying it once");
         }
 
         #[test]
-        fn prop_overlay_native_json_no_panic(
+        fn prop_overlay_native_crush_no_panic(
             fragment in arb_yaml_value(3),
         ) {
             let mut dst = serde_json::json!({"existing": "value"});
-            let _ = overlay_native_json(&mut dst, Some(&fragment), "test");
+            let _ = overlay_native_crush(&mut dst, Some(&fragment));
+        }
+
+        // ── model_providers ──────────────────────────────────────────────────
+
+        #[test]
+        fn prop_render_model_providers_keys_match_non_disabled(
+            ids in prop::collection::vec("[a-z][a-z0-9-]{0,15}", 0..6),
+            disabled_flags in prop::collection::vec(proptest::bool::ANY, 0..6),
+        ) {
+            let providers: Vec<llmenv_config::ModelProvider> = ids
+                .iter()
+                .zip(disabled_flags.iter())
+                .map(|(id, &d)| llmenv_config::ModelProvider {
+                    id: id.clone(),
+                    disabled: d,
+                    ..Default::default()
+                })
+                .collect();
+            let expected: std::collections::BTreeSet<String> = providers
+                .iter()
+                .filter(|p| !p.disabled)
+                .map(|p| p.id.clone())
+                .collect();
+            let result = super::render_model_providers(&providers).unwrap();
+            let got: std::collections::BTreeSet<String> = result
+                .as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn prop_render_model_providers_no_panic(
+            id in ".*",
+            base_url in prop::option::of(".*"),
+            api_key in prop::option::of(".*"),
+        ) {
+            let provider = llmenv_config::ModelProvider {
+                id,
+                base_url,
+                api_key,
+                ..Default::default()
+            };
+            let _ = super::render_model_providers(std::slice::from_ref(&provider));
+        }
+
+        #[test]
+        fn prop_render_default_models_no_panic(
+            role in ".*",
+            provider in ".*",
+            model in ".*",
+        ) {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert(role, llmenv_config::ModelRef { provider, model });
+            let _ = super::render_default_models(&map);
         }
     }
 }

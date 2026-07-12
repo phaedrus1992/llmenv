@@ -46,6 +46,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let mut mcp = Vec::new();
     let mut lsp = Vec::new();
     let mut skills = Vec::new();
+    let mut model_providers = Vec::new();
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -62,6 +63,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         mcp.extend(caps.mcp.iter().cloned());
         lsp.extend(caps.lsp.iter().cloned());
         skills.extend(caps.skills.iter().cloned());
+        model_providers.extend(caps.model_providers.iter().cloned());
         allow.extend(caps.permissions.allow.iter().cloned());
         ask.extend(caps.permissions.ask.iter().cloned());
         deny.extend(caps.permissions.deny.iter().cloned());
@@ -74,12 +76,14 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     }
 
     let env = resolve_env(contributors)?;
+    let default_models = resolve_default_models(contributors)?;
 
     dedup(&mut hooks);
     dedup(&mut plugins);
     dedup(&mut mcp);
     dedup(&mut lsp);
     dedup(&mut skills);
+    dedup(&mut model_providers);
     dedup(&mut allow);
     dedup(&mut ask);
     dedup(&mut deny);
@@ -127,6 +131,9 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             memory,
             throttle,
             context_mode: None,
+            upgrade: None,
+            read_once: None,
+            slippage: None,
         })
     };
 
@@ -153,6 +160,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         native,
         features,
         host,
+        model_providers,
+        default_models,
     })
 }
 
@@ -276,6 +285,46 @@ fn resolve_env(contributors: &[CapabilityContributor]) -> anyhow::Result<BTreeMa
     Ok(env
         .into_iter()
         .map(|(k, (_, v))| (k, v.to_string()))
+        .collect())
+}
+
+/// Resolve `default_models` across contributors: highest precedence wins
+/// per role key; same-precedence disagreement on a role is a hard error.
+/// Matches `resolve_env`'s per-key scalar policy.
+fn resolve_default_models(
+    contributors: &[CapabilityContributor],
+) -> anyhow::Result<BTreeMap<String, crate::config::ModelRef>> {
+    let mut roles: BTreeMap<String, (&CapabilityContributor, &crate::config::ModelRef)> =
+        BTreeMap::new();
+
+    for c in contributors {
+        for (role, r#ref) in &c.capabilities.default_models {
+            match roles.get(role) {
+                None => {
+                    roles.insert(role.clone(), (c, r#ref));
+                }
+                Some((prev_c, prev_ref)) => {
+                    if c.precedence > prev_c.precedence {
+                        roles.insert(role.clone(), (c, r#ref));
+                    } else if c.precedence == prev_c.precedence && r#ref != *prev_ref {
+                        anyhow::bail!(
+                            "conflicting default_models role '{role}' at the same precedence: \
+                             '{}' sets {:?} but '{}' sets {:?} — no scope can break \
+                             the tie; resolve by giving one a higher-precedence scope",
+                            prev_c.name,
+                            prev_ref,
+                            c.name,
+                            r#ref,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(roles
+        .into_iter()
+        .map(|(k, (_, v))| (k, v.clone()))
         .collect())
 }
 
@@ -1400,10 +1449,15 @@ mod tests {
                         default_type: None,
                         default_importance: None,
                         type_importance: std::collections::BTreeMap::new(),
+                        retention: None,
+                        auto_prune: false,
                         consolidation: None,
                     }],
                     throttle: vec![],
                     context_mode: None,
+                    upgrade: None,
+                    read_once: None,
+                    slippage: None,
                 }),
                 ..Default::default()
             }
@@ -1431,10 +1485,15 @@ mod tests {
                         default_type: None,
                         default_importance: None,
                         type_importance: std::collections::BTreeMap::new(),
+                        retention: None,
+                        auto_prune: false,
                         consolidation: None,
                     }],
                     throttle: vec![],
                     context_mode: None,
+                    upgrade: None,
+                    read_once: None,
+                    slippage: None,
                 }),
                 ..Default::default()
             }
@@ -1446,5 +1505,151 @@ mod tests {
         .unwrap();
         let features = out.features.as_ref().expect("features must be present");
         assert_eq!(features.memory.len(), 1, "duplicate entry must be deduped");
+    }
+
+    fn model_provider(id: &str) -> crate::config::ModelProvider {
+        crate::config::ModelProvider {
+            id: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn model_providers_concat_across_contributors() {
+        let a = contributor(
+            "a",
+            0,
+            Capabilities {
+                model_providers: vec![model_provider("ollama")],
+                ..Default::default()
+            },
+        );
+        let b = contributor(
+            "b",
+            1,
+            Capabilities {
+                model_providers: vec![model_provider("vllm")],
+                ..Default::default()
+            },
+        );
+        let out = merge_capabilities(&[a, b]).unwrap();
+        assert_eq!(out.model_providers.len(), 2);
+    }
+
+    #[test]
+    fn model_providers_dedup_exact_duplicates() {
+        let a = contributor(
+            "a",
+            0,
+            Capabilities {
+                model_providers: vec![model_provider("ollama"), model_provider("ollama")],
+                ..Default::default()
+            },
+        );
+        let out = merge_capabilities(&[a]).unwrap();
+        assert_eq!(out.model_providers.len(), 1);
+    }
+
+    #[test]
+    fn default_models_higher_precedence_wins_per_role() {
+        let a = contributor(
+            "a",
+            0,
+            Capabilities {
+                default_models: std::collections::BTreeMap::from([(
+                    "large".to_string(),
+                    crate::config::ModelRef {
+                        provider: "anthropic".into(),
+                        model: "claude-opus-4-7".into(),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let b = contributor(
+            "b",
+            1,
+            Capabilities {
+                default_models: std::collections::BTreeMap::from([(
+                    "large".to_string(),
+                    crate::config::ModelRef {
+                        provider: "ollama".into(),
+                        model: "llama3.1:8b".into(),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let out = merge_capabilities(&[a, b]).unwrap();
+        assert_eq!(out.default_models["large"].provider, "ollama");
+    }
+
+    #[test]
+    fn default_models_independent_roles_both_survive() {
+        let a = contributor(
+            "a",
+            0,
+            Capabilities {
+                default_models: std::collections::BTreeMap::from([(
+                    "large".to_string(),
+                    crate::config::ModelRef {
+                        provider: "anthropic".into(),
+                        model: "claude-opus-4-7".into(),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let b = contributor(
+            "b",
+            1,
+            Capabilities {
+                default_models: std::collections::BTreeMap::from([(
+                    "small".to_string(),
+                    crate::config::ModelRef {
+                        provider: "ollama".into(),
+                        model: "llama3.1:8b".into(),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let out = merge_capabilities(&[a, b]).unwrap();
+        assert_eq!(out.default_models["large"].provider, "anthropic");
+        assert_eq!(out.default_models["small"].provider, "ollama");
+    }
+
+    #[test]
+    fn default_models_same_precedence_conflict_errors() {
+        let a = contributor(
+            "a",
+            0,
+            Capabilities {
+                default_models: std::collections::BTreeMap::from([(
+                    "large".to_string(),
+                    crate::config::ModelRef {
+                        provider: "anthropic".into(),
+                        model: "claude-opus-4-7".into(),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let b = contributor(
+            "b",
+            0,
+            Capabilities {
+                default_models: std::collections::BTreeMap::from([(
+                    "large".to_string(),
+                    crate::config::ModelRef {
+                        provider: "ollama".into(),
+                        model: "llama3.1:8b".into(),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let err = merge_capabilities(&[a, b]).unwrap_err();
+        assert!(err.to_string().contains("conflicting default_models"));
     }
 }

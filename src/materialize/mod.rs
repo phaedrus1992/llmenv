@@ -1,6 +1,5 @@
 pub mod cache;
 pub mod manifest;
-pub mod schema_gen;
 pub mod state;
 
 use std::collections::BTreeSet;
@@ -56,14 +55,14 @@ pub fn materialize_with_mode(
     shape: &str,
 ) -> anyhow::Result<Rendered> {
     let hash = cache::hash_manifest(m)?;
-    let folder = cache::folder_name(&mode, shape, &hash);
+    let folder = cache::folder_name(mode, shape, &hash);
     let dest = cache_root.join(&folder);
 
     match mode {
         // Loose/normal reuse one folder across content edits: write in place,
         // never swap (the folder is the agent's live home). Stale-file cleanup
         // is the orchestrator's job via the owned-set manifest.
-        HashingMode::Loose | HashingMode::Normal { .. } => {
+        HashingMode::Loose | HashingMode::Normal => {
             write_in_place(m, &dest)?;
             return Ok(Rendered { path: dest, hash });
         }
