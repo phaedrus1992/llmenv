@@ -32,6 +32,9 @@ pub async fn start_session(
     // not as a bare id. Parse it; fall back to the raw text for forward compat
     // with backend changes.
     let id = serde_json::from_str::<Value>(raw)
+        .inspect_err(|e| {
+            tracing::warn!("failed to parse ICM session id response: {e}");
+        })
         .ok()
         .and_then(|v| {
             v.get("session_id")
