@@ -32,8 +32,8 @@ fn main() {
         .map(|c| c.session_log_resolved())
         .unwrap_or_default();
 
-    let file_layer = resolved.file.then(|| {
-        let path = session_log_file_path(resolved.path.as_deref());
+    let file_layer = resolved.file.as_ref().is_some_and(|f| f.enabled).then(|| {
+        let path = session_log_file_path(resolved.file_path());
         FileLogLayer::new(FileSink::new(path)).with_filter(EnvFilter::from_default_env())
     });
 

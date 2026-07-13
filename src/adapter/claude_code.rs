@@ -75,9 +75,9 @@ const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("session_end", "SessionEnd"),
 ];
 
-/// `(engine-neutral event, native Claude event)` pairs registered only when
-/// `session_log.verbose` is set — per-hook prompt/tool-use capture (#382).
-const VERBOSE_HOOK_EVENTS: &[(&str, &str)] = &[
+/// `(engine-neutral event, native Claude event)` pairs registered when any
+/// session-log sink is enabled — per-hook prompt/tool-use capture (#382).
+const SESSION_LOG_HOOK_EVENTS: &[(&str, &str)] = &[
     ("user_prompt_submit", "UserPromptSubmit"),
     ("pre_tool_use", "PreToolUse"),
     ("post_tool_use", "PostToolUse"),
@@ -984,10 +984,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             }));
     }
 
-    // Verbose session-log hooks: per-prompt/tool-use capture, opt-in via
-    // `session_log.verbose` (#382).
-    if manifest.session_log.verbose {
-        for (neutral_event, native_event) in VERBOSE_HOOK_EVENTS {
+    // Session-log turn hooks: per-prompt/tool-use capture, registered when any
+    // sink is enabled (#382). The hook-run binary filters by per-sink level.
+    if manifest.session_log.any_sink_enabled() {
+        for (neutral_event, native_event) in SESSION_LOG_HOOK_EVENTS {
             hooks_by_event
                 .entry((*native_event).to_string())
                 .or_default()
@@ -2052,11 +2052,18 @@ mod tests {
 
     #[test]
     fn baseline_injects_sessionstart_sessionend_only() {
-        // #382: default SessionLog (transcript on, verbose off) — the baseline
-        // hook-run hooks are always present (SessionStart, SessionEnd), the
-        // verbose ones never appear. PreToolUse carries the unconditional
-        // read-once hook (#318) in addition to the config-guard hooks.
-        let manifest = crate::merge::MergedManifest::default();
+        // Default SessionLog has transcript enabled at info, so turn hooks
+        // register. Explicitly disable all sinks for the baseline check.
+        let manifest = crate::merge::MergedManifest {
+            session_log: crate::config::SessionLog {
+                transcript: Some(crate::config::TranscriptSinkConfig {
+                    enabled: false,
+                    level: crate::config::LogLevel::Info,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let settings = render_settings_for_test(&manifest);
 
         assert!(
@@ -2087,7 +2094,7 @@ mod tests {
                 hook_commands_for(&settings, event)
                     .iter()
                     .all(|c| !c.starts_with(HOOK_RUN_COMMAND)),
-                "{event} must not carry a hook-run command when verbose is off; got {:?}",
+                "{event} must not carry a hook-run command when all sinks are disabled; got {:?}",
                 hook_commands_for(&settings, event)
             );
         }
@@ -2132,10 +2139,13 @@ mod tests {
     }
 
     #[test]
-    fn verbose_injects_all_turn_hooks() {
+    fn session_log_injects_all_turn_hooks_when_sink_enabled() {
         let manifest = crate::merge::MergedManifest {
             session_log: crate::config::SessionLog {
-                verbose: true,
+                transcript: Some(crate::config::TranscriptSinkConfig {
+                    enabled: true,
+                    level: crate::config::LogLevel::Info,
+                }),
                 ..Default::default()
             },
             ..Default::default()

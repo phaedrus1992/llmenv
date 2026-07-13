@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Remove dead `diff` field from `ReadOnce` config schema — the
   planned phase-2 delta mode was never implemented (#725)
 
+### Changed
+- `session_log.verbose` replaced with per-sink `level` (info/debug/trace).
+  `session_log.file` and `session_log.transcript` are now mapping blocks with
+  `enabled` + `level` fields. Old boolean shape still parses. ([#740](https://github.com/phaedrus1992/llmenv/issues/740))
+
 ### Fixed
 - Early-exit hook-run before scope evaluation for events that
   produce no memory actions — saves ~3.5ms per PreToolUse
