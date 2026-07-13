@@ -77,13 +77,10 @@ stdio/http/sse with tag-intersection selection, and the `memory`/ICM backend
 desugars into a resolved MCP server. This surface is in good shape. Remaining
 gaps:
 
-1. **No remote auth headers.** The schema has no field for `--header` /
-   `Authorization` bearer tokens on http/sse servers. Any authenticated remote
-   MCP can't be expressed.
-2. **No stale-server pruning.** The adapter upserts llmenv servers by name but
+1. **No stale-server pruning.** The adapter upserts llmenv servers by name but
    tracks no owned-name set, so a server llmenv stops resolving lingers in
    `.claude.json`'s `mcpServers` until removed by hand. (Deferred follow-up.)
-3. **Managed MCP allow/deny lists** are unmodeled; out of scope for a personal
+2. **Managed MCP allow/deny lists** are unmodeled; out of scope for a personal
    project but relevant if llmenv ever targets shared/enterprise configs.
 
 The approval-policy settings below (`enableAllProjectMcpServers`,
