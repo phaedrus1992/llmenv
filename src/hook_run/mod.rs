@@ -332,8 +332,12 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     let null_payload = serde_json::Value::Null;
     let payload = stdin_json.as_ref().unwrap_or(&null_payload);
     let adapter = crate::adapter::adapter_for_engine(engine);
-    let adapter_name = adapter.name().to_string();
-    match run_inner(parsed, claude_session_id.as_deref(), payload, &adapter_name) {
+    match run_inner(
+        parsed,
+        claude_session_id.as_deref(),
+        payload,
+        adapter.name(),
+    ) {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
             // to stdout so the Claude Code engine blocks the tool call.
@@ -1636,7 +1640,7 @@ mod tests {
     fn web_fetch_store_args_supports_web_search() {
         let payload = json!({
             "tool_name": "WebSearch",
-            "tool_input": {"url": "https://example.com/search"},
+            "tool_input": {"query": "rust programming"},
             "tool_response": "Search results here",
         });
         let args = web_fetch_store_args(&payload).expect("should detect WebSearch");
@@ -1644,6 +1648,8 @@ mod tests {
         let content = args["content"].as_str().unwrap();
         assert!(content.contains("WebSearch"));
         assert!(content.contains("Search results"));
+        assert!(content.contains("Query: rust programming"));
+        assert!(content.contains("Tool: WebSearch"));
     }
 
     #[test]
