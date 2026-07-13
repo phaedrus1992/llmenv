@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Fixed
+- Strip ICM advisory lines ("Consider saving", "No memories found.")
+  from hook-run recall output — ~1KB/turn of noise in agent
+  conversations (#692)
 - Fix doctor false-flagging marketplaces pinned to annotated
   tags as broken — `git rev-parse <tag>` returns the tag
   object SHA, not the commit SHA; use `^{commit}` peeling for
