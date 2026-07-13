@@ -238,6 +238,25 @@ Before cutting the tag, confirm `CHANGELOG.md` is complete for the version
 you're shipping — every user-facing change since the last tag must be listed
 under its `[Unreleased]` section. This applies equally to pre-releases (see below).
 
+### 5. Close the milestone and move remaining issues
+
+After the release tag is pushed and CI completes:
+
+1. **Move any open issues** from the released milestone (e.g. `v3.3.0`) to the
+   next one (e.g. `v3.4.0`). Create the next milestone if it doesn't exist yet:
+   ```bash
+   gh api repos/:owner/:repo/milestones -f title="vX.Y" -f description="<theme>"
+   ```
+2. **Close the released milestone:**
+   ```bash
+   gh issue list --milestone "vX.Y.Z" --state open -L 100 --json number --jq '.[].number' \
+     | xargs -I{} gh issue edit {} --milestone "vX.Y+1"
+   gh api -X PATCH repos/:owner/:repo/milestones/<number> -f state=closed
+   ```
+
+This prevents the milestone view from showing completed releases as open with
+stale issue counts, and keeps planned work tracking against a live target.
+
 ## Pre-releases (RC, beta, alpha)
 
 Pre-releases use standard semantic versioning format: `v3.0.0-rc.1`, `v3.0.0-beta.1`, `v3.0.0-alpha.1`.
