@@ -314,7 +314,9 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
         eprintln!("llmenv hook-run: failed to read stdin: {e}");
     }
-    let stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf).ok();
+    let stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf)
+        .inspect_err(|e| tracing::warn!("hook-run: failed to parse stdin JSON: {e}"))
+        .ok();
     let hook_event_name = stdin_json
         .as_ref()
         .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))

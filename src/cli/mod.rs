@@ -1562,6 +1562,7 @@ fn run_config_context() {
         eprintln!("llmenv config-context: failed to read stdin: {e}");
     }
     let hook_event_name = serde_json::from_str::<serde_json::Value>(&stdin_buf)
+        .inspect_err(|e| tracing::warn!(error = %e, "failed to parse config-context stdin JSON; falling back to SessionStart"))
         .ok()
         .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "SessionStart".to_owned());
