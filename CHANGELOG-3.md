@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `.llmenv.yaml` are now logged as warnings before returning defaults (#753)
 - Add diagnostics for config-context stdin JSON parse failures — parse
   errors are now logged as warnings before falling back to SessionStart (#754)
+- Surface silent error swallowing in settings.json parse — parse failures
+  in `apply_seeded_settings` are now logged as warnings instead of silently
+  returning defaults (#762)
+- Surface silent error swallowing in version comparison — malformed version
+  strings in `compare_versions` are now logged as warnings instead of silently
+  returning `Equal` (#766)
+- Surface silent error swallowing in session log path resolution — path
+  resolution failures are now logged to stderr instead of silently falling
+  back to CWD before the tracing subscriber is initialized (#763)
+- Upgrade `debug_assert!` to `tracing::warn!` in scope matcher — walkdir
+  entries outside the workspace root are now surfaced as warnings instead
+  of only being checked in debug builds (#761)
 
 ## [3.3.0] - 2026-07-13
 
