@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Removed
+- Remove dead `diff` field from `ReadOnce` config schema — the
+  planned phase-2 delta mode was never implemented (#725)
+
 ### Fixed
 - Early-exit hook-run before scope evaluation for events that
   produce no memory actions — saves ~3.5ms per PreToolUse
@@ -39,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   host-level plugin collection, MCP server, and throttle
   resolution — introduce `non_project_tags()` to exclude
   project-scoped tags from host config generation (#696)
+
+- Fix read-once hook using PascalCase `filePath` when Claude Code
+  sends snake_case `file_path` — production read-once was a
+  complete no-op against any Read call (#724)
+- Move `prune_stale_sessions` from `SessionCache::load()` (runs
+  on every Read) to `save()` — eliminates redundant readdir +
+  stat per Read call (#726)
 
 ### Added
 - Add `llmenv upgrade` subcommand for self-upgrade from

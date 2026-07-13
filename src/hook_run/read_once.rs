@@ -51,10 +51,8 @@ impl SessionCache {
     }
 
     /// Load the session cache from disk. Returns an empty cache on any IO or
-    /// parse error (fail-soft). Also prunes stale session files on every load.
+    /// parse error (fail-soft).
     pub fn load(state_dir: &Path, session_id: &str, ttl_seconds: u64) -> Self {
-        Self::prune_stale_sessions(state_dir, 7);
-
         let path = session_cache_path(state_dir, session_id);
         let mut cache: Self = match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
@@ -75,8 +73,9 @@ impl SessionCache {
     }
 
     /// Save the session cache atomically to disk. Logs errors to stderr
-    /// (fail-soft).
+    /// (fail-soft). Opportunistically prunes stale session files before writing.
     pub fn save(&self, state_dir: &Path) -> anyhow::Result<()> {
+        Self::prune_stale_sessions(state_dir, 7);
         let ro_dir = read_once_state_dir(state_dir);
         std::fs::create_dir_all(&ro_dir)?;
 
@@ -96,7 +95,7 @@ impl SessionCache {
     }
 
     /// Scan `state_dir/read_once/` and delete `.json` files older than
-    /// `max_age_days`. Call on every load for opportunistic cleanup.
+    /// `max_age_days`. Runs opportunistically during save().
     pub fn prune_stale_sessions(state_dir: &Path, max_age_days: u64) {
         let max_age_secs = max_age_days * 86_400;
         let now = unix_now();
@@ -197,10 +196,14 @@ pub(crate) fn handle_pre_tool_use_inner(
         Some(obj) => obj,
         None => return String::new(),
     };
-    // Extract file path (PascalCase per Claude Code hook payload convention)
-    let file_path = match tool_input.get("filePath").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return String::new(),
+    // Extract file path — the real key is snake_case per Claude Code hook payload
+    // convention, but accept PascalCase fallback for synthetic test payloads.
+    let Some(file_path) = tool_input
+        .get("file_path")
+        .or_else(|| tool_input.get("filePath"))
+        .and_then(|v| v.as_str())
+    else {
+        return String::new();
     };
     // Partial read bypass: if offset or limit are present, never cache
     if tool_input.contains_key("offset") || tool_input.contains_key("limit") {
@@ -235,14 +238,11 @@ pub(crate) fn handle_pre_tool_use_inner(
         if entry.mtime_unix == mtime
             && now.saturating_sub(entry.first_read_at) < config.ttl_seconds as i64
         {
-            // Cache hit within TTL — warn or deny
+            // Cache hit within TTL — warn or deny.
+            // Don't save on hit — hits/tokens_saved are advisory stats that
+            // get accurately written on the next miss-path save.
             entry.hits = entry.hits.saturating_add(1);
             entry.tokens_saved = entry.tokens_saved.saturating_add(tokens_saved);
-
-            // Save updated cache before returning
-            if let Err(e) = cache.save(state_dir) {
-                eprintln!("llmenv: failed to save read-once cache: {e}");
-            }
 
             let msg = format!(
                 "{file_path} was already read this session (~{tokens_saved} tokens saved from re-read). \
@@ -292,7 +292,6 @@ mod tests {
             enabled: true,
             mode: ReadOnceMode::Warn,
             ttl_seconds: 1200,
-            diff: false,
         }
     }
 
@@ -301,16 +300,16 @@ mod tests {
             enabled: true,
             mode: ReadOnceMode::Deny,
             ttl_seconds: 1200,
-            diff: false,
         }
     }
 
     /// Build a synthetic PreToolUse stdin payload for a Read tool call.
+    /// Uses snake_case keys matching what Claude Code actually sends.
     fn read_payload(path: &str) -> serde_json::Value {
         serde_json::json!({
             "tool_name": "Read",
             "tool_input": {
-                "filePath": path,
+                "file_path": path,
             },
         })
     }
@@ -320,7 +319,7 @@ mod tests {
         serde_json::json!({
             "tool_name": "Read",
             "tool_input": {
-                "filePath": path,
+                "file_path": path,
                 "offset": offset,
                 "limit": limit,
             },
@@ -331,7 +330,7 @@ mod tests {
         serde_json::json!({
             "tool_name": "Edit",
             "tool_input": {
-                "filePath": "/some/file.rs",
+                "file_path": "/some/file.rs",
                 "oldString": "foo",
                 "newString": "bar",
             },
@@ -497,7 +496,6 @@ mod tests {
             enabled: true,
             mode: ReadOnceMode::Warn,
             ttl_seconds: 0, // Zero TTL means immediate expiry
-            diff: false,
         };
 
         // First read
