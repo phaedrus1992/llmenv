@@ -225,7 +225,7 @@ fn fetch_json_blocking(url: &str, token: &str) -> anyhow::Result<UmansUsageBody>
                 .bytes()
                 .await
                 .inspect_err(
-                    |e| tracing::warn!(error = %e, "failed to read throttle error response body"),
+                    |e| tracing::warn!(error = %e, url = %url, "failed to read throttle error response body"),
                 )
                 .unwrap_or_default();
             let preview: String = String::from_utf8_lossy(&body).chars().take(512).collect();
