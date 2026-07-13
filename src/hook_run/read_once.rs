@@ -228,7 +228,15 @@ pub(crate) fn handle_pre_tool_use_inner(
         Some(id) => id,
         None => return String::new(),
     };
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical = std::fs::canonicalize(path)
+        .inspect_err(|e| {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "cannot canonicalize read-once cache path, using raw path"
+            )
+        })
+        .unwrap_or_else(|_| path.to_path_buf());
     let path_key = canonical.to_string_lossy().to_string();
     // Load session cache
     let mut cache = SessionCache::load(state_dir, session_id, config.ttl_seconds);
