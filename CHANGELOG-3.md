@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fix transcript session id parsing — ICM returns the session id as a JSON
   object, not a bare ULID, so every transcript record call was passing a JSON
   blob instead of a real id and records went nowhere (#755)
+- Add diagnostics for walkdir entry errors in scope matcher — I/O errors
+  during directory traversal are now logged as warnings instead of silently
+  skipped (#752)
+- Add diagnostics for project marker file read errors — read failures on
+  `.llmenv.yaml` are now logged as warnings before returning defaults (#753)
+- Add diagnostics for config-context stdin JSON parse failures — parse
+  errors are now logged as warnings before falling back to SessionStart (#754)
 
 ## [3.3.0] - 2026-07-13
 
