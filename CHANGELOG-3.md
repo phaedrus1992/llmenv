@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add default model selection
   (`capabilities.default_models`) for role-keyed model
   resolution across providers (#530)
+- Add content-based scope matching with file glob
+  patterns (`scope.content`) — auto-activates tags when
+  matching files exist in the working directory, without
+  requiring `.llmenv.yaml` markers (#278)
 
 ## [3.2.0] - 2026-07-11
 
