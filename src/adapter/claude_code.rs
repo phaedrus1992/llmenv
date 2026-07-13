@@ -572,7 +572,12 @@ fn merge_mcp_into_claude_json(
     // Write companion file with current owned server names.
     let current_names: Vec<String> = llmenv_servers.keys().cloned().collect();
     if current_names.is_empty() {
-        let _ = std::fs::remove_file(&owned_path);
+        if let Err(e) = std::fs::remove_file(&owned_path) {
+            tracing::warn!(
+                "failed to remove stale owned MCP server tracking file {}: {e}",
+                owned_path.display(),
+            );
+        }
     } else {
         crate::paths::write_owner_only_atomic(
             &owned_path,
@@ -588,22 +593,25 @@ fn merge_mcp_into_claude_json(
 /// Returns an empty set when the file is absent or corrupt — a bad companion
 /// file must never prevent `.claude.json` from being written.
 fn read_owned_servers(path: &Path) -> std::collections::BTreeSet<String> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => match serde_json::from_str::<Vec<String>>(&s) {
-            Ok(names) => names.into_iter().collect(),
-            Err(e) => {
-                tracing::warn!(
-                    "failed to parse owned MCP server tracking file {} \
-                     (treated as empty): {e}",
-                    path.display(),
-                );
-                std::collections::BTreeSet::new()
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::collections::BTreeSet::new(),
+    let s = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return std::collections::BTreeSet::new();
+        }
         Err(e) => {
             tracing::warn!(
                 "failed to read owned MCP server tracking file {} \
+                 (treated as empty): {e}",
+                path.display(),
+            );
+            return std::collections::BTreeSet::new();
+        }
+    };
+    match serde_json::from_str::<Vec<String>>(&s) {
+        Ok(names) => names.into_iter().collect(),
+        Err(e) => {
+            tracing::warn!(
+                "failed to parse owned MCP server tracking file {} \
                  (treated as empty): {e}",
                 path.display(),
             );
@@ -1663,8 +1671,8 @@ mod tests {
         CONFIG_GUARD_COMMAND, ClaudeCodeAdapter, HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS,
         STALE_CHECK_COMMAND, classify_claude_path, generate_installed_plugins_json,
         generate_settings_json, is_hook_json, merge_mcp_into_claude_json, overlay_native,
-        reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, seed_install_method, strip_json_nulls,
+        read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
+        render_marketplace_source, render_permission_rule, seed_install_method, strip_json_nulls,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -2825,6 +2833,73 @@ mod tests {
         assert_eq!(owned, vec!["icm"]);
     }
 
+    #[test]
+    fn merge_mcp_corrupt_companion_file_treated_as_empty() {
+        // #739: a corrupt companion file (not valid JSON) is treated as empty,
+        // so no pruning occurs — foreign servers survive, and the companion file
+        // is overwritten with the current owned set.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({
+                "mcpServers": {
+                    "user-added": { "command": "user-bin" }
+                }
+            }),
+        );
+        let owned_path = tmp.path().join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+        std::fs::write(&owned_path, b"not valid json").unwrap();
+
+        merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("icm", "icm-bin")], None).unwrap();
+
+        // Foreign server preserved despite corrupt companion file.
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["user-added"]["command"], "user-bin");
+        // Companion file overwritten with the current owned servers.
+        let owned: Vec<String> =
+            serde_json::from_slice(&std::fs::read(&owned_path).unwrap()).unwrap();
+        assert_eq!(owned, vec!["icm"]);
+    }
+
+    #[test]
+    fn merge_mcp_empty_servers_removes_companion_file() {
+        // #739: when no llmenv MCP servers are resolved, the companion file
+        // should be removed (not written with []).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({
+                "mcpServers": {
+                    "user-added": { "command": "user-bin" },
+                    "stale-srv": { "command": "stale-bin" }
+                }
+            }),
+        );
+        let owned_path = tmp.path().join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+        std::fs::write(&owned_path, br#"["stale-srv"]"#).unwrap();
+
+        // No llmenv servers → stale-srv is pruned from .claude.json and companion
+        // file is removed.
+        merge_mcp_into_claude_json(tmp.path(), &[], None).unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            doc["mcpServers"].get("stale-srv").is_none(),
+            "stale server pruned"
+        );
+        // Foreign server preserved.
+        assert_eq!(doc["mcpServers"]["user-added"]["command"], "user-bin");
+        // Companion file removed.
+        assert!(
+            !owned_path.exists(),
+            "companion file removed when no owned servers"
+        );
+    }
+
     // #311: hardcoded config-path rejection.
 
     #[test]
@@ -3334,6 +3409,65 @@ mod tests {
                 "calling with the same plugin set twice must not duplicate entries or change output"
             );
         }
+    }
+
+    proptest! {
+        // #739 roundtrip: writing a set of owned MCP server names then reading
+        // back via read_owned_servers must produce an identical set.
+        #[test]
+        fn prop_read_owned_servers_roundtrip(
+            names in prop::collection::btree_set(".{1,40}", 0..10),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+
+            // Write the set as a JSON array (same serialization pattern used by
+            // merge_mcp_into_claude_json).
+            let json: Vec<&str> = names.iter().map(String::as_str).collect();
+            std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+
+            let got = read_owned_servers(&path);
+            prop_assert_eq!(got, names, "read_owned_servers must roundtrip the written set");
+        }
+
+        // No panic on arbitrary byte content: any input to read_owned_servers
+        // must return a BTreeSet (possibly empty) without panicking.
+        #[test]
+        fn prop_read_owned_servers_no_panic(
+            bytes in prop::collection::vec(any::<u8>(), 0..=512),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+            std::fs::write(&path, &bytes).unwrap();
+            let _ = read_owned_servers(&path);
+            // Any panic would fail the test — the function must handle all inputs.
+        }
+    }
+
+    #[test]
+    fn read_owned_servers_absent_file_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist.json");
+        let got = read_owned_servers(&path);
+        assert!(got.is_empty(), "absent file must return empty set");
+    }
+
+    #[test]
+    fn read_owned_servers_malformed_json_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+        std::fs::write(&path, b"not valid json at all").unwrap();
+        let got = read_owned_servers(&path);
+        assert!(got.is_empty(), "malformed JSON must return empty set");
+    }
+
+    #[test]
+    fn read_owned_servers_empty_array_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+        std::fs::write(&path, b"[]").unwrap();
+        let got = read_owned_servers(&path);
+        assert!(got.is_empty(), "empty JSON array must return empty set");
     }
 
     #[test]
