@@ -125,6 +125,20 @@ pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     ]
 }
 
+/// Resolve an adapter by its engine ID (the underscore form from `--engine` flags,
+/// e.g. `"claude_code"` or `"crush"`). Falls back to env-sniffing
+/// [`active_adapter`] when no registered adapter matches the given engine ID.
+///
+/// Used by hook-run to honour the caller's `--engine` flag instead of
+/// re-sniffing environment variables for adapter detection.
+#[must_use]
+pub fn adapter_for_engine(engine: &str) -> Box<dyn AgentAdapter> {
+    registered_adapters()
+        .into_iter()
+        .find(|a| engine_id(a.as_ref()) == engine)
+        .unwrap_or_else(active_adapter)
+}
+
 /// Normalise an adapter's identity to the underscore form used by `--engine`
 /// flags, `native.<engine>` config keys, and `disabled_engines` entries.
 /// [`AgentAdapter::name`] is the hyphenated cache-dir form (`claude-code`);
