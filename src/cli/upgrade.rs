@@ -182,7 +182,12 @@ fn install_binary(data: &[u8]) -> Result<()> {
     })();
 
     if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_file(&temp).inspect_err(|e| {
+            tracing::warn!(
+                "upgrade: failed to remove temp file {}: {e}",
+                temp.display()
+            )
+        });
         // Restore backup before propagating the error
         let restore_err = restore_backup(&current_exe, &backup);
         if let Err(re) = restore_err {
@@ -194,16 +199,32 @@ fn install_binary(data: &[u8]) -> Result<()> {
     // Verify the new binary works
     match Command::new(&current_exe).arg("--version").output() {
         Ok(output) if output.status.success() => {
-            let _ = std::fs::remove_file(&backup);
+            let _ = std::fs::remove_file(&backup).inspect_err(|e| {
+                tracing::warn!("upgrade: failed to remove backup {}: {e}", backup.display())
+            });
             Ok(())
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let _ = restore_backup(&current_exe, &backup);
+            let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
+                tracing::warn!("upgrade: failed to restore backup after verification failure: {e}")
+            });
+            if let Err(re) = restore_err {
+                anyhow::bail!(
+                    "new binary failed verification (stderr: {stderr}); AND failed to restore backup: {re}"
+                );
+            }
             anyhow::bail!("new binary failed verification (stderr: {stderr}); restored original");
         }
         Err(e) => {
-            let _ = restore_backup(&current_exe, &backup);
+            let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
+                tracing::warn!("upgrade: failed to restore backup after verification error: {e}")
+            });
+            if let Err(re) = restore_err {
+                anyhow::bail!(
+                    "could not verify new binary: {e}; AND failed to restore backup: {re}"
+                );
+            }
             anyhow::bail!("could not verify new binary: {e}; restored original");
         }
     }
@@ -389,13 +410,7 @@ mod tests {
             let b = format!("{b_major}.{b_minor}.{b_patch}");
             let forward = compare_versions(&a, &b);
             let backward = compare_versions(&b, &a);
-            if forward == std::cmp::Ordering::Greater {
-                prop_assert_eq!(backward, std::cmp::Ordering::Less);
-            } else if forward == std::cmp::Ordering::Less {
-                prop_assert_eq!(backward, std::cmp::Ordering::Greater);
-            } else {
-                prop_assert_eq!(backward, std::cmp::Ordering::Equal);
-            }
+            prop_assert_eq!(backward, forward.reverse());
         }
 
         #[test]
