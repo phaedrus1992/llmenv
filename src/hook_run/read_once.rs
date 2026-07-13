@@ -198,12 +198,12 @@ pub(crate) fn handle_pre_tool_use_inner(
     };
     // Extract file path — the real key is snake_case per Claude Code hook payload
     // convention, but accept PascalCase fallback for synthetic test payloads.
-    let file_path = match tool_input.get("file_path").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => match tool_input.get("filePath").and_then(|v| v.as_str()) {
-            Some(p) => p,
-            None => return String::new(),
-        },
+    let Some(file_path) = tool_input
+        .get("file_path")
+        .or_else(|| tool_input.get("filePath"))
+        .and_then(|v| v.as_str())
+    else {
+        return String::new();
     };
     // Partial read bypass: if offset or limit are present, never cache
     if tool_input.contains_key("offset") || tool_input.contains_key("limit") {
