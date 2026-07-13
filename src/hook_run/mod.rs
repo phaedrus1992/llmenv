@@ -399,7 +399,10 @@ static CONFIG_CACHE: Mutex<Option<CachedConfig>> = Mutex::new(None);
 /// when the file hasn't changed. Falls back to a fresh load on stat errors
 /// or cache-miss.
 fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
-    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .inspect_err(|e| tracing::warn!("failed to stat config file {}: {e}", path.display()))
+        .ok();
     if let Some(mtime) = mtime
         && let Ok(lock) = CONFIG_CACHE.lock()
         && let Some(cached) = lock.as_ref()
@@ -521,6 +524,9 @@ fn run_inner(
         let state_dir = crate::paths::state_dir()?;
         let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
         let is_unchanged = std::fs::read_to_string(&dedup_path)
+            .inspect_err(|e| {
+                tracing::warn!("failed to read dedup cache {}: {e}", dedup_path.display())
+            })
             .ok()
             .is_some_and(|prev| prev == chunk);
         if is_unchanged {

@@ -471,7 +471,8 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
 
     let dir_entries = match std::fs::read_dir(&ro_dir) {
         Ok(e) => e,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("  warning: failed to read ReadOnce cache directory: {e}");
             println!("  ReadOnce: (none)");
             return Ok(());
         }
@@ -484,14 +485,22 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
         }
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => {
+            Err(e) => {
+                eprintln!(
+                    "  warning: failed to read ReadOnce cache file {}: {e}",
+                    path.display()
+                );
                 skipped += 1;
                 continue;
             }
         };
         let cache: SessionCache = match serde_json::from_str(&content) {
             Ok(c) => c,
-            Err(_) => {
+            Err(e) => {
+                eprintln!(
+                    "  warning: failed to parse ReadOnce cache file {}: {e}",
+                    path.display()
+                );
                 skipped += 1;
                 continue;
             }
