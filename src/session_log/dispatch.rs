@@ -27,7 +27,18 @@ pub async fn start_session(
     let text = client
         .call_tool(START_TOOL, start_session_args(agent, project, metadata))
         .await?;
-    let id = text.trim().to_string();
+    let raw = text.trim();
+    // ICM returns the session id as a JSON object like `{"session_id":"01KXE..."}`,
+    // not as a bare id. Parse it; fall back to the raw text for forward compat
+    // with backend changes.
+    let id = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| {
+            v.get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| raw.to_string());
     if id.is_empty() {
         anyhow::bail!("{START_TOOL} returned an empty session id");
     }
@@ -83,6 +94,28 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(id, "sess-42");
+    }
+
+    #[tokio::test]
+    async fn start_session_extracts_session_id_from_json_object() {
+        // ICM returns `{"session_id":"..."}`, not a bare ULID.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text_result(
+                r#"{"session_id":"01KXE1FNZCF1A0EAHK5X207RBW"}"#,
+            )))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let id = start_session(
+            &client,
+            "claude_code",
+            Some("llmenv"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(id, "01KXE1FNZCF1A0EAHK5X207RBW");
     }
 
     #[tokio::test]
