@@ -859,14 +859,32 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             None
         };
 
-        let handler = json!({
-            "command": resolved_command,
-            "tool": hook.handler.tool,
-            "type": match hook.handler.kind {
-                crate::config::HookHandlerKind::Command => "command",
-                crate::config::HookHandlerKind::McpTool => "mcp_tool",
-            },
-        });
+        // Build handler as a Map so null-valued keys (e.g. "tool": null for
+        // command-type hooks) are omitted rather than serialized. The json!
+        // macro would produce `"tool": null` for None, which later differs
+        // from absent in JSON PartialEq — causing duplicate hooks across
+        // renders when reconcile_settings merges fresh with existing disk
+        // state that happens to lack the null key.
+        let handler = {
+            let mut m = serde_json::Map::new();
+            if let Some(ref cmd) = resolved_command {
+                m.insert("command".into(), serde_json::Value::String(cmd.clone()));
+            }
+            if let Some(ref tool) = hook.handler.tool {
+                m.insert("tool".into(), serde_json::Value::String(tool.clone()));
+            }
+            m.insert(
+                "type".into(),
+                serde_json::Value::String(
+                    match hook.handler.kind {
+                        crate::config::HookHandlerKind::Command => "command",
+                        crate::config::HookHandlerKind::McpTool => "mcp_tool",
+                    }
+                    .into(),
+                ),
+            );
+            serde_json::Value::Object(m)
+        };
 
         let mut hook_entry = serde_json::Map::new();
         if let Some(matcher) = &hook.matcher {
@@ -1366,7 +1384,22 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
                 // intentionally discarded after the mutation completes.
                 merged_obj
                     .get_mut(key)
-                    .map(|v| merge_json(v, fresh_val.clone()))
+                    .map(|v| {
+                        merge_json(v, fresh_val.clone());
+                        // Null-valued keys (e.g. "tool": null) differ from
+                        // absent keys in JSON PartialEq, so hook entries that
+                        // differ only by null vs absent don't dedup inside
+                        // merge_json. Strip nulls then re-dedup so entries
+                        // from different render generations converge.
+                        strip_json_nulls(v);
+                        if let Some(obj) = v.as_object_mut() {
+                            for entries in obj.values_mut() {
+                                if let Some(arr) = entries.as_array_mut() {
+                                    dedup(arr);
+                                }
+                            }
+                        }
+                    })
                     .or_else(|| {
                         merged_obj.insert(key.to_string(), fresh_val.clone());
                         Some(())
@@ -1395,6 +1428,45 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
     }
 
     Ok(merged)
+}
+
+/// Recursively remove null-valued keys from every JSON object in `value`.
+///
+/// This makes objects that differ only by null vs absent key compare equal
+/// under [`PartialEq`], which [`merge_json`]'s array dedup uses. Needed
+/// because `generate_settings_json` conditionally omits keys when their
+/// value is `None` (e.g. `"tool"` for command-type hooks), but older
+/// on-disk copies may have `"tool": null` from a previous serialization
+/// path — the two compare unequal and pile up as duplicates across renders.
+fn strip_json_nulls(value: &mut serde_json::Value) {
+    strip_json_nulls_depth(value, 0);
+}
+
+/// Depth-limited implementation of [`strip_json_nulls`].
+///
+/// The depth guard prevents stack overflow on pathological JSON nesting
+/// (config depth is normally <10 levels). The serde_json parser has its
+/// own recursion limit, but that guards _parsing_ — the value tree can
+/// be arbitrarily nested after deserialization.
+fn strip_json_nulls_depth(value: &mut serde_json::Value, depth: usize) {
+    if depth > 64 {
+        tracing::warn!("strip_json_nulls: max depth exceeded, bailing");
+        return;
+    }
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                strip_json_nulls_depth(item, depth + 1);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_json_nulls_depth(v, depth + 1);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Render one marketplace's `extraKnownMarketplaces` entry body, or `None` if it
@@ -1524,7 +1596,7 @@ mod tests {
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        seed_install_method,
+        seed_install_method, strip_json_nulls,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -2235,6 +2307,170 @@ mod tests {
         let out = reconcile_settings(&path, llmenv_hook.clone()).unwrap();
         let entries = out["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "identical hook deduped, not doubled");
+    }
+
+    #[test]
+    fn reconcile_hooks_dedups_cross_render_null_vs_absent_tool() {
+        // #699: A hook entry on disk with `"tool": null` (from an older render
+        // that serialized the Option as JSON null) must dedup against a fresh
+        // hook that omits `"tool"` entirely (the current
+        // generate_settings_json). The difference between null and absent
+        // makes JSON PartialEq consider them unequal — strip_json_nulls + re-
+        // dedup after merge_json must handle this.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        // Existing on disk: has "tool": null in the inner handler.
+        write_json(
+            &path,
+            &serde_json::json!({
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "hooks": [{ "command": "lint.sh", "tool": null, "type": "command" }],
+                            "matcher": "Edit|Write"
+                        }
+                    ]
+                }
+            }),
+        );
+        // Fresh render: same hook, but "tool" omitted entirely (not null).
+        let fresh = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "hooks": [{ "command": "lint.sh", "type": "command" }],
+                        "matcher": "Edit|Write"
+                    }
+                ]
+            }
+        });
+        let out = reconcile_settings(&path, fresh).unwrap();
+        let entries = out["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "null-vs-absent tool deduped, not doubled");
+    }
+
+    #[test]
+    fn reconcile_hooks_dedups_with_native_overlay_nulls() {
+        // #699: Same as the null-vs-absent test but also verifies that
+        // nested null keys in the inner handler and outer entry are all
+        // stripped — the dedup must handle objects with null at any depth.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        write_json(
+            &path,
+            &serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [{ "command": "check.sh", "tool": null, "type": "command" }],
+                            "tool": null
+                        }
+                    ]
+                }
+            }),
+        );
+        let fresh = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [{ "command": "check.sh", "type": "command" }]
+                    }
+                ]
+            }
+        });
+        let out = reconcile_settings(&path, fresh).unwrap();
+        let entries = out["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "nulls at any depth stripped before dedup");
+    }
+
+    #[test]
+    fn strip_json_nulls_removes_null_vals() {
+        let mut v = serde_json::json!({
+            "a": null,
+            "b": 1,
+            "c": { "d": null, "e": [{"f": null, "g": 2}] }
+        });
+        strip_json_nulls(&mut v);
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "b": 1,
+                "c": { "e": [{ "g": 2 }] }
+            })
+        );
+    }
+
+    fn contains_no_nulls(v: &serde_json::Value) -> bool {
+        match v {
+            // Only check for null-valued *keys in objects* — that's what
+            // strip_json_nulls removes. Bare null or null array elements
+            // are not touched, so don't flag them.
+            serde_json::Value::Array(items) => items.iter().all(contains_no_nulls),
+            serde_json::Value::Object(map) => {
+                !map.values().any(|v| v.is_null()) && map.values().all(contains_no_nulls)
+            }
+            _ => true,
+        }
+    }
+
+    fn count_non_null_leaves(v: &serde_json::Value) -> usize {
+        match v {
+            serde_json::Value::Null => 0,
+            serde_json::Value::Array(items) => items.iter().map(count_non_null_leaves).sum(),
+            serde_json::Value::Object(map) => map.values().map(count_non_null_leaves).sum(),
+            _ => 1,
+        }
+    }
+
+    fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i32>().prop_map(serde_json::Value::from),
+            "[a-z]{0,4}".prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(3, 16, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                prop::collection::vec(("[a-z]{1,4}", inner), 0..4)
+                    .prop_map(|kvs| serde_json::Value::Object(kvs.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        // strip_json_nulls never panics on arbitrary JSON input.
+        #[test]
+        fn strip_json_nulls_total(mut v in arb_json()) {
+            strip_json_nulls(&mut v);
+        }
+
+        // Idempotency: applying strip_json_nulls twice equals applying it once.
+        #[test]
+        fn strip_json_nulls_idempotent(v in arb_json()) {
+            let mut once = v.clone();
+            strip_json_nulls(&mut once);
+            let mut twice = once.clone();
+            strip_json_nulls(&mut twice);
+            prop_assert_eq!(once, twice);
+        }
+
+        // Completeness: after strip_json_nulls, no Value::Null exists at any depth.
+        #[test]
+        fn strip_json_nulls_no_nulls_remain(mut v in arb_json()) {
+            strip_json_nulls(&mut v);
+            prop_assert!(contains_no_nulls(&v), "null values remain after strip_json_nulls");
+        }
+
+        // Non-null preservation: non-null leaf values are structurally preserved.
+        #[test]
+        fn strip_json_nulls_preserves_non_null(mut v in arb_json()) {
+            let expected = count_non_null_leaves(&v);
+            strip_json_nulls(&mut v);
+            let actual = count_non_null_leaves(&v);
+            prop_assert_eq!(expected, actual,
+                "strip_json_nulls should not remove non-null values");
+        }
     }
 
     #[test]
