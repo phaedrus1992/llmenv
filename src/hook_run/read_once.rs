@@ -215,10 +215,14 @@ pub(crate) fn handle_pre_tool_use_inner(
     let path = Path::new(file_path);
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
-        Err(_) => return String::new(), // Missing file → pass through
+        Err(e) => {
+            tracing::warn!("read_once stat failed for {}: {e}", path.display());
+            return String::new();
+        }
     };
     let mtime = metadata
         .modified()
+        .inspect_err(|e| tracing::warn!("read_once mtime failed for {}: {e}", path.display()))
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
