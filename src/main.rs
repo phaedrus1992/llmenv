@@ -14,9 +14,21 @@ fn session_log_file_path(configured: Option<&str>) -> PathBuf {
 
 fn main() {
     // Resolved session-logging config (absent block → transcript on, file off).
-    let resolved = llmenv_paths::config_path()
+    // Log config errors so they're visible even though we fall back to defaults
+    // (tracing subscriber isn't initialized yet, so use eprintln!).
+    let config_path = llmenv_paths::config_path();
+    if let Err(ref e) = config_path {
+        eprintln!("llmenv: failed to resolve config path: {e:#}");
+    }
+    let resolved = config_path
         .ok()
-        .and_then(|p| llmenv_config::Config::load(&p).ok())
+        .and_then(|p| {
+            llmenv_config::Config::load(&p)
+                .inspect_err(|e| {
+                    eprintln!("llmenv: failed to load config from {}: {e:#}", p.display())
+                })
+                .ok()
+        })
         .map(|c| c.session_log_resolved())
         .unwrap_or_default();
 
