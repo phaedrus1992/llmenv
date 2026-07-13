@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+- Surface silent error swallowing in auth, throttle, hook-run, and
+  reconcile_settings — read/parse failures are now logged as warnings instead
+  of being silently discarded (#749)
+- Fix transcript session id parsing — ICM returns the session id as a JSON
+  object, not a bare ULID, so every transcript record call was passing a JSON
+  blob instead of a real id and records went nowhere (#755)
+
 ## [3.3.0] - 2026-07-13
 
 ### Deprecated
