@@ -174,7 +174,9 @@ pub fn handle_pre_tool_use(
     session_id: Option<&str>,
     config: &ReadOnceConfig,
 ) -> String {
-    let Ok(state_dir) = crate::paths::state_dir() else {
+    let Ok(state_dir) = crate::paths::state_dir().inspect_err(|e| {
+        tracing::warn!("failed to resolve state_dir for read-once pre-tool-use: {e}")
+    }) else {
         return String::new();
     };
     handle_pre_tool_use_inner(stdin_payload, session_id, config, &state_dir)
