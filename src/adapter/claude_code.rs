@@ -44,6 +44,24 @@ const THROTTLE_COMMAND: &str = "llmenv throttle";
 /// file/transcript sinks (#382). Always fail-soft (exit 0).
 const HOOK_RUN_COMMAND: &str = "llmenv hook-run --engine claude_code";
 
+/// #317: fragment appended to CLAUDE.md when slippage control is enabled with
+/// compact_survival. Guides agent behavior after context compaction.
+const COMPACT_SURVIVAL_FRAGMENT: &str = concat!(
+    "# Compaction Survival Guide\n",
+    "\n",
+    "After context compaction (memory summarization), rules and instructions\n",
+    "from earlier may be lost. Before acting on any task:\n",
+    "\n",
+    "1. Re-read the generated CLAUDE.md and settings files to restore rules.\n",
+    "2. Verify your understanding of the current state — don't assume prior\n",
+    "   context survived compaction.\n",
+    "3. State your key assumptions before executing commands.\n",
+    "4. Use the available tools to re-gather context if needed.\n",
+    "\n",
+    "Slippage control layers (read-before-edit, self-critique) remain active\n",
+    "across compactions to catch gaps your restored context might miss.\n",
+);
+
 /// `(engine-neutral event, native Claude event)` pairs for the always-on
 /// baseline hooks. Registered unconditionally — `hook-run` itself no-ops
 /// cheaply when neither memory nor session logging is configured — so this
@@ -173,7 +191,22 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         std::fs::create_dir_all(out)?;
         reject_hardcoded_config_path(&manifest.agents_md, "CLAUDE.md")?;
-        crate::paths::write_owner_only(&out.join("CLAUDE.md"), manifest.agents_md.as_bytes())?;
+
+        // #317: build CLAUDE.md content, appending compact_survival fragment
+        // when slippage is enabled with compact_survival on.
+        let mut claude_md_content = manifest.agents_md.clone();
+        if let Some(s) = manifest
+            .capabilities
+            .features
+            .as_ref()
+            .and_then(|f| f.slippage.as_ref())
+            && s.enabled
+            && s.compact_survival
+        {
+            claude_md_content.push_str("\n\n<!-- from slippage control: compact_survival -->\n");
+            claude_md_content.push_str(COMPACT_SURVIVAL_FRAGMENT);
+        }
+        crate::paths::write_owner_only(&out.join("CLAUDE.md"), claude_md_content.as_bytes())?;
         owned.push(PathBuf::from("CLAUDE.md"));
 
         // Claude Code has a native rules-directory convention, so write each
@@ -219,6 +252,24 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let skill_owned =
             crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
         owned.extend(skill_owned);
+
+        // #317: write /diagnose skill when slippage is enabled with diagnose_command.
+        if let Some(s) = manifest
+            .capabilities
+            .features
+            .as_ref()
+            .and_then(|f| f.slippage.as_ref())
+            && s.enabled
+            && s.diagnose_command
+        {
+            let diagnose_dir = out.join("skills").join("diagnose");
+            crate::adapter::skills::create_dir_owner_only(&diagnose_dir)?;
+            crate::paths::write_owner_only(
+                &diagnose_dir.join("SKILL.md"),
+                DIAGNOSE_SKILL_CONTENT.as_bytes(),
+            )?;
+            owned.push(PathBuf::from("skills").join("diagnose"));
+        }
 
         // #556: LSP servers render into a synthetic skills-directory plugin named
         // `LSP_PLUGIN_NAME`. A first-class skill of the same name would silently
@@ -639,6 +690,49 @@ fn generate_installed_plugins_json(
 /// surface (a plugin manifest's `lspServers` key); there is no bare top-level
 /// config key the way MCP has `mcpServers`.
 pub(crate) const LSP_PLUGIN_NAME: &str = "llmenv-lsp";
+
+/// #317: skill content for the `/diagnose` slash command, written as a
+/// first-class skill when slippage control is enabled with diagnose_command.
+const DIAGNOSE_SKILL_CONTENT: &str = concat!(
+    "---\n",
+    "name: diagnose\n",
+    "description: Structured evidence-first debugging checklist\n",
+    "---\n",
+    "\n",
+    "Structured evidence-first debugging. Follow each step in order.\n",
+    "\n",
+    "## 1. Collect Symptoms\n",
+    "\n",
+    "- What exactly happened? (exact error message, behavior, output)\n",
+    "- When did it start? (after a change, deploy, or time-based)\n",
+    "- Is it reproducible? (always, sometimes, specific inputs)\n",
+    "\n",
+    "## 2. Gather Evidence\n",
+    "\n",
+    "- Check recent changes (git log, deploy history)\n",
+    "- Examine relevant logs, metrics, or state\n",
+    "- Check for known issues or recent regressions\n",
+    "\n",
+    "## 3. Form Hypotheses\n",
+    "\n",
+    "- List 2-3 possible root causes based on evidence\n",
+    "- Rank by likelihood given the evidence\n",
+    "- State what would confirm or rule out each\n",
+    "\n",
+    "## 4. Test Per Hypothesis\n",
+    "\n",
+    "For each hypothesis (highest likelihood first):\n",
+    "- Design a specific test to confirm or rule it out\n",
+    "- Run the test\n",
+    "- Record the result\n",
+    "\n",
+    "## 5. Act\n",
+    "\n",
+    "Only after a hypothesis is confirmed:\n",
+    "- Apply the targeted fix\n",
+    "- Verify the fix resolves the original symptom\n",
+    "- Add a regression guard if appropriate\n",
+);
 
 /// Renders `manifest.capabilities.lsp` into `skills/llmenv-lsp/.claude-plugin/plugin.json`.
 /// Returns the relative path written, or `None` if nothing rendered (mirrors how the

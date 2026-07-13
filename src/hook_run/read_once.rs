@@ -8,6 +8,7 @@
 //! silently — the optimizer must never block real work.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -38,8 +39,6 @@ pub struct SessionCache {
     pub session_id: String,
     /// Entries keyed by canonicalized file path.
     pub entries: HashMap<String, ReadEntry>,
-    /// Last-updated unix timestamp of this cache file.
-    pub updated_at: i64,
 }
 
 impl SessionCache {
@@ -48,7 +47,6 @@ impl SessionCache {
         Self {
             session_id: session_id.to_string(),
             entries: HashMap::new(),
-            updated_at: unix_now(),
         }
     }
 
@@ -63,7 +61,14 @@ impl SessionCache {
                 eprintln!("llmenv: failed to parse read-once cache: {e}");
                 Self::new(session_id)
             }),
-            Err(_) => Self::new(session_id),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
+            Err(e) => {
+                eprintln!(
+                    "llmenv: failed to read read-once cache {}: {e}",
+                    path.display()
+                );
+                Self::new(session_id)
+            }
         };
         cache.prune(ttl_seconds);
         cache
@@ -86,7 +91,7 @@ impl SessionCache {
         let now = unix_now();
         self.entries.retain(|_, entry| {
             let age = now.saturating_sub(entry.first_read_at);
-            age <= ttl_seconds as i64
+            age < ttl_seconds as i64
         });
     }
 
@@ -96,24 +101,28 @@ impl SessionCache {
         let max_age_secs = max_age_days * 86_400;
         let now = unix_now();
         let ro_dir = read_once_state_dir(state_dir);
-        let Ok(entries) = std::fs::read_dir(&ro_dir) else {
-            return; // Directory doesn't exist yet — nothing to prune
+        let entries = match std::fs::read_dir(&ro_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                eprintln!("llmenv: failed to read read-once dir for pruning: {e}");
+                return;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if let Ok(modified) = meta.modified() {
-                    if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-                        let age_secs = now.saturating_sub(duration.as_secs() as i64);
-                        if age_secs > max_age_secs as i64 {
-                            if let Err(e) = std::fs::remove_file(&path) {
-                                eprintln!("llmenv: failed to prune stale read-once cache: {e}");
-                            }
-                        }
-                    }
+            if let Ok(meta) = std::fs::metadata(&path)
+                && let Ok(modified) = meta.modified()
+                && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                let age_secs = now.saturating_sub(duration.as_secs() as i64);
+                if age_secs > max_age_secs as i64
+                    && let Err(e) = std::fs::remove_file(&path)
+                {
+                    eprintln!("llmenv: failed to prune stale read-once cache: {e}");
                 }
             }
         }
@@ -136,6 +145,9 @@ pub fn clear_cache() -> anyhow::Result<()> {
     let ro_dir = read_once_state_dir(&state_dir);
     if ro_dir.exists() {
         std::fs::remove_dir_all(&ro_dir)?;
+        writeln!(std::io::stdout(), "Read-once cache cleared")?;
+    } else {
+        writeln!(std::io::stdout(), "No read-once cache to clear")?;
     }
     Ok(())
 }
@@ -180,24 +192,20 @@ pub(crate) fn handle_pre_tool_use_inner(
     if stdin_payload["tool_name"].as_str() != Some("Read") {
         return String::new();
     }
-
     // Parse tool_input for file path and offset/limit
     let tool_input = match stdin_payload["tool_input"].as_object() {
         Some(obj) => obj,
         None => return String::new(),
     };
-
     // Extract file path (PascalCase per Claude Code hook payload convention)
     let file_path = match tool_input.get("filePath").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return String::new(),
     };
-
     // Partial read bypass: if offset or limit are present, never cache
     if tool_input.contains_key("offset") || tool_input.contains_key("limit") {
         return String::new();
     }
-
     // Stat the file
     let path = Path::new(file_path);
     let metadata = match std::fs::metadata(path) {
@@ -210,21 +218,15 @@ pub(crate) fn handle_pre_tool_use_inner(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let file_size = metadata.len();
-
-    // Need a session id to cache
+    let file_size = metadata.len(); // Need a session id to cache
     let session_id = match session_id {
         Some(id) => id,
         None => return String::new(),
     };
-
-    // Canonicalize path for consistent cache key
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let path_key = canonical.to_string_lossy().to_string();
-
     // Load session cache
-
-    let mut cache = SessionCache::load(&state_dir, session_id, config.ttl_seconds);
+    let mut cache = SessionCache::load(state_dir, session_id, config.ttl_seconds);
     let now = unix_now();
     let tokens_saved = (file_size / 4) as u64;
 
@@ -236,10 +238,9 @@ pub(crate) fn handle_pre_tool_use_inner(
             // Cache hit within TTL — warn or deny
             entry.hits = entry.hits.saturating_add(1);
             entry.tokens_saved = entry.tokens_saved.saturating_add(tokens_saved);
-            cache.updated_at = now;
 
             // Save updated cache before returning
-            if let Err(e) = cache.save(&state_dir) {
+            if let Err(e) = cache.save(state_dir) {
                 eprintln!("llmenv: failed to save read-once cache: {e}");
             }
 
@@ -272,8 +273,7 @@ pub(crate) fn handle_pre_tool_use_inner(
         );
     }
 
-    cache.updated_at = now;
-    if let Err(e) = cache.save(&state_dir) {
+    if let Err(e) = cache.save(state_dir) {
         eprintln!("llmenv: failed to save read-once cache: {e}");
     }
 
@@ -281,6 +281,7 @@ pub(crate) fn handle_pre_tool_use_inner(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;
@@ -349,12 +350,12 @@ mod tests {
 
     #[test]
     fn partial_read_passes_through() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"hello world").unwrap();
+        fs::write(&file_path, b"hello world").expect("test");
 
         let result = handle_pre_tool_use(
-            &partial_read_payload(file_path.to_str().unwrap(), 0, 10),
+            &partial_read_payload(file_path.to_str().expect("test"), 0, 10),
             Some("test-session"),
             &test_config_warn(),
         );
@@ -373,12 +374,12 @@ mod tests {
 
     #[test]
     fn no_session_id_passes_through() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"content").unwrap();
+        fs::write(&file_path, b"content").expect("test");
 
         let result = handle_pre_tool_use(
-            &read_payload(file_path.to_str().unwrap()),
+            &read_payload(file_path.to_str().expect("test")),
             None,
             &test_config_warn(),
         );
@@ -387,32 +388,35 @@ mod tests {
 
     #[test]
     fn first_read_passes_through() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"hello").unwrap();
+        fs::write(&file_path, b"hello").expect("test");
 
-        let result = handle_pre_tool_use(
-            &read_payload(file_path.to_str().unwrap()),
+        let result = handle_pre_tool_use_inner(
+            &read_payload(file_path.to_str().expect("test")),
             Some("test-session"),
             &test_config_warn(),
+            dir.path(),
         );
         assert!(result.is_empty(), "first read should pass through");
     }
 
     #[test]
     fn second_read_in_warn_mode_returns_advisory() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"hello world").unwrap();
+        fs::write(&file_path, b"hello world").expect("test");
 
-        let payload = read_payload(file_path.to_str().unwrap());
+        let payload = read_payload(file_path.to_str().expect("test"));
 
         // First read passes through
-        let result1 = handle_pre_tool_use(&payload, Some("test-warn"), &test_config_warn());
+        let result1 =
+            handle_pre_tool_use_inner(&payload, Some("test-warn"), &test_config_warn(), dir.path());
         assert!(result1.is_empty(), "first read should pass through");
 
         // Second read warns
-        let result2 = handle_pre_tool_use(&payload, Some("test-warn"), &test_config_warn());
+        let result2 =
+            handle_pre_tool_use_inner(&payload, Some("test-warn"), &test_config_warn(), dir.path());
         assert!(!result2.is_empty(), "second read should warn");
         assert!(
             !result2.contains("__DENY__"),
@@ -426,18 +430,20 @@ mod tests {
 
     #[test]
     fn second_read_in_deny_mode_returns_deny_marker() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test_deny.txt");
-        fs::write(&file_path, b"hello world").unwrap();
+        fs::write(&file_path, b"hello world").expect("test");
 
-        let payload = read_payload(file_path.to_str().unwrap());
+        let payload = read_payload(file_path.to_str().expect("test"));
 
         // First read passes through
-        let result1 = handle_pre_tool_use(&payload, Some("test-deny"), &test_config_deny());
+        let result1 =
+            handle_pre_tool_use_inner(&payload, Some("test-deny"), &test_config_deny(), dir.path());
         assert!(result1.is_empty(), "first read should pass through");
 
         // Second read denies
-        let result2 = handle_pre_tool_use(&payload, Some("test-deny"), &test_config_deny());
+        let result2 =
+            handle_pre_tool_use_inner(&payload, Some("test-deny"), &test_config_deny(), dir.path());
         assert!(!result2.is_empty(), "second read should deny");
         assert!(
             result2.starts_with("__DENY__:"),
@@ -447,14 +453,19 @@ mod tests {
 
     #[test]
     fn changed_mtime_passes_through_again() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test_mtime.txt");
-        fs::write(&file_path, b"v1").unwrap();
+        fs::write(&file_path, b"v1").expect("test");
 
-        let payload = read_payload(file_path.to_str().unwrap());
+        let payload = read_payload(file_path.to_str().expect("test"));
 
         // First read
-        let result1 = handle_pre_tool_use(&payload, Some("test-mtime"), &test_config_warn());
+        let result1 = handle_pre_tool_use_inner(
+            &payload,
+            Some("test-mtime"),
+            &test_config_warn(),
+            dir.path(),
+        );
         assert!(result1.is_empty());
 
         // Sleep to ensure mtime changes (sub-second writes don't always advance mtime
@@ -462,20 +473,25 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         // Modify file
-        fs::write(&file_path, b"v2").unwrap();
+        fs::write(&file_path, b"v2").expect("test");
 
         // Read again — mtime changed, should pass through even in deny mode
-        let result2 = handle_pre_tool_use(&payload, Some("test-mtime"), &test_config_deny());
+        let result2 = handle_pre_tool_use_inner(
+            &payload,
+            Some("test-mtime"),
+            &test_config_deny(),
+            dir.path(),
+        );
         assert!(result2.is_empty(), "changed file should pass through");
     }
 
     #[test]
     fn ttl_expiry_passes_through_again() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let file_path = dir.path().join("test_ttl.txt");
-        fs::write(&file_path, b"content").unwrap();
+        fs::write(&file_path, b"content").expect("test");
 
-        let payload = read_payload(file_path.to_str().unwrap());
+        let payload = read_payload(file_path.to_str().expect("test"));
 
         let config = ReadOnceConfig {
             enabled: true,
@@ -485,30 +501,30 @@ mod tests {
         };
 
         // First read
-        let result1 = handle_pre_tool_use(&payload, Some("test-ttl"), &config);
+        let result1 = handle_pre_tool_use_inner(&payload, Some("test-ttl"), &config, dir.path());
         assert!(result1.is_empty());
 
         // Second read beyond TTL (0 seconds) — passes through
-        let result2 = handle_pre_tool_use(&payload, Some("test-ttl"), &config);
+        let result2 = handle_pre_tool_use_inner(&payload, Some("test-ttl"), &config, dir.path());
         assert!(result2.is_empty(), "expired TTL should pass through");
     }
 
     #[test]
     fn corrupt_cache_file_fail_soft() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("test");
         let state_dir = dir.path();
         let ro_dir = read_once_state_dir(state_dir);
-        fs::create_dir_all(&ro_dir).unwrap();
-        fs::write(ro_dir.join("test-session.json"), b"not valid json{}").unwrap();
+        fs::create_dir_all(&ro_dir).expect("test");
+        fs::write(ro_dir.join("test-session.json"), b"not valid json{}").expect("test");
 
         let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, b"content").unwrap();
+        fs::write(&file_path, b"content").expect("test");
 
         // Even with corrupt cache, the first read should pass through.
         // Uses the inner function with injectable state_dir so the corrupt file
         // in the TempDir is actually consulted.
         let result = handle_pre_tool_use_inner(
-            &read_payload(file_path.to_str().unwrap()),
+            &read_payload(file_path.to_str().expect("test")),
             Some("test-session"),
             &test_config_warn(),
             state_dir,
@@ -518,9 +534,9 @@ mod tests {
 
     #[test]
     fn session_cache_prune_stale_entries() {
-        let state_dir = TempDir::new().unwrap();
+        let state_dir = TempDir::new().expect("test");
         let ro_dir = read_once_state_dir(state_dir.path());
-        fs::create_dir_all(&ro_dir).unwrap();
+        fs::create_dir_all(&ro_dir).expect("test");
 
         let mut cache = SessionCache::new("test-prune");
         let now = unix_now();
@@ -552,9 +568,9 @@ mod tests {
 
     #[test]
     fn session_cache_save_and_load_roundtrip() {
-        let state_dir = TempDir::new().unwrap();
+        let state_dir = TempDir::new().expect("test");
         let ro_dir = read_once_state_dir(state_dir.path());
-        fs::create_dir_all(&ro_dir).unwrap();
+        fs::create_dir_all(&ro_dir).expect("test");
 
         let mut cache = SessionCache::new("test-rt");
         cache.entries.insert(
@@ -567,12 +583,12 @@ mod tests {
                 tokens_saved: 500,
             },
         );
-        cache.save(state_dir.path()).unwrap();
+        cache.save(state_dir.path()).expect("test");
 
         let loaded = SessionCache::load(state_dir.path(), "test-rt", 3600);
         assert_eq!(loaded.session_id, "test-rt");
         assert_eq!(loaded.entries.len(), 1);
-        let entry = loaded.entries.get("/foo/bar.rs").unwrap();
+        let entry = loaded.entries.get("/foo/bar.rs").expect("test");
         assert_eq!(entry.hits, 2);
         assert_eq!(entry.tokens_saved, 500);
     }

@@ -1,6 +1,5 @@
 ---
 source: tests/claude_code_adapter.rs
-assertion_line: 1223
 expression: stable_parsed
 ---
 hooks:
@@ -19,6 +18,10 @@ hooks:
         - command: llmenv config-guard --engine claude_code
           type: command
       matcher: ^(Write|Edit|MultiEdit)$
+    - hooks:
+        - command: llmenv hook-run --engine claude_code pre_tool_use
+          type: command
+      matcher: ^Read$
   SessionEnd:
     - hooks:
         - command: llmenv hook-run --engine claude_code session_end
