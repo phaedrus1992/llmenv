@@ -29,12 +29,14 @@ pub fn state_path() -> PathBuf {
     state_dir()
         .map(|d| d.join("transcript-sessions.json"))
         .unwrap_or_else(|e| {
+            let path = PathBuf::from("transcript-sessions.json");
             tracing::warn!(
                 error = %e,
+                path = %path.display(),
                 "cannot resolve state dir for transcript-sessions.json, \
-                 using CWD fallback"
+                 using CWD-relative fallback"
             );
-            PathBuf::from("transcript-sessions.json")
+            path
         })
 }
 
