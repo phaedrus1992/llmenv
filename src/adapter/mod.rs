@@ -368,16 +368,7 @@ mod tests {
     };
 
     #[test]
-    fn registry_contains_opencode_adapter() {
-        let adapters = registered_adapters();
-        assert!(
-            adapters.iter().any(|a| a.name() == "opencode"),
-            "opencode adapter must be registered in the adapter registry"
-        );
-    }
-
-    #[test]
-    fn registry_contains_claude_and_crush_adapters() {
+    fn registered_adapters_are_expected() {
         let adapters = registered_adapters();
         assert_eq!(
             adapters.len(),
