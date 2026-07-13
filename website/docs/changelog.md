@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.3.0] - 2026-07-13
+
 ### Deprecated
 - The old boolean `session_log` shape (`file: bool`, `transcript: bool`,
   `verbose: bool`) is deprecated. It still parses in 3.x but will be
