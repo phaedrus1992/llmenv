@@ -331,6 +331,11 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                         eprintln!("{warn}   → Fix: cargo install --path . --force");
                     }
                 }
+            } else {
+                tracing::warn!(
+                    "failed to read adapter cache directory {:?} for version skew check",
+                    adapter_cache,
+                );
             }
         }
     }

@@ -44,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Fixed
+- Surface silent error swallowing in read-once hook — `state_dir()`
+  resolution failures are now logged as warnings before returning empty
+  strings (#760)
+- Surface silent error swallowing in doctor version skew check —
+  `read_dir` failures on adapter cache directories are now logged as
+  warnings instead of being silently skipped (#764)
+- Surface silent error swallowing in login auth status update —
+  `CacheManifest::read` failures are now logged as warnings instead of
+  being silently skipped (#765)
 - Surface silent error swallowing in auth, throttle, hook-run, and
   reconcile_settings — read/parse failures are now logged as warnings instead
   of being silently discarded (#749)
