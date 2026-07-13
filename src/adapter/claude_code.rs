@@ -1439,16 +1439,30 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
 /// on-disk copies may have `"tool": null` from a previous serialization
 /// path — the two compare unequal and pile up as duplicates across renders.
 fn strip_json_nulls(value: &mut serde_json::Value) {
+    strip_json_nulls_depth(value, 0);
+}
+
+/// Depth-limited implementation of [`strip_json_nulls`].
+///
+/// The depth guard prevents stack overflow on pathological JSON nesting
+/// (config depth is normally <10 levels). The serde_json parser has its
+/// own recursion limit, but that guards _parsing_ — the value tree can
+/// be arbitrarily nested after deserialization.
+fn strip_json_nulls_depth(value: &mut serde_json::Value, depth: usize) {
+    if depth > 64 {
+        tracing::warn!("strip_json_nulls: max depth exceeded, bailing");
+        return;
+    }
     match value {
         serde_json::Value::Array(items) => {
             for item in items.iter_mut() {
-                strip_json_nulls(item);
+                strip_json_nulls_depth(item, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
             map.retain(|_, v| !v.is_null());
             for v in map.values_mut() {
-                strip_json_nulls(v);
+                strip_json_nulls_depth(v, depth + 1);
             }
         }
         _ => {}
