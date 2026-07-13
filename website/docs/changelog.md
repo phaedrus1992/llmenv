@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   tags as broken — `git rev-parse <tag>` returns the tag
   object SHA, not the commit SHA; use `^{commit}` peeling for
   commit-vs-commit comparison (#695)
+- Fix project-scoped tags from `.llmenv.yaml` leaking into
+  host-level plugin collection, MCP server, and throttle
+  resolution — introduce `non_project_tags()` to exclude
+  project-scoped tags from host config generation (#696)
 
 ### Added
 - Add `llmenv upgrade` subcommand for self-upgrade from
