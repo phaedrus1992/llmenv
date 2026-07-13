@@ -50,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Move `prune_stale_sessions` from `SessionCache::load()` (runs
   on every Read) to `save()` — eliminates redundant readdir +
   stat per Read call (#726)
+- Surface silent error swallowing in config load, session-log
+  correlation, and setup detection — add `inspect_err`
+  diagnostics before `.ok()`/`.ok()?`/`unwrap_or_default()` that
+  silently discarded errors (#731, #710, #712, #713)
 
 ### Added
 - Add `llmenv upgrade` subcommand for self-upgrade from
