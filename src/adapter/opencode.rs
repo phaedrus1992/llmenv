@@ -791,6 +791,9 @@ impl AgentAdapter for OpencodeAdapter {
 
         // 12. Bundle-level commands/agents from manifest.files
         for (rel, abs) in &manifest.files {
+            if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
+                anyhow::bail!("path traversal in bundle file: {}", rel.display());
+            }
             let rel_str = rel.to_string_lossy();
             if rel_str.starts_with("commands/") && rel_str.ends_with(".md") {
                 let source = std::fs::read_to_string(abs).map_err(|e| {
@@ -856,7 +859,16 @@ fn generate_shim_js(hooks: &[crate::config::Hook]) -> anyhow::Result<String> {
             .as_deref()
             .map(|cmd| match &hook.bundle_origin {
                 Some(bundle_dir) => super::resolve_bundle_relative_paths(cmd, bundle_dir)
-                    .unwrap_or_else(|| cmd.to_string()),
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            command = %cmd,
+                            bundle_dir = %bundle_dir.display(),
+                            "could not resolve bundle-relative hook command path \
+                             in generate_shim_js — falling back to raw command; \
+                             path may be stale or the bundle restructured"
+                        );
+                        cmd.to_string()
+                    }),
                 None => cmd.to_string(),
             })
             .unwrap_or_default();
@@ -922,7 +934,13 @@ fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &str) {
         // and before the `\n` at position `end`.
         let fm_raw = if end > 0 { &after_opener[1..end] } else { "" };
         let body = &after_opener[(end + 4)..];
-        let fm = serde_yaml::from_str(fm_raw).ok();
+        let fm = match serde_yaml::from_str(fm_raw) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("failed to parse frontmatter YAML (treated as absent): {e}");
+                None
+            }
+        };
         (fm, body.trim_start())
     } else {
         (None, source)
@@ -1574,5 +1592,59 @@ mod tests {
             "OPENCODE_CONFIG_DIR".into(),
             tmp.path().to_string_lossy().into_owned()
         )));
+    }
+
+    // -- split_frontmatter --
+
+    #[test]
+    fn split_frontmatter_simple() {
+        let (fm, body) = split_frontmatter("---\ndescription: hello\n---\nbody text\n");
+        assert!(fm.is_some(), "frontmatter must be parsed");
+        assert_eq!(body.trim(), "body text");
+    }
+
+    #[test]
+    fn split_frontmatter_absent() {
+        let (fm, body) = split_frontmatter("just body text without frontmatter");
+        assert!(fm.is_none(), "no frontmatter expected");
+        assert_eq!(body.trim(), "just body text without frontmatter");
+    }
+
+    #[test]
+    fn split_frontmatter_empty_source() {
+        let (fm, body) = split_frontmatter("");
+        assert!(fm.is_none());
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn split_frontmatter_only_delimiter() {
+        // A single "---" with no closer or body.
+        let (fm, body) = split_frontmatter("---");
+        assert!(fm.is_none(), "no closing ---, no frontmatter");
+        assert_eq!(body.trim(), "---");
+    }
+
+    #[test]
+    fn split_frontmatter_empty_frontmatter() {
+        let (fm, body) = split_frontmatter("---\n---\nbody\n");
+        assert!(fm.is_some(), "empty frontmatter is valid YAML");
+        assert_eq!(body.trim(), "body");
+    }
+
+    #[test]
+    fn split_frontmatter_invalid_yaml() {
+        // Malformed YAML should warn (via tracing) and return None.
+        let (fm, body) = split_frontmatter("---\n: invalid yaml :::\n---\nbody\n");
+        assert!(fm.is_none(), "invalid YAML returns None frontmatter");
+        assert_eq!(body.trim(), "body");
+    }
+
+    #[test]
+    fn split_frontmatter_preserves_body_trailing_whitespace() {
+        // The raw body after the closing --- delimiter is returned as-is
+        // (not trimmed) so markdown line-endings are preserved.
+        let (_, body) = split_frontmatter("---\nkey: val\n---\nstrong text\n\nmore\n");
+        assert_eq!(body, "strong text\n\nmore\n");
     }
 }
