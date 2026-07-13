@@ -570,6 +570,13 @@ fn native_hooks_merge_into_settings_hooks() {
             native_hooks,
             ..Default::default()
         },
+        session_log: llmenv::config::SessionLog {
+            transcript: Some(llmenv::config::TranscriptSinkConfig {
+                enabled: false,
+                level: llmenv::config::LogLevel::Info,
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let tmp = tempdir().expect("tempdir");
@@ -1211,12 +1218,19 @@ fn user_native_auto_memory_overrides_icm_default() {
 #[test]
 fn two_bundles_merge_into_deterministic_settings_json() {
     let bundles = vec![fixture_bundle("merge-a"), fixture_bundle("merge-b")];
-    let m = merge(
+    let mut m = merge(
         &llmenv::config::Capabilities::default(),
         &empty_native(),
         &bundles,
     )
     .expect("merge");
+    m.session_log = llmenv::config::SessionLog {
+        transcript: Some(llmenv::config::TranscriptSinkConfig {
+            enabled: false,
+            level: llmenv::config::LogLevel::Info,
+        }),
+        ..Default::default()
+    };
     let tmp = tempdir().expect("tempdir");
     ClaudeCodeAdapter
         .materialize(&m, tmp.path())
