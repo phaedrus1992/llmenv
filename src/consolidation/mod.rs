@@ -178,7 +178,13 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
 
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_else(|_| "(no body)".into());
+        let text = resp
+            .text()
+            .await
+            .inspect_err(
+                |e| tracing::warn!(error = %e, "failed to read consolidation error response body"),
+            )
+            .unwrap_or_else(|_| "(no body)".into());
         anyhow::bail!("Anthropic API returned {status}: {text}");
     }
 

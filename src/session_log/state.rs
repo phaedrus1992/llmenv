@@ -21,10 +21,21 @@ const MAX_CORRELATION_ENTRIES: usize = 1000;
 
 /// Path to the correlation map file.
 ///
-/// # Errors
-/// Propagates `state_dir()` failure.
-pub fn state_path() -> anyhow::Result<PathBuf> {
-    Ok(state_dir()?.join("transcript-sessions.json"))
+/// Falls back to a relative path in CWD when `state_dir()` cannot be resolved
+/// (e.g. `$HOME` not set), so transcript correlation never silently breaks
+/// even without filesystem state dir. The fallback logs a `warn!`.
+#[must_use]
+pub fn state_path() -> PathBuf {
+    state_dir()
+        .map(|d| d.join("transcript-sessions.json"))
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "cannot resolve state dir for transcript-sessions.json, \
+                 using CWD fallback"
+            );
+            PathBuf::from("transcript-sessions.json")
+        })
 }
 
 /// Load the correlation map at `path`. A missing file is the normal
@@ -96,19 +107,15 @@ pub(crate) fn record_session_at(
 /// The ICM session id for a Claude session, if recorded.
 #[must_use]
 pub fn lookup_session(claude_session_id: &str) -> Option<String> {
-    let path = state_path()
-        .inspect_err(|e| tracing::warn!(error = %e, "resolving session-log state path"))
-        .ok()?;
-    lookup_session_at(&path, claude_session_id)
+    lookup_session_at(&state_path(), claude_session_id)
 }
 
 /// Record the correlation (read-modify-write, atomic, 0o600).
 ///
 /// # Errors
-/// Path resolution or atomic-write failure.
+/// Atomic-write failure.
 pub fn record_session(claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
-    let path = state_path()?;
-    record_session_at(&path, claude_session_id, icm_session_id)
+    record_session_at(&state_path(), claude_session_id, icm_session_id)
 }
 
 #[cfg(test)]
