@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+- Surface silent error swallowing in auth, throttle, hook-run, and
+  reconcile_settings — read/parse failures are now logged as warnings instead
+  of being silently discarded (#749)
+
 ## [3.3.0] - 2026-07-13
 
 ### Deprecated
