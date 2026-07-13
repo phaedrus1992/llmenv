@@ -1398,15 +1398,18 @@ fn build_manifest(
         all_host.insert(k.clone(), v.clone());
     }
 
+    // Non-project tags for host-level resolution — project-scoped tags must not
+    // leak into host plugin/MCP/throttle decisions (#696).
+    let host_tags = active.non_project_tags();
+
     manifest.mcps =
-        crate::mcp::resolve::resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
+        crate::mcp::resolve::resolve_mcps(&config.mcp, &all_memory, &all_host, &host_tags)
             .context("resolving MCP servers")?;
     manifest.mcps.extend(
-        crate::mcp::resolve::resolve_bundle_mcps(&manifest.capabilities.mcp, &active.tags)
-            .context(
-                "resolving bundle MCP servers \
+        crate::mcp::resolve::resolve_bundle_mcps(&manifest.capabilities.mcp, &host_tags).context(
+            "resolving bundle MCP servers \
                  (check mcp: entries in active bundle.yaml files)",
-            )?,
+        )?,
     );
     // Detect cross-source name collisions (global vs bundle).
     {
@@ -1424,7 +1427,6 @@ fn build_manifest(
 
     let cache_root = expand_tilde(&config.cache.cache_dir)?;
 
-    let host_tags = active.non_project_tags();
     let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags)
         .context("resolving plugins")?;
     manifest.plugins = sync_plugin_payloads(&cache_root, resolved.plugins);
@@ -1453,7 +1455,7 @@ fn build_manifest(
         .cloned()
         .collect();
     crate::util::dedup(&mut all_throttle);
-    manifest.throttle = crate::throttle::resolve_active_throttle(&all_throttle, &active.tags)
+    manifest.throttle = crate::throttle::resolve_active_throttle(&all_throttle, &host_tags)
         .context("resolving throttle config")?;
 
     manifest.session_log = config.session_log_resolved();
