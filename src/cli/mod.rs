@@ -492,7 +492,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::HookRun { event, engine }) => {
             tracing::debug!(engine, "hook-run invoked by engine");
             warn_if_unknown_engine(&engine);
-            crate::hook_run::run(&event)?;
+            crate::hook_run::run(&event, &engine)?;
         }
         Some(Command::SessionLogRecord) => {
             use std::io::Read;
