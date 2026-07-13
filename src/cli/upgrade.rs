@@ -38,10 +38,14 @@ fn parse_version(s: &str) -> Result<Version> {
 }
 
 fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let Ok(va) = parse_version(a) else {
+    let Ok(va) = parse_version(a).inspect_err(|e| {
+        tracing::warn!(version = %a, error = %e, "failed to parse version string in comparison")
+    }) else {
         return std::cmp::Ordering::Equal;
     };
-    let Ok(vb) = parse_version(b) else {
+    let Ok(vb) = parse_version(b).inspect_err(|e| {
+        tracing::warn!(version = %b, error = %e, "failed to parse version string in comparison")
+    }) else {
         return std::cmp::Ordering::Equal;
     };
     va.cmp(&vb)
