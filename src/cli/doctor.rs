@@ -1,5 +1,6 @@
 use crate::config::{Bundle, Config};
 use crate::paths;
+use crate::plugins::cache;
 use anyhow::Context;
 use std::collections::HashSet;
 use std::path::Path;
@@ -642,6 +643,43 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             );
         } else {
             eprintln!("{pass} context-mode marketplace '{mkt_name}' synced and ready");
+        }
+    }
+
+    // Verify pinned marketplaces: when a marketplace source includes a `#ref`
+    // pin, the checked-out HEAD should match that pinned ref. Use `^{commit}`
+    // dereferencing so annotated tags don't false-positive (#695).
+    for m in &config.marketplace {
+        let (_, pinned_ref) = cache::split_source_ref(&m.source);
+        let Some(pinned_ref) = pinned_ref else {
+            continue;
+        };
+        let mkt_path = cache::marketplace_path(&cache_dir, &m.name);
+        if !mkt_path.join(".git").exists() {
+            continue;
+        }
+        let Some(head) = cache::git_head(&mkt_path) else {
+            // Clone exists but HEAD can't be resolved — let the `plugin-sync`
+            // / materialize paths report the broken clone.
+            continue;
+        };
+        let Some(pinned_sha) = cache::git_peeled_ref(&mkt_path, pinned_ref) else {
+            eprintln!(
+                "{warn} marketplace '{}' pinned to '{}' but that ref cannot be \
+                 resolved in the local clone — run `llmenv plugin-sync` to repair",
+                m.name, pinned_ref,
+            );
+            continue;
+        };
+        if head != pinned_sha {
+            eprintln!(
+                "{warn} marketplace '{}' pinned to '{}': HEAD ({}) does not match \
+                 the pinned ref's commit ({}) — run `llmenv plugin-sync` to repair",
+                m.name,
+                pinned_ref,
+                &head[..head.len().min(7)],
+                &pinned_sha[..pinned_sha.len().min(7)],
+            );
         }
     }
 

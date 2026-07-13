@@ -455,7 +455,7 @@ pub fn sync_external_plugin_with(
 /// when a ref (tag/branch/commit) is pinned, or `(source, None)` when it
 /// isn't (#496). Git URLs practically never contain a literal `#` in the
 /// path, so splitting on the first occurrence is unambiguous.
-fn split_source_ref(source: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_source_ref(source: &str) -> (&str, Option<&str>) {
     match source.split_once('#') {
         Some((url, r#ref)) => (url, Some(r#ref)),
         None => (source, None),
@@ -569,7 +569,7 @@ fn git_pull(repo: &Path) -> Result<()> {
 }
 
 /// Resolve the current HEAD sha of a git checkout, or `None` if it can't be read.
-fn git_head(repo: &Path) -> Option<String> {
+pub(crate) fn git_head(repo: &Path) -> Option<String> {
     let output = match git::secure_git()
         .args(["rev-parse", "HEAD"])
         .current_dir(repo)
@@ -599,6 +599,58 @@ fn git_head(repo: &Path) -> Option<String> {
         Err(e) => {
             tracing::warn!(
                 "git rev-parse HEAD output invalid UTF-8 at {}: {}",
+                repo.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Resolve a ref to its peeled commit sha using `git rev-parse <ref>^{commit}`.
+/// This dereferences annotated tags to the underlying commit SHA, unlike bare
+/// `git rev-parse <ref>` which returns the tag object SHA for annotated tags.
+///
+/// Returns `None` when the ref cannot be resolved (doesn't exist, or the
+/// checked-out repo can't be read).
+pub(crate) fn git_peeled_ref(repo: &Path, ref_name: &str) -> Option<String> {
+    let ref_spec = format!("{ref_name}^{{commit}}");
+    let output = match git::secure_git()
+        .args(["rev-parse", &ref_spec])
+        .current_dir(repo)
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::warn!(
+                "git rev-parse {} failed at {}: {}",
+                ref_spec,
+                repo.display(),
+                e
+            );
+            return None;
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        tracing::warn!(
+            "git rev-parse {} failed at {} with exit {}: {}",
+            ref_spec,
+            repo.display(),
+            output.status,
+            stderr
+        );
+        return None;
+    }
+    match String::from_utf8(output.stdout) {
+        Ok(sha) => {
+            let sha = sha.trim().to_string();
+            if sha.is_empty() { None } else { Some(sha) }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "git rev-parse {} output invalid UTF-8 at {}: {}",
+                ref_spec,
                 repo.display(),
                 e
             );
@@ -811,6 +863,14 @@ mod tests {
         assert_eq!(
             cloned_sha, tagged_sha,
             "pinned clone must check out the tag, not the branch tip"
+        );
+
+        // git_peeled_ref must also resolve the annotated tag to the same commit
+        // SHA rather than returning the tag object SHA (#695).
+        let peeled = git_peeled_ref(&dest, "v1").unwrap();
+        assert_eq!(
+            peeled, tagged_sha,
+            "git_peeled_ref must dereference annotated tag to commit SHA"
         );
     }
 
