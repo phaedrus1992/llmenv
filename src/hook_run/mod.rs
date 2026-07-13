@@ -23,8 +23,6 @@ use mcp_client::McpHttpClient;
 use serde_json::json;
 use tracing::{debug, warn};
 
-use crate::adapter::AgentAdapter;
-use crate::adapter::claude_code::ClaudeCodeAdapter;
 use crate::config::SessionLog;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, resolve_mcps};
@@ -308,7 +306,7 @@ fn json_or_empty(v: &serde_json::Value) -> String {
 
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
 /// `Ok(())` even when the backend is unreachable.
-pub fn run(event: &str) -> anyhow::Result<()> {
+pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     use std::io::Read;
 
     let mut stdin_buf = String::new();
@@ -333,8 +331,9 @@ pub fn run(event: &str) -> anyhow::Result<()> {
     };
     let null_payload = serde_json::Value::Null;
     let payload = stdin_json.as_ref().unwrap_or(&null_payload);
-    let adapter = crate::adapter::active_adapter();
-    match run_inner(parsed, claude_session_id.as_deref(), payload) {
+    let adapter = crate::adapter::adapter_for_engine(engine);
+    let adapter_name = adapter.name().to_string();
+    match run_inner(parsed, claude_session_id.as_deref(), payload, &adapter_name) {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
             // to stdout so the Claude Code engine blocks the tool call.
@@ -424,6 +423,7 @@ fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
     stdin_payload: &serde_json::Value,
+    adapter_name: &str,
 ) -> anyhow::Result<String> {
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
@@ -444,9 +444,27 @@ fn run_inner(
         ));
     }
 
+    // #702: Early-exit for events that dispatch no memory actions AND have
+    // no verbose session-log consumer. The expensive work below (scope
+    // evaluation, bundle merge, memory MCP resolution / HTTP client) is
+    // only needed when dispatch produces actions (SessionStart/TurnStart/
+    // SessionEnd), PostToolUse needs WebFetch auto-store, PostSession runs
+    // consolidation, or verbose capture is active.
+    let log_cfg = config.session_log_resolved();
+    if !matches!(
+        event,
+        HookEvent::SessionStart
+            | HookEvent::TurnStart
+            | HookEvent::SessionEnd
+            | HookEvent::PostToolUse
+            | HookEvent::PostSession
+    ) && !log_cfg.verbose
+    {
+        return Ok(String::new());
+    }
+
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
-    let log_cfg = config.session_log_resolved();
 
     let config_dir = config_path
         .parent()
@@ -492,7 +510,7 @@ fn run_inner(
             debug!("session_log: cannot resolve state path, correlation disabled: {e}")
         })
         .ok();
-    let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd);
+    let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd, adapter_name);
 
     // Dedup: skip Store when the context chunk hasn't changed since the last
     // SessionEnd (R3). Avoids redundant ICM writes when hooks re-run.
@@ -638,6 +656,7 @@ fn build_scope_context(
     tags: &[String],
     bundles: &[String],
     cwd: &str,
+    adapter_name: &str,
 ) -> ScopeContext {
     let project = active
         .scopes
@@ -649,7 +668,7 @@ fn build_scope_context(
         bundles: bundles.to_vec(),
         project,
         cwd: cwd.to_string(),
-        adapter: ClaudeCodeAdapter.name().to_string(),
+        adapter: adapter_name.to_string(),
         llmenv_version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
@@ -999,7 +1018,12 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
     if tool_name != TOOL_NAME_WEBFETCH && tool_name != TOOL_NAME_WEBSEARCH {
         return None;
     }
-    let url = payload["tool_input"]["url"].as_str().unwrap_or("unknown");
+    let is_search = tool_name == TOOL_NAME_WEBSEARCH;
+    let source_field = if is_search { "query" } else { "url" };
+    let source_value = payload["tool_input"][source_field]
+        .as_str()
+        .unwrap_or("unknown");
+    let label = if is_search { "Query" } else { "URL" };
     let response = payload["tool_response"]
         .as_str()
         .map_or_else(|| json_or_empty(&payload["tool_response"]), String::from);
@@ -1015,7 +1039,7 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
 
     Some(json!({
         "content": format!(
-            "URL: {url}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
+            "{label}: {source_value}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
         ),
         "topic": "web-fetch",
         "importance": "low",
