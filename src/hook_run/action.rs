@@ -147,11 +147,28 @@ impl Action {
         client
             .call_tool(self.tool_name(), self.arguments(query, chunk))
             .await
+            .map(|text| strip_advisory(&text))
             .map_err(|e| {
                 warn!(action = ?self, error = %e, "MCP tool call failed");
                 e
             })
     }
+}
+
+/// Strip advisor/no-memory lines from an ICM server recall response.
+///
+/// The ICM server appends `[ICM: N tool calls … Consider saving …]` and/or
+/// `No memories found.` to recall responses. These lines are useful in an
+/// interactive session but inject ~1KB of pure noise per user turn when piped
+/// through the hook-runner's `emit_hook_context` (issue #692).
+///
+/// Only the specific advisory patterns are stripped — all other content passes
+/// through unchanged.
+fn strip_advisory(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.contains("Consider saving") && !line.contains("No memories found"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -440,5 +457,40 @@ mod tests {
             let second = parse_importance_marker(&chunk);
             prop_assert_eq!(first, second);
         }
+    }
+
+    // ===== #692: ICM advisory line stripping =====
+
+    #[test]
+    fn strip_advisory_passes_normal_memory_text() {
+        let text = "## Project Context\n- Key configuration\n- Recent changes";
+        assert_eq!(strip_advisory(text), text);
+    }
+
+    #[test]
+    fn strip_advisory_removes_no_memories_found() {
+        let text = "No memories found.";
+        assert!(strip_advisory(text).is_empty());
+    }
+
+    #[test]
+    fn strip_advisory_removes_consider_saving() {
+        let text = "[ICM: 42 tool calls since last store. Consider saving important context with icm_memory_store before it is lost.]";
+        assert!(strip_advisory(text).is_empty());
+    }
+
+    #[test]
+    fn strip_advisory_removes_both_advisory_lines() {
+        let text = "No memories found.\n[ICM: 3 tool calls since last store. Consider saving important context with icm_memory_store before it is lost.]";
+        assert!(strip_advisory(text).is_empty());
+    }
+
+    #[test]
+    fn strip_advisory_preserves_real_content_alongside_advisory() {
+        let text = "## Project Context\n- Key configuration\nNo memories found.\n[ICM: 3 tool calls. Consider saving.]\n- Recent changes";
+        assert_eq!(
+            strip_advisory(text),
+            "## Project Context\n- Key configuration\n- Recent changes"
+        );
     }
 }
