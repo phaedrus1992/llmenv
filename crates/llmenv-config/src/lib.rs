@@ -54,7 +54,7 @@ impl Config {
     }
 
     /// Effective session-logging config: an absent block means ICM transcript
-    /// on, file + verbose off.
+    /// on, file off.
     #[must_use]
     pub fn session_log_resolved(&self) -> SessionLog {
         self.session_log.clone().unwrap_or_default()
