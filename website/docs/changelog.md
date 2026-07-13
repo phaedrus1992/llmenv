@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+- Fix doctor false-flagging marketplaces pinned to annotated
+  tags as broken — `git rev-parse <tag>` returns the tag
+  object SHA, not the commit SHA; use `^{commit}` peeling for
+  commit-vs-commit comparison (#695)
+
 ### Added
 - Add `llmenv upgrade` subcommand for self-upgrade from
   GitHub releases (`--check`, `--track beta|release`,
