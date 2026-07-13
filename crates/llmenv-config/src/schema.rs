@@ -660,9 +660,6 @@ pub struct ReadOnce {
     /// Session-cache TTL fallback in seconds (default 1200 = 20 min).
     #[serde(default = "default_read_once_ttl")]
     pub ttl_seconds: u64,
-    /// Changed-file delta mode (phase 2, default false).
-    #[serde(default)]
-    pub diff: bool,
 }
 
 const fn default_read_once_ttl() -> u64 {
@@ -1612,7 +1609,6 @@ mod tests {
         assert!(ro.enabled);
         assert_eq!(ro.mode, ReadOnceMode::Warn);
         assert_eq!(ro.ttl_seconds, 1200);
-        assert!(!ro.diff);
     }
 
     #[test]
@@ -1637,7 +1633,6 @@ mod tests {
         assert!(!ro.enabled);
         assert_eq!(ro.mode, ReadOnceMode::Warn);
         assert_eq!(ro.ttl_seconds, 1200);
-        assert!(!ro.diff);
     }
 
     // ===== SlippageControl config tests =====
@@ -1716,7 +1711,6 @@ mod tests {
                 enabled: true,
                 mode: ReadOnceMode::Deny,
                 ttl_seconds: 600,
-                diff: true,
             }),
             ..Default::default()
         };
