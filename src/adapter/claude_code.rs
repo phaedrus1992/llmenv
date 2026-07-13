@@ -859,14 +859,32 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             None
         };
 
-        let handler = json!({
-            "command": resolved_command,
-            "tool": hook.handler.tool,
-            "type": match hook.handler.kind {
-                crate::config::HookHandlerKind::Command => "command",
-                crate::config::HookHandlerKind::McpTool => "mcp_tool",
-            },
-        });
+        // Build handler as a Map so null-valued keys (e.g. "tool": null for
+        // command-type hooks) are omitted rather than serialized. The json!
+        // macro would produce `"tool": null` for None, which later differs
+        // from absent in JSON PartialEq — causing duplicate hooks across
+        // renders when reconcile_settings merges fresh with existing disk
+        // state that happens to lack the null key.
+        let handler = {
+            let mut m = serde_json::Map::new();
+            if let Some(ref cmd) = resolved_command {
+                m.insert("command".into(), serde_json::Value::String(cmd.clone()));
+            }
+            if let Some(ref tool) = hook.handler.tool {
+                m.insert("tool".into(), serde_json::Value::String(tool.clone()));
+            }
+            m.insert(
+                "type".into(),
+                serde_json::Value::String(
+                    match hook.handler.kind {
+                        crate::config::HookHandlerKind::Command => "command",
+                        crate::config::HookHandlerKind::McpTool => "mcp_tool",
+                    }
+                    .into(),
+                ),
+            );
+            serde_json::Value::Object(m)
+        };
 
         let mut hook_entry = serde_json::Map::new();
         if let Some(matcher) = &hook.matcher {
@@ -1366,7 +1384,22 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
                 // intentionally discarded after the mutation completes.
                 merged_obj
                     .get_mut(key)
-                    .map(|v| merge_json(v, fresh_val.clone()))
+                    .map(|v| {
+                        merge_json(v, fresh_val.clone());
+                        // Null-valued keys (e.g. "tool": null) differ from
+                        // absent keys in JSON PartialEq, so hook entries that
+                        // differ only by null vs absent don't dedup inside
+                        // merge_json. Strip nulls then re-dedup so entries
+                        // from different render generations converge.
+                        strip_json_nulls(v);
+                        if let Some(obj) = v.as_object_mut() {
+                            for entries in obj.values_mut() {
+                                if let Some(arr) = entries.as_array_mut() {
+                                    dedup(arr);
+                                }
+                            }
+                        }
+                    })
                     .or_else(|| {
                         merged_obj.insert(key.to_string(), fresh_val.clone());
                         Some(())
@@ -1395,6 +1428,31 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
     }
 
     Ok(merged)
+}
+
+/// Recursively remove null-valued keys from every JSON object in `value`.
+///
+/// This makes objects that differ only by null vs absent key compare equal
+/// under [`PartialEq`], which [`merge_json`]'s array dedup uses. Needed
+/// because `generate_settings_json` conditionally omits keys when their
+/// value is `None` (e.g. `"tool"` for command-type hooks), but older
+/// on-disk copies may have `"tool": null` from a previous serialization
+/// path — the two compare unequal and pile up as duplicates across renders.
+fn strip_json_nulls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                strip_json_nulls(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_json_nulls(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Render one marketplace's `extraKnownMarketplaces` entry body, or `None` if it
@@ -1524,7 +1582,7 @@ mod tests {
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, overlay_native, reconcile_settings,
         reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        seed_install_method,
+        seed_install_method, strip_json_nulls,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -2235,6 +2293,97 @@ mod tests {
         let out = reconcile_settings(&path, llmenv_hook.clone()).unwrap();
         let entries = out["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "identical hook deduped, not doubled");
+    }
+
+    #[test]
+    fn reconcile_hooks_dedups_cross_render_null_vs_absent_tool() {
+        // #699: A hook entry on disk with `"tool": null` (from an older render
+        // that serialized the Option as JSON null) must dedup against a fresh
+        // hook that omits `"tool"` entirely (the current
+        // generate_settings_json). The difference between null and absent
+        // makes JSON PartialEq consider them unequal — strip_json_nulls + re-
+        // dedup after merge_json must handle this.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        // Existing on disk: has "tool": null in the inner handler.
+        write_json(
+            &path,
+            &serde_json::json!({
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "hooks": [{ "command": "lint.sh", "tool": null, "type": "command" }],
+                            "matcher": "Edit|Write"
+                        }
+                    ]
+                }
+            }),
+        );
+        // Fresh render: same hook, but "tool" omitted entirely (not null).
+        let fresh = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "hooks": [{ "command": "lint.sh", "type": "command" }],
+                        "matcher": "Edit|Write"
+                    }
+                ]
+            }
+        });
+        let out = reconcile_settings(&path, fresh).unwrap();
+        let entries = out["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "null-vs-absent tool deduped, not doubled");
+    }
+
+    #[test]
+    fn reconcile_hooks_dedups_with_native_overlay_nulls() {
+        // #699: Same as the null-vs-absent test but also verifies that
+        // nested null keys in the inner handler and outer entry are all
+        // stripped — the dedup must handle objects with null at any depth.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        write_json(
+            &path,
+            &serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [{ "command": "check.sh", "tool": null, "type": "command" }],
+                            "tool": null
+                        }
+                    ]
+                }
+            }),
+        );
+        let fresh = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [{ "command": "check.sh", "type": "command" }]
+                    }
+                ]
+            }
+        });
+        let out = reconcile_settings(&path, fresh).unwrap();
+        let entries = out["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "nulls at any depth stripped before dedup");
+    }
+
+    #[test]
+    fn strip_json_nulls_removes_null_vals() {
+        let mut v = serde_json::json!({
+            "a": null,
+            "b": 1,
+            "c": { "d": null, "e": [{"f": null, "g": 2}] }
+        });
+        strip_json_nulls(&mut v);
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "b": 1,
+                "c": { "e": [{"g": 2}] }
+            })
+        );
     }
 
     #[test]
