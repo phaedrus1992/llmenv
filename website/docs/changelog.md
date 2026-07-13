@@ -17,6 +17,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+- Add `llmenv upgrade` subcommand for self-upgrade from
+  GitHub releases (`--check`, `--track beta|release`,
+  `features.upgrade.track` config option) (#686)
+- Add model provider configuration
+  (`capabilities.model_providers`) with schema types,
+  validation, merge rules, and CrushAdapter rendering
+  (#526, #527, #528)
+- Add default model selection
+  (`capabilities.default_models`) for role-keyed model
+  resolution across providers (#530)
+- Add content-based scope matching with file glob
+  patterns (`scope.content`) — auto-activates tags when
+  matching files exist in the working directory, without
+  requiring `.llmenv.yaml` markers (#278)
+- Cache hashing now supports `version: major` granularity — set
+  `hashing: { normal: { version: major } }` in config.yaml to key
+  cache folders on major version only (e.g. `1/` instead of `1.2/`).
+  Default remains `minor` for full backward compatibility. (#651)
+- opencode engine support — new `opencode` adapter with full parity
+  vs the claude-code adapter: AGENTS.md, rules, skills, MCP
+  (local/remote), LSP, permissions, hook bridging via a generated JS
+  shim plugin, and Claude-plugin content translation (#656, #657)
+- JSON Schema generation for materialized configs — adapters that
+  derive `JsonSchema` on their output structs now emit a
+  `{adapter}.schema.json` sidecar alongside the native config file,
+  enabling IDE validation and editor autocompletion for materialized
+  opencode.json files. (#660)
+
+### Fixed
+- opencode adapter not activating when `OPENCODE_CONFIG_DIR` is unset
+  (now falls back to checking if `opencode` is on PATH) (#657)
+
 ## [3.2.0] - 2026-07-11
 
 ### Changed
@@ -24,18 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Cache parsed config by file mtime in hook-run to avoid redundant YAML parsing on each event (#670)
 
 ### Added
-- Cache hashing now supports `version: major` granularity — set
-  `hashing: { normal: { version: major } }` in config.yaml to key cache
-  folders on major version only (e.g. `1/` instead of `1.2/`). Default
-  remains `minor` for full backward compatibility. (#651)
-- opencode engine support — new `opencode` adapter with full parity vs the
-  claude-code adapter: AGENTS.md, rules, skills, MCP (local/remote), LSP,
-  permissions, hook bridging via a generated JS shim plugin, and Claude-plugin
-  content translation (#656, #657)
-- JSON Schema generation for materialized configs — adapters that derive
-  `JsonSchema` on their output structs now emit a `{adapter}.schema.json`
-  sidecar alongside the native config file, enabling IDE validation and
-  editor autocompletion for materialized opencode.json files. (#660)
 - `llmenv doctor` checks that config-dependent executables (`icm`,
   `mcp-proxy`/`uvx`, `claude`, `crush`) are available on `PATH`,
   respecting each tool's config conditions (memory entries, disabled
@@ -51,8 +72,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   silently drop at settings-load time. This previously left `deny` rules
   silently non-functional with no warning from `llmenv doctor` or config
   validation. (#664)
-- opencode adapter not activating when `OPENCODE_CONFIG_DIR` is unset (now
-  falls back to checking if `opencode` is on PATH) (#657)
 - Validate skill-file paths with CommonMark-aware parsing (`pulldown-cmark`)
   instead of fragile heuristics. Fenced/indented code blocks and inline code
   spans containing `~/.claude` no longer falsely trigger configuration-path
@@ -554,6 +573,7 @@ the rc.1 and rc.2 sections below.
 - Fix `pre-release-hook = []` panic in cargo-release 1.1.2: remove empty hook
   arrays from sub-crate configs and update workspace hook to use `${WORKSPACE_ROOT}`
   so it resolves correctly from any sub-crate working directory
+
 ## [2.0.1] - 2026-06-14
 
 ### Fixed
@@ -638,7 +658,6 @@ the rc.1 and rc.2 sections below.
   logs a `warn` when the plugin manifest is absent after materializing the plugin,
   making broken plugin installs diagnosable (#379)
 
-
 ## [1.0.10] - 2026-06-11
 
 ### Added
@@ -716,6 +735,7 @@ the rc.1 and rc.2 sections below.
   top level) is now emitted (#325)
 - Fix `llmenv init` silently replacing non-UTF-8 path bytes with `?`; non-UTF-8
   paths now fail with a clear error (#325)
+
 ## [1.0.6] - 2026-06-05
 
 ### Added

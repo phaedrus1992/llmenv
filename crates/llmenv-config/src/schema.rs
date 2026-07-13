@@ -532,6 +532,8 @@ pub struct Scopes {
     pub host: Vec<HostScope>,
     #[serde(default)]
     pub user: Vec<UserScope>,
+    #[serde(default)]
+    pub content: Vec<ContentScope>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -573,6 +575,20 @@ pub struct UserScope {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UserMatch {
     pub user: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ContentScope {
+    pub id: String,
+    pub r#match: ContentMatch,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ContentMatch {
+    pub glob: String,
+    pub depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -682,6 +698,23 @@ pub struct SlippageControl {
 
 const fn default_slippage_true() -> bool {
     true
+}
+
+impl Default for SlippageControl {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            effort_level: None,
+            rule_reinjection: true,
+            read_before_edit: true,
+            self_critique: true,
+            metrics: true,
+            compact_survival: true,
+            diagnose_command: true,
+            explain_before_act: false,
+            answer_before_act: false,
+        }
+    }
 }
 
 /// Memory type classification for stored memory chunks (R1).
@@ -1658,6 +1691,20 @@ mod tests {
         assert!(!sc.explain_before_act);
         assert!(!sc.answer_before_act);
         assert_eq!(sc.effort_level, None);
+    }
+
+    /// The manual `Default` impl for SlippageControl must stay in sync with
+    /// serde defaults — if a field is added to the struct with a serde default
+    /// but the manual impl isn't updated, they silently diverge.
+    #[test]
+    fn slippage_default_matches_serde_empty() {
+        let from_serde: SlippageControl =
+            serde_json::from_str("{}").expect("empty object should deserialize");
+        let from_default = SlippageControl::default();
+        assert_eq!(
+            from_default, from_serde,
+            "manual Default impl diverges from serde defaults for SlippageControl"
+        );
     }
 
     // ===== Feature round-trip tests =====

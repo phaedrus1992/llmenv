@@ -1,7 +1,8 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
 use llmenv::config::{
-    Config, HostMatch, HostScope, NetworkMatch, NetworkScope, Scopes, UserMatch, UserScope,
+    Config, ContentMatch, ContentScope, HostMatch, HostScope, NetworkMatch, NetworkScope, Scopes,
+    UserMatch, UserScope,
 };
 use llmenv::scope::{Env, evaluate};
 
@@ -306,4 +307,237 @@ fn project_marker_malformed_yaml_uses_defaults() {
         .to_string_lossy()
         .to_string();
     assert_eq!(project.unwrap().id, basename);
+}
+
+#[test]
+fn content_scope_matches_glob_in_cwd() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"test\"\n",
+    )
+    .expect("write");
+
+    let cfg = Config {
+        scope: Scopes {
+            content: vec![ContentScope {
+                id: "rust-project".into(),
+                r#match: ContentMatch {
+                    glob: "Cargo.toml".into(),
+                    depth: None,
+                },
+                tags: vec!["lang-rust".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg, &env);
+    assert!(active.tags.contains("lang-rust"));
+    assert!(
+        active
+            .scopes
+            .iter()
+            .any(|s| s.id == "rust-project" && s.kind == "content")
+    );
+}
+
+#[test]
+fn content_scope_does_not_match_when_file_absent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let cfg = Config {
+        scope: Scopes {
+            content: vec![ContentScope {
+                id: "rust-project".into(),
+                r#match: ContentMatch {
+                    glob: "Cargo.toml".into(),
+                    depth: None,
+                },
+                tags: vec!["lang-rust".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg, &env);
+    assert!(!active.tags.contains("lang-rust"));
+}
+
+#[test]
+fn content_scope_matches_recursive_glob() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let nested = tmp.path().join("src").join("lib");
+    std::fs::create_dir_all(&nested).expect("mkdir");
+    std::fs::write(nested.join("mod.rs"), "pub fn hello() {}\n").expect("write");
+
+    let cfg = Config {
+        scope: Scopes {
+            content: vec![ContentScope {
+                id: "rust-project".into(),
+                r#match: ContentMatch {
+                    glob: "**/*.rs".into(),
+                    depth: None,
+                },
+                tags: vec!["lang-rust".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg, &env);
+    assert!(active.tags.contains("lang-rust"));
+}
+
+#[test]
+fn content_scope_depth_caps_walk() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let deep = tmp.path().join("a").join("b").join("c");
+    std::fs::create_dir_all(&deep).expect("mkdir");
+    std::fs::write(deep.join("deep.rs"), "fn x() {}\n").expect("write");
+    std::fs::write(tmp.path().join("a").join("shallow.py"), "# python\n").expect("write");
+
+    let cfg = Config {
+        scope: Scopes {
+            content: vec![ContentScope {
+                id: "python".into(),
+                r#match: ContentMatch {
+                    glob: "**/*.py".into(),
+                    depth: Some(2),
+                },
+                tags: vec!["lang-python".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg, &env);
+    // depth: 2 means WalkDir max_depth(2) = root + immediate children (a/)
+    // a/shallow.py is at depth 2 — should match
+    assert!(
+        active.tags.contains("lang-python"),
+        "depth:2 should reach a/shallow.py"
+    );
+}
+
+#[test]
+fn content_scope_multiple_independent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("package.json"), "{}").expect("write");
+    std::fs::write(tmp.path().join("main.py"), "print()").expect("write");
+
+    let cfg = Config {
+        scope: Scopes {
+            content: vec![
+                ContentScope {
+                    id: "node".into(),
+                    r#match: ContentMatch {
+                        glob: "package.json".into(),
+                        depth: None,
+                    },
+                    tags: vec!["lang-node".into()],
+                },
+                ContentScope {
+                    id: "python".into(),
+                    r#match: ContentMatch {
+                        glob: "*.py".into(),
+                        depth: None,
+                    },
+                    tags: vec!["lang-python".into()],
+                },
+            ],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg, &env);
+    assert!(active.tags.contains("lang-node"));
+    assert!(active.tags.contains("lang-python"));
+}
+
+#[test]
+fn content_scope_works_with_other_scope_kinds() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("Cargo.toml"), "[package]\n").expect("write");
+
+    let cfg = Config {
+        scope: Scopes {
+            host: vec![HostScope {
+                id: "h".into(),
+                r#match: HostMatch {
+                    hostname: Some("fixed".into()),
+                },
+                tags: vec!["icm-server".into()],
+            }],
+            content: vec![ContentScope {
+                id: "rust".into(),
+                r#match: ContentMatch {
+                    glob: "Cargo.toml".into(),
+                    depth: None,
+                },
+                tags: vec!["lang-rust".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        hostname: "fixed".into(),
+        user: "nobody".into(),
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg, &env);
+    assert!(
+        active.tags.contains("icm-server"),
+        "host scope should still match"
+    );
+    assert!(
+        active.tags.contains("lang-rust"),
+        "content scope should also match"
+    );
+}
+
+#[test]
+fn content_scope_invalid_glob_does_not_panic() {
+    let cfg = Config {
+        scope: Scopes {
+            content: vec![ContentScope {
+                id: "bad".into(),
+                r#match: ContentMatch {
+                    glob: "[invalid".into(),
+                    depth: None,
+                },
+                tags: vec!["broken".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        cwd: "/tmp".into(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg, &env);
+    assert!(!active.tags.contains("broken"));
 }
