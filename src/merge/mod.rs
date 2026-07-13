@@ -60,7 +60,7 @@ pub struct MergedManifest {
     pub throttle: Option<crate::config::Throttle>,
     /// Resolved `session_log` config (see `Config::session_log_resolved`),
     /// gating which session-log hooks adapters auto-emit. Defaults to
-    /// `SessionLog::default()` (transcript on, file/verbose off).
+    /// `SessionLog::default()` (transcript on, file off).
     pub session_log: crate::config::SessionLog,
 }
 

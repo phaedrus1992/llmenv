@@ -56,6 +56,7 @@ impl<S: Subscriber> Layer<S> for FileLogLayer {
             level: Some(meta.level().to_string()),
             content: visitor.message,
             fields: serde_json::json!({"target": meta.target()}),
+            trace_fields: None,
         };
         self.sink.append(&ev.to_jsonl());
     }

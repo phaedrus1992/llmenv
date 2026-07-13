@@ -57,6 +57,7 @@ mod tests {
             level: None,
             content: "ls".into(),
             fields: serde_json::json!({"k":1}),
+            trace_fields: None,
         }
     }
 
