@@ -532,6 +532,8 @@ pub struct Scopes {
     pub host: Vec<HostScope>,
     #[serde(default)]
     pub user: Vec<UserScope>,
+    #[serde(default)]
+    pub content: Vec<ContentScope>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -573,6 +575,20 @@ pub struct UserScope {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UserMatch {
     pub user: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ContentScope {
+    pub id: String,
+    pub r#match: ContentMatch,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ContentMatch {
+    pub glob: String,
+    pub depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
