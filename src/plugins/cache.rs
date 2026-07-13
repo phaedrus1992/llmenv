@@ -568,23 +568,28 @@ fn git_pull(repo: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the current HEAD sha of a git checkout, or `None` if it can't be read.
-pub(crate) fn git_head(repo: &Path) -> Option<String> {
+/// Shared helper for `git rev-parse <ref>`. Returns the trimmed commit SHA on
+/// success, `None` on any failure (IO, non-zero exit, invalid UTF-8, empty output).
+fn git_rev_parse(repo: &Path, ref_name: &str) -> Option<String> {
     let output = match git::secure_git()
-        .args(["rev-parse", "HEAD"])
+        .args(["rev-parse", ref_name])
         .current_dir(repo)
         .output()
     {
         Ok(out) => out,
         Err(e) => {
-            tracing::warn!("git rev-parse HEAD failed at {}: {}", repo.display(), e);
+            tracing::warn!(
+                "git rev-parse {ref_name} failed at {}: {}",
+                repo.display(),
+                e
+            );
             return None;
         }
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         tracing::warn!(
-            "git rev-parse HEAD failed at {} with exit {}: {}",
+            "git rev-parse {ref_name} failed at {} with exit {}: {}",
             repo.display(),
             output.status,
             stderr
@@ -594,17 +599,30 @@ pub(crate) fn git_head(repo: &Path) -> Option<String> {
     match String::from_utf8(output.stdout) {
         Ok(sha) => {
             let sha = sha.trim().to_string();
-            if sha.is_empty() { None } else { Some(sha) }
+            if sha.is_empty() {
+                tracing::warn!(
+                    "git rev-parse {ref_name} at {} returned empty output",
+                    repo.display()
+                );
+                None
+            } else {
+                Some(sha)
+            }
         }
         Err(e) => {
             tracing::warn!(
-                "git rev-parse HEAD output invalid UTF-8 at {}: {}",
+                "git rev-parse {ref_name} output invalid UTF-8 at {}: {}",
                 repo.display(),
                 e
             );
             None
         }
     }
+}
+
+/// Resolve the current HEAD sha of a git checkout, or `None` if it can't be read.
+pub(crate) fn git_head(repo: &Path) -> Option<String> {
+    git_rev_parse(repo, "HEAD")
 }
 
 /// Resolve a ref to its peeled commit sha using `git rev-parse <ref>^{commit}`.
@@ -614,49 +632,7 @@ pub(crate) fn git_head(repo: &Path) -> Option<String> {
 /// Returns `None` when the ref cannot be resolved (doesn't exist, or the
 /// checked-out repo can't be read).
 pub(crate) fn git_peeled_ref(repo: &Path, ref_name: &str) -> Option<String> {
-    let ref_spec = format!("{ref_name}^{{commit}}");
-    let output = match git::secure_git()
-        .args(["rev-parse", &ref_spec])
-        .current_dir(repo)
-        .output()
-    {
-        Ok(out) => out,
-        Err(e) => {
-            tracing::warn!(
-                "git rev-parse {} failed at {}: {}",
-                ref_spec,
-                repo.display(),
-                e
-            );
-            return None;
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        tracing::warn!(
-            "git rev-parse {} failed at {} with exit {}: {}",
-            ref_spec,
-            repo.display(),
-            output.status,
-            stderr
-        );
-        return None;
-    }
-    match String::from_utf8(output.stdout) {
-        Ok(sha) => {
-            let sha = sha.trim().to_string();
-            if sha.is_empty() { None } else { Some(sha) }
-        }
-        Err(e) => {
-            tracing::warn!(
-                "git rev-parse {} output invalid UTF-8 at {}: {}",
-                ref_spec,
-                repo.display(),
-                e
-            );
-            None
-        }
-    }
+    git_rev_parse(repo, &format!("{ref_name}^{{commit}}"))
 }
 
 #[cfg(test)]
