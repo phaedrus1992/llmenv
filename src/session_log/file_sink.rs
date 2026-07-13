@@ -20,6 +20,12 @@ pub fn default_file_path() -> anyhow::Result<PathBuf> {
 #[must_use]
 pub fn default_file_path_string() -> String {
     default_file_path()
+        .inspect_err(|e| {
+            tracing::warn!(
+                error = %e,
+                "cannot resolve default session-log path, using CWD fallback"
+            )
+        })
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "session-log.jsonl".to_string())
 }
