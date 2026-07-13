@@ -5,7 +5,7 @@ use serde_json::json;
 use super::AgentAdapter;
 use super::resolve_bundle_relative_paths;
 use crate::merge::MergedManifest;
-use crate::util::{dedup, merge_json};
+use crate::util::dedup;
 
 /// Adapter for Crush: writes `crush.json` into the cache dir and exports
 /// `CRUSH_GLOBAL_CONFIG` / `CRUSH_GLOBAL_DATA` so Crush discovers it.
@@ -194,9 +194,10 @@ impl AgentAdapter for CrushAdapter {
                 .map(|(k, v)| (k, json!(v)))
                 .collect(),
         );
-        overlay_native_crush(
+        super::overlay_native_json(
             &mut hooks_value,
             manifest.capabilities.native_hooks.get("crush"),
+            "native_hooks.crush",
         )?;
         // P1-4: validate every event key in the merged hooks object — native_hooks.crush can
         // inject unsupported events (e.g. PostToolUse) that bypass the earlier manifest gate.
@@ -292,9 +293,10 @@ impl AgentAdapter for CrushAdapter {
             }
             // fix 7: overlay native_mcp.crush into the mcp object
             let mut mcp_value = serde_json::Value::Object(mcp_obj);
-            overlay_native_crush(
+            super::overlay_native_json(
                 &mut mcp_value,
                 manifest.capabilities.native_mcp.get("crush"),
+                "native_mcp.crush",
             )?;
             if !mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
                 doc.insert("mcp".into(), mcp_value);
@@ -350,10 +352,10 @@ impl AgentAdapter for CrushAdapter {
         // keys have dedicated rendering paths and must not clobber the security output.
         // Use native_permissions.crush / native_hooks.crush / native_mcp.crush instead.
         if let Some(native) = manifest.native.get("crush") {
-            reject_modeled_keys_in_native_crush(native)?;
+            super::reject_modeled_native_keys(native, CRUSH_MODELED_KEYS, "crush")?;
         }
         let mut doc_value = serde_json::Value::Object(doc);
-        overlay_native_crush(&mut doc_value, manifest.native.get("crush"))?;
+        super::overlay_native_json(&mut doc_value, manifest.native.get("crush"), "native.crush")?;
 
         // 7. Write crush.json
         let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
@@ -564,38 +566,6 @@ fn render_default_models(
 /// channels instead, which merge in the safe direction.
 const CRUSH_MODELED_KEYS: &[&str] = &["permissions", "hooks", "mcp", "lsp", "providers", "models"];
 
-/// P1-3: Reject `native.crush` fragments that carry modeled-feature keys.
-fn reject_modeled_keys_in_native_crush(fragment: &serde_yaml::Value) -> anyhow::Result<()> {
-    let Some(map) = fragment.as_mapping() else {
-        return Ok(());
-    };
-    for key in CRUSH_MODELED_KEYS {
-        if map.contains_key(serde_yaml::Value::String((*key).into())) {
-            anyhow::bail!(
-                "top-level `native.crush` carries the modeled-feature key `{key}`, \
-                 which would silently clobber the rendered `{key}` \
-                 (a security regression for permissions). \
-                 Use `native_{key}.crush` (or `native_permissions.crush` / \
-                 `native_hooks.crush` / `native_mcp.crush`) instead, \
-                 which merges in the safe direction."
-            );
-        }
-    }
-    Ok(())
-}
-
-fn overlay_native_crush(
-    dst: &mut serde_json::Value,
-    fragment: Option<&serde_yaml::Value>,
-) -> anyhow::Result<()> {
-    if let Some(frag) = fragment {
-        let as_json = serde_json::to_value(frag)
-            .map_err(|e| anyhow::anyhow!("converting native crush fragment to JSON: {e}"))?;
-        merge_json(dst, as_json);
-    }
-    Ok(())
-}
-
 fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
     rules.iter().flat_map(render_permission_rule).collect()
 }
@@ -619,7 +589,7 @@ fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
 mod tests {
     use super::{
         CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter, SUPPORTED_HOOK_EVENTS,
-        overlay_native_crush, reject_modeled_keys_in_native_crush, render_permission_rule,
+        render_permission_rule,
     };
     use crate::adapter::AgentAdapter;
     use crate::adapter::skills::arb_yaml_value;
@@ -1089,13 +1059,13 @@ mod tests {
         );
     }
 
-    // ── overlay_native_crush ──────────────────────────────────────────────────
+    // ── overlay_native_json (shared) ──────────────────────────────────────────
 
     #[test]
     fn overlay_native_crush_none_is_noop() {
         let mut dst = serde_json::json!({ "k": 1 });
         let before = dst.clone();
-        overlay_native_crush(&mut dst, None).unwrap();
+        super::super::overlay_native_json(&mut dst, None, "native.crush").unwrap();
         assert_eq!(dst, before);
     }
 
@@ -1103,7 +1073,7 @@ mod tests {
     fn overlay_native_crush_merges_keys() {
         let mut dst = serde_json::json!({ "a": 1 });
         let frag: serde_yaml::Value = serde_yaml::from_str("b: 2").unwrap();
-        overlay_native_crush(&mut dst, Some(&frag)).unwrap();
+        super::super::overlay_native_json(&mut dst, Some(&frag), "native.crush").unwrap();
         assert_eq!(dst["a"], serde_json::json!(1));
         assert_eq!(dst["b"], serde_json::json!(2));
     }
@@ -1949,7 +1919,8 @@ mod tests {
         for key in CRUSH_MODELED_KEYS {
             let frag: serde_yaml::Value =
                 serde_yaml::from_str(&format!("{key}: anything")).unwrap();
-            let err = reject_modeled_keys_in_native_crush(&frag).unwrap_err();
+            let err = super::super::reject_modeled_native_keys(&frag, CRUSH_MODELED_KEYS, "crush")
+                .unwrap_err();
             assert!(
                 err.to_string().contains(key),
                 "error must name the offending key '{key}': {err}"
@@ -2108,7 +2079,7 @@ mod tests {
             let _ = render_permission_rule(&rule);
         }
 
-        // ── P2: overlay_native_crush ─────────────────────────────────────────
+        // ── P2: overlay_native_json (shared) ──────────────────────────────────
 
         #[test]
         fn prop_overlay_native_crush_idempotent(
@@ -2117,11 +2088,11 @@ mod tests {
             let frag_yaml: serde_yaml::Value = serde_yaml::to_value(&fragment).unwrap();
 
             let mut once = serde_json::json!({});
-            overlay_native_crush(&mut once, Some(&frag_yaml)).unwrap();
+            super::super::overlay_native_json(&mut once, Some(&frag_yaml), "native.crush").unwrap();
 
             let mut twice = serde_json::json!({});
-            overlay_native_crush(&mut twice, Some(&frag_yaml)).unwrap();
-            overlay_native_crush(&mut twice, Some(&frag_yaml)).unwrap();
+            super::super::overlay_native_json(&mut twice, Some(&frag_yaml), "native.crush").unwrap();
+            super::super::overlay_native_json(&mut twice, Some(&frag_yaml), "native.crush").unwrap();
 
             prop_assert_eq!(once, twice, "applying the same fragment twice must equal applying it once");
         }
@@ -2131,7 +2102,7 @@ mod tests {
             fragment in arb_yaml_value(3),
         ) {
             let mut dst = serde_json::json!({"existing": "value"});
-            let _ = overlay_native_crush(&mut dst, Some(&fragment));
+            let _ = super::super::overlay_native_json(&mut dst, Some(&fragment), "native.crush");
         }
 
         // ── model_providers ──────────────────────────────────────────────────
