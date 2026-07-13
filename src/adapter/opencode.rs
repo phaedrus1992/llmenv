@@ -791,6 +791,9 @@ impl AgentAdapter for OpencodeAdapter {
 
         // 12. Bundle-level commands/agents from manifest.files
         for (rel, abs) in &manifest.files {
+            if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
+                anyhow::bail!("path traversal in bundle file: {}", rel.display());
+            }
             let rel_str = rel.to_string_lossy();
             if rel_str.starts_with("commands/") && rel_str.ends_with(".md") {
                 let source = std::fs::read_to_string(abs).map_err(|e| {
@@ -856,7 +859,16 @@ fn generate_shim_js(hooks: &[crate::config::Hook]) -> anyhow::Result<String> {
             .as_deref()
             .map(|cmd| match &hook.bundle_origin {
                 Some(bundle_dir) => super::resolve_bundle_relative_paths(cmd, bundle_dir)
-                    .unwrap_or_else(|| cmd.to_string()),
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            command = %cmd,
+                            bundle_dir = %bundle_dir.display(),
+                            "could not resolve bundle-relative hook command path \
+                             in generate_shim_js — falling back to raw command; \
+                             hook may not work from a non-bundle context"
+                        );
+                        cmd.to_string()
+                    }),
                 None => cmd.to_string(),
             })
             .unwrap_or_default();
@@ -922,7 +934,13 @@ fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &str) {
         // and before the `\n` at position `end`.
         let fm_raw = if end > 0 { &after_opener[1..end] } else { "" };
         let body = &after_opener[(end + 4)..];
-        let fm = serde_yaml::from_str(fm_raw).ok();
+        let fm = match serde_yaml::from_str(fm_raw) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("failed to parse frontmatter YAML (treated as absent): {e}");
+                None
+            }
+        };
         (fm, body.trim_start())
     } else {
         (None, source)
