@@ -21,7 +21,7 @@ const OPENCODE_JSON_FILE: &str = "opencode.json";
 /// Top-level structure for the opencode.json config document.
 /// Constructed from the merged manifest, serialized to Value, then native
 /// overlay keys are deep-merged at the Value level.
-#[derive(serde::Serialize, schemars::JsonSchema)]
+#[derive(serde::Serialize)]
 struct OpencodeConfig {
     /// Native opencode JS plugins (e.g. context-mode).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,7 +45,7 @@ struct OpencodeConfig {
 }
 
 /// An LSP server entry in opencode.json.
-#[derive(serde::Serialize, schemars::JsonSchema)]
+#[derive(serde::Serialize)]
 struct LspServerEntry {
     /// Command with arguments.
     command: Vec<String>,
@@ -63,7 +63,7 @@ struct LspServerEntry {
 /// A permission value — either a bare action string (when the tool has only
 /// a wildcard pattern covering all inputs) or a pattern→action map (when the
 /// tool has specific input patterns with distinct actions).
-#[derive(serde::Serialize, schemars::JsonSchema)]
+#[derive(serde::Serialize)]
 #[serde(untagged)]
 enum PermissionValue {
     /// Single action covering all patterns (e.g. `"allow"`).
@@ -280,6 +280,10 @@ impl AgentAdapter for OpencodeAdapter {
         true
     }
 
+    fn supports_model_providers(&self) -> bool {
+        true
+    }
+
     fn supported_hook_events(&self) -> &'static [&'static str] {
         SUPPORTED_HOOK_EVENTS
     }
@@ -340,7 +344,7 @@ impl AgentAdapter for OpencodeAdapter {
         std::fs::create_dir_all(out.join("command"))?;
 
         for plugin in &manifest.plugins {
-            let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
+            let payload = super::crush::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
 
             // Does this plugin provide native opencode support (e.g. a
             // TypeScript plugin registered via "plugin" key in opencode.json)?
@@ -834,12 +838,6 @@ impl AgentAdapter for OpencodeAdapter {
             }
         })
         .to_string()
-    }
-
-    fn config_schema(&self) -> Option<serde_json::Value> {
-        let root = schemars::schema_for!(OpencodeConfig);
-        let value = serde_json::to_value(&root).ok()?;
-        Some(crate::materialize::schema_gen::with_root_additional_properties(value))
     }
 }
 

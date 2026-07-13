@@ -382,7 +382,7 @@ impl AgentAdapter for CrushAdapter {
 ///
 /// External plugins (`install_path = Some`) use that path directly.
 /// First-party plugins look up their marketplace `install_location`.
-fn resolve_plugin_payload(
+pub(crate) fn resolve_plugin_payload(
     plugin: &crate::plugins::resolve::ResolvedPlugin,
     marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
 ) -> anyhow::Result<PathBuf> {
