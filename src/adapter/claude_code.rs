@@ -321,9 +321,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // llmenv only upserts `mcpServers`, and must never reconcile-delete the
         // file.
         let native_mcp = manifest.capabilities.native_mcp.get("claude_code");
-        if !manifest.mcps.is_empty() || native_mcp.is_some() {
-            merge_mcp_into_claude_json(out, &manifest.mcps, native_mcp)?;
-        }
+        // Always called — the companion file may have previously-owned servers
+        // that need pruning even when the current server set is empty.
+        merge_mcp_into_claude_json(out, &manifest.mcps, native_mcp)?;
 
         crate::materialize::prune_empty_dirs(out)?;
 
@@ -413,6 +413,11 @@ fn is_hook_json(rel: &Path) -> bool {
 /// legacy `mcp.json` was never a config surface Claude ingested.
 const CLAUDE_JSON_FILE: &str = ".claude.json";
 
+/// Companion file to `.claude.json` tracking which mcpServers llmenv wrote on
+/// the previous render. A JSON array of server name strings. Used to prune
+/// servers that llmenv no longer resolves while preserving foreign entries.
+const CLAUDE_JSON_OWNED_SERVERS_FILE: &str = ".claude.json.llmenv-owned";
+
 /// Build the `mcpServers` object for every resolved server, keyed by name.
 /// Stdio entries carry `command`/`args`/`env`; remote entries carry
 /// `{"type", "url"}` — the transport discriminator Claude Code requires (#244).
@@ -497,9 +502,10 @@ fn build_mcp_servers(
 /// `.mcp.json` approval gate, irrelevant for the auto-trusted user-scoped
 /// servers in `.claude.json`, and is intentionally dropped (#244, relates #122).
 ///
-/// Known limitation (follow-up): a server llmenv stops resolving is not removed
-/// from `mcpServers` — llmenv does not yet track which server names it owns
-/// across renders, so stale entries linger until manually removed.
+/// Stale-server pruning (#739): llmenv tracks which server names it wrote in a
+/// companion file (`CLAUDE_JSON_OWNED_SERVERS_FILE`). On each render it removes
+/// previously-owned servers no longer in the resolved set, while preserving
+/// foreign (non-llmenv) entries.
 fn merge_mcp_into_claude_json(
     out: &Path,
     mcps: &[ResolvedMcp],
@@ -510,12 +516,20 @@ fn merge_mcp_into_claude_json(
     let servers = build_mcp_servers(mcps)?;
     let mut doc = json!({ "mcpServers": servers });
     overlay_native(&mut doc, native)?;
-    let llmenv_servers = match doc.get("mcpServers").and_then(|v| v.as_object()) {
-        Some(s) if !s.is_empty() => s.clone(),
-        // No servers to merge (e.g. a native fragment that carried no
-        // `mcpServers`): leave `.claude.json` untouched.
-        _ => return Ok(()),
-    };
+    let llmenv_servers = doc
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    // Read previously-owned server names from the companion tracking file.
+    let owned_path = out.join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+    let previously_owned = read_owned_servers(&owned_path);
+
+    // Nothing to update or prune.
+    if llmenv_servers.is_empty() && previously_owned.is_empty() {
+        return Ok(());
+    }
 
     let path = out.join(CLAUDE_JSON_FILE);
     let mut claude = read_claude_json(&path)?;
@@ -532,14 +546,21 @@ fn merge_mcp_into_claude_json(
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     match servers_val.as_object_mut() {
         Some(servers_obj) => {
-            for (name, entry) in llmenv_servers {
-                servers_obj.insert(name, entry);
+            // Prune previously-owned servers no longer in the current set.
+            for stale_name in &previously_owned {
+                if !llmenv_servers.contains_key(stale_name.as_str()) {
+                    servers_obj.remove(stale_name.as_str());
+                }
+            }
+            // Upsert current servers.
+            for (name, entry) in &llmenv_servers {
+                servers_obj.insert(name.clone(), entry.clone());
             }
         }
         // Foreign `mcpServers` was a non-object (malformed). Replace it with
         // llmenv's set rather than error — the servers key is llmenv's domain.
         None => {
-            *servers_val = serde_json::Value::Object(llmenv_servers);
+            *servers_val = serde_json::Value::Object(llmenv_servers.clone());
         }
     }
 
@@ -547,7 +568,48 @@ fn merge_mcp_into_claude_json(
         &path,
         serde_json::to_string_pretty(&claude)?.as_bytes(),
     )?;
+
+    // Write companion file with current owned server names.
+    let current_names: Vec<String> = llmenv_servers.keys().cloned().collect();
+    if current_names.is_empty() {
+        let _ = std::fs::remove_file(&owned_path);
+    } else {
+        crate::paths::write_owner_only_atomic(
+            &owned_path,
+            serde_json::to_string_pretty(&current_names)?.as_bytes(),
+        )?;
+    }
+
     Ok(())
+}
+
+/// Read the llmenv-owned MCP server tracking companion file.
+///
+/// Returns an empty set when the file is absent or corrupt — a bad companion
+/// file must never prevent `.claude.json` from being written.
+fn read_owned_servers(path: &Path) -> std::collections::BTreeSet<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => match serde_json::from_str::<Vec<String>>(&s) {
+            Ok(names) => names.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!(
+                    "failed to parse owned MCP server tracking file {} \
+                     (treated as empty): {e}",
+                    path.display(),
+                );
+                std::collections::BTreeSet::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::collections::BTreeSet::new(),
+        Err(e) => {
+            tracing::warn!(
+                "failed to read owned MCP server tracking file {} \
+                 (treated as empty): {e}",
+                path.display(),
+            );
+            std::collections::BTreeSet::new()
+        }
+    }
 }
 
 /// Read `.claude.json`, returning an empty object when the file is absent. A
@@ -1597,12 +1659,12 @@ enum PermissionAction {
 mod tests {
     use super::super::AgentAdapter;
     use super::{
-        CLAUDE_JSON_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND, ClaudeCodeAdapter,
-        HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
-        generate_installed_plugins_json, generate_settings_json, is_hook_json,
-        merge_mcp_into_claude_json, overlay_native, reconcile_settings,
-        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        seed_install_method, strip_json_nulls,
+        CLAUDE_JSON_FILE, CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND,
+        CONFIG_GUARD_COMMAND, ClaudeCodeAdapter, HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS,
+        STALE_CHECK_COMMAND, classify_claude_path, generate_installed_plugins_json,
+        generate_settings_json, is_hook_json, merge_mcp_into_claude_json, overlay_native,
+        reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
+        render_permission_rule, seed_install_method, strip_json_nulls,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -2694,6 +2756,73 @@ mod tests {
         assert_eq!(doc["mcpServers"]["extra"]["command"], "native-bin");
         // enabledMcpjsonServers is never emitted into .claude.json (#244).
         assert!(doc.get("enabledMcpjsonServers").is_none());
+    }
+
+    #[test]
+    fn merge_mcp_prunes_stale_owned_servers() {
+        // #739: a server llmenv previously owned but no longer resolves must
+        // be removed from .claude.json, while foreign servers are preserved.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({
+                "mcpServers": {
+                    "stale-srv": { "command": "stale-bin" },
+                    "user-added": { "command": "user-bin" },
+                    "current-srv": { "command": "current-bin" }
+                }
+            }),
+        );
+        // Pre-populate companion file: llmenv owned stale-srv and current-srv.
+        let owned_path = tmp.path().join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+        std::fs::write(&owned_path, br#"["stale-srv", "current-srv"]"#).unwrap();
+
+        merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("current-srv", "current-bin")], None)
+            .unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // Stale server pruned.
+        assert!(
+            doc["mcpServers"].get("stale-srv").is_none(),
+            "stale server must be pruned"
+        );
+        // Foreign server preserved.
+        assert_eq!(doc["mcpServers"]["user-added"]["command"], "user-bin");
+        // Current server upserted.
+        assert_eq!(doc["mcpServers"]["current-srv"]["command"], "current-bin");
+        // Companion file updated: only current-srv remains.
+        let owned: Vec<String> =
+            serde_json::from_slice(&std::fs::read(&owned_path).unwrap()).unwrap();
+        assert_eq!(owned, vec!["current-srv"]);
+    }
+
+    #[test]
+    fn merge_mcp_preserves_foreign_when_no_owned() {
+        // No companion file → first render; no servers are owned, so no
+        // pruning occurs. Foreign servers survive the upsert.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({
+                "mcpServers": {
+                    "user-added": { "command": "user-bin" }
+                }
+            }),
+        );
+        merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("icm", "icm-bin")], None).unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["user-added"]["command"], "user-bin");
+        assert_eq!(doc["mcpServers"]["icm"]["command"], "icm-bin");
+        // Companion file created with the current owned name.
+        let owned_path = tmp.path().join(CLAUDE_JSON_OWNED_SERVERS_FILE);
+        let owned: Vec<String> =
+            serde_json::from_slice(&std::fs::read(&owned_path).unwrap()).unwrap();
+        assert_eq!(owned, vec!["icm"]);
     }
 
     // #311: hardcoded config-path rejection.
