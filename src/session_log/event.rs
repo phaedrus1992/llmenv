@@ -93,6 +93,13 @@ impl SessionLogEvent {
     pub fn to_jsonl(&self) -> String {
         // Serialize is infallible for this shape; fall back to a minimal line.
         serde_json::to_string(self)
+            .inspect_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    kind = ?self.kind,
+                    "failed to serialize SessionLogEvent — all data except ts lost in fallback"
+                )
+            })
             .unwrap_or_else(|_| format!("{{\"ts\":\"{}\",\"kind\":\"internal\"}}", self.ts))
     }
 
