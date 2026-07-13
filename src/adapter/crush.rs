@@ -170,7 +170,13 @@ impl AgentAdapter for CrushAdapter {
                     .as_ref()
                     .map(|cmd| match &hook.bundle_origin {
                         Some(bundle_dir) => resolve_bundle_relative_paths(cmd, bundle_dir)
-                            .unwrap_or_else(|| cmd.clone()),
+                            .unwrap_or_else(|| {
+                                tracing::warn!(
+                                    "failed to resolve bundle-relative path for command in {:?}: {cmd:?}",
+                                    bundle_dir
+                                );
+                                cmd.clone()
+                            }),
                         None => cmd.clone(),
                     });
             let mut entry = serde_json::Map::new();
