@@ -58,7 +58,12 @@ fn read_gemini_md(home: &Path) -> Option<String> {
 fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
     let mut projects = BTreeMap::new();
     let projects_dir = home.join(".claude").join("projects");
-    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+    let Ok(entries) = std::fs::read_dir(&projects_dir).inspect_err(|e| {
+        eprintln!(
+            "llmenv: failed to read project configs from {}: {e:#}",
+            projects_dir.display()
+        )
+    }) else {
         return projects;
     };
     for entry in entries.flatten() {
