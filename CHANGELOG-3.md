@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Fixed
+- Early-exit hook-run before scope evaluation for events that
+  produce no memory actions — saves ~3.5ms per PreToolUse
+  dispatch on a loaded config (#702)
+- Thread `--engine` flag through to adapter selection so
+  hook-runs targeting non-default engines (e.g. opencode)
+  actually use the correct adapter instead of always env-sniffing
+  (#704)
+- Fix WebSearch auto-store labelling "URL: unknown" instead of
+  the actual search query — read `tool_input.query` for WebSearch
+  and label as `Query:` (#707)
 - Strip ICM advisory lines ("Consider saving", "No memories found.")
   from hook-run recall output — ~1KB/turn of noise in agent
   conversations (#692)
