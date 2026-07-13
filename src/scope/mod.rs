@@ -80,13 +80,22 @@ impl ActiveScopes {
     /// Non-project tags (network, host, user, content) describe the
     /// *environment*, which is the correct scope for host plugin decisions.
     pub fn non_project_tags(&self) -> BTreeSet<String> {
-        let project_tags: BTreeSet<String> = self
+        // Tags from non-project scopes (network, host, user, content).
+        let mut result: BTreeSet<String> = self
             .scopes
             .iter()
-            .filter(|s| s.kind == "project")
+            .filter(|s| s.kind != "project")
             .flat_map(|s| s.tags.iter().cloned())
             .collect();
-        self.tags.difference(&project_tags).cloned().collect()
+        // Preserve tags in the union that no scope contributed (e.g. OS
+        // tag added by evaluate()). These are never project-scoped.
+        result.extend(
+            self.tags
+                .iter()
+                .filter(|t| !self.scopes.iter().any(|s| s.tags.contains(t)))
+                .cloned(),
+        );
+        result
     }
 }
 
@@ -312,5 +321,86 @@ mod tests {
         assert!(!host_tags.contains("tag-a"));
         assert!(!host_tags.contains("tag-b"));
         assert!(host_tags.contains("shared-tag"));
+    }
+
+    #[test]
+    fn non_project_tags_only_project_scopes_returns_only_os_tag() {
+        let active = ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "my-project".into(),
+                kind: "project",
+                tags: vec!["lang-typescript".into(), "agent-coding".into()],
+                project_root: Some("/project".into()),
+                enable_bundles: Vec::new(),
+                disable_bundles: Vec::new(),
+                name: Some("p".into()),
+                description: None,
+                unknown_fields: Vec::new(),
+            }],
+            tags: BTreeSet::from([
+                "lang-typescript".into(),
+                "agent-coding".into(),
+                "macos".into(),
+            ]),
+        };
+
+        let host_tags = active.non_project_tags();
+        assert!(!host_tags.contains("lang-typescript"));
+        assert!(!host_tags.contains("agent-coding"));
+        assert!(host_tags.contains("macos"));
+        assert_eq!(host_tags.len(), 1);
+    }
+
+    #[test]
+    fn non_project_tags_empty_scopes() {
+        let active = ActiveScopes {
+            scopes: Vec::new(),
+            tags: BTreeSet::new(),
+        };
+
+        let host_tags = active.non_project_tags();
+        assert!(host_tags.is_empty());
+    }
+
+    #[test]
+    fn non_project_tags_preserves_tag_shared_with_non_project() {
+        // A tag name that appears in BOTH a project and a non-project
+        // scope should be preserved — the non-project scope contributed
+        // it as an environment tag, which is the correct input for
+        // host-level decisions.
+        let active = ActiveScopes {
+            scopes: vec![
+                ActiveScope {
+                    id: "h1".into(),
+                    kind: "host",
+                    tags: vec!["infra".into(), "web".into()],
+                    project_root: None,
+                    enable_bundles: Vec::new(),
+                    disable_bundles: Vec::new(),
+                    name: None,
+                    description: None,
+                    unknown_fields: Vec::new(),
+                },
+                ActiveScope {
+                    id: "p1".into(),
+                    kind: "project",
+                    tags: vec!["infra".into(), "lang-typescript".into()],
+                    project_root: Some("/p1".into()),
+                    enable_bundles: Vec::new(),
+                    disable_bundles: Vec::new(),
+                    name: Some("p1".into()),
+                    description: None,
+                    unknown_fields: Vec::new(),
+                },
+            ],
+            tags: BTreeSet::from(["infra".into(), "web".into(), "lang-typescript".into()]),
+        };
+
+        let host_tags = active.non_project_tags();
+        // "infra" appears in both host and project — preserved (host contributed it)
+        assert!(host_tags.contains("infra"));
+        assert!(host_tags.contains("web"));
+        // "lang-typescript" is project-only — excluded
+        assert!(!host_tags.contains("lang-typescript"));
     }
 }
