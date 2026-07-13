@@ -1,6 +1,7 @@
 //! The single event type session logging produces, and how it renders to a
 //! JSONL line. The transcript-record mapping lives in `transcript.rs`.
 
+use llmenv_config::LogLevel;
 use serde::{Deserialize, Serialize};
 
 /// Whether an event belongs to a correlated agent transcript session or is a
@@ -29,6 +30,22 @@ pub enum EventKind {
     LifecycleEnd,
 }
 
+impl EventKind {
+    #[must_use]
+    pub fn log_level(self) -> LogLevel {
+        match self {
+            EventKind::LifecycleStart
+            | EventKind::LifecycleEnd
+            | EventKind::Scope
+            | EventKind::Prompt
+            | EventKind::Notification
+            | EventKind::Stop
+            | EventKind::Internal => LogLevel::Info,
+            EventKind::ToolUse | EventKind::ToolResult => LogLevel::Debug,
+        }
+    }
+}
+
 /// One session-logging event. Both sinks consume this; the file sink writes
 /// `to_jsonl`, the transcript sink maps it via `transcript::record_args`.
 /// Also round-trips through JSON when a hook process hands an event off to
@@ -52,6 +69,10 @@ pub struct SessionLogEvent {
     pub content: String,
     /// Structured payload (tags, bundles, scopes, op name, …).
     pub fields: serde_json::Value,
+    /// Hook diagnostics for Trace-level events: stdout, stderr, exit code.
+    /// Only populated when the event is at Trace level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_fields: Option<serde_json::Value>,
 }
 
 /// Current time as an RFC 3339 timestamp (e.g. `2026-06-30T00:00:00Z`).
@@ -61,6 +82,12 @@ pub fn now_rfc3339() -> String {
 }
 
 impl SessionLogEvent {
+    /// Minimum level this event should be recorded at.
+    #[must_use]
+    pub fn log_level(&self) -> LogLevel {
+        self.kind.log_level()
+    }
+
     /// Render to a single JSONL line (no trailing newline).
     #[must_use]
     pub fn to_jsonl(&self) -> String {
@@ -99,6 +126,7 @@ mod tests {
             level: None,
             content: "hello".into(),
             fields: serde_json::json!({}),
+            trace_fields: None,
         }
     }
 
@@ -125,6 +153,28 @@ mod tests {
     fn truncated_is_noop_when_within_cap() {
         let t = ev().truncated(1000);
         assert_eq!(t.content, "hello");
+    }
+
+    #[test]
+    fn log_level_info_for_lifecycle_events() {
+        assert_eq!(EventKind::LifecycleStart.log_level(), LogLevel::Info);
+        assert_eq!(EventKind::LifecycleEnd.log_level(), LogLevel::Info);
+        assert_eq!(EventKind::Scope.log_level(), LogLevel::Info);
+        assert_eq!(EventKind::Prompt.log_level(), LogLevel::Info);
+        assert_eq!(EventKind::Notification.log_level(), LogLevel::Info);
+        assert_eq!(EventKind::Stop.log_level(), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_debug_for_tool_events() {
+        assert_eq!(EventKind::ToolUse.log_level(), LogLevel::Debug);
+        assert_eq!(EventKind::ToolResult.log_level(), LogLevel::Debug);
+    }
+
+    #[test]
+    fn log_level_ordering_is_correct() {
+        assert!(LogLevel::Trace > LogLevel::Debug);
+        assert!(LogLevel::Debug > LogLevel::Info);
     }
 
     use proptest::prelude::*;
@@ -171,6 +221,7 @@ mod tests {
                     level,
                     content,
                     fields: serde_json::json!({"k": "v"}),
+                    trace_fields: None,
                 }
             })
     }
