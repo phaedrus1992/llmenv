@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc a65d25e66efeb022f67509ef60256ce32a060085298a6e8bbb068be4f58a0dc5 # shrinks to frag = Mapping {"a": Sequence [Bool(true), Bool(true)]}
+cc 2062a3a31df0aff5fd46d5708ad94881c630910d95901f7bc259b4b8e5380415 # shrinks to mut v = Null
