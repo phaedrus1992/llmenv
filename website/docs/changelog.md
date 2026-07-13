@@ -59,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Fixed
+- Session log transcript correlation (`session_log::state`) no longer
+  silently fails when `state_dir()` is unavailable — falls back to CWD with
+  a `tracing::warn!` instead of returning `None`/`Err` (#737)
+- Add `tracing::warn!` diagnostics to 7 additional silent-error swallowing
+  sites in file_sink, event serialization, read-once canonicalize, throttle
+  error body, consolidation error body, and MCP client error body reads (#773)
 - Surface silent error swallowing in read-once hook — `state_dir()`
   resolution failures are now logged as warnings before returning empty
   strings (#760)
