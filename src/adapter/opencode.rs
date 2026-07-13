@@ -865,7 +865,7 @@ fn generate_shim_js(hooks: &[crate::config::Hook]) -> anyhow::Result<String> {
                             bundle_dir = %bundle_dir.display(),
                             "could not resolve bundle-relative hook command path \
                              in generate_shim_js — falling back to raw command; \
-                             hook may not work from a non-bundle context"
+                             path may be stale or the bundle restructured"
                         );
                         cmd.to_string()
                     }),
@@ -1592,5 +1592,59 @@ mod tests {
             "OPENCODE_CONFIG_DIR".into(),
             tmp.path().to_string_lossy().into_owned()
         )));
+    }
+
+    // -- split_frontmatter --
+
+    #[test]
+    fn split_frontmatter_simple() {
+        let (fm, body) = split_frontmatter("---\ndescription: hello\n---\nbody text\n");
+        assert!(fm.is_some(), "frontmatter must be parsed");
+        assert_eq!(body.trim(), "body text");
+    }
+
+    #[test]
+    fn split_frontmatter_absent() {
+        let (fm, body) = split_frontmatter("just body text without frontmatter");
+        assert!(fm.is_none(), "no frontmatter expected");
+        assert_eq!(body.trim(), "just body text without frontmatter");
+    }
+
+    #[test]
+    fn split_frontmatter_empty_source() {
+        let (fm, body) = split_frontmatter("");
+        assert!(fm.is_none());
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn split_frontmatter_only_delimiter() {
+        // A single "---" with no closer or body.
+        let (fm, body) = split_frontmatter("---");
+        assert!(fm.is_none(), "no closing ---, no frontmatter");
+        assert_eq!(body.trim(), "---");
+    }
+
+    #[test]
+    fn split_frontmatter_empty_frontmatter() {
+        let (fm, body) = split_frontmatter("---\n---\nbody\n");
+        assert!(fm.is_some(), "empty frontmatter is valid YAML");
+        assert_eq!(body.trim(), "body");
+    }
+
+    #[test]
+    fn split_frontmatter_invalid_yaml() {
+        // Malformed YAML should warn (via tracing) and return None.
+        let (fm, body) = split_frontmatter("---\n: invalid yaml :::\n---\nbody\n");
+        assert!(fm.is_none(), "invalid YAML returns None frontmatter");
+        assert_eq!(body.trim(), "body");
+    }
+
+    #[test]
+    fn split_frontmatter_preserves_body_trailing_whitespace() {
+        // The raw body after the closing --- delimiter is returned as-is
+        // (not trimmed) so markdown line-endings are preserved.
+        let (_, body) = split_frontmatter("---\nkey: val\n---\nstrong text\n\nmore\n");
+        assert_eq!(body, "strong text\n\nmore\n");
     }
 }
