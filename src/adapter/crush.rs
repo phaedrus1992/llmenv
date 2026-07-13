@@ -177,6 +177,10 @@ impl AgentAdapter for CrushAdapter {
             if let Some(matcher) = &hook.matcher {
                 entry.insert("matcher".into(), json!(matcher));
             }
+            debug_assert!(
+                resolved_command.is_some(),
+                "command is always Some for Command-kind hooks"
+            );
             entry.insert("command".into(), json!(resolved_command));
             hooks_by_event
                 .entry(hook.event.clone())
