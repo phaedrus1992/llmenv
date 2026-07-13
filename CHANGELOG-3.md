@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+- Surface silent error swallowing in auth, throttle, hook-run, and
+  reconcile_settings — read/parse failures are now logged as warnings instead
+  of being silently discarded (#749)
+- Fix transcript session id parsing — ICM returns the session id as a JSON
+  object, not a bare ULID, so every transcript record call was passing a JSON
+  blob instead of a real id and records went nowhere (#755)
+- Add diagnostics for walkdir entry errors in scope matcher — I/O errors
+  during directory traversal are now logged as warnings instead of silently
+  skipped (#752)
+- Add diagnostics for project marker file read errors — read failures on
+  `.llmenv.yaml` are now logged as warnings before returning defaults (#753)
+- Add diagnostics for config-context stdin JSON parse failures — parse
+  errors are now logged as warnings before falling back to SessionStart (#754)
+
+## [3.3.0] - 2026-07-13
+
+### Deprecated
+- The old boolean `session_log` shape (`file: bool`, `transcript: bool`,
+  `verbose: bool`) is deprecated. It still parses in 3.x but will be
+  removed in 4.0. Migrate to the new per-sink mapping blocks. ([#744](https://github.com/phaedrus1992/llmenv/issues/744))
+
 ### Removed
 - Remove dead `diff` field from `ReadOnce` config schema — the
   planned phase-2 delta mode was never implemented (#725)
@@ -80,6 +102,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `{adapter}.schema.json` sidecar alongside the native config file,
   enabling IDE validation and editor autocompletion for materialized
   opencode.json files. (#660)
+- Add read-once file deduplication hook — tracks files
+  read via the Read tool within a session and skips
+  re-reading unchanged files within a configurable TTL
+  (`features.read_once`). Includes deny-mode envelope to
+  block writes to never-read files (#318)
+- Add slippage control bundle — effort-level injection
+  and compaction-survival rules to improve agent behavior
+  consistency across long sessions
+  (`features.slippage`) (#317)
+- Add TTL-based memory retention pruning
+  (`llmenv memory prune`, `memories.retention` config with
+  per-type durations, `memories.auto_prune` flag during
+  materialize) (#270)
+- Add post-session LLM consolidation — after SessionEnd,
+  distills recent memories into permanent semantic rules
+  via direct Anthropic API call, reducing context drift
+  across sessions (#595)
 
 ### Fixed
 - opencode adapter not activating when `OPENCODE_CONFIG_DIR` is unset
@@ -407,7 +446,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.3.0...HEAD
+[3.3.0]: https://github.com/phaedrus1992/llmenv/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/phaedrus1992/llmenv/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0-rc.2...v3.0.0
