@@ -367,7 +367,7 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
         struct NewShape {
             #[serde(default)]
             file: Option<FileSinkConfig>,
-            #[serde(default)]
+            #[serde(default = "default_transcript_sink")]
             transcript: Option<TranscriptSinkConfig>,
             #[serde(default)]
             max_content_bytes: Option<usize>,
@@ -383,6 +383,10 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_transcript_sink() -> Option<TranscriptSinkConfig> {
+    Some(TranscriptSinkConfig::default())
 }
 
 /// llmenv's own cache/sync behavior. Distinct from engine `capabilities` — this
@@ -1474,12 +1478,12 @@ mod tests {
         #[test]
         fn prop_session_log_yaml_roundtrip(
             file in prop::option::of((proptest::bool::ANY, arb_level(), prop::option::of("[a-zA-Z0-9/_.-]{1,32}"))),
-            transcript in prop::option::of((proptest::bool::ANY, arb_level())),
+            (transcript_enabled, transcript_level) in (proptest::bool::ANY, arb_level()),
             max_content_bytes in prop::option::of(0usize..1_000_000),
         ) {
             let original = SessionLog {
                 file: file.map(|(enabled, level, path)| FileSinkConfig { enabled, level, path }),
-                transcript: transcript.map(|(enabled, level)| TranscriptSinkConfig { enabled, level }),
+                transcript: Some(TranscriptSinkConfig { enabled: transcript_enabled, level: transcript_level }),
                 max_content_bytes,
             };
             let yaml = serde_yaml::to_string(&original).expect("serialize");

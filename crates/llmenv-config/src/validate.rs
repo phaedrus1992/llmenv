@@ -745,19 +745,20 @@ mod tests {
         }
         (
             prop::option::of((any::<bool>(), arb_level(), arb_opt_string())),
-            prop::option::of((any::<bool>(), arb_level())),
+            (any::<bool>(), arb_level()),
             prop::option::of(0usize..65_536),
         )
-            .prop_map(|(file, transcript, max_content_bytes)| crate::SessionLog {
-                file: file.map(|(enabled, level, path)| crate::FileSinkConfig {
-                    enabled,
-                    level,
-                    path,
-                }),
-                transcript: transcript
-                    .map(|(enabled, level)| crate::TranscriptSinkConfig { enabled, level }),
-                max_content_bytes,
-            })
+            .prop_map(
+                |(file, (enabled, level), max_content_bytes)| crate::SessionLog {
+                    file: file.map(|(fe, fl, path)| crate::FileSinkConfig {
+                        enabled: fe,
+                        level: fl,
+                        path,
+                    }),
+                    transcript: Some(crate::TranscriptSinkConfig { enabled, level }),
+                    max_content_bytes,
+                },
+            )
     }
 
     fn arb_hashing_mode() -> impl Strategy<Value = HashingMode> {
