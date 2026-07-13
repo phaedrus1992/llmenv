@@ -65,7 +65,6 @@ features:
     enabled: true
     mode: {mode}
     ttl_seconds: 1200
-    diff: false
 
 cache:
   sync_interval_minutes: 60
