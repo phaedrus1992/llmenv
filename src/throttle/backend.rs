@@ -76,8 +76,23 @@ pub fn fetch_cached(
 }
 
 fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageSnapshot> {
-    let meta = std::fs::metadata(cache_file).ok()?;
-    let modified = meta.modified().ok()?;
+    let meta = std::fs::metadata(cache_file)
+        .inspect_err(|e| {
+            tracing::warn!(
+                "throttle cache stat failed for {}: {e}",
+                cache_file.display()
+            )
+        })
+        .ok()?;
+    let modified = meta
+        .modified()
+        .inspect_err(|e| {
+            tracing::warn!(
+                "throttle cache mtime failed for {}: {e}",
+                cache_file.display()
+            )
+        })
+        .ok()?;
     let age = match SystemTime::now().duration_since(modified) {
         Ok(d) => d,
         Err(_) => {
