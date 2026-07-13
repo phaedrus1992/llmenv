@@ -25,15 +25,15 @@ pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
 pub use schema::{
     Bundle, Cache, Capabilities, Config, ConsolidationBackend, ConsolidationConfig, ContentMatch,
-    ContentScope, ContextMode, EnvVar, Features, HashingMode, Hook, HookHandler, HookHandlerKind,
-    HostEntry, HostMatch, HostScope, ImportanceLevel, InitConfig, LspServer, Marketplace,
-    MarketplaceSource, McpServer, McpTransport, Memory, MemoryType, ModelCost, ModelProvider,
-    ModelRef, ModelSource, NativePermissionRules, NetworkMatch, NetworkScope,
-    OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, Scopes, SessionLog, SkillSource,
-    SlippageControl, StateConfig, StateTool, Throttle, UpgradeConfig, UpgradeTrack, UserMatch,
-    UserScope, classify_source, github_owner_repo, is_reserved_official_marketplace,
-    split_plugin_ref,
+    ContentScope, ContextMode, EnvVar, Features, FileSinkConfig, HashingMode, Hook, HookHandler,
+    HookHandlerKind, HostEntry, HostMatch, HostScope, ImportanceLevel, InitConfig, LogLevel,
+    LspServer, Marketplace, MarketplaceSource, McpServer, McpTransport, Memory, MemoryType,
+    ModelCost, ModelProvider, ModelRef, ModelSource, NativePermissionRules, NetworkMatch,
+    NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions,
+    PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, Scopes, SessionLog,
+    SkillSource, SlippageControl, StateConfig, StateTool, Throttle, TranscriptSinkConfig,
+    UpgradeConfig, UpgradeTrack, UserMatch, UserScope, classify_source, github_owner_repo,
+    is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
 pub use validate::{
@@ -119,13 +119,14 @@ mod tests {
         let cfg = Config::load(&p).unwrap();
         assert!(cfg.session_log.is_none());
         let resolved = cfg.session_log_resolved();
-        assert!(resolved.transcript, "default must enable transcript");
-        assert!(!resolved.file);
-        assert!(!resolved.verbose);
+        assert!(!resolved.any_sink_wants(LogLevel::Debug));
+        let t = resolved.transcript.as_ref().unwrap();
+        assert!(t.enabled);
+        assert_eq!(t.level, LogLevel::Info);
     }
 
     #[test]
-    fn session_log_table_parses_flags() {
+    fn session_log_old_shape_translates_to_new() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("config.yaml");
         std::fs::write(
@@ -133,9 +134,31 @@ mod tests {
             "session_log:\n  file: true\n  transcript: false\n  verbose: true\n",
         )
         .unwrap();
-        let cfg = Config::load(&p).unwrap();
-        let r = cfg.session_log_resolved();
-        assert!(r.file && !r.transcript && r.verbose);
+        let r = Config::load(&p).unwrap().session_log_resolved();
+        let f = r.file.as_ref().unwrap();
+        assert!(f.enabled);
+        assert_eq!(f.level, LogLevel::Debug);
+        let t = r.transcript.as_ref().unwrap();
+        assert!(!t.enabled);
+        assert_eq!(t.level, LogLevel::Debug);
+    }
+
+    #[test]
+    fn session_log_new_shape_parses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        std::fs::write(
+            &p,
+            "session_log:\n  file:\n    enabled: true\n    level: trace\n  transcript:\n    enabled: true\n    level: info\n",
+        )
+        .unwrap();
+        let r = Config::load(&p).unwrap().session_log_resolved();
+        let f = r.file.as_ref().unwrap();
+        assert!(f.enabled);
+        assert_eq!(f.level, LogLevel::Trace);
+        let t = r.transcript.as_ref().unwrap();
+        assert!(t.enabled);
+        assert_eq!(t.level, LogLevel::Info);
     }
 
     #[test]

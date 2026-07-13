@@ -733,23 +733,30 @@ mod tests {
     }
 
     // Arbitrary SessionLog so the round-trip exercises the custom Deserialize
-    // (mapping form) and every flag combination.
+    // (mapping form) and every sink configuration.
     fn arb_session_log() -> impl Strategy<Value = crate::SessionLog> {
+        use crate::LogLevel;
+        fn arb_level() -> impl Strategy<Value = LogLevel> {
+            prop_oneof![
+                Just(LogLevel::Info),
+                Just(LogLevel::Debug),
+                Just(LogLevel::Trace),
+            ]
+        }
         (
-            any::<bool>(),
-            any::<bool>(),
-            any::<bool>(),
-            arb_opt_string(),
+            prop::option::of((any::<bool>(), arb_level(), arb_opt_string())),
+            prop::option::of((any::<bool>(), arb_level())),
             prop::option::of(0usize..65_536),
         )
-            .prop_map(|(file, transcript, verbose, path, max_content_bytes)| {
-                crate::SessionLog {
-                    file,
-                    transcript,
-                    verbose,
+            .prop_map(|(file, transcript, max_content_bytes)| crate::SessionLog {
+                file: file.map(|(enabled, level, path)| crate::FileSinkConfig {
+                    enabled,
+                    level,
                     path,
-                    max_content_bytes,
-                }
+                }),
+                transcript: transcript
+                    .map(|(enabled, level)| crate::TranscriptSinkConfig { enabled, level }),
+                max_content_bytes,
             })
     }
 
