@@ -29,6 +29,7 @@ use crate::mcp::resolve::{ResolvedKind, resolve_mcps};
 use crate::session_log::dispatch as transcript_dispatch;
 use crate::session_log::event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
 use crate::session_log::{ScopeContext, scope_header_content, scope_metadata_json, state};
+use llmenv_config::LogLevel;
 
 /// A single cross-project, tag-scoped recall the TurnStart hook issues against
 /// ICM. Exposes the recall contract (#197) so it is testable without a live
@@ -462,7 +463,7 @@ fn run_inner(
             | HookEvent::SessionEnd
             | HookEvent::PostToolUse
             | HookEvent::PostSession
-    ) && !log_cfg.verbose
+    ) && !log_cfg.any_sink_enabled()
     {
         return Ok(String::new());
     }
@@ -612,8 +613,9 @@ struct SessionLogCall<'a> {
 }
 
 /// Dispatch the event's session-log handling: baseline lifecycle/scope events
-/// for `SessionStart`/`SessionEnd`, or (when `verbose`) the per-hook capture
-/// event for every other mapped event. No-op for unmapped events.
+/// for `SessionStart`/`SessionEnd`, or the per-hook capture event for every
+/// other mapped event when any sink is enabled. No-op for unmapped events or
+/// when no sink cares about this event's level.
 async fn run_session_log(
     event: HookEvent,
     call: &SessionLogCall<'_>,
@@ -631,25 +633,42 @@ async fn run_session_log(
         .await;
         return;
     }
-    let (true, Some((kind, role))) = (call.log_cfg.verbose, event_to_log_kind(event)) else {
+    let Some((kind, role)) = event_to_log_kind(event) else {
         return;
     };
+    let level = kind.log_level();
+    if !call.log_cfg.any_sink_wants(level) {
+        return;
+    }
     let session_id = match call.claude_session_id {
         Some(csid) => {
             ensure_transcript_session(call.log_cfg, call.client, csid, call.ctx, call.state_path)
                 .await
         }
         None => {
-            debug!("verbose event captured without claude_session_id — transcript record skipped");
+            debug!("event captured without claude_session_id — transcript record skipped");
             None
         }
     };
     let (tool_name, content) = verbose_content(event, stdin_payload);
-    emit_session_log(
-        verbose_session_event(kind, role, tool_name, content),
-        call.log_cfg,
-        session_id.as_deref(),
-    );
+    let trace_fields = if level == LogLevel::Trace {
+        let mut tf = serde_json::json!({});
+        if let Some(stdout) = stdin_payload.get("stdout").and_then(|v| v.as_str()) {
+            tf["hook_stdout"] = serde_json::Value::String(stdout.to_string());
+        }
+        if let Some(stderr) = stdin_payload.get("stderr").and_then(|v| v.as_str()) {
+            tf["hook_stderr"] = serde_json::Value::String(stderr.to_string());
+        }
+        if let Some(exit) = stdin_payload.get("exit_code") {
+            tf["hook_exit_code"] = exit.clone();
+        }
+        Some(tf)
+    } else {
+        None
+    };
+    let mut ev = agent_session_event(kind, role, tool_name, content, serde_json::json!({}));
+    ev.trace_fields = trace_fields;
+    emit_session_log(ev, call.log_cfg, session_id.as_deref());
 }
 
 /// Build the active-scope context a session's lifecycle/scope-header events
@@ -691,7 +710,7 @@ async fn handle_session_log(
     ctx: &ScopeContext,
     state_path: Option<&std::path::Path>,
 ) -> Option<String> {
-    if !(cfg.file || cfg.transcript) {
+    if !cfg.any_sink_enabled() {
         return None;
     }
     let session_id = match (event, claude_session_id) {
@@ -732,7 +751,7 @@ async fn ensure_transcript_session(
     if let Some(existing) = state::lookup_session_at(path, csid) {
         return Some(existing);
     }
-    let (true, Some(client)) = (cfg.transcript, client) else {
+    let (true, Some(client)) = (cfg.transcript_wants(LogLevel::Info), client) else {
         return None;
     };
     let metadata = scope_metadata_json(ctx);
@@ -757,16 +776,17 @@ async fn ensure_transcript_session(
     }
 }
 
-/// Append `ev` to the configured sinks: the JSONL file (if `cfg.file`,
-/// written synchronously) and, for agent-session-scoped events, the ICM
-/// transcript (if `cfg.transcript` and a transcript session id is known —
-/// dispatched via a detached child, see `session_log::detached`, so this
-/// never blocks on the network). Fail-soft.
+/// Append `ev` to the configured sinks: the JSONL file (if enabled and
+/// `ev.log_level() <= file.level`, written synchronously) and, for
+/// agent-session-scoped events, the ICM transcript (if enabled and
+/// `ev.log_level() <= transcript.level` — dispatched via a detached child, see
+/// `session_log::detached`, so this never blocks on the network). Fail-soft.
 fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id: Option<&str>) {
     let max = cfg.max_content_bytes.unwrap_or(16_384);
     let ev = ev.truncated(max);
-    if cfg.file {
-        let path = cfg.path.clone().map(std::path::PathBuf::from).or_else(|| {
+    let level = ev.log_level();
+    if cfg.file_wants(level) {
+        let path = cfg.file_path().map(std::path::PathBuf::from).or_else(|| {
             crate::session_log::default_file_path()
                 .inspect_err(|e| debug!("session_log: file sink disabled, no path resolved: {e}"))
                 .ok()
@@ -775,7 +795,7 @@ fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id: Option<&s
             crate::session_log::FileSink::new(p).append(&ev.to_jsonl());
         }
     }
-    if cfg.transcript
+    if cfg.transcript_wants(level)
         && ev.scope == EventScope::AgentSession
         && let Some(sid) = session_id
     {
@@ -803,6 +823,7 @@ fn agent_session_event(
         level: None,
         content,
         fields,
+        trace_fields: None,
     }
 }
 
@@ -824,17 +845,6 @@ fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
         scope_header_content(ctx),
         scope_metadata_json(ctx),
     )
-}
-
-/// Build a verbose-capture event (`session_log.verbose`) from a Claude hook
-/// payload, as extracted by `verbose_content`.
-fn verbose_session_event(
-    kind: EventKind,
-    role: &str,
-    tool_name: Option<String>,
-    content: String,
-) -> SessionLogEvent {
-    agent_session_event(kind, role, tool_name, content, serde_json::json!({}))
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, if any.
@@ -1797,10 +1807,15 @@ mod session_log_tests {
 
     fn file_only_cfg(path: &std::path::Path) -> SessionLog {
         SessionLog {
-            file: true,
-            transcript: false,
-            verbose: false,
-            path: Some(path.to_string_lossy().into_owned()),
+            file: Some(llmenv_config::FileSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                path: Some(path.to_string_lossy().into_owned()),
+            }),
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: false,
+                level: LogLevel::Info,
+            }),
             max_content_bytes: None,
         }
     }
@@ -1861,9 +1876,16 @@ mod session_log_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-log.jsonl");
         let cfg = SessionLog {
-            file: false,
-            transcript: false,
-            ..file_only_cfg(&path)
+            file: Some(llmenv_config::FileSinkConfig {
+                enabled: false,
+                level: LogLevel::Info,
+                path: Some(path.to_string_lossy().into_owned()),
+            }),
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: false,
+                level: LogLevel::Info,
+            }),
+            max_content_bytes: None,
         };
         handle_session_log(HookEvent::SessionStart, &cfg, None, None, &ctx(), None).await;
         assert!(!path.exists());
@@ -1895,7 +1917,10 @@ mod session_log_tests {
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let cfg = SessionLog {
-            transcript: true,
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+            }),
             ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
 
@@ -1921,7 +1946,10 @@ mod session_log_tests {
         let server = MockServer::start().await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let cfg = SessionLog {
-            transcript: true,
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+            }),
             ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
 

@@ -162,6 +162,7 @@ mod tests {
             level: None,
             content: "hi".into(),
             fields: serde_json::json!({}),
+            trace_fields: None,
         };
         record(&client, "sess-42", &ev).await.unwrap();
     }
