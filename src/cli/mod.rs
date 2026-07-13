@@ -2314,13 +2314,20 @@ fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyh
     {
         crate::auth::inject_auth_into_claude_json(folder, &entry)?;
         // Update manifest auth_status to Explicit.
-        if let Ok(Some(mut manifest)) = crate::materialize::manifest::CacheManifest::read(folder) {
-            manifest.auth_status = crate::materialize::manifest::AuthStatus {
-                source: crate::materialize::manifest::AuthSource::Explicit,
-                id: Some(entry.uuid),
-                email: Some(entry.email),
-            };
-            manifest.write(folder)?;
+        match crate::materialize::manifest::CacheManifest::read(folder) {
+            Ok(Some(mut manifest)) => {
+                manifest.auth_status = crate::materialize::manifest::AuthStatus {
+                    source: crate::materialize::manifest::AuthSource::Explicit,
+                    id: Some(entry.uuid),
+                    email: Some(entry.email),
+                };
+                manifest.write(folder)?;
+            }
+            Ok(None) => {} // no manifest yet — benign
+            Err(e) => tracing::warn!(
+                "failed to read cache manifest in {:?} for auth status update: {e}",
+                folder,
+            ),
         }
     }
     Ok(())
