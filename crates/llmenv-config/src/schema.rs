@@ -160,21 +160,16 @@ pub struct Config {
 
 /// Per-sink log level for session-log events. Each level includes all events
 /// from the levels above it: Trace ⊃ Debug ⊃ Info.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Lifecycle events, user prompts, stop, notifications, precompact.
+    #[default]
     Info,
     /// Info + tool uses, tool results.
     Debug,
     /// Debug + hook stdout/stderr, hook exit codes.
     Trace,
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 impl<'de> Deserialize<'de> for LogLevel {
@@ -318,6 +313,7 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
                  `session_log: {{ file: true }}` (file path overridable via `path:`)"
             )));
         }
+        #[expect(clippy::unwrap_used, reason = "guarded by is_mapping() check above")]
         let m = v.as_mapping().unwrap();
 
         let is_old_shape = m.iter().any(|(k, v)| {
@@ -346,7 +342,7 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
                 LogLevel::Info
             };
             return Ok(SessionLog {
-                file: old.file.then(|| FileSinkConfig {
+                file: old.file.then_some(FileSinkConfig {
                     enabled: true,
                     level,
                     path: old.path,
