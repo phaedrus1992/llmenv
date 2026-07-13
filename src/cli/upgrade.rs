@@ -182,7 +182,12 @@ fn install_binary(data: &[u8]) -> Result<()> {
     })();
 
     if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_file(&temp).inspect_err(|e| {
+            tracing::warn!(
+                "upgrade: failed to remove temp file {}: {e}",
+                temp.display()
+            )
+        });
         // Restore backup before propagating the error
         let restore_err = restore_backup(&current_exe, &backup);
         if let Err(re) = restore_err {
@@ -194,16 +199,32 @@ fn install_binary(data: &[u8]) -> Result<()> {
     // Verify the new binary works
     match Command::new(&current_exe).arg("--version").output() {
         Ok(output) if output.status.success() => {
-            let _ = std::fs::remove_file(&backup);
+            let _ = std::fs::remove_file(&backup).inspect_err(|e| {
+                tracing::warn!("upgrade: failed to remove backup {}: {e}", backup.display())
+            });
             Ok(())
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let _ = restore_backup(&current_exe, &backup);
+            let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
+                tracing::warn!("upgrade: failed to restore backup after verification failure: {e}")
+            });
+            if let Err(re) = restore_err {
+                anyhow::bail!(
+                    "new binary failed verification (stderr: {stderr}); AND failed to restore backup: {re}"
+                );
+            }
             anyhow::bail!("new binary failed verification (stderr: {stderr}); restored original");
         }
         Err(e) => {
-            let _ = restore_backup(&current_exe, &backup);
+            let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
+                tracing::warn!("upgrade: failed to restore backup after verification error: {e}")
+            });
+            if let Err(re) = restore_err {
+                anyhow::bail!(
+                    "could not verify new binary: {e}; AND failed to restore backup: {re}"
+                );
+            }
             anyhow::bail!("could not verify new binary: {e}; restored original");
         }
     }
@@ -284,6 +305,7 @@ pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()>
 #[expect(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -368,6 +390,56 @@ mod tests {
             compare_versions("invalid", "3.2.0"),
             std::cmp::Ordering::Equal
         );
+    }
+
+    // -- Property-based tests
+
+    proptest::proptest! {
+        #[test]
+        fn compare_versions_reflexive(major: u64, minor: u64, patch: u64) {
+            let v = format!("{major}.{minor}.{patch}");
+            prop_assert_eq!(compare_versions(&v, &v), std::cmp::Ordering::Equal);
+        }
+
+        #[test]
+        fn compare_versions_antisymmetric(
+            a_major: u64, a_minor: u64, a_patch: u64,
+            b_major: u64, b_minor: u64, b_patch: u64,
+        ) {
+            let a = format!("{a_major}.{a_minor}.{a_patch}");
+            let b = format!("{b_major}.{b_minor}.{b_patch}");
+            let forward = compare_versions(&a, &b);
+            let backward = compare_versions(&b, &a);
+            prop_assert_eq!(backward, forward.reverse());
+        }
+
+        #[test]
+        fn compare_versions_transitive(
+            a: (u64, u64, u64), b: (u64, u64, u64), c: (u64, u64, u64),
+        ) {
+            let va = format!("{}.{}.{}", a.0, a.1, a.2);
+            let vb = format!("{}.{}.{}", b.0, b.1, b.2);
+            let vc = format!("{}.{}.{}", c.0, c.1, c.2);
+            let ab = compare_versions(&va, &vb);
+            let bc = compare_versions(&vb, &vc);
+            if ab == std::cmp::Ordering::Greater && bc == std::cmp::Ordering::Greater {
+                prop_assert_eq!(compare_versions(&va, &vc), std::cmp::Ordering::Greater);
+            }
+        }
+
+        #[test]
+        fn compare_versions_v_prefix(major: u64, minor: u64, patch: u64) {
+            let bare = format!("{major}.{minor}.{patch}");
+            let prefixed = format!("v{major}.{minor}.{patch}");
+            prop_assert_eq!(compare_versions(&bare, &prefixed), std::cmp::Ordering::Equal);
+            prop_assert_eq!(compare_versions(&prefixed, &bare), std::cmp::Ordering::Equal);
+        }
+
+        #[test]
+        fn compare_versions_no_panic_on_any_string(s in ".*") {
+            let _ = compare_versions(&s, "1.0.0");
+            let _ = compare_versions("1.0.0", &s);
+        }
     }
 
     // -- GitHub API integration

@@ -113,9 +113,25 @@ impl SessionCache {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(meta) = std::fs::metadata(&path)
-                && let Ok(modified) = meta.modified()
-                && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+            if let Ok(meta) = std::fs::metadata(&path).inspect_err(|e| {
+                tracing::warn!(
+                    "prune_stale_sessions: stat failed for {}: {e}",
+                    path.display()
+                )
+            }) && let Ok(modified) = meta.modified().inspect_err(|e| {
+                tracing::warn!(
+                    "prune_stale_sessions: mtime failed for {}: {e}",
+                    path.display()
+                )
+            }) && let Ok(duration) =
+                modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .inspect_err(|e| {
+                        tracing::warn!(
+                            "prune_stale_sessions: duration_since failed for {}: {e}",
+                            path.display()
+                        )
+                    })
             {
                 let age_secs = now.saturating_sub(duration.as_secs() as i64);
                 if age_secs > max_age_secs as i64
@@ -215,10 +231,14 @@ pub(crate) fn handle_pre_tool_use_inner(
     let path = Path::new(file_path);
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
-        Err(_) => return String::new(), // Missing file → pass through
+        Err(e) => {
+            tracing::warn!("read_once stat failed for {}: {e}", path.display());
+            return String::new();
+        }
     };
     let mtime = metadata
         .modified()
+        .inspect_err(|e| tracing::warn!("read_once mtime failed for {}: {e}", path.display()))
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
