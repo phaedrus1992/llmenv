@@ -30,7 +30,7 @@ pub fn state_path() -> anyhow::Result<PathBuf> {
 /// Load the correlation map at `path`. A missing file is the normal
 /// first-run case and returns an empty map silently. A file that exists but
 /// fails to parse (truncated by a crash, hand-edited, corrupted) is handled
-/// fail-soft: the map degrades to empty and a `debug!` message is logged.
+/// fail-soft: the map degrades to empty and a `warn!` message is logged.
 ///
 /// **Deliberate deviation from hard-error convention:** Unlike persistent
 /// config (plugins, `.claude.json`), session correlation state is ephemeral
