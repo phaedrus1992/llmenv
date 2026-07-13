@@ -9,7 +9,9 @@ fn session_log_file_path(configured: Option<&str>) -> PathBuf {
     match configured {
         Some(raw) => PathBuf::from(llmenv_paths::expand_tilde(raw)),
         None => default_file_path().unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to resolve default session log path; falling back to CWD");
+            eprintln!(
+                "llmenv: failed to resolve default session log path: {e}; falling back to CWD"
+            );
             PathBuf::from("session-log.jsonl")
         }),
     }
