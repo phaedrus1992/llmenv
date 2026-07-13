@@ -129,6 +129,13 @@ impl McpHttpClient {
             let body = resp
                 .text()
                 .await
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        url = %self.url,
+                        "failed to read MCP initialize error response body"
+                    )
+                })
                 .unwrap_or_else(|_| "(failed to read error body)".to_string());
             return Err(anyhow!("MCP initialize returned HTTP {status}: {body}"));
         }
@@ -199,6 +206,13 @@ impl McpHttpClient {
             let body = resp
                 .text()
                 .await
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        tool = %name,
+                        "failed to read MCP tool error response body"
+                    )
+                })
                 .unwrap_or_else(|_| "(failed to read error body)".to_string());
             return Err(anyhow!("tool {name} returned HTTP {}: {}", status, body));
         }

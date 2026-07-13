@@ -512,11 +512,7 @@ fn run_inner(
         .map(|u| McpHttpClient::new(u, HOOK_TIMEOUT))
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
-    let state_path = state::state_path()
-        .inspect_err(|e| {
-            debug!("session_log: cannot resolve state path, correlation disabled: {e}")
-        })
-        .ok();
+    let state_path = Some(state::state_path());
     let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd, adapter_name);
 
     // Dedup: skip Store when the context chunk hasn't changed since the last
