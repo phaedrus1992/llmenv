@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Deprecated
+- The old boolean `session_log` shape (`file: bool`, `transcript: bool`,
+  `verbose: bool`) is deprecated. It still parses in 3.x but will be
+  removed in 4.0. Migrate to the new per-sink mapping blocks. ([#744](https://github.com/phaedrus1992/llmenv/issues/744))
+
 ### Removed
 - Remove dead `diff` field from `ReadOnce` config schema — the
   planned phase-2 delta mode was never implemented (#725)
@@ -67,6 +72,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   patterns (`scope.content`) — auto-activates tags when
   matching files exist in the working directory, without
   requiring `.llmenv.yaml` markers (#278)
+- Add read-once file deduplication hook — tracks files
+  read via the Read tool within a session and skips
+  re-reading unchanged files within a configurable TTL
+  (`features.read_once`). Includes deny-mode envelope to
+  block writes to never-read files (#318)
+- Add slippage control bundle — effort-level injection
+  and compaction-survival rules to improve agent behavior
+  consistency across long sessions
+  (`features.slippage`) (#317)
+- Add TTL-based memory retention pruning
+  (`llmenv memory prune`, `memories.retention` config with
+  per-type durations, `memories.auto_prune` flag during
+  materialize) (#270)
+- Add post-session LLM consolidation — after SessionEnd,
+  distills recent memories into permanent semantic rules
+  via direct Anthropic API call, reducing context drift
+  across sessions (#595)
 
 ## [3.2.0] - 2026-07-11
 
