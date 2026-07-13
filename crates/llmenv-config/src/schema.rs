@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Settings pre-seeded during `llmenv init` for newly-materialized folders.
 ///
@@ -153,65 +153,154 @@ pub struct Config {
     /// new materialized folders' `settings.json`, surviving every re-render.
     #[serde(default)]
     pub init: InitConfig,
-    /// Session logging configuration. Absent → ICM transcript on, file + verbose
-    /// off (see `Config::session_log_resolved`). Was a bare path string before
-    /// 3.0; that form is now rejected with a migration hint.
+    /// Session logging configuration. Absent → ICM transcript on (info), file off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_log: Option<SessionLog>,
 }
 
+/// Per-sink log level for session-log events. Each level includes all events
+/// from the levels above it: Trace ⊃ Debug ⊃ Info.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Lifecycle events, user prompts, stop, notifications, precompact.
+    #[default]
+    Info,
+    /// Info + tool uses, tool results.
+    Debug,
+    /// Debug + hook stdout/stderr, hook exit codes.
+    Trace,
+}
+
+impl<'de> Deserialize<'de> for LogLevel {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.as_str() {
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown log level {other:?}, expected info | debug | trace"
+            ))),
+        }
+    }
+}
+
+/// Configuration for the file sink within `session_log`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSinkConfig {
+    /// Enable the JSONL file sink.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minimum event level recorded to this file.
+    #[serde(default)]
+    pub level: LogLevel,
+    /// Override the default path (`<state_dir>/session-log.jsonl`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl Default for FileSinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            level: LogLevel::Info,
+            path: None,
+        }
+    }
+}
+
+/// Configuration for the ICM transcript sink within `session_log`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSinkConfig {
+    /// Enable the ICM transcript sink.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum event level recorded to the transcript.
+    #[serde(default)]
+    pub level: LogLevel,
+}
+
+impl Default for TranscriptSinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            level: LogLevel::Info,
+        }
+    }
+}
+
 /// Where and how llmenv records session activity. `file` and `transcript` are
-/// independent sinks that receive the same event stream; `verbose` adds
-/// per-hook prompt/tool detail to it.
+/// independent sinks that share the same event stream; each filters by its own
+/// `level`. `max_content_bytes` applies uniformly to both.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionLog {
-    /// Append the session-event stream as JSONL to `path` (or the default).
-    pub file: bool,
-    /// Record the same stream to ICM transcripts via the ICM MCP.
-    pub transcript: bool,
-    /// Include per-hook prompt/tool-use events in the stream.
-    pub verbose: bool,
-    /// Override the file-sink path (default `<state_dir>/session-log.jsonl`).
-    pub path: Option<String>,
-    /// Truncate event content to this many bytes (default 16384).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<FileSinkConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<TranscriptSinkConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_content_bytes: Option<usize>,
 }
 
 impl Default for SessionLog {
     fn default() -> Self {
         Self {
-            file: false,
-            transcript: true,
-            verbose: false,
-            path: None,
+            file: None,
+            transcript: Some(TranscriptSinkConfig::default()),
             max_content_bytes: None,
         }
     }
 }
 
-/// Reject the pre-3.0 bare-string form with a clear migration message; otherwise
-/// parse a mapping, applying `transcript = true` as the field default.
+impl SessionLog {
+    #[must_use]
+    pub fn any_sink_enabled(&self) -> bool {
+        self.file.as_ref().is_some_and(|f| f.enabled)
+            || self.transcript.as_ref().is_some_and(|t| t.enabled)
+    }
+
+    #[must_use]
+    pub fn any_sink_wants(&self, level: LogLevel) -> bool {
+        self.file
+            .as_ref()
+            .is_some_and(|f| f.enabled && level <= f.level)
+            || self
+                .transcript
+                .as_ref()
+                .is_some_and(|t| t.enabled && level <= t.level)
+    }
+
+    #[must_use]
+    pub fn file_wants(&self, level: LogLevel) -> bool {
+        self.file
+            .as_ref()
+            .is_some_and(|f| f.enabled && level <= f.level)
+    }
+
+    #[must_use]
+    pub fn transcript_wants(&self, level: LogLevel) -> bool {
+        self.transcript
+            .as_ref()
+            .is_some_and(|t| t.enabled && level <= t.level)
+    }
+
+    #[must_use]
+    pub fn file_path(&self) -> Option<&str> {
+        self.file.as_ref().and_then(|f| f.path.as_deref())
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for SessionLog {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Shadow {
-            #[serde(default)]
-            file: bool,
-            #[serde(default = "default_true")]
-            transcript: bool,
-            #[serde(default)]
-            verbose: bool,
-            #[serde(default)]
-            path: Option<String>,
-            #[serde(default)]
-            max_content_bytes: Option<usize>,
-        }
         let v = serde_yaml::Value::deserialize(d)?;
         if !v.is_mapping() {
             let got = match &v {
                 serde_yaml::Value::String(_) => {
-                    "a string (the pre-3.0 bare path-string form is no longer supported)"
+                    "a string (the pre-3.0 bare path-string form is no longer supported); use \
+                     `session_log: {{ file: true }}` (file path overridable via `path:`)"
                         .to_string()
                 }
                 serde_yaml::Value::Bool(_) => "a boolean".to_string(),
@@ -221,22 +310,83 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
             };
             return Err(serde::de::Error::custom(format!(
                 "session_log must be a mapping, not {got}; use \
-                 `session_log: {{ file: true }}` (file path overridable via `path:`)",
+                 `session_log: {{ file: true }}` (file path overridable via `path:`)"
             )));
         }
-        let s: Shadow = serde_yaml::from_value(v).map_err(serde::de::Error::custom)?;
+        #[expect(clippy::unwrap_used, reason = "guarded by is_mapping() check above")]
+        let m = v.as_mapping().unwrap();
+
+        let is_old_shape = m.iter().any(|(k, v)| {
+            let key = k.as_str().unwrap_or("");
+            (key == "file" || key == "transcript" || key == "verbose") && v.is_bool()
+        });
+
+        if is_old_shape {
+            #[derive(Deserialize)]
+            struct OldShape {
+                #[serde(default)]
+                file: bool,
+                #[serde(default = "default_true")]
+                transcript: bool,
+                #[serde(default)]
+                verbose: bool,
+                #[serde(default)]
+                path: Option<String>,
+                #[serde(default)]
+                max_content_bytes: Option<usize>,
+            }
+            let old: OldShape = serde_yaml::from_value(v).map_err(serde::de::Error::custom)?;
+            let level = if old.verbose {
+                LogLevel::Debug
+            } else {
+                LogLevel::Info
+            };
+            return Ok(SessionLog {
+                file: old.file.then_some(FileSinkConfig {
+                    enabled: true,
+                    level,
+                    path: old.path,
+                }),
+                transcript: if old.transcript {
+                    Some(TranscriptSinkConfig {
+                        enabled: true,
+                        level,
+                    })
+                } else {
+                    Some(TranscriptSinkConfig {
+                        enabled: false,
+                        level,
+                    })
+                },
+                max_content_bytes: old.max_content_bytes,
+            });
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NewShape {
+            #[serde(default)]
+            file: Option<FileSinkConfig>,
+            #[serde(default = "default_transcript_sink")]
+            transcript: Option<TranscriptSinkConfig>,
+            #[serde(default)]
+            max_content_bytes: Option<usize>,
+        }
+        let n: NewShape = serde_yaml::from_value(v).map_err(serde::de::Error::custom)?;
         Ok(SessionLog {
-            file: s.file,
-            transcript: s.transcript,
-            verbose: s.verbose,
-            path: s.path,
-            max_content_bytes: s.max_content_bytes,
+            file: n.file,
+            transcript: n.transcript,
+            max_content_bytes: n.max_content_bytes,
         })
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_transcript_sink() -> Option<TranscriptSinkConfig> {
+    Some(TranscriptSinkConfig::default())
 }
 
 /// llmenv's own cache/sync behavior. Distinct from engine `capabilities` — this
@@ -1269,6 +1419,14 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn arb_level() -> impl Strategy<Value = LogLevel> {
+        prop_oneof![
+            Just(LogLevel::Info),
+            Just(LogLevel::Debug),
+            Just(LogLevel::Trace),
+        ]
+    }
+
     #[test]
     fn cache_defaults_to_normal_when_hashing_absent() {
         // #246: a Cache block with no `hashing` key parses to the default
@@ -1299,12 +1457,16 @@ mod tests {
 
     #[test]
     fn session_log_serialize_deserialize_roundtrips() {
-        // #509 item 4: no round-trip test existed for the custom Deserialize impl.
         let original = SessionLog {
-            file: true,
-            transcript: false,
-            verbose: true,
-            path: Some("/tmp/log.jsonl".into()),
+            file: Some(FileSinkConfig {
+                enabled: true,
+                level: LogLevel::Debug,
+                path: Some("/tmp/log.jsonl".into()),
+            }),
+            transcript: Some(TranscriptSinkConfig {
+                enabled: false,
+                level: LogLevel::Trace,
+            }),
             max_content_bytes: Some(1024),
         };
         let yaml = serde_yaml::to_string(&original).expect("serialize");
@@ -1315,13 +1477,15 @@ mod tests {
     proptest! {
         #[test]
         fn prop_session_log_yaml_roundtrip(
-            file in proptest::bool::ANY,
-            transcript in proptest::bool::ANY,
-            verbose in proptest::bool::ANY,
-            path in prop::option::of("[a-zA-Z0-9/_.-]{1,32}"),
+            file in prop::option::of((proptest::bool::ANY, arb_level(), prop::option::of("[a-zA-Z0-9/_.-]{1,32}"))),
+            (transcript_enabled, transcript_level) in (proptest::bool::ANY, arb_level()),
             max_content_bytes in prop::option::of(0usize..1_000_000),
         ) {
-            let original = SessionLog { file, transcript, verbose, path, max_content_bytes };
+            let original = SessionLog {
+                file: file.map(|(enabled, level, path)| FileSinkConfig { enabled, level, path }),
+                transcript: Some(TranscriptSinkConfig { enabled: transcript_enabled, level: transcript_level }),
+                max_content_bytes,
+            };
             let yaml = serde_yaml::to_string(&original).expect("serialize");
             let back: SessionLog = serde_yaml::from_str(&yaml).expect("deserialize");
             prop_assert_eq!(original, back);

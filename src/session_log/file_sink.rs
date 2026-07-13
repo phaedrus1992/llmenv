@@ -63,7 +63,7 @@ impl FileSink {
         // ran, or by an older llmenv version) keeps its prior permissions. Set
         // them explicitly on every open via the already-open fd so a
         // pre-existing world-readable file gets locked down before this
-        // process appends potentially sensitive verbose-mode content to it.
+        // process appends potentially sensitive session-log content to it.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
