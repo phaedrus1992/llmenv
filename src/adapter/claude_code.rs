@@ -1349,7 +1349,9 @@ pub(crate) fn seed_install_method(out: &std::path::Path) -> anyhow::Result<()> {
 ///   actually clears the key rather than leaving a stale one.
 fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let existing = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).ok(),
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .inspect_err(|e| tracing::warn!("failed to parse {}: {e:#}", path.display()))
+            .ok(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             return Err(anyhow::anyhow!(

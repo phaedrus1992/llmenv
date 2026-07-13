@@ -184,7 +184,11 @@ pub fn matches_content(s: &ContentScope, cwd: &std::path::Path) -> bool {
     }
 
     for entry in walker {
-        let Ok(entry) = entry else { continue };
+        let Ok(entry) =
+            entry.inspect_err(|e| tracing::warn!(error = %e, "walkdir entry error; skipping"))
+        else {
+            continue;
+        };
         if entry.file_type().is_dir() {
             continue;
         }
@@ -285,7 +289,9 @@ const MAX_DESCRIPTION_BYTES: usize = 1024;
 /// Malformed YAML → log warning and return defaults. The `description`
 /// field is truncated to `MAX_DESCRIPTION_BYTES` if oversized.
 fn read_project_file(path: &std::path::Path) -> ProjectFile {
-    let Ok(body) = std::fs::read_to_string(path) else {
+    let Ok(body) = std::fs::read_to_string(path).inspect_err(|e| {
+        tracing::warn!(path = %path.display(), error = %e, "failed to read project marker file; using defaults")
+    }) else {
         return ProjectFile::default();
     };
     if body.trim().is_empty() {
@@ -732,5 +738,20 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn read_project_file_io_error_returns_defaults() {
+        // When the marker file exists but can't be read (e.g. it's a directory),
+        // read_project_file must return defaults — not panic, not hang.
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let marker = temp_dir.path().join(".llmenv.yaml");
+        std::fs::create_dir(&marker).expect("create .llmenv.yaml as directory");
+
+        let env = env_in(temp_dir.path(), temp_dir.path());
+        let project = discover_project(&env).expect("discover must return Some even on I/O error");
+        // Should get a basename-derived id instead of crashing or None.
+        assert!(!project.id.is_empty());
+        assert!(!project.name.is_empty());
     }
 }
