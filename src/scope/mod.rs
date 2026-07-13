@@ -68,6 +68,28 @@ pub struct ActiveScopes {
     pub tags: BTreeSet<String>,
 }
 
+impl ActiveScopes {
+    /// Tags from all scopes whose `kind` is not `"project"`.
+    ///
+    /// Project-scoped tags describe the *project's* domain (e.g.
+    /// `lang-typescript`, `agent-coding`) and must not leak into host-level
+    /// plugin collection selection — a project's `.llmenv.yaml` should not
+    /// cause plugins like `fullstack-dev-skills` to appear in the generated
+    /// host `settings.json` (#696).
+    ///
+    /// Non-project tags (network, host, user, content) describe the
+    /// *environment*, which is the correct scope for host plugin decisions.
+    pub fn non_project_tags(&self) -> BTreeSet<String> {
+        let project_tags: BTreeSet<String> = self
+            .scopes
+            .iter()
+            .filter(|s| s.kind == "project")
+            .flat_map(|s| s.tags.iter().cloned())
+            .collect();
+        self.tags.difference(&project_tags).cloned().collect()
+    }
+}
+
 pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     let mut scopes = Vec::new();
     for s in &cfg.scope.network {
@@ -150,4 +172,145 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
         tags.insert(env.os.clone());
     }
     ActiveScopes { scopes, tags }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_project_tags_excludes_project_scope_tags() {
+        let active = ActiveScopes {
+            scopes: vec![
+                ActiveScope {
+                    id: "my-host".into(),
+                    kind: "host",
+                    tags: vec!["infra".into(), "web".into()],
+                    project_root: None,
+                    enable_bundles: Vec::new(),
+                    disable_bundles: Vec::new(),
+                    name: None,
+                    description: None,
+                    unknown_fields: Vec::new(),
+                },
+                ActiveScope {
+                    id: "my-project".into(),
+                    kind: "project",
+                    tags: vec!["lang-typescript".into(), "agent-coding".into()],
+                    project_root: Some("/project".into()),
+                    enable_bundles: Vec::new(),
+                    disable_bundles: Vec::new(),
+                    name: Some("project".into()),
+                    description: None,
+                    unknown_fields: Vec::new(),
+                },
+            ],
+            // Full union: infra, web, lang-typescript, agent-coding
+            tags: BTreeSet::from([
+                "infra".into(),
+                "web".into(),
+                "lang-typescript".into(),
+                "agent-coding".into(),
+            ]),
+        };
+
+        let host_tags = active.non_project_tags();
+        assert!(host_tags.contains("infra"));
+        assert!(host_tags.contains("web"));
+        assert!(!host_tags.contains("lang-typescript"));
+        assert!(!host_tags.contains("agent-coding"));
+    }
+
+    #[test]
+    fn non_project_tags_no_project_returns_all_tags() {
+        let active = ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "my-host".into(),
+                kind: "host",
+                tags: vec!["infra".into(), "web".into()],
+                project_root: None,
+                enable_bundles: Vec::new(),
+                disable_bundles: Vec::new(),
+                name: None,
+                description: None,
+                unknown_fields: Vec::new(),
+            }],
+            tags: BTreeSet::from(["infra".into(), "web".into()]),
+        };
+
+        let host_tags = active.non_project_tags();
+        assert!(host_tags.contains("infra"));
+        assert!(host_tags.contains("web"));
+        assert_eq!(host_tags.len(), 2);
+    }
+
+    #[test]
+    fn non_project_tags_preserves_os_tag() {
+        let active = ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "my-project".into(),
+                kind: "project",
+                tags: vec!["lang-typescript".into()],
+                project_root: Some("/project".into()),
+                enable_bundles: Vec::new(),
+                disable_bundles: Vec::new(),
+                name: Some("p".into()),
+                description: None,
+                unknown_fields: Vec::new(),
+            }],
+            // OS tag added by evaluate(), not from any scope
+            tags: BTreeSet::from(["lang-typescript".into(), "macos".into()]),
+        };
+
+        let host_tags = active.non_project_tags();
+        assert!(!host_tags.contains("lang-typescript"));
+        assert!(host_tags.contains("macos"));
+    }
+
+    #[test]
+    fn non_project_tags_multiple_projects_excludes_all() {
+        let active = ActiveScopes {
+            scopes: vec![
+                ActiveScope {
+                    id: "p1".into(),
+                    kind: "project",
+                    tags: vec!["tag-a".into()],
+                    project_root: Some("/p1".into()),
+                    enable_bundles: Vec::new(),
+                    disable_bundles: Vec::new(),
+                    name: Some("p1".into()),
+                    description: None,
+                    unknown_fields: Vec::new(),
+                },
+                ActiveScope {
+                    id: "p2".into(),
+                    kind: "project",
+                    tags: vec!["tag-b".into()],
+                    project_root: Some("/p2".into()),
+                    enable_bundles: Vec::new(),
+                    disable_bundles: Vec::new(),
+                    name: Some("p2".into()),
+                    description: None,
+                    unknown_fields: Vec::new(),
+                },
+                ActiveScope {
+                    id: "h1".into(),
+                    kind: "host",
+                    tags: vec!["shared-tag".into()],
+                    project_root: None,
+                    enable_bundles: Vec::new(),
+                    disable_bundles: Vec::new(),
+                    name: None,
+                    description: None,
+                    unknown_fields: Vec::new(),
+                },
+            ],
+            tags: BTreeSet::from(["tag-a".into(), "tag-b".into(), "shared-tag".into()]),
+        };
+
+        let host_tags = active.non_project_tags();
+        assert!(!host_tags.contains("tag-a"));
+        assert!(!host_tags.contains("tag-b"));
+        assert!(host_tags.contains("shared-tag"));
+    }
 }

@@ -1424,7 +1424,8 @@ fn build_manifest(
 
     let cache_root = expand_tilde(&config.cache.cache_dir)?;
 
-    let resolved = crate::plugins::resolve::resolve_plugins(config, &active.tags)
+    let host_tags = active.non_project_tags();
+    let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags)
         .context("resolving plugins")?;
     manifest.plugins = sync_plugin_payloads(&cache_root, resolved.plugins);
     manifest.marketplaces = sync_marketplaces(
