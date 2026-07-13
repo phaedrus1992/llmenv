@@ -2395,9 +2395,82 @@ mod tests {
             v,
             serde_json::json!({
                 "b": 1,
-                "c": { "e": [{"g": 2}] }
+                "c": { "e": [{ "g": 2 }] }
             })
         );
+    }
+
+    fn contains_no_nulls(v: &serde_json::Value) -> bool {
+        match v {
+            // Only check for null-valued *keys in objects* — that's what
+            // strip_json_nulls removes. Bare null or null array elements
+            // are not touched, so don't flag them.
+            serde_json::Value::Array(items) => items.iter().all(contains_no_nulls),
+            serde_json::Value::Object(map) => {
+                !map.values().any(|v| v.is_null()) && map.values().all(contains_no_nulls)
+            }
+            _ => true,
+        }
+    }
+
+    fn count_non_null_leaves(v: &serde_json::Value) -> usize {
+        match v {
+            serde_json::Value::Null => 0,
+            serde_json::Value::Array(items) => items.iter().map(count_non_null_leaves).sum(),
+            serde_json::Value::Object(map) => map.values().map(count_non_null_leaves).sum(),
+            _ => 1,
+        }
+    }
+
+    fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i32>().prop_map(serde_json::Value::from),
+            "[a-z]{0,4}".prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(3, 16, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                prop::collection::vec(("[a-z]{1,4}", inner), 0..4)
+                    .prop_map(|kvs| serde_json::Value::Object(kvs.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        // strip_json_nulls never panics on arbitrary JSON input.
+        #[test]
+        fn strip_json_nulls_total(mut v in arb_json()) {
+            strip_json_nulls(&mut v);
+        }
+
+        // Idempotency: applying strip_json_nulls twice equals applying it once.
+        #[test]
+        fn strip_json_nulls_idempotent(v in arb_json()) {
+            let mut once = v.clone();
+            strip_json_nulls(&mut once);
+            let mut twice = once.clone();
+            strip_json_nulls(&mut twice);
+            prop_assert_eq!(once, twice);
+        }
+
+        // Completeness: after strip_json_nulls, no Value::Null exists at any depth.
+        #[test]
+        fn strip_json_nulls_no_nulls_remain(mut v in arb_json()) {
+            strip_json_nulls(&mut v);
+            prop_assert!(contains_no_nulls(&v), "null values remain after strip_json_nulls");
+        }
+
+        // Non-null preservation: non-null leaf values are structurally preserved.
+        #[test]
+        fn strip_json_nulls_preserves_non_null(mut v in arb_json()) {
+            let expected = count_non_null_leaves(&v);
+            strip_json_nulls(&mut v);
+            let actual = count_non_null_leaves(&v);
+            prop_assert_eq!(expected, actual,
+                "strip_json_nulls should not remove non-null values");
+        }
     }
 
     #[test]
