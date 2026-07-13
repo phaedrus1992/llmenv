@@ -88,7 +88,11 @@ fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageS
     if age >= Duration::from_secs(cache_ttl) {
         return None;
     }
-    let bytes = std::fs::read(cache_file).ok()?;
+    let bytes = std::fs::read(cache_file)
+        .inspect_err(|e| {
+            tracing::warn!("throttle cache read failed (falling back to live fetch): {e}")
+        })
+        .ok()?;
     match serde_json::from_slice::<UsageSnapshot>(&bytes) {
         Ok(snap) => Some(snap),
         Err(e) => {

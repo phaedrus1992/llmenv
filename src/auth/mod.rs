@@ -130,13 +130,23 @@ pub fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntr
     };
     let mut entries: Vec<AuthEntry> = read_dir
         .filter_map(|res| {
-            let entry = res.ok()?;
+            let entry = res
+                .inspect_err(|e| tracing::warn!("failed to read auth dir entry: {e}"))
+                .ok()?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 return None;
             }
-            let bytes = std::fs::read(&path).ok()?;
-            serde_json::from_slice::<AuthEntry>(&bytes).ok()
+            let bytes = std::fs::read(&path)
+                .inspect_err(|e| {
+                    tracing::warn!("failed to read auth entry {}: {e}", path.display())
+                })
+                .ok()?;
+            serde_json::from_slice::<AuthEntry>(&bytes)
+                .inspect_err(|e| {
+                    tracing::warn!("failed to parse auth entry {}: {e}", path.display())
+                })
+                .ok()
         })
         .collect();
     entries.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
