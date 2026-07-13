@@ -1210,7 +1210,11 @@ pub(crate) fn apply_seeded_settings(
     // Read whatever materialize wrote; no-op if file absent (materialize
     // failed or skipped — don't create a seeded-only file in that case).
     let existing: serde_json::Value = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .inspect_err(|e| {
+                tracing::warn!(path = %path.display(), error = %e, "failed to parse settings.json")
+            })
+            .unwrap_or_default(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
             return Err(anyhow::anyhow!(

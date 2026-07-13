@@ -200,10 +200,10 @@ pub fn matches_content(s: &ContentScope, cwd: &std::path::Path) -> bool {
                 entry.path(),
                 cwd,
             );
-            tracing::debug!(
+            tracing::warn!(
                 path = ?entry.path(),
                 cwd = ?cwd,
-                "walkdir yielded path outside root",
+                "walkdir yielded path outside root; skipping",
             );
             continue;
         };
