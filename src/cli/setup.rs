@@ -10,8 +10,12 @@ fn read_claude_settings(home: &Path) -> Option<serde_json::Value> {
     if !path.is_file() {
         return None;
     }
-    let bytes = std::fs::read(&path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let bytes = std::fs::read(&path)
+        .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
+        .ok()?;
+    serde_json::from_slice(&bytes)
+        .inspect_err(|e| eprintln!("llmenv: failed to parse {}: {e:#}", path.display()))
+        .ok()
 }
 
 /// Read ~/.claude/plugins.json if it exists.
@@ -20,8 +24,12 @@ fn read_claude_plugins(home: &Path) -> Option<serde_json::Value> {
     if !path.is_file() {
         return None;
     }
-    let bytes = std::fs::read(&path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let bytes = std::fs::read(&path)
+        .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
+        .ok()?;
+    serde_json::from_slice(&bytes)
+        .inspect_err(|e| eprintln!("llmenv: failed to parse {}: {e:#}", path.display()))
+        .ok()
 }
 
 /// Read ~/.claude/claude.md if it exists.
@@ -30,7 +38,9 @@ fn read_claude_md(home: &Path) -> Option<String> {
     if !path.is_file() {
         return None;
     }
-    std::fs::read_to_string(&path).ok()
+    std::fs::read_to_string(&path)
+        .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
+        .ok()
 }
 
 /// Read ~/.claude/gemini.md if it exists.
@@ -39,7 +49,9 @@ fn read_gemini_md(home: &Path) -> Option<String> {
     if !path.is_file() {
         return None;
     }
-    std::fs::read_to_string(&path).ok()
+    std::fs::read_to_string(&path)
+        .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
+        .ok()
 }
 
 /// Read per-project settings from ~/.claude/projects/*/settings.json.
@@ -52,11 +64,23 @@ fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let settings_path = entry.path().join("settings.json");
-        if let Ok(bytes) = std::fs::read(&settings_path)
-            && let Ok(val) = serde_json::from_slice(&bytes)
-        {
-            projects.insert(name, val);
-        }
+        let Ok(bytes) = std::fs::read(&settings_path).inspect_err(|e| {
+            eprintln!(
+                "llmenv: failed to read project settings {}: {e:#}",
+                settings_path.display()
+            )
+        }) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_slice(&bytes).inspect_err(|e| {
+            eprintln!(
+                "llmenv: failed to parse project settings {}: {e:#}",
+                settings_path.display()
+            )
+        }) else {
+            continue;
+        };
+        projects.insert(name, val);
     }
     projects
 }

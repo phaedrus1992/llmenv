@@ -40,11 +40,13 @@ pub fn state_path() -> anyhow::Result<PathBuf> {
 /// over corruption detection (contrast: #522 treats corrupt `installed_plugins.json`
 /// as a hard error to avoid losing version pins).
 fn load_at(path: &Path) -> BTreeMap<String, String> {
-    let Ok(s) = std::fs::read_to_string(path) else {
+    let Ok(s) = std::fs::read_to_string(path).inspect_err(|e| {
+        tracing::warn!(path = %path.display(), error = %e, "failed to read transcript-sessions.json, resetting");
+    }) else {
         return BTreeMap::default();
     };
     serde_json::from_str(&s).unwrap_or_else(|e| {
-        tracing::debug!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
+        tracing::warn!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
         BTreeMap::default()
     })
 }
@@ -94,7 +96,9 @@ pub(crate) fn record_session_at(
 /// The ICM session id for a Claude session, if recorded.
 #[must_use]
 pub fn lookup_session(claude_session_id: &str) -> Option<String> {
-    let path = state_path().ok()?;
+    let path = state_path()
+        .inspect_err(|e| tracing::warn!(error = %e, "resolving session-log state path"))
+        .ok()?;
     lookup_session_at(&path, claude_session_id)
 }
 
