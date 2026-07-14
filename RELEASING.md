@@ -101,7 +101,7 @@ only when cutting a release), first reconcile against what has forward-merged in
 # What landed since this branch's last tag, and from where?
 git log --no-merges <last-tag>..HEAD
 # What user-facing entries exist on the older line that aren't here yet?
-git show origin/release/<older-major>.x:CHANGELOG-<older-major>.md
+git show origin/release/<older-major>.x:CHANGELOG.md
 ```
 
 Add any missing user-facing fix to the appropriate section with its
