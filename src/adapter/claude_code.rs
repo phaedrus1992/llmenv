@@ -87,6 +87,64 @@ const SESSION_LOG_HOOK_EVENTS: &[(&str, &str)] = &[
     ("pre_compact", "PreCompact"),
 ];
 
+/// #694 (backport): Built-in ICM MCP server tool tiers.
+/// Read-only tools → allow, mutation tools → ask, destructive → deny.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
+const ICM_READ_ONLY: &[&str] = &[
+    "icm_wake_up",
+    "icm_memory_recall",
+    "icm_memory_stats",
+    "icm_memory_health",
+    "icm_memory_list_topics",
+    "icm_feedback_stats",
+    "icm_feedback_search",
+    "icm_transcript_search",
+    "icm_transcript_stats",
+    "icm_transcript_show",
+    "icm_memoir_search",
+    "icm_memoir_search_all",
+    "icm_memoir_show",
+    "icm_memoir_inspect",
+    "icm_memoir_export",
+    "icm_memoir_list",
+];
+
+#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
+const ICM_MUTATION: &[&str] = &[
+    "icm_memory_store",
+    "icm_memory_update",
+    "icm_memory_consolidate",
+    "icm_memory_embed_all",
+    "icm_memory_extract_patterns",
+    "icm_learn",
+    "icm_transcript_start_session",
+    "icm_transcript_record",
+    "icm_feedback_record",
+    "icm_memoir_create",
+    "icm_memoir_add_concept",
+    "icm_memoir_refine",
+    "icm_memoir_link",
+];
+
+#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
+const ICM_DESTRUCTIVE: &[&str] = &["icm_memory_forget", "icm_memory_forget_topic"];
+
+/// Backport: Built-in context-mode MCP plugin tool tiers (without common prefix).
+#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
+const CTX_READ_ONLY: &[&str] = &["ctx_search", "ctx_stats", "ctx_doctor", "ctx_insight"];
+
+#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
+const CTX_MUTATION: &[&str] = &[
+    "ctx_index",
+    "ctx_execute",
+    "ctx_execute_file",
+    "ctx_fetch_and_index",
+    "ctx_batch_execute",
+];
+
+#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
+const CTX_DESTRUCTIVE: &[&str] = &["ctx_purge", "ctx_upgrade"];
+
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
 /// `out` as its config root.
@@ -1528,12 +1586,13 @@ enum PermissionAction {
 mod tests {
     use super::super::AgentAdapter;
     use super::{
-        CLAUDE_JSON_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND, ClaudeCodeAdapter,
-        HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
-        generate_installed_plugins_json, generate_settings_json, is_hook_json,
-        merge_mcp_into_claude_json, overlay_native, permission_mode_str, reconcile_settings,
-        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        seed_install_method,
+        CLAUDE_JSON_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND, CTX_DESTRUCTIVE,
+        CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter, HOOK_RUN_COMMAND, ICM_DESTRUCTIVE,
+        ICM_MUTATION, ICM_READ_ONLY, MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND,
+        classify_claude_path, generate_installed_plugins_json, generate_settings_json,
+        is_hook_json, merge_mcp_into_claude_json, overlay_native, permission_mode_str,
+        reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
+        render_permission_rule, seed_install_method,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -3068,5 +3127,160 @@ mod tests {
                 "permission_mode_str({mode:?})"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // #801: Coverage detection — ensure every known ICM/ctx tool has a
+    // permission-tier entry. When a new tool is added to the MCP server
+    // or plugin, update the snapshot below AND add it to the matching
+    // `*_READ_ONLY` / `*_MUTATION` / `*_DESTRUCTIVE` const array above.
+    // ------------------------------------------------------------------
+
+    /// Snapshot of every tool exported by the ICM MCP server (server-side
+    /// name, without the `mcp__icm__` prefix that Claude Code applies).
+    const ALL_KNOWN_ICM_TOOLS: &[&str] = &[
+        // READ_ONLY (16)
+        "icm_wake_up",
+        "icm_memory_recall",
+        "icm_memory_stats",
+        "icm_memory_health",
+        "icm_memory_list_topics",
+        "icm_feedback_stats",
+        "icm_feedback_search",
+        "icm_transcript_search",
+        "icm_transcript_stats",
+        "icm_transcript_show",
+        "icm_memoir_search",
+        "icm_memoir_search_all",
+        "icm_memoir_show",
+        "icm_memoir_inspect",
+        "icm_memoir_export",
+        "icm_memoir_list",
+        // MUTATION (13)
+        "icm_memory_store",
+        "icm_memory_update",
+        "icm_memory_consolidate",
+        "icm_memory_embed_all",
+        "icm_memory_extract_patterns",
+        "icm_learn",
+        "icm_transcript_start_session",
+        "icm_transcript_record",
+        "icm_feedback_record",
+        "icm_memoir_create",
+        "icm_memoir_add_concept",
+        "icm_memoir_refine",
+        "icm_memoir_link",
+        // DESTRUCTIVE (2)
+        "icm_memory_forget",
+        "icm_memory_forget_topic",
+    ];
+
+    /// Snapshot of every tool exported by the context-mode plugin (without
+    /// any common prefix — names match `CTX_*` arrays directly).
+    const ALL_KNOWN_CTX_TOOLS: &[&str] = &[
+        // READ_ONLY (4)
+        "ctx_search",
+        "ctx_stats",
+        "ctx_doctor",
+        "ctx_insight",
+        // MUTATION (5)
+        "ctx_index",
+        "ctx_execute",
+        "ctx_execute_file",
+        "ctx_fetch_and_index",
+        "ctx_batch_execute",
+        // DESTRUCTIVE (2)
+        "ctx_purge",
+        "ctx_upgrade",
+    ];
+
+    #[test]
+    fn icm_tool_tiers_cover_all_known_tools() {
+        let ro: std::collections::BTreeSet<&str> = ICM_READ_ONLY.iter().copied().collect();
+        let mutation: std::collections::BTreeSet<&str> = ICM_MUTATION.iter().copied().collect();
+        let dest: std::collections::BTreeSet<&str> = ICM_DESTRUCTIVE.iter().copied().collect();
+
+        // No tool appears in more than one tier.
+        for &tier in &[&ro, &mutation, &dest] {
+            let dupes: Vec<_> = {
+                let others: [&std::collections::BTreeSet<&str>; 2] = if std::ptr::eq(tier, &ro) {
+                    [&mutation, &dest]
+                } else if std::ptr::eq(tier, &mutation) {
+                    [&ro, &dest]
+                } else {
+                    [&ro, &mutation]
+                };
+                tier.iter()
+                    .filter(|t| others[0].contains(*t) || others[1].contains(*t))
+                    .copied()
+                    .collect()
+            };
+            assert!(dupes.is_empty(), "ICM tool(s) in multiple tiers: {dupes:?}");
+        }
+
+        let mut covered: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        covered.extend(&ro);
+        covered.extend(&mutation);
+        covered.extend(&dest);
+        let all: std::collections::BTreeSet<&str> = ALL_KNOWN_ICM_TOOLS.iter().copied().collect();
+
+        let uncovered: Vec<_> = all.difference(&covered).copied().collect();
+        assert!(
+            uncovered.is_empty(),
+            "ICM tool(s) in ALL_KNOWN_ICM_TOOLS but not in any tier array: {uncovered:?}\n\
+             Add each tool to the correct ICM_* array above."
+        );
+
+        let extras: Vec<_> = covered.difference(&all).copied().collect();
+        assert!(
+            extras.is_empty(),
+            "ICM tool(s) in tier arrays but not in ALL_KNOWN_ICM_TOOLS: {extras:?}\n\
+             Either remove the stale entry or add the tool to ALL_KNOWN_ICM_TOOLS."
+        );
+    }
+
+    #[test]
+    fn ctx_tool_tiers_cover_all_known_tools() {
+        let ro: std::collections::BTreeSet<&str> = CTX_READ_ONLY.iter().copied().collect();
+        let mutation: std::collections::BTreeSet<&str> = CTX_MUTATION.iter().copied().collect();
+        let dest: std::collections::BTreeSet<&str> = CTX_DESTRUCTIVE.iter().copied().collect();
+
+        // No tool appears in more than one tier.
+        for &tier in &[&ro, &mutation, &dest] {
+            let dupes: Vec<_> = {
+                let others: [&std::collections::BTreeSet<&str>; 2] = if std::ptr::eq(tier, &ro) {
+                    [&mutation, &dest]
+                } else if std::ptr::eq(tier, &mutation) {
+                    [&ro, &dest]
+                } else {
+                    [&ro, &mutation]
+                };
+                tier.iter()
+                    .filter(|t| others[0].contains(*t) || others[1].contains(*t))
+                    .copied()
+                    .collect()
+            };
+            assert!(dupes.is_empty(), "CTX tool(s) in multiple tiers: {dupes:?}");
+        }
+
+        let mut covered: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        covered.extend(&ro);
+        covered.extend(&mutation);
+        covered.extend(&dest);
+        let all: std::collections::BTreeSet<&str> = ALL_KNOWN_CTX_TOOLS.iter().copied().collect();
+
+        let uncovered: Vec<_> = all.difference(&covered).copied().collect();
+        assert!(
+            uncovered.is_empty(),
+            "CTX tool(s) in ALL_KNOWN_CTX_TOOLS but not in any tier array: {uncovered:?}\n\
+             Add each tool to the correct CTX_* array above."
+        );
+
+        let extras: Vec<_> = covered.difference(&all).copied().collect();
+        assert!(
+            extras.is_empty(),
+            "CTX tool(s) in tier arrays but not in ALL_KNOWN_CTX_TOOLS: {extras:?}\n\
+             Either remove the stale entry or add the tool to ALL_KNOWN_CTX_TOOLS."
+        );
     }
 }
