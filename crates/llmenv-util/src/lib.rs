@@ -46,7 +46,13 @@ pub fn merge_yaml(dst: &mut serde_yaml::Value, src: serde_yaml::Value) {
                         // duplicates while a merged one drops them, making the
                         // overall merge non-idempotent.
                         normalize_yaml(&mut v);
-                        d.insert(k, v);
+                        // Skip null-valued keys — normalize_yaml strips them from
+                        // mappings, so introducing one on the insert path would
+                        // make merge_yaml non-idempotent (re-merging the same src
+                        // would re-insert a null that was just stripped).
+                        if !v.is_null() {
+                            d.insert(k, v);
+                        }
                     }
                 }
             }
@@ -65,10 +71,17 @@ pub fn merge_yaml(dst: &mut serde_yaml::Value, src: serde_yaml::Value) {
     }
 }
 
-/// Recursively dedup every sequence in a YAML value so it matches what
-/// [`merge_yaml`] produces. Used on insert/overwrite paths to keep the merge
-/// idempotent — including by callers (e.g. `merge::capabilities`) that insert a
-/// fragment into a fresh map without routing it through [`merge_yaml`].
+/// Recursively normalize a YAML value for stable `PartialEq` comparison.
+///
+/// 1. **Dedup sequences** — removes duplicate entries.
+/// 2. **Strip null-valued mapping keys** — removes `~` (null) entries, so
+///    mappings differing only by null vs absent key collapse during
+///    [`merge_yaml`]'s `PartialEq`-based dedup across merge generations.
+///
+/// Used on insert/overwrite paths to keep every [`merge_yaml`] caller
+/// null-tolerant without per-caller post-processing.  Mirrors
+/// [`normalize_json`] — the two must stay in sync so that YAML-shaped
+/// `native` fragments behave the same as JSON-shaped ones.
 pub fn normalize_yaml(value: &mut serde_yaml::Value) {
     use serde_yaml::Value;
     match value {
@@ -79,6 +92,10 @@ pub fn normalize_yaml(value: &mut serde_yaml::Value) {
             dedup(items);
         }
         Value::Mapping(map) => {
+            // Strip null-valued entries so merge_yaml's PartialEq-based dedup
+            // collapses mappings differing only by null vs absent across merge
+            // generations (mirrors serialize_json's normalize_json).
+            map.retain(|_, v| !v.is_null());
             for (_, v) in map.iter_mut() {
                 normalize_yaml(v);
             }
@@ -94,6 +111,10 @@ pub fn normalize_yaml(value: &mut serde_yaml::Value) {
 /// per-engine `native_*` fragment converted from YAML. Same value-shape rule:
 ///
 /// - **Objects** merge key-by-key — shared keys recurse, disjoint keys union.
+///   Disjoint keys from `src` skip null-valued entries (see insert path below).
+///   Shared-key overwrites from `src` *do not* null-strip — a source that
+///   explicitly sets a key to `null` is treated as intentional, not as an
+///   `Option::None` serialization artifact.
 /// - **Arrays** concatenate (`src` after `dst`), then dedup.
 /// - **Scalars** and any shape mismatch are overwritten by `src` — the native
 ///   fragment is the higher-precedence overlay, so it wins on collision.
