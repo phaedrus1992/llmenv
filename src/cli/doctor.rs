@@ -699,7 +699,20 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                 } else {
                     let cache_retention_hours = config.cache.cache_retention_hours.unwrap_or(168);
                     let retention = std::time::Duration::from_secs(cache_retention_hours * 3600);
-                    match crate::materialize::cache::gc(&cache_dir, retention) {
+                    let current_version = match config.cache.hashing {
+                        crate::config::HashingMode::Normal => {
+                            Some(crate::materialize::cache::version_mm())
+                        }
+                        crate::config::HashingMode::Loose | crate::config::HashingMode::Strict => {
+                            None
+                        }
+                    };
+                    match crate::materialize::cache::gc(
+                        &cache_dir,
+                        retention,
+                        config.cache.hashing,
+                        current_version.as_deref(),
+                    ) {
                         Ok(report) => {
                             eprintln!(
                                 "{pass} GC complete: removed {} entries, kept {}",

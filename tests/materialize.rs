@@ -140,7 +140,13 @@ fn gc_removes_old_entries_and_keeps_fresh_ones() {
     std::fs::create_dir_all(&fresh).expect("mkdir fresh");
     std::fs::write(fresh.join("marker"), "y").expect("write marker");
 
-    let report = cache::gc(tmp.path(), Duration::from_secs(60 * 60 * 24 * 7)).expect("gc");
+    let report = cache::gc(
+        tmp.path(),
+        Duration::from_secs(60 * 60 * 24 * 7),
+        HashingMode::Loose,
+        None,
+    )
+    .expect("gc");
     assert!(!old.exists(), "old entry should have been removed");
     assert!(fresh.exists(), "fresh entry should remain");
     assert_eq!(report.kept, 1);
@@ -154,7 +160,13 @@ fn gc_removes_tmp_stage_dirs_regardless_of_age() {
     std::fs::create_dir_all(&stage).expect("mkdir stage");
     std::fs::write(stage.join("marker"), "x").expect("write marker");
 
-    let report = cache::gc(tmp.path(), Duration::from_secs(60 * 60 * 24 * 365)).expect("gc");
+    let report = cache::gc(
+        tmp.path(),
+        Duration::from_secs(60 * 60 * 24 * 365),
+        HashingMode::Loose,
+        None,
+    )
+    .expect("gc");
     assert!(!stage.exists(), "stage dir should always be GC'd");
     assert_eq!(report.removed.len(), 1);
 }
@@ -199,7 +211,7 @@ fn hash_is_unambiguous_across_field_boundaries() {
 fn gc_on_missing_root_is_noop() {
     let tmp = tempdir().expect("tempdir");
     let missing = tmp.path().join("nope");
-    let report = cache::gc(&missing, Duration::from_secs(1)).expect("gc");
+    let report = cache::gc(&missing, Duration::from_secs(1), HashingMode::Loose, None).expect("gc");
     assert!(report.removed.is_empty());
     assert_eq!(report.kept, 0);
 }
