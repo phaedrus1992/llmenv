@@ -12,7 +12,7 @@ the publishing work:
 - bumps the Homebrew formula in `phaedrus1992/homebrew-tap`.
 
 [`cargo-release`](https://github.com/crate-ci/cargo-release) owns only the local
-prep: bumping the version and rolling `CHANGELOG.md` into a single commit. It is
+prep: bumping the version and rolling the changelog into a single commit. It is
 configured (in [`release.toml`](release.toml)) to **not** publish, tag, or push
 — see [Why cargo-release does so little](#why-cargo-release-does-so-little).
 
@@ -52,7 +52,7 @@ in the merge PR it opens — don't work around it by applying the change twice.
 
 **Docs-only edits on a `release/X.x` branch don't need a branch or PR.** The
 feature-branch + PR rule exists to gate *code* changes. A simple documentation
-update on a release branch — reconciling `CHANGELOG.md`, editing `RELEASING.md`,
+update on a release branch — reconciling the changelog, editing `RELEASING.md`,
 `docs/`, or `README.md` — can be edited, committed, and pushed **directly** to
 the `release/X.x` branch. Code changes still go through a branch + PR.
 
@@ -94,7 +94,7 @@ that carried it, not the immediately-preceding branch.
 
 **No automation enforces this — so check on every changelog edit.** Nothing
 triggers a docs update when a forward-merge lands, so the cross-listing can only
-be caught by hand. Make it a reflex: **any time you modify `CHANGELOG.md`** (not
+be caught by hand. Make it a reflex: **any time you modify the changelog** (not
 only when cutting a release), first reconcile against what has forward-merged in:
 
 ```bash
@@ -187,7 +187,7 @@ or internal-only entries that don't affect users of the released binary.
 
 ```bash
 git switch main && git pull
-git log --no-merges <last-tag>..HEAD  # review what landed; compare against CHANGELOG.md
+git log --no-merges <last-tag>..HEAD  # review what landed; compare against the changelog
 git switch -c chore/release-<next-version>
 cargo release <minor|major> --workspace            # dry-run preview (default)
 cargo release <minor|major> --workspace --execute  # apply: bump all crates + roll CHANGELOG, commit
@@ -235,7 +235,7 @@ CI publishes to crates.io, creates the GitHub Release, and updates Homebrew. The
 crates.io publish runs exactly once per tag — re-pushing an existing tag will
 fail at publish because that version already exists on the registry.
 
-Before cutting the tag, confirm `CHANGELOG.md` is complete for the version
+Before cutting the tag, confirm the changelog is complete for the version
 you're shipping — every user-facing change since the last tag must be listed
 under its `[Unreleased]` section. This applies equally to pre-releases (see below).
 
@@ -307,19 +307,19 @@ If the post-RC changes are substantial, consider a second RC (`v3.0.0-rc.2`) bef
 Pre-releases get the same changelog treatment as stable releases — their
 changes matter to testers and should be visible on the release page.
 
-**1. Every pre-release gets its own `CHANGELOG.md` section.** Cut from
+**1. Every pre-release gets its own changelog section.** Cut from
 `[Unreleased]` at tag time, same as a stable release. The section stays in the
 file permanently; pre-release sections are not deleted when the final release
 ships. `cargo-release` skips `pre-release-replacements` for pre-release suffix
 versions (it treats `-rc.1` as not-yet-stable and won't roll the changelog),
-so `scripts/roll-prerelease-changelog.sh` — called from the `pre-release-hook`
+so `scripts/roll-changelog.sh` — called from the `pre-release-hook`
 in `release.toml` — does the same replacements manually.
 
 **2. The GitHub Release body carries the actual changelog** — not a placeholder.
-After tagging, edit the release with the content from the new `CHANGELOG.md`
+After tagging, edit the release with the content from the new changelog
 section. The `## Binary Checksums` block added by CI stays; replace the
 placeholder text above it. Unwrap the hard line breaks so each bullet point is
-a single flowing paragraph — the fixed-width formatting in `CHANGELOG.md` is
+a single flowing paragraph — the fixed-width formatting in the changelog is
 for source readability, not the release page.
 
 **3. On final release, roll up the beta/RC sections into a high-level summary.**
@@ -366,7 +366,7 @@ project's crates.io and Homebrew credentials.
 
 ## The 1.0.0 release
 
-1.0.0 is already prepared on `main`: `Cargo.toml` is at `1.0.0` and `CHANGELOG.md`
+1.0.0 is already prepared on `main`: `Cargo.toml` is at `1.0.0` and the changelog
 has a dated `[1.0.0]` section. To publish it, run **step 3** above with
 `v1.0.0` — no `cargo release` run is needed for this first release. Every release
 after 1.0.0 uses the full flow.
