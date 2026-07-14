@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Fixed
+- Fold `strip_json_nulls` into `normalize_json` so every merge path (not just
+  `reconcile_settings`) benefits from null-tolerant merge dedup (#718)
+- Add null-stripping to `normalize_yaml` and insert-path null guard to
+  `merge_yaml` for YAML merge parity with JSON (#718)
 - Session log transcript correlation (`session_log::state`) no longer
   silently fails when `state_dir()` is unavailable — falls back to CWD with
   a `tracing::warn!` instead of returning `None`/`Err` (#737)
