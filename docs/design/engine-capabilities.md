@@ -83,7 +83,7 @@ inside it).
 
 ```yaml
 permissions:
-  default_mode: acceptEdits        # neutral: acceptEdits | plan | default | bypassPermissions
+  default_mode: acceptEdits        # neutral: acceptEdits | plan | default | auto | dontAsk | manual | bypassPermissions
   allow:
     - { tool: Bash, pattern: "git diff *" }
     - { tool: Read, paths: ["./src"] }
@@ -269,7 +269,7 @@ bundle fragments compose identically.
   a `native_mcp` fragment's `enabledMcpjsonServers` key is dropped rather than
   propagated.
 - **O2** — Neutral `default_mode` vocabulary: adopt Claude's
-  (`acceptEdits`/`plan`/`default`/`bypassPermissions`) as the neutral set, or
+  (`acceptEdits`/`plan`/`default`/`auto`/`dontAsk`/`manual`/`bypassPermissions`) as the neutral set, or
   invent engine-neutral names? Claude's are reasonable defaults.
 - **O3** — Conflict policy between modeled capability and `native` passthrough.
   *Partially resolved:* the **mergeable** case is a deep-merge, not a conflict —
