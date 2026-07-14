@@ -801,22 +801,24 @@ fn run_export(
                     "warning: scope '{scope_id}' not active in current environment \
                      — no bundles will fire for this scope"
                 );
-            }
+                let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
+                (firing, active.clone())
+            } else {
+                let mut filtered_tags: BTreeSet<String> = filtered_scopes
+                    .iter()
+                    .flat_map(|s| s.tags.iter().cloned())
+                    .collect();
+                if !env.os.is_empty() {
+                    filtered_tags.insert(env.os.clone());
+                }
 
-            let mut filtered_tags: BTreeSet<String> = filtered_scopes
-                .iter()
-                .flat_map(|s| s.tags.iter().cloned())
-                .collect();
-            if !env.os.is_empty() {
-                filtered_tags.insert(env.os.clone());
+                let filtered = ActiveScopes {
+                    scopes: filtered_scopes,
+                    tags: filtered_tags,
+                };
+                let firing = firing_bundles(&config.bundle, &filtered, tag.as_deref());
+                (firing, filtered)
             }
-
-            let filtered = ActiveScopes {
-                scopes: filtered_scopes,
-                tags: filtered_tags,
-            };
-            let firing = firing_bundles(&config.bundle, &filtered, tag.as_deref());
-            (firing, filtered)
         } else {
             let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
             (firing, active.clone())
@@ -830,7 +832,7 @@ fn run_export(
     let materialize_ctx = MaterializeContext {
         config: &config,
         config_dir: &config_dir,
-        active: &active,
+        active: &use_active,
         firing: &firing,
     };
     let mut any_adapter_failed = false;
