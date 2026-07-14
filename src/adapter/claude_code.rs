@@ -104,7 +104,6 @@ const ICM_READ_ONLY: &[&str] = &[
     "icm_memoir_search_all",
     "icm_memoir_show",
     "icm_memoir_inspect",
-    "icm_memoir_export",
     "icm_memoir_list",
 ];
 
@@ -120,6 +119,7 @@ const ICM_MUTATION: &[&str] = &[
     "icm_feedback_record",
     "icm_memoir_create",
     "icm_memoir_add_concept",
+    "icm_memoir_export",
     "icm_memoir_refine",
     "icm_memoir_link",
 ];
