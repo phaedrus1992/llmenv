@@ -46,6 +46,7 @@ This is the surface a `CodexAdapter` would need to model. Codex's full
 generates.
 
 ### Model & session
+
 | Key | Type / values | Notes |
 | --- | --- | --- |
 | `model` | string | active model id (e.g. `gpt-5.4`) |
@@ -57,6 +58,7 @@ generates.
 | `review_model` | string | model used by `/review` |
 
 ### Sandbox & approvals — see [sandbox-and-approvals](./sandbox-and-approvals.md)
+
 | Key | Type / values |
 | --- | --- |
 | `sandbox_mode` | `read-only \| workspace-write \| danger-full-access` |
@@ -69,12 +71,14 @@ generates.
 | `allow_login_shell` | boolean |
 
 ### MCP — see [mcp](./mcp.md)
+
 `[mcp_servers.<id>]` tables with `command`/`args`/`env`/`env_vars`/`cwd` (stdio)
 or `url`/`bearer_token_env_var`/`http_headers` (streamable HTTP), plus per-tool
 gating. `mcp_oauth_callback_port`, `mcp_oauth_callback_url`,
 `mcp_oauth_credentials_store` configure OAuth login.
 
 ### Model providers — see [model-and-providers](./model-and-providers.md)
+
 `[model_providers.<id>]`: `name`, `base_url`, `wire_api` (`responses`/`chat`),
 `env_key`, `http_headers`, `env_http_headers`, `query_params`,
 `request_max_retries`, `stream_max_retries`, `stream_idle_timeout_ms`, and
@@ -82,13 +86,16 @@ gating. `mcp_oauth_callback_port`, `mcp_oauth_callback_url`,
 overrides the built-in OpenAI provider.
 
 ### Shell environment — see [shell-env-policy](./shell-env-policy.md)
+
 `[shell_environment_policy]`: `inherit` (`none`/`core`/`all`), `set`, `exclude`,
 `include_only`, `ignore_default_excludes`, `experimental_use_profile`.
 
 ### Hooks — see [hooks](./hooks.md)
+
 `[hooks]` table keyed by event; **command handlers only**.
 
 ### Instructions & project discovery — see [agents-md](./agents-md.md)
+
 | Key | Type | Notes |
 | --- | --- | --- |
 | `project_root_markers` | array | default `[".git"]`; `[]` disables walking |
@@ -97,6 +104,7 @@ overrides the built-in OpenAI provider.
 | `instructions` | string | **reserved**; prefer `model_instructions_file`/AGENTS.md |
 
 ### History, notifications, state
+
 | Key | Type | Notes |
 | --- | --- | --- |
 | `history.persistence` | `save-all \| none` | local transcript persistence |
@@ -109,14 +117,17 @@ overrides the built-in OpenAI provider.
 | `sqlite_home` | path | SQLite-backed agent-job state |
 
 ### Profiles — see [profiles](./profiles.md)
+
 `profile = "<name>"` selects a default profile; `[profiles.<name>]` tables hold
 overrides. `--profile` selects at runtime.
 
 ### Skills — see [skills](./skills.md)
+
 `[[skills.config]]` entries with `path` (folder containing `SKILL.md`) and
 `enabled`.
 
 ### Feature flags
+
 `[features]` table of boolean toggles (`web_search`, `shell_tool`,
 `unified_exec`, `undo`, `shell_snapshot`, `browser_use`, `computer_use`, …),
 some stable, some experimental.

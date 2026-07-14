@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # Configuration Reference
 
 llmenv's central configuration is a YAML file at
@@ -12,7 +14,7 @@ The config directory is resolved in this order:
 ## Top-level blocks
 
 | Block | Shape | Purpose |
-|-------|-------|---------|
+| ------- | ------- | --------- |
 | `cache:` | map | Local materialization cache + sync behavior |
 | `scope:` | map of lists | Network / host / user scope definitions |
 | `capabilities:` | map | Engine-neutral permissions, hooks, plugins (+ `native_*` overrides) |
@@ -50,7 +52,7 @@ disable age-based GC.
 A single dial with three positions. The folder path is:
 
 | Mode | Folder layout | When to use |
-|------|---------------|-------------|
+| ------ | --------------- | ------------- |
 | `loose` | `<adapter>/<shape>/` | Maximum cache reuse across upgrades |
 | `normal` (default) | `<adapter>/<version_mm>/<shape>/` | Balanced: stable within a release, churns on minor bumps |
 | `strict` | `<adapter>/<VERSION_TAG>-<content_hash>/` | Maximum isolation; new folder on any input change |
@@ -213,7 +215,7 @@ mcp:
 ```
 
 | Field | Required | Notes |
-|-------|----------|-------|
+| ------- | ---------- | ------- |
 | `name` | yes | Registration name in the agent's MCP config |
 | `when` | no | Activation tags |
 | `type` | no | `stdio` (default), `http`, or `sse` |
@@ -247,7 +249,7 @@ lsp:
 ```
 
 | Field | Required | Notes |
-|-------|----------|-------|
+| ------- | ---------- | ------- |
 | `name` | yes | Registration name in the agent's LSP config |
 | `when` | no | Activation tags |
 | `command` | yes | Executable to launch |
@@ -300,7 +302,7 @@ features:
 ```
 
 | Field | Required | Notes |
-|-------|----------|-------|
+| ------- | ---------- | ------- |
 | `server_host` | yes | Key into `host:` for the daemon host |
 | `port` | yes | Port the proxy listens on / clients connect to |
 | `listen_host` | no | IP address to listen on (`127.0.0.1` for loopback, `0.0.0.0` for all interfaces); default `127.0.0.1` |
@@ -331,7 +333,7 @@ features:
 ```
 
 | Field | Required | Notes |
-|-------|----------|-------|
+| ------- | ---------- | ------- |
 | `backend` | yes | Usage-data backend; currently only `umans` |
 | `when` | no | Activation tags (an entry with none never activates) |
 | `cache_ttl` | no | Seconds a polled usage snapshot is cached; default `30` |
@@ -355,9 +357,9 @@ features:
     track: beta    # "release" (default) or "beta"
 ```
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| `track` | no | `"release"` (default) or `"beta"`. `release` uses the GitHub latest-stable endpoint; `beta` uses the first non-draft release from the recent list. |
+| Field   | Required | Notes                                                                                                                                              |
+|---------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `track` | no       | `"release"` (default) or `"beta"`. `release` uses the GitHub latest-stable endpoint; `beta` uses the first non-draft release from the recent list. |
 
 ## `session_log:`
 
@@ -379,7 +381,7 @@ session_log:
 ```
 
 | Field | Required | Notes |
-|-------|----------|-------|
+| ------- | ---------- | ------- |
 | `transcript` | no | Record into ICM's transcript store via the ICM MCP; default `true` |
 | `file` | no | Mirror the same event stream to a local JSONL file; default `false` |
 | `verbose` | no | Also capture `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop`/`SubagentStop`/`PreCompact` events, not just the lifecycle + scope header; default `false` |
@@ -425,7 +427,7 @@ The scope-header event embeds the same `llmenv-tag:<tag>` / `llmenv-bundle:<bund
 tokens the memory-recall hooks use, so a transcript is discoverable the same
 way stored memory is. From the ICM MCP:
 
-```
+```text
 icm_transcript_search { query: "llmenv-tag:rust" }                      # sessions scoped to the rust tag
 icm_transcript_search { query: "llmenv-bundle:base" }                   # sessions where the base bundle fired
 icm_transcript_search { query: "llmenv session", project: "my-project" } # sessions for one project
@@ -455,10 +457,10 @@ state:
       subdir: context-mode          # → $LLMENV_STATE_DIR/context-mode
 ```
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| `env` | yes | Env var the tool honors (e.g. `CONTEXT_MODE_DATA_DIR`) |
-| `subdir` | yes | Single path component under `$LLMENV_STATE_DIR` (no separators) |
+| Field     | Required | Notes                                                                |
+|-----------|----------|----------------------------------------------------------------------|
+| `env`     | yes      | Env var the tool honors (e.g. `CONTEXT_MODE_DATA_DIR`)               |
+| `subdir`  | yes      | Single path component under `$LLMENV_STATE_DIR` (no separators)      |
 
 `env` names must be `[A-Z][A-Z0-9_]*`. A handful of system-reserved names
 (`HOME`, `PATH`, `USER`, etc.) are rejected.

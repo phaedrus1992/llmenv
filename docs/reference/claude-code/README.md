@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Claude Code configuration reference
 
 Reference notes on **Claude Code's** configuration surfaces, captured from the

@@ -1,9 +1,9 @@
 # llmenv
 
-[![CI](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml)
-[![coverage](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml)
-[![docs](https://img.shields.io/badge/docs-phaedrus1992.github.io%2Fllmenv-blue)](https://phaedrus1992.github.io/llmenv/)
-[![Discord](https://img.shields.io/discord/1327438504941457480?logo=discord&label=Discord)](https://discord.gg/HvQrGAaGAS)
+[![CI](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/ci.yml) <!-- markdownlint-disable-line MD013 -->
+[![coverage](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml/badge.svg)](https://github.com/phaedrus1992/llmenv/actions/workflows/coverage.yml) <!-- markdownlint-disable-line MD013 -->
+[![docs](https://img.shields.io/badge/docs-phaedrus1992.github.io%2Fllmenv-blue)](https://phaedrus1992.github.io/llmenv/) <!-- markdownlint-disable-line MD013 -->
+[![Discord](https://img.shields.io/discord/1327438504941457480?logo=discord&label=Discord)](https://discord.gg/HvQrGAaGAS) <!-- markdownlint-disable-line MD013 -->
 
 A universal, scope-aware environment for AI coding agents.
 
@@ -22,7 +22,8 @@ project tagged `rust`". llmenv lets you declare configuration once, attach it to
 
 ## Install
 
-See [Getting Started — Install](https://phaedrus1992.github.io/llmenv/docs/getting-started#1-install) for complete instructions (Homebrew, Cargo, from source).
+See [Getting Started — Install](https://phaedrus1992.github.io/llmenv/docs/getting-started#1-install)
+for complete instructions (Homebrew, Cargo, from source).
 
 ## Quick start
 
@@ -43,7 +44,7 @@ See [Getting Started](https://phaedrus1992.github.io/llmenv/docs/getting-started
 
 llmenv resolves your environment through a fixed pipeline:
 
-```
+```text
 scopes → tags → bundles → materialize → adapter emit
 ```
 
@@ -104,7 +105,7 @@ and plugins activate automatically.
 ## Commands
 
 | Command | Purpose |
-|---------|---------|
+| --------- | --------- |
 | `llmenv init [PATH] [--repo URL]` | Write a template config (optionally clone from a repo) |
 | `llmenv export [--scope ID] [--tag TAG]` | Print `export` lines for the current scope (used by the hook) |
 | `llmenv hook <zsh\|bash>` | Print shell integration code |
@@ -131,7 +132,7 @@ for full flag details. Per-command reference: [Commands](https://phaedrus1992.gi
 context:
 
 | Variable | Format | Meaning |
-|----------|--------|---------|
+| ---------- | -------- | --------- |
 | `LLMENV_ACTIVE_SCOPES` | `kind:id,kind:id,…` | Every matched scope, prefixed by kind |
 | `LLMENV_ACTIVE_TAGS` | `tag,tag,…` (sorted) | The active tag set |
 | `LLMENV_ACTIVE_BUNDLES` | `name,name,…` | Bundles that fired, in declaration order |

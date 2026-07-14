@@ -17,7 +17,7 @@ flowchart TD
 A **scope** answers "where am I?". There are four kinds:
 
 | Kind | Matches on | Declared in |
-|------|-----------|-------------|
+| ------ | ----------- | ------------- |
 | `network` | gateway MAC address | `config.yaml` under `scope.network` |
 | `host` | hostname (case-insensitive) | `config.yaml` under `scope.host` |
 | `user` | `$USER` | `config.yaml` under `scope.user` |
@@ -67,7 +67,7 @@ All firing contributors are merged into a single **manifest**, which is written
 to a directory under the cache. The folder name depends on the `cache.hashing`
 mode:
 
-```
+```text
 # loose: folder named by content shape only
 <cache_dir>/<adapter>/<shape>/
 
@@ -149,7 +149,7 @@ After resolution, `llmenv export` emits the active context as environment
 variables so the agent and your shell can read it back:
 
 | Variable | Format |
-|----------|--------|
+| ---------- | -------- |
 | `LLMENV_ACTIVE_SCOPES` | `kind:id,…` |
 | `LLMENV_ACTIVE_TAGS` | `tag,…` (sorted) |
 | `LLMENV_ACTIVE_BUNDLES` | `name,…` (declaration order) |

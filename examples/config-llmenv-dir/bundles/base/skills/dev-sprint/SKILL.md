@@ -1,12 +1,15 @@
+<!-- markdownlint-disable MD003 MD013 MD022 MD041 -->
 ---
 name: dev-sprint
 description: Use when user asks "start sprint", "pick up work", "what should I work on". Selects 1-5 related issues from active milestone, synthesizes into composite work item (or picks single issue), hands off to ship-issue.
 model: haiku
 resources:
-  - scripts/list-issues.sh
-  - scripts/create-composite.sh
-  - scripts/resolve-base-branch.sh
-  - references/plugin-augmentation.md
+
+- scripts/list-issues.sh
+- scripts/create-composite.sh
+- scripts/resolve-base-branch.sh
+- references/plugin-augmentation.md
+
 ---
 
 # Dev Sprint
@@ -24,6 +27,7 @@ Hand off to `ship-issue`. `ship-issue` owns branching, TDD, CI, pre-pr-review, m
 ## Setup
 
 **Create `.tmp/` at project root before starting:**
+
 ```bash
 mkdir -p .tmp
 ```
@@ -43,14 +47,19 @@ All temp files in dev-sprint + sub-skills (`ship-issue`, `pre-pr-review`, etc.) 
 Assign each unmilestoned issue to the right milestone:
 
 1. **Survey existing milestones first.** List with due dates + themes to place each orphan accurately:
+
    ```bash
    gh api repos/:owner/:repo/milestones --jq '.[] | "\(.title) — \(.description // "no description") (due \(.due_on // "none"))"'
    ```
+
 2. **Match each orphan to best-fitting milestone** by topic/subsystem + ordering (which release it belongs to). Bugs in shipped behavior → earliest open milestone; new features → milestone owning that area.
+
    ```bash
    gh issue edit <issue> --milestone "<milestone-title>"
    ```
+
 3. **No existing milestone fits? OK to create one** — or rename existing milestones for better ordering or topic coverage. Prefer reuse/rename over proliferating near-duplicate milestones.
+
    ```bash
    # create
    gh api repos/:owner/:repo/milestones -f title="vX.Y" -f description="<theme>" -f due_on="<ISO8601 or omit>"
@@ -73,7 +82,8 @@ Prefer: shared files, unblock each other. Avoid: mixed domains.
 ## Phase 3: Create Composite Issue
 
 Composite body structure:
-```
+
+```markdown
 ## Issues
 - #N — <title>
 - #N — <title>
@@ -107,12 +117,14 @@ This is the orphan-sprint failure mode: composite #A is created with sub-issues 
 **If scope must shrink after Phase 3 (e.g. one bug harder than expected, another turns out blocked):**
 
 1. **Preferred — keep the composite, shrink the PR:** Pick the subset you'll actually ship. Update composite body to mark deferred sub-issues:
-   ```
+
+```markdown
    ## Issues
    - #X — <title>  ✅ (this PR)
    - #Y — <title>  ⏸ deferred → #<followup>
    - #Z — <title>  ⏸ deferred → #<followup>
    ```
+
    For each deferred sub-issue, post a comment explaining the defer + linking the follow-up plan (or leave it open with no comment if follow-up is just "next sprint"). Composite stays open until its PR merges; on merge, `Closes #<composite>` + `Closes #X` only. #Y and #Z stay open for a future sprint.
 
    ```bash
@@ -120,11 +132,13 @@ This is the orphan-sprint failure mode: composite #A is created with sub-issues 
    gh issue comment <Y> --body "Deferred from sprint #<composite>. Will be picked up in a follow-up sprint."
    ```
 
-2. **Alternative — abandon the composite cleanly:** Original framing wrong and you want a fresh composite? You must close the old one first with a justification comment:
+1. **Alternative — abandon the composite cleanly:** Original framing wrong and you want a fresh composite? You must close the old one first with a justification comment:
+
    ```bash
    gh issue comment <composite> --body "Closing as superseded. Original scope (#X #Y #Z) was too broad for one sprint. Replacing with #<new-composite> covering #X only. #Y and #Z return to milestone backlog."
    gh issue close <composite>
    ```
+
    Only after the old composite is CLOSED may you create a new one.
 
 **Self-check before running `create-composite.sh` a second time in one run:** Has a composite already been created in this run? If yes, you are in the orphan path. STOP and apply resolution 1 or 2 above. Never create a second composite without closing or updating the first.
@@ -156,7 +170,8 @@ Pull latest of `$BASE_BRANCH` before invoking. **Pass `$BASE_BRANCH` into the `s
 **CRITICAL: Include sub-issue list in `ship-issue` invocation.** Propagates to `pre-pr-review` so PR has all closing refs.
 
 Example message:
-```
+
+```text
 Sprint: Validation & Error Handling
 
 Base branch: release/1.0.x   ← branch from this, NOT main (from Phase 4a)
@@ -176,6 +191,7 @@ Applies to any sub-skill that launches agents to do the work (`ship-issue`, `pre
 **Review phase autonomy:** `ship-issue` → `pre-pr-review` fixes apply automatically, no user prompts. Fix or defer, then create PR.
 
 **Required scans during `pre-pr-review`:** Include in `ship-issue` handoff so it propagates to `pre-pr-review`:
+
 - `/Users/phaedrus/git/my-llmenv/bundles/base/scripts/slop-scan.sh scan . --lint`
 
   Always invoke slop-scan through this pinned wrapper (it runs `slop-scan@0.3.0`
@@ -185,7 +201,8 @@ Applies to any sub-skill that launches agents to do the work (`ship-issue`, `pre
 **After `pre-pr-review` completes:** Run `ponytail:ponytail-review` and apply all suggestions automatically before creating the PR. No user prompts — apply and commit.
 
 **PR closing references (MANDATORY):**
-```
+
+```text
 Closes #<composite-id>
 Closes #<issue-1>
 Closes #<issue-2>
@@ -195,7 +212,8 @@ Closes #<issue-3>
 Composite first, then sub-issues. GitHub auto-closes on merge. Every sprint PR closes all sub-issues, not just composite.
 
 **Sprint meta-issue:** Sprint tracked via issue? Add closing ref:
-```
+
+```text
 Closes #<composite-id>
 Closes #<issue-1>
 ...
@@ -203,7 +221,8 @@ Closes #<sprint-tracking-issue>
 ```
 
 Branch (created by `ship-issue` from `$BASE_BRANCH` selected in Phase 4a):
-```
+
+```text
 feat/<composite-id>-<theme-slug>   # forked from $BASE_BRANCH (release/X.Y.x or default)
 ```
 
@@ -214,12 +233,14 @@ Follow `ship-issue` exactly—no skips.
 After `ship-issue`, update docs + version.
 
 **Docs:** Update README.md, docs/ for:
+
 - Features/APIs → examples + usage
 - Behavior changes → update sections
 - Types/functions → API docs
 - Config changes → options/env vars
 
 **Semver:**
+
 - **MAJOR**: Breaking API/behavior/config
 - **MINOR**: New features, APIs, config options (backward-compatible)
 - **PATCH**: Bug fixes, internal improvements
@@ -231,6 +252,7 @@ Update `package.json` / `Cargo.toml` / `pyproject.toml` + any version refs. Comm
 ## Phase 6: Deferred Work & Pre-Existing Issues
 
 **Defer only if:**
+
 - Pre-existing bugs outside sprint scope
 - Features needing brainstorm/design
 - Work needing `feature-dev` or architecture review
@@ -247,17 +269,20 @@ gh issue create \
 ```
 
 **REQUIRED:** All issues from any skill need:
+
 - `--milestone` (no exceptions)
 - `--label` is **optional** — if used, must be a label that exists in repo (`gh label list`). Don't invent labels.
 
 ## Phase 6a: Issue Creation Standards (All Skills)
 
 **MANDATORY for all issues:**
+
 1. **Milestone**: Active milestone or current sprint (required)
 2. **Body**: Where found, why deferred, repro steps (if bug), blockers
 3. **Label**: optional — if used, must already exist in the repo (`gh label list`)
 
 **Enforce in skill scripts:** require the milestone, but treat the label as optional and validate it against the repo (warn, don't reject) rather than against a fixed allowlist:
+
 ```bash
 if [[ -z "$MILESTONE" ]]; then
   echo "Error: Milestone is required for all issues" >&2
