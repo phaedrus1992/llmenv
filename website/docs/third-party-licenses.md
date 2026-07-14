@@ -1312,6 +1312,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [bitflags 2.11.1](https://github.com/bitflags/bitflags)
+- [getopts 0.2.24](https://github.com/rust-lang/getopts)
 - [glob 0.3.3](https://github.com/rust-lang/glob)
 - [log 0.4.30](https://github.com/rust-lang/log)
 - [num-traits 0.2.19](https://github.com/rust-num/num-traits)
@@ -1435,6 +1436,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+```
+
+## MIT License (MIT)
+
+Used by:
+- [unicase 2.9.0](https://github.com/seanmonstar/unicase)
+
+```
+Copyright (c) 2014-2026 Sean McArthur
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
 
 ```
 
@@ -3335,7 +3365,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv 3.3.0](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3797,10 +3827,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 3.0.0-rc.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 3.3.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 3.3.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 3.3.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 3.3.0](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
@@ -4048,6 +4078,37 @@ SOFTWARE
 ## MIT License (MIT)
 
 Used by:
+- [pulldown-cmark-escape 0.11.0](https://github.com/raphlinus/pulldown-cmark)
+- [pulldown-cmark 0.13.4](https://github.com/raphlinus/pulldown-cmark)
+
+```
+The MIT License
+
+Copyright 2015 Google Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+```
+
+## MIT License (MIT)
+
+Used by:
 - [typenum 1.20.0](https://github.com/paholg/typenum)
 
 ```
@@ -4109,6 +4170,7 @@ THE SOFTWARE.
 
 Used by:
 - [aho-corasick 1.1.4](https://github.com/BurntSushi/aho-corasick)
+- [globset 0.4.18](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset)
 - [jiff 0.2.30](https://github.com/BurntSushi/jiff)
 - [memchr 2.8.0](https://github.com/BurntSushi/memchr)
 - [walkdir 2.5.0](https://github.com/BurntSushi/walkdir)
