@@ -122,7 +122,7 @@ cargo install llmenv
 **Prerequisites:**
 
 - A valid `CARGO_REGISTRY_TOKEN` must be set as a GitHub Actions secret
-- Generate tokens at <https://crates.io/me>
+- Generate tokens at `https://crates.io/me`
 
 ### Homebrew
 
