@@ -1215,14 +1215,15 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // #694: Tiered MCP permission rules for built-in servers.
     // Read-only tools → allow, mutation → ask, destructive → deny.
     if icm_active {
+        let icm_prefix = format!("mcp__{}__", MEMORY_MCP_NAME);
         for &tool in ICM_READ_ONLY {
-            allow.push(tool.to_owned());
+            allow.push(format!("{icm_prefix}{tool}"));
         }
         for &tool in ICM_MUTATION {
-            ask.push(tool.to_owned());
+            ask.push(format!("{icm_prefix}{tool}"));
         }
         for &tool in ICM_DESTRUCTIVE {
-            deny.push(tool.to_owned());
+            deny.push(format!("{icm_prefix}{tool}"));
         }
     }
 
@@ -2428,22 +2429,26 @@ mod tests {
         let allow = settings["permissions"]["allow"].as_array().unwrap();
         let ask = settings["permissions"]["ask"].as_array().unwrap();
         let deny = settings["permissions"]["deny"].as_array().unwrap();
+        let icm_prefix = format!("mcp__{}__", crate::mcp::resolve::MEMORY_MCP_NAME);
         for &tool in ICM_READ_ONLY {
+            let expected = format!("{icm_prefix}{tool}");
             assert!(
-                allow.iter().any(|v| v == tool),
-                "expected ICM read-only {tool:?} in allow, got {allow:?}"
+                allow.iter().any(|v| v == &expected),
+                "expected ICM read-only {expected:?} in allow, got {allow:?}"
             );
         }
         for &tool in ICM_MUTATION {
+            let expected = format!("{icm_prefix}{tool}");
             assert!(
-                ask.iter().any(|v| v == tool),
-                "expected ICM mutation {tool:?} in ask, got {ask:?}"
+                ask.iter().any(|v| v == &expected),
+                "expected ICM mutation {expected:?} in ask, got {ask:?}"
             );
         }
         for &tool in ICM_DESTRUCTIVE {
+            let expected = format!("{icm_prefix}{tool}");
             assert!(
-                deny.iter().any(|v| v == tool),
-                "expected ICM destructive {tool:?} in deny, got {deny:?}"
+                deny.iter().any(|v| v == &expected),
+                "expected ICM destructive {expected:?} in deny, got {deny:?}"
             );
         }
     }
@@ -2473,7 +2478,7 @@ mod tests {
             .unwrap_or_default();
         for v in allow.iter().chain(ask.iter()).chain(deny.iter()) {
             assert!(
-                !v.as_str().is_some_and(|s| s.starts_with("icm_")),
+                !v.as_str().is_some_and(|s| s.starts_with("mcp__icm__")),
                 "ICM tool rule found when MCP absent: {v:?}"
             );
         }
@@ -2507,24 +2512,28 @@ mod tests {
         let allow = settings["permissions"]["allow"].as_array().unwrap();
         let ask = settings["permissions"]["ask"].as_array().unwrap();
         let deny = settings["permissions"]["deny"].as_array().unwrap();
+        let icm_prefix = format!("mcp__{}__", crate::mcp::resolve::MEMORY_MCP_NAME);
         let ctx_prefix = crate::config::CONTEXT_MODE_MCP_PREFIX;
         // ICM tools
         for &tool in ICM_READ_ONLY {
+            let expected = format!("{icm_prefix}{tool}");
             assert!(
-                allow.iter().any(|v| v == tool),
-                "ICM read-only {tool:?} not in allow"
+                allow.iter().any(|v| v == &expected),
+                "ICM read-only {expected:?} not in allow"
             );
         }
         for &tool in ICM_MUTATION {
+            let expected = format!("{icm_prefix}{tool}");
             assert!(
-                ask.iter().any(|v| v == tool),
-                "ICM mutation {tool:?} not in ask"
+                ask.iter().any(|v| v == &expected),
+                "ICM mutation {expected:?} not in ask"
             );
         }
         for &tool in ICM_DESTRUCTIVE {
+            let expected = format!("{icm_prefix}{tool}");
             assert!(
-                deny.iter().any(|v| v == tool),
-                "ICM destructive {tool:?} not in deny"
+                deny.iter().any(|v| v == &expected),
+                "ICM destructive {expected:?} not in deny"
             );
         }
         // Context-mode tools
