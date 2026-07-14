@@ -24,13 +24,13 @@ the resolved endpoint. The only non-MCP use of the `icm` binary is launching
 
 ## Versioning, Changelog & Releases
 
-Before doing **anything** that touches the version number, `CHANGELOG.md`, or a
+Before doing **anything** that touches the version number, the changelog, or a
 release — read [`RELEASING.md`](RELEASING.md) and follow it.
 
 Key invariants (full details in `RELEASING.md`):
 
 - **A version only exists once it has been git-tagged.** Until then every change
-  goes under `## [Unreleased]` in `CHANGELOG.md`.
+  goes under `## [Unreleased]` in the changelog.
 - Never bump `Cargo.toml`'s `version` or create a `## [X.Y.Z]` changelog heading
   unless you are cutting a release (renaming `[Unreleased]` → `[X.Y.Z]`, bumping
   `Cargo.toml`, regenerating `Cargo.lock`, all in one release commit, then
@@ -51,14 +51,14 @@ Key invariants (full details in `RELEASING.md`):
   under `[Unreleased]`; once an older branch cuts its release the entry freezes
   there, so the newer release must re-list it. See `RELEASING.md`
   §"Forward-merged fixes appear in every release that ships them".
-- **No trigger keeps this in sync — so check on *every* `CHANGELOG.md` edit,**
+- **No trigger keeps this in sync — so check on *every* changelog edit,**
   not just at release time. Before finishing any changelog change, reconcile
   against the older release line (`git log --no-merges <last-tag>..HEAD` and the
-  older branch's `CHANGELOG.md`) and add any missing forward-merged fix with its
+  older branch's changelog) and add any missing forward-merged fix with its
   back-reference. A changelog edit that leaves an inherited fix unlisted is
   incomplete.
 - **When wrapping up `dev-sprint` or `ship-issue`, always evaluate
-  `CHANGELOG.md` — every user-facing change (fix, feature, enhancement, deprecation, breaking, security)
+  the changelog — every user-facing change (fix, feature, enhancement, deprecation, breaking, security)
   from the current work needs an entry under `[Unreleased]` following
   [keepachangelog](https://keepachangelog.com) formatting. Invoke the
   `keepachangelog` skill to check and write entries. Don't leave the task
