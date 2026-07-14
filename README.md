@@ -5,7 +5,7 @@
 [![docs](https://img.shields.io/badge/docs-phaedrus1992.github.io%2Fllmenv-blue)](https://phaedrus1992.github.io/llmenv/) <!-- markdownlint-disable-line MD013 -->
 [![Discord](https://img.shields.io/discord/1327438504941457480?logo=discord&label=Discord)](https://discord.gg/HvQrGAaGAS) <!-- markdownlint-disable-line MD013 -->
 
-A universal, scope-aware environment for AI coding agents.
+A universal, composable environment for AI coding agents.
 
 **llmenv** is `direnv` for Claude Code and other AI tools. As you move between
 networks, hosts, users, and projects, it detects the current context, selects
@@ -105,23 +105,24 @@ and plugins activate automatically.
 ## Commands
 
 | Command | Purpose |
-| --------- | --------- |
-| `llmenv init [PATH] [--repo URL]` | Write a template config (optionally clone from a repo) |
-| `llmenv export [--scope ID] [--tag TAG]` | Print `export` lines for the current scope (used by the hook) |
+| ------- | ------- |
+| `llmenv init [PATH] [--repo URL]` | Write a template config |
+| `llmenv setup` | Interactive setup wizard (auth + settings import) |
+| `llmenv export [--scope ID] [--tag TAG] [--compress]` | Print `export` lines for the current scope (used by the hook) |
+| `llmenv regenerate` | Re-materialize config without emitting shell variables |
 | `llmenv hook <zsh\|bash>` | Print shell integration code |
-| `llmenv status` | Show the active scopes, tags, and config status |
-| `llmenv context` | Show the resolved environment and active scopes in detail |
-| `llmenv scope-ls` | List configured scopes, marking active/orphaned |
-| `llmenv tag-ls` | List tags, marking active/orphaned |
-| `llmenv bundle-ls` | List bundles, marking active |
-| `llmenv mcp-ls` | List selected MCP servers with resolved role and transport |
-| `llmenv marketplace-ls` | List plugin marketplaces, marking referenced ones |
-| `llmenv plugin-ls` | List plugins, marking those selected by the active scope |
+| `llmenv status [scopes\|tags\|bundles\|mcps\|plugins\|marketplaces]` | Show active scopes, tags, and config status |
+| `llmenv context [--bundle NAME] [--why]` | Show the resolved environment and active scopes in detail |
+| `llmenv validate` | Check config for structural issues |
+| `llmenv edit [BUNDLE-NAME]` | Open config (or a bundle file) in `$EDITOR` |
+| `llmenv completions <bash\|zsh\|fish>` | Generate shell completion scripts |
 | `llmenv plugin-sync` | Clone/fast-forward plugin marketplaces into the cache |
-| `llmenv sync` | `git add`/`commit`/`push` the config repo to GitHub |
-| `llmenv check-stale` | Warn if the running agent's config has drifted (SessionStart hook) |
+| `llmenv login [--global]` | Capture and cache Claude Code auth credentials |
+| `llmenv upgrade [--check] [--track beta\|release]` | Self-upgrade from the latest GitHub release |
+| `llmenv memory stats\|list\|diff\|prune` | Inspect ICM memory state |
+| `llmenv check-stale [--auto-fix]` | Warn if the running agent's config has drifted |
 | `llmenv prune [--all] [--older-than DUR] [--dry-run]` | Clean stale cache folders |
-| `llmenv doctor [--gc]` | Validate wiring; optionally garbage-collect the cache |
+| `llmenv doctor [--gc] [--all]` | Validate wiring; optionally garbage-collect the cache |
 
 Every command accepts `--color <auto\|always\|never>`. Run `llmenv <command> --help`
 for full flag details. Per-command reference: [Commands](https://phaedrus1992.github.io/llmenv/docs/commands).
@@ -132,7 +133,7 @@ for full flag details. Per-command reference: [Commands](https://phaedrus1992.gi
 context:
 
 | Variable | Format | Meaning |
-| ---------- | -------- | --------- |
+| ------- | ------ | ------- |
 | `LLMENV_ACTIVE_SCOPES` | `kind:id,kind:id,…` | Every matched scope, prefixed by kind |
 | `LLMENV_ACTIVE_TAGS` | `tag,tag,…` (sorted) | The active tag set |
 | `LLMENV_ACTIVE_BUNDLES` | `name,name,…` | Bundles that fired, in declaration order |

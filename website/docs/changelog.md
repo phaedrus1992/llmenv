@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.4.0] - 2026-07-14
+
 This release tightens error diagnostic coverage across two dozen silent-fallthrough
 sites, adds PermissionMode variants for granular permission control, hardens cache
 GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
@@ -116,6 +118,10 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
 - Upgrade `debug_assert!` to `tracing::warn!` in scope matcher — walkdir
   entries outside the workspace root are now surfaced as warnings instead
   of only being checked in debug builds (#761)
+- Remove angle brackets from bare URLs in changelog and release docs —
+  `<url>` is interpreted as JSX by Docusaurus, breaking the `docs.yml`
+  CI build against `website/docs/changelog.md` and `website/docs/release.md`
+  (#811)
 
 ### Added
 
