@@ -1506,6 +1506,9 @@ fn permission_mode_str(mode: crate::config::PermissionMode) -> &'static str {
         PermissionMode::Plan => "plan",
         PermissionMode::Default => "default",
         PermissionMode::BypassPermissions => "bypassPermissions",
+        PermissionMode::Auto => "auto",
+        PermissionMode::DontAsk => "dontAsk",
+        PermissionMode::Manual => "manual",
     }
 }
 
@@ -1528,7 +1531,7 @@ mod tests {
         CLAUDE_JSON_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND, ClaudeCodeAdapter,
         HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
-        merge_mcp_into_claude_json, overlay_native, reconcile_settings,
+        merge_mcp_into_claude_json, overlay_native, permission_mode_str, reconcile_settings,
         reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
         seed_install_method,
     };
@@ -3043,5 +3046,27 @@ mod tests {
             baseline_json, with_providers_json,
             "model_providers/default_models must not affect Claude Code settings.json output"
         );
+    }
+
+    // ---- PermissionMode -> string mapping ----
+
+    #[test]
+    fn permission_mode_str_maps_all_variants() {
+        use crate::config::PermissionMode;
+        for (mode, expected) in [
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::Plan, "plan"),
+            (PermissionMode::Default, "default"),
+            (PermissionMode::BypassPermissions, "bypassPermissions"),
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::DontAsk, "dontAsk"),
+            (PermissionMode::Manual, "manual"),
+        ] {
+            assert_eq!(
+                permission_mode_str(mode),
+                expected,
+                "permission_mode_str({mode:?})"
+            );
+        }
     }
 }

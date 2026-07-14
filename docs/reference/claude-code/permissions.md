@@ -13,7 +13,7 @@ tools Claude can run without asking. Sandbox config lives under `sandbox`.
 | `allow` | Array of rules to auto-allow. `["Bash(git diff *)"]` |
 | `ask` | Array of rules that always prompt. |
 | `deny` | Array of rules to block (use for secrets). `["Read(./.env)"]` |
-| `defaultMode` | `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`. |
+| `defaultMode` | `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `manual`, `bypassPermissions`. |
 | `additionalDirectories` | Extra working dirs for file access (most `.claude/` config is *not* discovered from these). |
 | `disableBypassPermissionsMode` | (M) `"disable"` to block bypass mode + `--dangerously-skip-permissions`. |
 | `skipDangerousModePermissionPrompt` | Skip the bypass-mode confirmation. |
@@ -49,6 +49,7 @@ Cycle with Shift+Tab (CLI) or the mode selector (IDE/Desktop/web).
 | `auto` | Auto-mode classifier decides (block/soft-deny/allow rules; see `autoMode`). |
 | `dontAsk` | Suppress prompts (within rule bounds). |
 | `bypassPermissions` | Skip all prompts (the `--dangerously-skip-permissions` mode). |
+| `manual` | Equivalent to `default`; set via the mode selector in the CLI/IDE. |
 
 ## Sandbox (`sandbox` key)
 
