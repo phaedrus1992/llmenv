@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Version 3.x
 
 ## [Unreleased] - ReleaseDate
 
@@ -519,6 +520,8 @@ the rc.1 and rc.2 sections below.
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
+## Version 2.x
+
 ## [2.4.1] - 2026-07-10
 
 - CI updates to support trusted publishing to crates.io
@@ -806,6 +809,8 @@ the rc.1 and rc.2 sections below.
 - Fix missing `plugin.json` after a plugin sync being silently ignored; `llmenv` now
   logs a `warn` when the plugin manifest is absent after materializing the plugin,
   making broken plugin installs diagnosable (#379)
+
+## Version 1.x
 
 ## [1.0.10] - 2026-06-11
 
