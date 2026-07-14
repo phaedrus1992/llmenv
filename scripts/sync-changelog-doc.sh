@@ -38,28 +38,29 @@ while IFS= read -r -d '' f; do
     continue
   fi
 
-  # Insert blank line separator between file groups
-  if [[ "$first" == "false" ]]; then
-    echo "" >> website/docs/changelog.md
-  fi
+  v=$(echo "$f" | sed 's/CHANGELOG-\([0-9]*\)\.md/\1/')
 
   if [[ "$first" == "true" ]]; then
-    # First file: keep preamble, strip footer + sentinels
-    perl -0777 -pe '
-      s/<!--\s*next-url\s*-->.*$//ms;                 # drop URL block
-      s/^<!--\s*[\d.]+\s+next-header\s*-->\n//mg;     # strip sentinel lines
-      s/^\n+//;                                        # trim leading blank lines
-      s/\n+$/\n/;                                      # trim trailing blank lines
-    ' "$f" >> website/docs/changelog.md
     first=false
+    # First file: keep preamble, insert ## Version N.x after it
+    V="$v" perl -0777 -pe '
+      s/<!--\s*next-url\s*-->.*$//ms;
+      s/^<!--\s*[\d.]+\s+next-header\s*-->\n//mg;
+      s/\n+(?=## \[)/\n\n## Version $ENV{V}.x\n\n/ms;
+      s/^\n+//;
+      s/\n+$/\n/;
+    ' "$f" >> website/docs/changelog.md
   else
-    # Subsequent files: strip preamble (everything before first ## [) too
+    echo "" >> website/docs/changelog.md
+    echo "## Version ${v}.x" >> website/docs/changelog.md
+    echo "" >> website/docs/changelog.md
+    # Subsequent files: strip preamble, footer + sentinels
     perl -0777 -pe '
-      s/<!--\s*next-url\s*-->.*$//ms;                 # drop URL block
-      s/^.*?\n(?=## \[)//s;                            # strip preamble up to first section
-      s/^<!--\s*[\d.]+\s+next-header\s*-->\n//mg;     # strip sentinel lines
-      s/^\n+//;                                        # trim leading blank lines
-      s/\n+$/\n/;                                      # trim trailing blank lines
+      s/<!--\s*next-url\s*-->.*$//ms;
+      s/^.*?\n(?=## \[)//s;
+      s/^<!--\s*[\d.]+\s+next-header\s*-->\n//mg;
+      s/^\n+//;
+      s/\n+$/\n/;
     ' "$f" >> website/docs/changelog.md
   fi
 done < <(find . -maxdepth 1 -name 'CHANGELOG-*.md' -print0 | sort -t- -k2 -n -r -z)

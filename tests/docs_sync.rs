@@ -88,21 +88,33 @@ fn expected_site_changelog() -> String {
             })
             .collect();
 
-        // For files 2+, strip everything before the first `## [` section header
-        // (the preamble / placeholder text). The first file keeps its preamble.
-        let sections: Vec<&str> = if first {
-            stripped
-        } else {
-            stripped
-                .into_iter()
-                .skip_while(|line| !line.trim().starts_with("## ["))
-                .collect()
-        };
+        // Separate preamble from sections. Each file gets its own ## Version N.x
+        // header so git's 3-way merge can match entries to the correct major-
+        // version section independently — entries in different sections won't
+        // conflict (#823).
+        let preamble: Vec<&str> = stripped
+            .iter()
+            .copied()
+            .take_while(|line| !line.trim().starts_with("## ["))
+            .collect();
+        let sections: Vec<&str> = stripped
+            .into_iter()
+            .skip_while(|line| !line.trim().starts_with("## ["))
+            .collect();
 
         if sections.is_empty() {
             continue;
         }
+
+        // First file keeps its preamble; files 2+ discard it.
+        let preamble_str = preamble.join("\n").trim().to_string();
+        if first && !preamble_str.is_empty() {
+            body_parts.push(preamble_str);
+        }
         first = false;
+
+        // Every file gets a ## Version N.x section header.
+        body_parts.push(format!("## Version {version}.x"));
 
         // Trim leading blank lines from sections, then join.
         let content = sections.join("\n").trim().to_string();
