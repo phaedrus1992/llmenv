@@ -3,7 +3,7 @@ use crate::paths;
 use crate::plugins::cache;
 use anyhow::Context;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -268,7 +268,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     }
 
     // Check cache directory is writable
-    let cache_dir = super::expand_tilde(&config.cache.cache_dir)?;
+    let cache_dir = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
     std::fs::create_dir_all(&cache_dir).context("cache directory not writable")?;
     eprintln!(
         "{pass} Cache directory is writable: {}",
