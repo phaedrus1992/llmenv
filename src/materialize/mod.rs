@@ -4,11 +4,19 @@ pub mod state;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Context as _;
 
 use crate::config::HashingMode;
+use crate::materialize::state::STATE_DIR_NAME;
 use crate::merge::MergedManifest;
+
+/// Known ephemeral subdirectory names that should survive hash changes.
+/// After materialization creates a new hashed folder for strict mode, these
+/// subdirectories are copied from the most recent sibling that has them.
+/// Best-effort — failures are logged but don't block materialization.
+const EPHEMERAL_SUBDIRS: &[&str] = &["projects"];
 
 /// Outcome of [`materialize`]: the folder llmenv rendered into, plus the
 /// content hash it rendered (so callers can record it in the dotfile without
@@ -101,7 +109,12 @@ pub fn materialize_with_mode(
         std::fs::copy(abs, &out)?;
     }
     match std::fs::rename(&staging, &dest) {
-        Ok(()) => Ok(Rendered { path: dest, hash }),
+        Ok(()) => {
+            // Best-effort migration of ephemeral data from sibling hashed
+            // folders. Only applies to strict mode (the rename branch).
+            migrate_ephemeral(cache_root, &folder);
+            Ok(Rendered { path: dest, hash })
+        }
         Err(e) => {
             // Another concurrent writer raced us to the same hash. Their dir
             // is byte-identical (same hash ⇒ same contents), so accept it
@@ -195,13 +208,104 @@ fn collect_subdirs(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Migrate ephemeral data from sibling hashed folders into a newly-created
+/// folder. Called after a Strict mode rename succeeds.
+///
+/// Scans sibling directories under `adapter_root`, finds the most recently
+/// modified one that has a known ephemeral subdirectory (e.g. `projects/`),
+/// and copies it into the new folder. Additive: does not overwrite existing
+/// content in the new folder. Idempotent: an existing dest is skipped.
+/// Best-effort: all errors are logged at trace/warn level.
+pub fn migrate_ephemeral(adapter_root: &Path, new_name: &str) {
+    let new_path = adapter_root.join(new_name);
+    if !new_path.is_dir() {
+        return;
+    }
+
+    let mut siblings: Vec<PathBuf> = match std::fs::read_dir(adapter_root) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n != STATE_DIR_NAME && n != new_name && !n.ends_with(".tmp"))
+            })
+            .collect(),
+        Err(e) => {
+            tracing::debug!("migrate_ephemeral: could not read {:?}: {e}", adapter_root);
+            return;
+        }
+    };
+
+    if siblings.is_empty() {
+        return;
+    }
+
+    // Sort by dir mtime, newest first — more likely to have current state.
+    siblings.sort_by(|a, b| {
+        let ma = a
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let mb = b
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        mb.cmp(&ma)
+    });
+
+    for dir_name in EPHEMERAL_SUBDIRS {
+        let dest = new_path.join(dir_name);
+        if dest.exists() {
+            // Additive — don't overwrite existing content.
+            continue;
+        }
+
+        for sibling in &siblings {
+            let src = sibling.join(dir_name);
+            if src.is_dir() {
+                if let Err(e) = copy_dir_all(&src, &dest) {
+                    tracing::warn!(
+                        "migrate_ephemeral: failed to copy {} -> {}: {e}",
+                        src.display(),
+                        dest.display(),
+                    );
+                }
+                break; // Migrate from first (newest) matching sibling.
+            }
+        }
+    }
+}
+
+/// Recursively copy a directory tree. No symlink preservation — only files and
+/// directories are copied. Good enough for best-effort ephemeral migration.
+fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if ft.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else if ft.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::materialize::state::STATE_DIR_NAME;
     use crate::merge::MergedManifest;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+    use std::time::{Duration, SystemTime};
 
     /// #149: a bundle file with a `..` component must be rejected, not joined
     /// into staging (which would escape the cache dir).
@@ -298,6 +402,151 @@ mod tests {
             prune_empty_dirs(&root).expect("first prune");
             prune_empty_dirs(&root).expect("second prune");
             prop_assert!(root.exists(), "root must still exist after second prune");
+        }
+    }
+
+    // #746: migrate_ephemeral — most recent sibling's projects/ is copied.
+    #[test]
+    fn migrate_ephemeral_copies_from_newest_sibling() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let old = tmp.path().join("V1-hash-old");
+        let recent = tmp.path().join("V1-hash-recent");
+        let new_name = "V1-hash-new";
+        let new_path = tmp.path().join(new_name);
+
+        std::fs::create_dir_all(old.join("projects").join("alpha"))
+            .expect("mkdir old/projects/alpha");
+        std::fs::write(
+            old.join("projects").join("alpha").join("state.json"),
+            b"old",
+        )
+        .expect("write old state");
+        std::fs::create_dir_all(recent.join("projects").join("beta"))
+            .expect("mkdir recent/projects/beta");
+        std::fs::write(
+            recent.join("projects").join("beta").join("state.json"),
+            b"recent",
+        )
+        .expect("write recent state");
+        // Backdate old so recent is clearly newer.
+        let old_time = SystemTime::now() - Duration::from_secs(3600);
+        set_mtime_recursive(&old, old_time);
+
+        std::fs::create_dir_all(&new_path).expect("mkdir new");
+        migrate_ephemeral(tmp.path(), new_name);
+
+        let copied = new_path.join("projects").join("beta").join("state.json");
+        assert!(copied.exists(), "should copy projects/ from newest sibling");
+        assert_eq!(
+            std::fs::read_to_string(&copied).expect("read copied"),
+            "recent",
+            "should migrate content from the most recent sibling"
+        );
+        // Old sibling's projects/ should NOT be copied (already broke on first
+        // match).
+        let old_copied = new_path.join("projects").join("alpha").join("state.json");
+        assert!(!old_copied.exists(), "should not copy from older sibling");
+    }
+
+    // #746: migrate_ephemeral — additive: existing dest is not overwritten.
+    #[test]
+    fn migrate_ephemeral_skips_existing_dest() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sibling = tmp.path().join("V1-hash-sib");
+        let new_name = "V1-hash-new";
+        let new_path = tmp.path().join(new_name);
+
+        std::fs::create_dir_all(sibling.join("projects")).expect("mkdir sib/projects");
+        std::fs::write(
+            sibling.join("projects").join("existing.txt"),
+            b"should not be overwritten",
+        )
+        .expect("write sibling file");
+        std::fs::create_dir_all(new_path.join("projects")).expect("mkdir new/projects");
+        std::fs::write(
+            new_path.join("projects").join("existing.txt"),
+            b"my content",
+        )
+        .expect("write new file");
+
+        migrate_ephemeral(tmp.path(), new_name);
+
+        assert_eq!(
+            std::fs::read_to_string(new_path.join("projects").join("existing.txt"))
+                .expect("read existing"),
+            "my content",
+            "existing content must not be overwritten"
+        );
+    }
+
+    // #746: migrate_ephemeral — noop when no siblings exist.
+    #[test]
+    fn migrate_ephemeral_noop_when_no_siblings() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let new_name = "V1-hash-only";
+        let new_path = tmp.path().join(new_name);
+        std::fs::create_dir_all(&new_path).expect("mkdir new");
+        std::fs::write(new_path.join("some-file"), b"content").expect("write");
+
+        migrate_ephemeral(tmp.path(), new_name);
+
+        assert!(
+            !new_path.join("projects").exists(),
+            "must not create projects/"
+        );
+    }
+
+    // #746: migrate_ephemeral — noop when no sibling has the ephemeral subdir.
+    #[test]
+    fn migrate_ephemeral_noop_when_no_matching_subdir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sibling = tmp.path().join("V1-hash-sib");
+        let new_name = "V1-hash-new";
+        let new_path = tmp.path().join(new_name);
+
+        std::fs::create_dir_all(sibling.join("other-data")).expect("mkdir sib/other-data");
+        std::fs::create_dir_all(&new_path).expect("mkdir new");
+
+        migrate_ephemeral(tmp.path(), new_name);
+
+        assert!(
+            !new_path.join("projects").exists(),
+            "must not create projects/"
+        );
+    }
+
+    // #746: migrate_ephemeral — state/ dir is not considered a sibling candidate.
+    #[test]
+    fn migrate_ephemeral_skips_state_dir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let state = tmp.path().join(STATE_DIR_NAME);
+        let new_name = "V1-hash-new";
+        let new_path = tmp.path().join(new_name);
+
+        std::fs::create_dir_all(state.join("projects")).expect("mkdir state/projects");
+        std::fs::write(state.join("projects").join("state.json"), b"auth")
+            .expect("write state file");
+        std::fs::create_dir_all(&new_path).expect("mkdir new");
+
+        migrate_ephemeral(tmp.path(), new_name);
+
+        assert!(
+            !new_path.join("projects").exists(),
+            "must not copy from state/"
+        );
+    }
+
+    fn set_mtime_recursive(p: &std::path::Path, t: SystemTime) {
+        if p.is_dir()
+            && let Ok(rd) = std::fs::read_dir(p)
+        {
+            for entry in rd.flatten() {
+                set_mtime_recursive(&entry.path(), t);
+            }
+        }
+        // set_modified requires an open handle on some platforms.
+        if let Ok(f) = std::fs::File::options().write(true).open(p) {
+            let _ = f.set_modified(t);
         }
     }
 }
