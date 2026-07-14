@@ -19,11 +19,14 @@ and patch-release workflow.
 ## Versioning invariant
 
 A version exists only once it has been git-tagged. Until then, every change goes
-under `## [Unreleased]` in [`CHANGELOG.md`](https://github.com/phaedrus1992/llmenv/blob/main/CHANGELOG.md). `git tag -l` is the
+under `## [Unreleased]` in
+[`CHANGELOG.md`](https://github.com/phaedrus1992/llmenv/blob/main/CHANGELOG.md). `git tag -l`
+is the source of truth <!-- markdownlint-disable-line MD013 -->
 source of truth — no tag means no version section and no `Cargo.toml` bump. Full
 details in [release.md](release.md).
 
 ## Design docs
 
-- [Engine capabilities](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md) — the two-layer
+- [Engine capabilities](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md)
+  — the two-layer <!-- markdownlint-disable-line MD013 -->
   (neutral + per-engine `native`) capability model.

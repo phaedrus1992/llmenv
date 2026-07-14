@@ -19,7 +19,7 @@ marketplace:
 The `source` is classified automatically:
 
 | Source form | Classified as | Behavior |
-|-------------|--------------|----------|
+| ------------- | -------------- | ---------- |
 | `https://`, `http://`, `ssh://`, `git://`, `git+ssh://` | git | Cloned into the cache |
 | `git@host:owner/repo` (scp-style) | git | Cloned into the cache |
 | `/abs`, `~/path`, `./rel`, `../rel`, bare relative | path | Used in place |

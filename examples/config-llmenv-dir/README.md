@@ -22,7 +22,7 @@ config into the cache directory.
 
 ## Layout
 
-```
+```text
 config.yaml                 ← top-level: cache, scope, bundle, plugin-collection,
                                mcp, memory. THE entry point. Read this first.
 bundles/<name>/             ← one directory per bundle
@@ -40,7 +40,7 @@ scopes/                     ← (optional) scope overrides; most scopes live in
 
 ## How the pieces connect
 
-```
+```text
                 ┌─────────────────────────────────────────────────┐
                 │  llmenv regenerate                               │
                 │                                                  │
@@ -68,7 +68,7 @@ scopes/                     ← (optional) scope overrides; most scopes live in
 
 ### Scope → Tag → Bundle chain (example)
 
-```
+```text
 hostname == "work-laptop.local"
     → scope `work-laptop` fires
     → emits tags: [host-work-laptop, work]

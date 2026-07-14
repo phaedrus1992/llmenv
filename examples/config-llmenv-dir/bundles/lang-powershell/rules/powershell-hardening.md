@@ -74,6 +74,7 @@ Get-Process | Select-Object -Property @($userInput)  # Only property names, no c
 ```
 
 **Other risky patterns:**
+
 - `& $variable` with user input (dynamic code execution)
 - `-ScriptBlock { ... }` with string concatenation
 - String interpolation in SQL-like queries
@@ -115,6 +116,7 @@ use a CA-signed code-signing certificate.
 ## Remote Execution (WinRM/Remoting)
 
 **Enable WinRM securely:**
+
 ```powershell
 # Enable only HTTPS (not HTTP)
 Enable-PSRemoting -Force
@@ -129,6 +131,7 @@ Set-WSManInstance -ResourceURI winrm/config/Listener `
 ```
 
 **Use domain accounts and constrained endpoints when possible:**
+
 ```powershell
 # Constrained endpoint: limit what commands can run
 Register-PSSessionConfiguration -Name "LimitedCLI" `
@@ -141,7 +144,7 @@ certificate validation.
 ## Common Pitfalls
 
 | Pitfall | Safe Pattern |
-|---------|-------------|
+| --------- | ------------- |
 | Hardcoded creds | Use `Get-Credential`, encrypted XML, vault |
 | `Invoke-Expression` with user input | Parse input, use allowlists, avoid it |
 | `-ExecutionPolicy Bypass` in scripts | Use signed scripts + RemoteSigned policy |

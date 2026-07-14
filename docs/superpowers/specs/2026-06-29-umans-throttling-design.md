@@ -37,7 +37,7 @@ passthrough, not the generic schema.
 **explicit polling**. The JSON body is rich:
 
 | Field | Meaning |
-|---|---|
+| --- | --- |
 | `limits.requests.limit` | soft limit per window (200) |
 | `limits.requests.hard_cap` | hard 429 ceiling (400) |
 | `limits.requests.window_seconds` | window length (18000 = 5h) |
@@ -59,9 +59,9 @@ Follows the built-in-feature pattern (ICM as reference):
    to the `Features` struct. `Throttle` is generic:
 
    | Field | Type | Default | Purpose |
-   |---|---|---|---|
-   | `backend` | String | — (required) | selects backend impl (`"umans"`) |
-   | `when` | Vec<String> | `[]` | tag-scoped activation (like `memory`) |
+   | --- | --- | --- | --- |
+   | `backend` | String | — (required) | selects backend implementation (`"umans"`) |
+   | `when` | `Vec<String>` | `[]` | tag-scoped activation (like `memory`) |
    | `cache_ttl` | u64 | 30 | shared usage-poll cache, seconds |
    | `max_wait` | u64 | 300 | hard cap on any single delay, seconds |
    | `soft_threshold` | u64 | 20 | `remaining` level where delays begin |
@@ -105,7 +105,7 @@ Follows the built-in-feature pattern (ICM as reference):
 Pure, backend-agnostic, unit-tested. Always capped at `max_wait`; we never wait
 until `boxed_until` (it can span hours / future windows, #487).
 
-```
+```text
 if snapshot.penalized:            return max_wait        # server deprioritizing us
 if remaining is None:             return 0               # unknown -> don't block
 if remaining == 0:                return max_wait

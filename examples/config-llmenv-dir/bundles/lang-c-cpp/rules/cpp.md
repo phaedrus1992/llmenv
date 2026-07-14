@@ -13,7 +13,7 @@ paths:
 ## Toolchain
 
 | Purpose | Tool |
-|---------|------|
+| --------- | ------ |
 | build | `cmake` (3.15+) or `meson` |
 | lint | `clang-tidy` |
 | format | `clang-format` |
@@ -98,7 +98,7 @@ std::vector<int*> find(const std::vector<int>& v, int x);
 Choose one strategy per module and be consistent:
 
 | Context | Strategy |
-|---------|----------|
+| --------- | ---------- |
 | General application code | Exceptions + RAII |
 | Performance-critical / embedded | `std::expected<T,E>` (C++23) or `std::optional<T>` + error enum |
 | Constructor failure | Throw — there is no "return" from a constructor |
@@ -117,12 +117,14 @@ std::string to_upper(std::string s) noexcept;   // cannot throw
 ## C++17 Features — Use Them
 
 ### Structured Bindings
+
 ```cpp
 auto [iter, inserted] = my_map.emplace(key, value);
 if (!inserted) { /* key already existed */ }
 ```
 
 ### `if` / `switch` with Init Statement
+
 ```cpp
 if (auto it = m.find(key); it != m.end()) {
     use(it->second);
@@ -130,13 +132,17 @@ if (auto it = m.find(key); it != m.end()) {
 ```
 
 ### `std::optional<T>`
+
 Replace sentinel values (`-1`, `nullptr`, `""`) and boolean out-parameters with `optional`.
+
 ```cpp
 std::optional<Config> load_config(std::string_view path);
 ```
 
 ### `std::variant<Ts...>` + `std::visit`
+
 Type-safe tagged unions. Prefer over `union` + manual tag.
+
 ```cpp
 using Result = std::variant<Value, ParseError>;
 std::visit(overloaded{
@@ -146,6 +152,7 @@ std::visit(overloaded{
 ```
 
 ### `std::filesystem`
+
 ```cpp
 #include <filesystem>
 namespace fs = std::filesystem;
@@ -153,7 +160,9 @@ fs::path p = fs::current_path() / "data" / "config.json";
 ```
 
 ### `if constexpr`
+
 Replaces SFINAE and `enable_if` for compile-time branching inside templates.
+
 ```cpp
 template<typename T>
 void serialize(T val) {
@@ -163,12 +172,14 @@ void serialize(T val) {
 ```
 
 ### Fold Expressions (variadic templates)
+
 ```cpp
 template<typename... Args>
 bool all_positive(Args... args) { return (... && (args > 0)); }
 ```
 
 ### Class Template Argument Deduction (CTAD)
+
 ```cpp
 std::pair p{1, 2.0};     // deduced pair<int, double>
 std::vector v{1, 2, 3};  // deduced vector<int>
@@ -269,7 +280,7 @@ void ProcessBlock(double** inputs, double** outputs, int nFrames) noexcept {
 ## What Not to Do
 
 | Avoid | Use instead |
-|-------|-------------|
+| ------- | ------------- |
 | `malloc` / `free` | `make_unique` / `make_shared` / containers |
 | Raw `new` / `delete` | RAII types |
 | `char*` for strings | `std::string` / `std::string_view` |

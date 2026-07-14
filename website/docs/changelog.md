@@ -63,7 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+This release tightens error diagnostic coverage across two dozen silent-fallthrough
+sites, adds PermissionMode variants for granular permission control, hardens cache
+GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
+
 ### Fixed
+
 - Fold `strip_json_nulls` into `normalize_json` so every merge path (not just
   `reconcile_settings`) benefits from null-tolerant merge dedup (#718)
 - Add null-stripping to `normalize_yaml` and insert-path null guard to
@@ -74,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `tracing::warn!` diagnostics to 7 additional silent-error swallowing
   sites in file_sink, event serialization, read-once canonicalize, throttle
   error body, consolidation error body, and MCP client error body reads (#773)
+- Enrich pre-subscriber diagnostics — promote event serialization failures
+  to `error!`, add URL context to throttle/consolidation error messages,
+  and log fallback path in `state_path()` warnings (#784)
 - Surface silent error swallowing in read-once hook — `state_dir()`
   resolution failures are now logged as warnings before returning empty
   strings (#760)
@@ -108,34 +116,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Upgrade `debug_assert!` to `tracing::warn!` in scope matcher — walkdir
   entries outside the workspace root are now surfaced as warnings instead
   of only being checked in debug builds (#761)
+
 ### Added
+
+- Add `auto`, `dontAsk`, and `manual` PermissionMode variants alongside
+  existing boolean/string forms — `auto` is only honored from user-scope
+  settings, `dontAsk` skips the permission prompt, and `manual` matches
+  the default deny-mode behavior (#748)
 - Migrate ephemeral state (`projects/`) across hash changes in Strict
   mode materialization (#746, #797)
 
 ### Fixed
+
 - GC in Normal mode now age-checks each shape individually instead of
   treating the entire version generation as one unit (#738, #797)
 - Clock-skew handling in GC — entries with future mtimes are now
   treated as expired with a logged warning instead of silently skipped
   (#797)
+- Edge-case hardening in cache lifecycle — log I/O errors in ephemeral
+  migration, attempt older siblings on copy failure, clean up `.tmp`
+  staging directories in GC, and log unexpected entries (#797)
 
 ## [3.3.0] - 2026-07-13
 
 ### Deprecated
+
 - The old boolean `session_log` shape (`file: bool`, `transcript: bool`,
   `verbose: bool`) is deprecated. It still parses in 3.x but will be
   removed in 4.0. Migrate to the new per-sink mapping blocks. ([#744](https://github.com/phaedrus1992/llmenv/issues/744))
 
 ### Removed
+
 - Remove dead `diff` field from `ReadOnce` config schema — the
   planned phase-2 delta mode was never implemented (#725)
 
 ### Changed
+
 - `session_log.verbose` replaced with per-sink `level` (info/debug/trace).
   `session_log.file` and `session_log.transcript` are now mapping blocks with
   `enabled` + `level` fields. Old boolean shape still parses. ([#740](https://github.com/phaedrus1992/llmenv/issues/740))
 
 ### Fixed
+
 - Early-exit hook-run before scope evaluation for events that
   produce no memory actions — saves ~3.5ms per PreToolUse
   dispatch on a loaded config (#702)
@@ -170,6 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   silently discarded errors (#731, #710, #712, #713)
 
 ### Added
+
 - Add `llmenv upgrade` subcommand for self-upgrade from
   GitHub releases (`--check`, `--track beta|release`,
   `features.upgrade.track` config option) (#686)
@@ -222,10 +245,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [3.2.0] - 2026-07-11
 
 ### Changed
-- Move WebFetch/WebSearch ICM storage and PostSession consolidation to background detached child processes, reducing hook latency for common events (#670)
+
+- Move WebFetch/WebSearch ICM storage and PostSession consolidation to background
+  detached child processes, reducing hook latency for common events (#670)
 - Cache parsed config by file mtime in hook-run to avoid redundant YAML parsing on each event (#670)
 
 ### Added
+
 - `llmenv doctor` checks that config-dependent executables (`icm`,
   `mcp-proxy`/`uvx`, `claude`, `crush`) are available on `PATH`,
   respecting each tool's config conditions (memory entries, disabled
@@ -233,6 +259,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add Discord community link to README and getting-started guide
 
 ### Fixed
+
 - `capabilities.permissions` and `native_permissions` rules
   (top-level or bundle-contributed) whose `pattern`/`paths` have
   unbalanced parentheses — e.g. a process-substitution deny pattern like
@@ -262,6 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [3.1.0] - 2026-07-10
 
 ### Added
+
 - Auto-activate OS tag in scope resolution — bundles with OS-specific `when:` tags
   (e.g. `linux`, `macos`, `windows`) now activate automatically without requiring
   manual scope configuration (#638)
@@ -269,6 +297,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and add `llmenv prune --plugin-cache` flag for explicit shared plugin cache cleanup (#643)
 
 ### Fixed
+
 - Build static Linux binaries with musl (`*-linux-musl`) instead of glibc
   (`*-linux-gnu`) so the pre-built Homebrew-tap binaries work on any Linux
   distro regardless of system glibc version (#647)
@@ -416,7 +445,7 @@ the rc.1 and rc.2 sections below.
   bundle-authored relative script path broken under Crush. (#551)
 - Fix `CrushAdapter` rendering MCP servers, LSP `init_options`, and permissions in
   Claude Code's shapes instead of Crush's actual schema
-  (https://charm.land/crush.json), found by auditing the adapter against it: every
+  (<https://charm.land/crush.json>), found by auditing the adapter against it: every
   MCP server previously failed to initialize because Crush's required `type` field
   (`stdio`/`sse`/`http`) was either missing (stdio entries) or set to the
   nonexistent value `"remote"` (remote entries) — Crush's MCP client hits an
@@ -547,6 +576,7 @@ the rc.1 and rc.2 sections below.
 ## [2.4.0] - 2026-07-10
 
 ### Added
+
 - Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
   `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
   temporary files to the current content hash (#630)

@@ -40,9 +40,11 @@ Run the scripts and MCP queries concurrently. Process large script output with
 `ctx_execute`/`ctx_execute_file` rather than reading raw logs into context.
 
 1. **GitHub — open PRs.** The in-flight spine.
+
    ```bash
    "${CLAUDE_CONFIG_DIR}/skills/fyi/scripts/gh-open-work.sh" phaedrus1992
    ```
+
    Emits two lists: PRs the user authored (with draft/ready + last-updated) and
    PRs awaiting the user's review (with author + last-updated). The query is
    org-scoped, so it catches repos beyond the priority seven — rank those lower.
@@ -79,12 +81,14 @@ Run the scripts and MCP queries concurrently. Process large script output with
 5. **llmenv-chart — maintainer watch.** The script above is `phaedrus1992`-scoped and
    only catches authored/review-requested PRs, so it misses this repo entirely. List
    *all* open issues and PRs the user should keep an eye on:
+
    ```bash
    gh issue list --repo llmenv-community/llmenv-chart --state open \
      --json number,title,url,updatedAt,labels -L 50
    gh pr list --repo llmenv-community/llmenv-chart --state open \
      --json number,title,url,updatedAt,isDraft,author -L 50
    ```
+
    Surface these regardless of author/assignee. Rank a fresh issue/PR (no maintainer
    reply yet) higher than a stale one already under discussion. Still drop bot noise
    (dependabot, etc.) per the rules below.
@@ -92,9 +96,11 @@ Run the scripts and MCP queries concurrently. Process large script output with
 6. **Sessions + Notion — WIP and cycle context.** Reuse the daily-update scanner to
    catch work that exists *only* in yesterday's session logs (uncommitted, no PR or
    issue yet):
+
    ```bash
    "${CLAUDE_CONFIG_DIR}/skills/daily-update/scripts/scan-sessions.mjs" --date <yesterday>
    ```
+
    This script is owned by the `daily-update` skill, which ships in the same `work`
    bundle — it is a cross-skill reuse, not a resource of this skill. If daily-update
    is absent, skip this source rather than failing the briefing.

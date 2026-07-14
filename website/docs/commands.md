@@ -6,7 +6,7 @@ Every command accepts `--color <auto|always|never>` (default `auto`). Run
 
 ## `init`
 
-```
+```text
 llmenv init [PATH] [--repo URL]
 ```
 
@@ -16,7 +16,7 @@ repository instead of writing a template. No-op if a config already exists.
 
 ## `export`
 
-```
+```text
 llmenv export [--scope ID] [--tag TAG] [--explain]
 ```
 
@@ -34,7 +34,7 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 
 ## `regenerate`
 
-```
+```text
 llmenv regenerate
 ```
 
@@ -44,7 +44,7 @@ the right env vars.
 
 ## `hook`
 
-```
+```text
 llmenv hook <zsh|bash>
 ```
 
@@ -54,7 +54,7 @@ prompt.
 
 ## `status`
 
-```
+```text
 llmenv status [bundles|tags|scopes|mcps|marketplaces|plugins]
 ```
 
@@ -76,7 +76,7 @@ config parses. With a subcommand, show a detailed listing for that category:
 
 ## `context`
 
-```
+```text
 llmenv context [--bundle NAME] [--why] [--json]
 ```
 
@@ -91,7 +91,7 @@ behind `status`, including which contributors fired.
 
 ## `validate`
 
-```
+```text
 llmenv validate
 ```
 
@@ -100,7 +100,7 @@ non-zero if any issues are found.
 
 ## `edit`
 
-```
+```text
 llmenv edit [BUNDLE-NAME]
 ```
 
@@ -109,7 +109,7 @@ Open `config.yaml` (or, if `BUNDLE-NAME` is given, the matching
 
 ## `completions`
 
-```
+```text
 llmenv completions <bash|zsh|fish>
 ```
 
@@ -129,7 +129,7 @@ llmenv completions fish > ~/.config/fish/completions/llmenv.fish
 
 ## `plugin-sync`
 
-```
+```text
 llmenv plugin-sync
 ```
 
@@ -139,7 +139,7 @@ need no sync.
 
 ## `sync`
 
-```
+```text
 llmenv sync [--dry-run]
 ```
 
@@ -151,7 +151,7 @@ config directory. Use this to propagate config changes to other hosts.
 
 ## `check-stale`
 
-```
+```text
 llmenv check-stale [--auto-fix]
 ```
 
@@ -165,7 +165,7 @@ freshly-computed one and prints a restart hint on drift. Safe to run manually.
 
 ## `hook-run`
 
-```
+```text
 llmenv hook-run <event>
 ```
 
@@ -203,7 +203,7 @@ blocks on the network round trip.
 
 ## `prune`
 
-```
+```text
 llmenv prune [--all] [--older-than DUR] [--dry-run]
 ```
 
@@ -220,7 +220,7 @@ Clean stale cache folders.
 
 ## `login`
 
-```
+```text
 llmenv login [--global]
 ```
 
@@ -240,7 +240,7 @@ or to re-authenticate.
 
 ## `config-context`
 
-```
+```text
 llmenv config-context
 ```
 
@@ -250,7 +250,7 @@ directory so the agent knows where to direct config edits. Invoked automatically
 
 ## `config-guard`
 
-```
+```text
 llmenv config-guard
 ```
 
@@ -262,7 +262,7 @@ blocked). Invoked automatically — not normally run by users.
 
 ## `upgrade`
 
-```
+```text
 llmenv upgrade [--check] [--track beta|release]
 ```
 
@@ -276,6 +276,7 @@ restores the original binary on failure.
 - `--track beta` uses the first non-draft GitHub release instead of the
   latest stable release. The track can be configured persistently via
   `features.upgrade.track` in `config.yaml`:
+
   ```yaml
   features:
     upgrade:
@@ -286,7 +287,7 @@ Supported platforms: macOS (aarch64, x86_64), Linux (aarch64, x86_64).
 
 ## `doctor`
 
-```
+```text
 llmenv doctor [--gc] [--all] [--verbose]
 ```
 
@@ -316,7 +317,7 @@ shims but will be removed in 2.1. Use the `status <subcommand>` equivalents
 instead:
 
 | Deprecated | Replacement |
-|---|---|
+| --- | --- |
 | `llmenv scope-ls` | `llmenv status scopes` |
 | `llmenv tag-ls` | `llmenv status tags` |
 | `llmenv bundle-ls` | `llmenv status bundles` |

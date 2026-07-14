@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD024 -->
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
@@ -14,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [2.4.0] - 2026-07-10
 
 ### Added
+
 - Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
   `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
   temporary files to the current content hash (#630)

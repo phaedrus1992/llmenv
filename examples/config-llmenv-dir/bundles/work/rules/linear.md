@@ -1,4 +1,6 @@
+<!-- markdownlint-disable MD003 MD013 MD022 MD041 -->
 ---
+
 scope: linear
 priority: high
 ---

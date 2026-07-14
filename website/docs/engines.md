@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # Engines
 
 llmenv emits agent-native configuration through pluggable **adapters**. The
@@ -72,7 +74,7 @@ For each materialized environment, the adapter writes (all with `0600`
 permissions):
 
 | File | From |
-|------|------|
+| ------ | ------ |
 | `CLAUDE.md` | the merged `AGENTS.md` / rules content |
 | `settings.json` | permissions, hooks, plugins (+ `native_*` overrides, + `native:` catch-all) |
 | `.claude.json` | resolved MCP servers upserted into `mcpServers`; foreign keys preserved (+ `native_mcp`) |
@@ -108,10 +110,10 @@ materialized inside the llmenv cache directory.
 
 ### Env vars
 
-| Variable | Points to | Notes |
-|----------|-----------|-------|
-| `CRUSH_GLOBAL_CONFIG` | `<cache>/crush/...` (the directory containing `crush.json`) | Crush joins `crush.json` onto this path itself — it must be a directory, not the file |
-| `CRUSH_GLOBAL_DATA` | `<state_dir>/crush` | A dedicated subdir of the stable llmenv state dir; Crush needs no separate workaround |
+| Variable               | Points to                                                              | Notes                                                                                          |
+|------------------------|------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
+| `CRUSH_GLOBAL_CONFIG`  | `<cache>/crush/...` (the directory containing `crush.json`)            | Crush joins `crush.json` onto this path itself — it must be a directory, not the file          |
+| `CRUSH_GLOBAL_DATA`    | `<state_dir>/crush`                                                    | A dedicated subdir of the stable llmenv state dir; Crush needs no separate workaround          |
 
 `CRUSH_GLOBAL_CONFIG` and `CLAUDE_CONFIG_DIR` use separate namespaces and can
 coexist in a single shell session without conflict.
@@ -119,7 +121,7 @@ coexist in a single shell session without conflict.
 ### Capability map
 
 | Feature | Crush support | Notes |
-|---------|--------------|-------|
+| --------- | -------------- | ------- |
 | Permissions (`allow`/`deny`) | Supported | Rendered to `allowed_tools` / `denied_tools` |
 | Permissions (`ask`) | **Lossy, fail-closed** | `ask` rules collapse to `denied_tools` — Crush has no interactive-ask concept |
 | Hooks — `PreToolUse` | Supported | `command`-kind handlers only |

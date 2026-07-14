@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Environment variables
 
 Codex reads a handful of environment variables. The one that matters most for an

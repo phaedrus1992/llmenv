@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # ICM-Transcript Session Logging Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -76,11 +77,13 @@ runtime, `proptest`, `tempfile`.
 ### Task 1: `SessionLog` config struct (breaking replace)
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/schema.rs:100`
 - Modify: `crates/llmenv-config/src/lib.rs:83-99` (existing tests)
 - Test: `crates/llmenv-config/src/schema.rs` (inline `#[cfg(test)]`)
 
 **Interfaces:**
+
 - Produces: `pub struct SessionLog { pub file: bool, pub transcript: bool,
   pub verbose: bool, pub path: Option<String>, pub max_content_bytes: Option<usize> }`;
   `impl Default for SessionLog` → `{ file: false, transcript: true, verbose:
@@ -262,11 +265,13 @@ git commit -m "feat: session_log config becomes a table (transcript on by defaul
 ### Task 2: `SessionLogEvent` model + JSONL serialization
 
 **Files:**
+
 - Create: `src/session_log/event.rs`
 - Modify: `src/session_log/mod.rs` (declare `pub mod event; pub use event::*;`)
 - Test: inline `#[cfg(test)]` in `event.rs`
 
 **Interfaces:**
+
 - Produces:
   `pub enum EventScope { AgentSession, Process }`
   `pub enum EventKind { LifecycleStart, Scope, Internal, Prompt, ToolUse, ToolResult, Notification, Stop, LifecycleEnd }`
@@ -421,12 +426,14 @@ git commit -m "feat: add SessionLogEvent model and JSONL rendering"
 ### Task 3: File sink (append JSONL, 0o600)
 
 **Files:**
+
 - Create: `src/session_log/file_sink.rs`
 - Modify: `src/session_log/mod.rs` (declare module; implement
   `default_file_path_string` for real, replacing the Task 1 stub)
 - Test: inline + a `tempfile`-based test
 
 **Interfaces:**
+
 - Produces: `pub struct FileSink { path: std::path::PathBuf }`;
   `impl FileSink { pub fn new(path: PathBuf) -> Self; pub fn append(&self, line: &str); }`;
   `pub fn default_file_path() -> anyhow::Result<PathBuf>` (=
@@ -563,11 +570,13 @@ git commit -m "feat: add append-only owner-only session-log file sink"
 ### Task 4: Scope-header content + metadata builder
 
 **Files:**
+
 - Create: `src/session_log/scope_header.rs`
 - Modify: `src/session_log/mod.rs`
 - Test: inline + property test
 
 **Interfaces:**
+
 - Produces:
   `pub struct ScopeContext { pub tags: Vec<String>, pub bundles: Vec<String>, pub project: Option<String>, pub cwd: String, pub adapter: String, pub llmenv_version: String }`
   `pub fn scope_header_content(ctx: &ScopeContext) -> String` (FTS-searchable, embeds `llmenv-tag:` / `llmenv-bundle:` tokens)
@@ -713,11 +722,13 @@ git commit -m "feat: add scope-header content and metadata builder"
 ### Task 5: Transcript MCP arg builders
 
 **Files:**
+
 - Create: `src/session_log/transcript.rs`
 - Modify: `src/session_log/mod.rs`
 - Test: inline
 
 **Interfaces:**
+
 - Produces:
   `pub fn start_session_args(agent: &str, project: Option<&str>, metadata: &serde_json::Value) -> serde_json::Value`
   `pub fn record_args(session_id: &str, ev: &SessionLogEvent) -> serde_json::Value`
@@ -833,11 +844,13 @@ git commit -m "feat: add ICM transcript MCP argument builders"
 ### Task 6: Session-id state map
 
 **Files:**
+
 - Create: `src/session_log/state.rs`
 - Modify: `src/session_log/mod.rs`
 - Test: inline + property test (mirror `icm.rs` perms test)
 
 **Interfaces:**
+
 - Produces:
   `pub fn lookup_session(claude_session_id: &str) -> Option<String>`
   `pub fn record_session(claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()>`
@@ -960,11 +973,13 @@ git commit -m "feat: persist claude->icm transcript session correlation map"
 ### Task 7: Transcript dispatch via `McpHttpClient` (start + record)
 
 **Files:**
+
 - Create: `src/session_log/dispatch.rs`
 - Modify: `src/session_log/mod.rs`
 - Test: inline using `wiremock` (already a dev-dep — see `mcp_client.rs` tests)
 
 **Interfaces:**
+
 - Consumes: `McpHttpClient::{new, call_tool}`, `transcript::{start_session_args,
   record_args, START_TOOL, RECORD_TOOL}`, `event::SessionLogEvent`.
 - Produces (async, run inside a current-thread runtime like `hook_run::run_inner`):
@@ -1094,11 +1109,13 @@ git commit -m "feat: transcript start/record dispatch via shared McpHttpClient"
 ### Task 8: `tracing` layer → file sink (process-scoped internal events)
 
 **Files:**
+
 - Create: `src/session_log/tracing_layer.rs`
 - Modify: `src/session_log/mod.rs`
 - Test: inline (capture an event through the layer into a temp file)
 
 **Interfaces:**
+
 - Produces: `pub struct FileLogLayer { sink: FileSink }`;
   `impl FileLogLayer { pub fn new(sink: FileSink) -> Self }`;
   `impl<S> tracing_subscriber::Layer<S> for FileLogLayer`.
@@ -1239,10 +1256,12 @@ git commit -m "feat: mirror internal tracing events into the session-log file"
 ### Task 9: Wire `main.rs` (install sinks from resolved config)
 
 **Files:**
+
 - Modify: `src/main.rs:1-50`
 - Test: none (integration wiring; covered by manual smoke + later e2e)
 
 **Interfaces:**
+
 - Consumes: `Config::session_log_resolved`, `session_log::{FileSink,
   default_file_path_string, tracing_layer::FileLogLayer}`.
 
@@ -1299,6 +1318,7 @@ LLMENV_STATE_DIR=$(mktemp -d) bash -c '
   test -f "$LLMENV_STATE_DIR/session-log.jsonl" && echo "FILE SINK OK" || echo "no file (ok if no info events fired)"
 '
 ```
+
 Expected: command exits 0 (file may or may not exist depending on whether an
 `info` event fired — the assertion is "no crash").
 
@@ -1316,12 +1336,14 @@ git commit -m "feat: wire session-log file sink from resolved config"
 ### Task 10: Baseline — emit lifecycle + scope-header in hooks
 
 **Files:**
+
 - Modify: `src/hook_run/mod.rs` (`run_inner` / `dispatch` region, around lines
   220-280) — add session-log emission alongside the existing memory actions.
 - Test: inline test asserting a session-log file line is produced on
   `session_start` when `file: true`.
 
 **Interfaces:**
+
 - Consumes: `session_log::{FileSink, scope_header::*, event::*, state, dispatch,
   default_file_path}`, `McpHttpClient`, the active tags/bundles `run_inner`
   already computes.
@@ -1417,6 +1439,7 @@ git commit -m "feat: emit lifecycle + scope-header session events from hooks"
 ### Task 11: Detached transcript dispatch (`llmenv session-log` subcommand)
 
 **Files:**
+
 - Create: `src/session_log/detached.rs` (spawn helper)
 - Modify: `src/cli/mod.rs` (register `session-log` subcommand)
 - Modify: `src/hook_run/mod.rs` (`emit_session_log` transcript branch → spawn
@@ -1424,6 +1447,7 @@ git commit -m "feat: emit lifecycle + scope-header session events from hooks"
 - Test: inline test for the spawn-args builder (pure), not the fork itself.
 
 **Interfaces:**
+
 - Produces:
   `pub fn spawn_record(session_id: &str, ev: &SessionLogEvent)` — serialize `ev`
   to a temp/stdin payload and `setsid`-detach `llmenv session-log record
@@ -1473,12 +1497,14 @@ git commit -m "feat: dispatch transcript records via detached child so hooks ret
 ### Task 12: Verbose `HookEvent` variants + record mapping
 
 **Files:**
+
 - Modify: `src/hook_run/mod.rs` (`HookEvent` enum lines 122-155, `FromStr`,
   `Display`, `dispatch`)
 - Test: extend the existing `parses_neutral_event_names` / `rejects_unknown_event`
   tests + a new event→kind mapping test.
 
 **Interfaces:**
+
 - Produces: `HookEvent::{PreToolUse, PostToolUse, Notification, Stop,
   SubagentStop, PreCompact}`; `fn event_to_log_kind(HookEvent) -> Option<(EventKind, &'static str)>`
   (kind + role; `None` for the memory-only events that don't log a turn).
@@ -1532,12 +1558,14 @@ git commit -m "feat: capture prompts and tool use as verbose session events"
 ### Task 13: Adapter hook injection (baseline always, verbose gated)
 
 **Files:**
+
 - Modify: `src/adapter/claude_code.rs` (hook emission; `STALE_CHECK_COMMAND`
   region + the `build_settings`/`hooks_by_event` generation)
 - Test: inline test asserting generated settings.json contains the baseline
   hooks when enabled and the verbose hooks only when `verbose: true`.
 
 **Interfaces:**
+
 - Consumes: `Config::session_log_resolved` (the adapter receives the resolved
   config / manifest; thread the `SessionLog` into the settings builder).
 - Produces: auto-emitted hooks calling `llmenv hook-run <event>` for
@@ -1589,6 +1617,7 @@ git commit -m "feat: inject baseline + verbose session-log hooks into Claude Cod
 ### Task 14: Example config block
 
 **Files:**
+
 - Modify: `examples/config-llmenv-dir/config.yaml`
 
 - [ ] **Step 1: Add a documented `session_log:` block** in the file's house
@@ -1635,6 +1664,7 @@ git commit -m "docs: show session_log settings in the example config"
 ### Task 15: User docs
 
 **Files:**
+
 - Create/modify: a docs page under `docs/` (and `website/` if the site mirrors
   docs — check `website/docs/` for the existing structure and add a matching
   page).
@@ -1657,6 +1687,7 @@ git commit -m "docs: document ICM-transcript session logging and query recipes"
 ### Task 16: CHANGELOG (Unreleased) + final verification
 
 **Files:**
+
 - Modify: `CHANGELOG.md` (under `## [Unreleased]`)
 
 - [ ] **Step 1: Add entries** under `## [Unreleased]` (do NOT create a version
@@ -1683,12 +1714,14 @@ any forward-merged fix needing a back-reference — add if found).
 - [ ] **Step 2: Full verification**
 
 Run:
+
 ```bash
 cargo fmt --check && \
 cargo clippy --all-targets --all-features -- -D warnings && \
 cargo test && \
 cargo deny check 2>/dev/null || echo "cargo deny: review if deps changed"
 ```
+
 Expected: fmt clean, zero clippy warnings, all tests pass. If a dependency was
 added in Task 8, confirm attribution files were regenerated.
 

@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Setup llmenv — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -23,7 +24,7 @@
 ## File Structure
 
 | File | Responsibility | Status |
-|------|---------------|--------|
+| ------ | --------------- | -------- |
 | `src/cli/mod.rs` | CLI definition — add `--no-launch` flag | Modify |
 | `src/cli/setup.rs` | Core logic: scanning, enumeration, engine probing, skill install, handoff, tests | Modify (major) |
 | `skills/setup-llmenv/SKILL.md` | The skill text — the AI reads this to know what to do | Create |
@@ -35,9 +36,11 @@
 ### Task 1: Add `--no-launch` flag to CLI enum and dispatch
 
 **Files:**
+
 - Modify: `src/cli/mod.rs` (Setup variant + dispatch lines)
 
 **Interfaces:**
+
 - Consumes: (none — new flag on existing Setup variant)
 - Produces: `Command::Setup { path, repo, no_launch }` with new `no_launch: bool` field
 
@@ -86,6 +89,7 @@ Change `pub(super) fn run_setup(path: Option<PathBuf>, repo: Option<String>)` to
 ```bash
 cargo check 2>&1
 ```
+
 Expected: no errors.
 
 - [ ] **Step 5: Commit**
@@ -100,9 +104,11 @@ git commit -m "feat: add --no-launch flag to llmenv setup"
 ### Task 2: Engine probing + `disabled_engines` in config
 
 **Files:**
+
 - Modify: `src/cli/setup.rs`
 
 **Interfaces:**
+
 - Produces: `fn probe_engines() -> Vec<String>` (returns engine IDs found on PATH: `"claude_code"`, `"crush"`)
 - Produces: `fn compute_disabled_engines(available: &[String]) -> Vec<String>` (ALL_SUPPORTED minus available)
 - Consumes: `write_config()` now takes `disabled_engines: &[String]` parameter
@@ -243,9 +249,11 @@ git add -A && git commit -m "feat: add engine probing and disabled_engines to se
 ### Task 3: Read config contents and write `.llmenv-setup-state.json`
 
 **Files:**
+
 - Modify: `src/cli/setup.rs`
 
 **Interfaces:**
+
 - Produces: `fn read_claude_settings(home: &Path) -> Option<serde_json::Value>`
 - Produces: `fn read_claude_plugins(home: &Path) -> Option<serde_json::Value>`
 - Produces: `fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value>`
@@ -458,10 +466,12 @@ git add -A && git commit -m "feat: read config contents and write enumeration JS
 ### Task 4: Create the embedded setup skill + install to bundle
 
 **Files:**
+
 - Create: `skills/setup-llmenv/SKILL.md`
 - Modify: `src/cli/setup.rs` (embed and install)
 
 **Interfaces:**
+
 - Produces: `const SETUP_SKILL: &str = include_str!(...)`
 - Produces: `fn install_setup_skill(config_dir: &Path, bundles: &[String]) -> Result<()>`
 - Produces: `fn resolve_skill_path(config_dir: &Path) -> PathBuf`
@@ -682,9 +692,11 @@ git commit -m "feat: embed and install setup-llmenv skill"
 ### Task 5: Engine handoff (the `--no-launch` path)
 
 **Files:**
+
 - Modify: `src/cli/setup.rs`
 
 **Interfaces:**
+
 - Produces: `fn engine_handoff_prompt(skill_path: &Path, state_path: &Path, available: &[String], no_launch: bool) -> Result<()>`
 - Consumes: Called at end of `run_setup` when `no_launch` is false
 
@@ -871,6 +883,7 @@ git add -A && git commit -m "feat: add engine handoff with --no-launch support"
 ### Task 6: Comprehensive smoke tests for the `--no-launch` path
 
 **Files:**
+
 - Modify: `src/cli/setup.rs` (test module)
 
 **Details:**
@@ -1058,6 +1071,7 @@ git add -A && git commit -m "test: add comprehensive --no-launch smoke tests"
 ### Task 7: Remove Cursor from `scan_existing_configs`
 
 **Files:**
+
 - Modify: `src/cli/setup.rs`
 
 **Details:**

@@ -2,7 +2,7 @@
 
 The user-facing documentation has moved to the docs site:
 
-**https://phaedrus1992.github.io/llmenv/**
+**<https://phaedrus1992.github.io/llmenv/>**
 
 Source lives in [`website/docs/`](../website/docs/). Edit there.
 
