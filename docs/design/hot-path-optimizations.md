@@ -106,16 +106,19 @@ This allocates I/O driver state, timer wheels, and thread-local storage — then
 drops it all when the event finishes. The hook only needs `block_on` for a
 single sequential HTTP call to the ICM MCP backend.
 
-**What changed:** A `OnceLock<Runtime>` replaces the per-event build:
+**What changed:** A `OnceLock<io::Result<Runtime>>` replaces the per-event build,
+avoiding `.expect()` (banned by workspace lints):
 
 ```rust
-static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-let runtime = RUNTIME.get_or_init(|| {
+static RUNTIME: OnceLock<io::Result<tokio::runtime::Runtime>> = OnceLock::new();
+let runtime = match RUNTIME.get_or_init(|| {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("tokio runtime")
-});
+}) {
+    Ok(rt) => rt,
+    Err(e) => return Err(anyhow::anyhow!("failed to build tokio runtime: {e}")),
+};
 ```
 
 `OnceLock::get_or_init()` guarantees exactly one build across all events within

@@ -527,7 +527,7 @@ fn run_inner(
     let client: Option<McpHttpClient> = match url {
         Some(u) => {
             let clients = MCP_CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-            let mut clients = clients.lock().unwrap();
+            let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
             match clients.entry(u.clone()) {
                 std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
                 std::collections::hash_map::Entry::Vacant(entry) => {
@@ -574,13 +574,16 @@ fn run_inner(
     // short sequence of HTTP round-trips. A multi-threaded runtime would spin up
     // a worker thread pool — pure overhead for this single sequential await. (#186)
     // Shared via OnceLock so the ~3ms builder overhead is paid once per session.
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    static RUNTIME: OnceLock<std::io::Result<tokio::runtime::Runtime>> = OnceLock::new();
     let rt = RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("failed to build tokio runtime")
     });
+    let rt = match rt {
+        Ok(rt) => rt,
+        Err(e) => return Err(anyhow::anyhow!("failed to build tokio runtime: {e}")),
+    };
     let session_log = SessionLogCall {
         log_cfg: &log_cfg,
         client: client.as_ref(),
@@ -962,7 +965,7 @@ pub(crate) fn memory_url(
         (Vec::new(), std::collections::BTreeMap::new())
     } else {
         let cache_key = merge_cache_key(&firing)?;
-        let mut cache = MERGE_CACHE.lock().unwrap();
+        let mut cache = MERGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.as_ref()
             && entry.key == cache_key
         {
