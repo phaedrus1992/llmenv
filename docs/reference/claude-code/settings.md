@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # settings.json reference
 
 Source: <https://code.claude.com/docs/en/settings> (fetched 2026-05-27).

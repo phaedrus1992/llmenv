@@ -40,12 +40,14 @@ description: >
 Before any query, list available libraries to find the correct library key.
 
 **Plex:**
-```
+
+```text
 GET http://plex.local:32400/library/sections?X-Plex-Token=${PLEX_TOKEN}
 ```
 
 **Jellyfin:**
-```
+
+```text
 GET http://jellyfin.local:8096/Library/MediaFolders
 Headers: X-Emby-Token: ${JELLYFIN_API_KEY}
 ```
@@ -54,7 +56,7 @@ Headers: X-Emby-Token: ${JELLYFIN_API_KEY}
 
 ### Browse a library
 
-```
+```text
 # Plex — list items in library section (key from Step 0)
 GET /library/sections/<key>/all?X-Plex-Token=...&sort=addedAt:desc&limit=50
 
@@ -64,7 +66,7 @@ GET /Items?ParentId=<libraryId>&SortBy=DateCreated&SortOrder=Descending&Limit=50
 
 ### Playback history
 
-```
+```text
 # Plex — recently played
 GET /status/sessions/history/all?X-Plex-Token=...&limit=20
 
@@ -79,7 +81,7 @@ Use when asked to build a playlist for a mood, occasion, or genre.
 ### Step 1 — Map mood to genre signals
 
 | Mood | Signals |
-|------|---------|
+| ------ | --------- |
 | Focus / work | Instrumental, ambient, lo-fi, jazz |
 | Energy / workout | BPM > 140, rock, electronic, hip-hop |
 | Relax | Acoustic, folk, soft jazz, classical |
@@ -92,6 +94,7 @@ Retrieve artists and albums. Filter client-side to matching genres.
 ### Step 3 — Score and rank
 
 Score each track:
+
 - Genre match: +3
 - Artist variety (don't cluster): +1
 - Recent play penalty: −1 per play in last 7 days
@@ -101,12 +104,14 @@ Pick top 20-30 tracks by score. Interleave artists.
 ### Step 4 — Create playlist
 
 **Plex:**
-```
+
+```text
 POST /playlists?type=audio&title=<name>&smart=0&uri=<trackURIs>&X-Plex-Token=...
 ```
 
 **Jellyfin:**
-```
+
+```text
 POST /Playlists
 Body: { "Name": "<name>", "Ids": ["<trackId1>", ...], "MediaType": "Audio" }
 ```

@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Lifecycle Memory Hooks Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -16,6 +17,7 @@
 - **Claude Code adapter:** `src/adapter/claude_code.rs`. Settings/hook emission in `generate_settings_json` (`src/adapter/claude_code.rs:322`); the auto-emitted SessionStart `check-stale` hook is at `src/adapter/claude_code.rs:356-361` using the `STALE_CHECK_COMMAND` constant.
 - **MCP resolution:** `src/mcp/resolve.rs`. `resolve_mcps(config, &active.tags)` returns `Vec<ResolvedMcp>`; the memory backend resolves to `ResolvedKind::Remote { url, transport }` named `MEMORY_MCP_NAME` (`"icm"`, `src/mcp/resolve.rs:43`). `resolve_memory` is private — do NOT make it public; instead scan `resolve_mcps` output for the entry named `MEMORY_MCP_NAME`.
 - **Config + scope resolution (the canonical pattern, from `run_export`):** `src/cli/mod.rs:559-564`:
+
   ```rust
   let config_path = paths::config_path()?;
   let config = Config::load(&config_path)?;
@@ -23,6 +25,7 @@
   let active = crate::scope::evaluate(&config, &env);
   // active.tags : BTreeSet<String>
   ```
+
 - **ICM context chunk:** `src/icm.rs:36` `generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> String` — reuse for the Store action's payload.
 - **CLI command enum + dispatch:** `src/cli/mod.rs:94-168` (`enum Command`) and `src/cli/mod.rs:178-` (the `match cli.command` block). Add a `HookRun` variant and its arm.
 
@@ -42,6 +45,7 @@
 ## Task 1: Add HTTP client dependencies
 
 **Files:**
+
 - Modify: `Cargo.toml`
 
 - [ ] **Step 1: Look up current stable versions**
@@ -89,6 +93,7 @@ git commit -m "build: add reqwest and wiremock for lifecycle memory hooks"
 ## Task 2: Minimal HTTP MCP client
 
 **Files:**
+
 - Create: `src/hook_run/mcp_client.rs`
 - Create: `src/hook_run/mod.rs` (module declaration only, fleshed out in Task 4)
 - Modify: `src/lib.rs`
@@ -290,6 +295,7 @@ git commit -m "feat: add minimal HTTP MCP client for lifecycle hooks"
 ## Task 3: Action enum (event → ICM tool call)
 
 **Files:**
+
 - Create: `src/hook_run/action.rs`
 - Modify: `src/hook_run/mcp_client.rs` (make `extract_text` reachable if needed — it stays private; no change expected)
 
@@ -410,6 +416,7 @@ git commit -m "feat: add lifecycle hook action-to-ICM-tool mapping"
 ## Task 4: Event dispatcher + fail-soft run entry
 
 **Files:**
+
 - Modify: `src/hook_run/mod.rs`
 
 - [ ] **Step 1: Write the failing test for event parsing + dispatch**
@@ -602,6 +609,7 @@ git commit -m "feat: add lifecycle hook event dispatcher with fail-soft run"
 ## Task 5: Adapter `emit_hook_context`
 
 **Files:**
+
 - Modify: `src/adapter/mod.rs:12-34`
 - Modify: `src/adapter/claude_code.rs`
 
@@ -682,6 +690,7 @@ git commit -m "feat: add emit_hook_context adapter method"
 ## Task 6: Wire the CLI `hook-run` command
 
 **Files:**
+
 - Modify: `src/cli/mod.rs:94-168` (enum) and the `match cli.command` block (`src/cli/mod.rs:178-`)
 
 - [ ] **Step 1: Add the command variant**
@@ -731,6 +740,7 @@ git commit -m "feat: wire hook-run CLI command"
 ## Task 7: Auto-emit lifecycle hooks in settings.json when memory is active
 
 **Files:**
+
 - Modify: `src/adapter/claude_code.rs` (`generate_settings_json`, around `src/adapter/claude_code.rs:322-361`)
 
 Background: `generate_settings_json` already auto-emits a SessionStart `check-stale` hook (`src/adapter/claude_code.rs:356-361`). This task adds three more lifecycle hooks — but only when the memory backend is active. The function currently takes `(out, manifest)`. Whether memory is active is derivable from the manifest's MCP entries: the resolved memory backend lands as an MCP named `MEMORY_MCP_NAME`. Confirm during implementation how resolved MCPs are stored on `MergedManifest` (search the struct); if the manifest does not carry resolved MCP names, thread an `memory_active: bool` parameter from the caller (`materialize`) which already has access to the resolved MCP list.
@@ -841,6 +851,7 @@ git commit -m "feat: auto-emit lifecycle memory hooks when memory backend active
 ## Task 8: Documentation
 
 **Files:**
+
 - Modify: `docs/commands.md`
 - Modify: `docs/mcp.md`
 - Modify: `CHANGELOG.md`

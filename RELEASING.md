@@ -24,10 +24,10 @@ bug fixes and small enhancements without picking up feature work.
 
 **Backport policy** — fixes are applied (when feasible) to:
 
-| Branch | Description |
-|--------|-------------|
-| `release/X.x` | Current major — always patched |
-| `release/(X-1).x` | Previous major — always patched |
+| Branch            | Description                          |
+|-------------------|--------------------------------------|
+| `release/X.x`     | Current major — always patched       |
+| `release/(X-1).x` | Previous major — always patched      |
 
 Fix in the **oldest applicable branch** first, then merge forward through the
 chain to carry the fix (and its CHANGELOG entry) into newer branches
@@ -35,6 +35,7 @@ automatically. Only skip a backport when the fix does not apply to an older
 branch — document the skip in the PR description.
 
 **Example:** a fix that applies to major 1, major 2, and main:
+
 1. Land fix on `release/1.x`
 2. Merge `release/1.x` → `release/2.x`
 3. Merge `release/2.x` → `main`
@@ -242,7 +243,9 @@ under its `[Unreleased]` section. This applies equally to pre-releases (see belo
 
 Pre-releases use standard semantic versioning format: `v3.0.0-rc.1`, `v3.0.0-beta.1`, `v3.0.0-alpha.1`.
 
-Follow the same release process as a stable release, but **tag the prerelease version instead** of the stable version. The suffix (anything after a `-` in the version) signals to the release pipeline:
+Follow the same release process as a stable release, but **tag the prerelease version
+instead** of the stable version. The suffix (anything after a `-` in the version) signals to the
+release pipeline:
 
 1. **GitHub Release** — marked as a prerelease, not as the latest release, so
    `/releases/latest` keeps pointing at the last stable version. Users can still
@@ -311,6 +314,7 @@ the changelog top-down. This is a manual editorial step, not automated.
 regardless of release stage. Any `### Changed` or `### Removed` entry that
 breaks backward compatibility must carry a `**BREAKING:**` prefix so testers
 and release-note readers can spot it immediately.
+
 ## Why cargo-release does so little
 
 `cargo-release` is fully capable of tagging, pushing, and publishing. We disable

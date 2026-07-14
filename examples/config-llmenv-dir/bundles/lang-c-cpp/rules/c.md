@@ -9,7 +9,7 @@ paths:
 ## Toolchain
 
 | Purpose | Tool |
-|---------|------|
+| --------- | ------ |
 | build | `cmake` or `make` |
 | lint | `clang-tidy`, `cppcheck` |
 | format | `clang-format` |
@@ -130,7 +130,7 @@ if (fclose(fp) != 0) {
 These constructs are silent UB in C. Avoid unconditionally:
 
 | Construct | Problem |
-|-----------|---------|
+| ----------- | --------- |
 | Signed integer overflow `a + b` | UB; compiler may assume it never happens |
 | Null pointer dereference | UB even with volatile |
 | Out-of-bounds array access | UB; no runtime check in C |
@@ -154,7 +154,7 @@ these at runtime.
 ## What Not to Do
 
 | Avoid | Use instead |
-|-------|-------------|
+| ------- | ------------- |
 | `gets()` | `fgets()` |
 | `strcpy` / `strcat` | `strlcpy` / `strlcat` / `snprintf` |
 | `sprintf` | `snprintf` |

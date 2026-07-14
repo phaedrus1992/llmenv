@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Setup llmenv — Design
 
 ## Problem
@@ -38,6 +39,7 @@ The mechanical, non-AI part. Runs first.
    via its stdin prompt (`claude -p` / `crush run`)
 
 **Flags:**
+
 - `--path` — custom config dir (same as `init`)
 - `--repo` — pre-set repo URL (non-interactive)
 - `--no-launch` — skip the engine handoff prompt (for scripting / CI)
@@ -129,11 +131,11 @@ At the end of `llmenv setup`:
 ### Files changed
 
 | File | Change |
-|------|--------|
+| ------ | -------- |
 | `src/cli/setup.rs` | Add enumeration scan, JSON write, engine detection, handoff prompt, skill embedding |
 | `src/cli/mod.rs` | Add `--no-launch` flag to Setup variant |
 | `skills/setup-llmenv/SKILL.md` | New — the skill content (embedded via include_str!) |
-| (the skill is in the repo for dev/CI; the binary embeds it at compile time) |
+| | (the skill is in the repo for dev/CI; the binary embeds it at compile time) |
 
 ### Future
 
@@ -150,7 +152,7 @@ is tested at integration level only.
 ### Smoke tests (`--no-launch`)
 
 | Scenario | What it verifies |
-|----------|------------------|
+| ---------- | ------------------ |
 | Fresh setup to temp dir | Config dir created, config.yaml valid, AGENTS.md written |
 | Setup with `--repo` | Marketplace entry written, overwrite prompt not skipped |
 | Re-run on existing config | Overwrite prompt fires, safe paths on "keep" |
@@ -164,7 +166,7 @@ is tested at integration level only.
 ### Integration tests
 
 | Scenario | What it verifies |
-|----------|------------------|
+| ---------- | ------------------ |
 | Full `--no-launch` run | The CLI completes without error, exits 0 |
 | Skill file installed | `bundles/base/skills/setup-llmenv/SKILL.md` exists and is valid markdown |
 | Config round-trips | `llmenv regenerate` succeeds on the generated config |

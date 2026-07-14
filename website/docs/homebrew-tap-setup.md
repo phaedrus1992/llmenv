@@ -7,12 +7,13 @@ This document guides the creation and maintenance of the `phaedrus1992/homebrew-
 ### 1. Create the Tap Repository
 
 On GitHub, create a new repository named `homebrew-tap` in the `phaedrus1992` account:
+
 - Visibility: Public
 - Initialize with README
 
 ### 2. Repository Structure
 
-```
+```text
 homebrew-tap/
 ├── Formula/
 │   └── llmenv.rb
@@ -22,6 +23,7 @@ homebrew-tap/
 ### 3. Add the Formula
 
 Create `Formula/llmenv.rb` using the template from the llmenv docs. The formula:
+
 - Downloads pre-built binaries from GitHub releases
 - Installs to `/usr/local/bin/llmenv`
 - Includes version detection and architecture-specific URLs
@@ -78,6 +80,7 @@ jobs:
 ## Workflow Integration
 
 The llmenv main repository's `release.yml` workflow is fully automated:
+
 1. Builds binaries for macOS (arm64, x86_64) and Linux (x86_64)
 2. Creates a GitHub Release with binaries, checksums, and SLSA provenance
 3. Publishes to crates.io
@@ -117,14 +120,17 @@ Formula updates are handled automatically by the release workflow (see
 
 ### Troubleshooting
 
-**Installation fails with "not found"**
+#### Installation fails with "not found"
+
 - Verify the formula's `url` points to a valid release binary
 - Check SHA256 hashes are correct
 
-**Formula audit fails**
+#### Formula audit fails
+
 - Run `brew audit --online Formula/llmenv.rb` for details
 - Common issues: missing description, invalid license format
 
-**Binary doesn't work on M1/M2 (arm64)**
+#### Binary doesn't work on M1/M2 (arm64)
+
 - Ensure the arm64 binary was built (check llmenv release CI)
 - Verify architecture detection in the formula (`on_arm` block)

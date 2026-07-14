@@ -7,6 +7,8 @@ sidebar_label: Changelog
 
 {/* GENERATED FILE — do not edit by hand. Regenerate with `scripts/sync-changelog-doc.sh`. */}
 
+<!-- markdownlint-disable MD024 -->
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
@@ -22,6 +24,7 @@ sites, adds PermissionMode variants for granular permission control, hardens cac
 GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
 
 ### Fixed
+
 - Fold `strip_json_nulls` into `normalize_json` so every merge path (not just
   `reconcile_settings`) benefits from null-tolerant merge dedup (#718)
 - Add null-stripping to `normalize_yaml` and insert-path null guard to
@@ -69,7 +72,9 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
 - Upgrade `debug_assert!` to `tracing::warn!` in scope matcher — walkdir
   entries outside the workspace root are now surfaced as warnings instead
   of only being checked in debug builds (#761)
+
 ### Added
+
 - Add `auto`, `dontAsk`, and `manual` PermissionMode variants alongside
   existing boolean/string forms — `auto` is only honored from user-scope
   settings, `dontAsk` skips the permission prompt, and `manual` matches
@@ -78,6 +83,7 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
   mode materialization (#746, #797)
 
 ### Fixed
+
 - GC in Normal mode now age-checks each shape individually instead of
   treating the entire version generation as one unit (#738, #797)
 - Clock-skew handling in GC — entries with future mtimes are now
@@ -90,20 +96,24 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
 ## [3.3.0] - 2026-07-13
 
 ### Deprecated
+
 - The old boolean `session_log` shape (`file: bool`, `transcript: bool`,
   `verbose: bool`) is deprecated. It still parses in 3.x but will be
   removed in 4.0. Migrate to the new per-sink mapping blocks. ([#744](https://github.com/phaedrus1992/llmenv/issues/744))
 
 ### Removed
+
 - Remove dead `diff` field from `ReadOnce` config schema — the
   planned phase-2 delta mode was never implemented (#725)
 
 ### Changed
+
 - `session_log.verbose` replaced with per-sink `level` (info/debug/trace).
   `session_log.file` and `session_log.transcript` are now mapping blocks with
   `enabled` + `level` fields. Old boolean shape still parses. ([#740](https://github.com/phaedrus1992/llmenv/issues/740))
 
 ### Fixed
+
 - Early-exit hook-run before scope evaluation for events that
   produce no memory actions — saves ~3.5ms per PreToolUse
   dispatch on a loaded config (#702)
@@ -138,6 +148,7 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
   silently discarded errors (#731, #710, #712, #713)
 
 ### Added
+
 - Add `llmenv upgrade` subcommand for self-upgrade from
   GitHub releases (`--check`, `--track beta|release`,
   `features.upgrade.track` config option) (#686)
@@ -173,10 +184,13 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
 ## [3.2.0] - 2026-07-11
 
 ### Changed
-- Move WebFetch/WebSearch ICM storage and PostSession consolidation to background detached child processes, reducing hook latency for common events (#670)
+
+- Move WebFetch/WebSearch ICM storage and PostSession consolidation to background
+  detached child processes, reducing hook latency for common events (#670)
 - Cache parsed config by file mtime in hook-run to avoid redundant YAML parsing on each event (#670)
 
 ### Added
+
 - `llmenv doctor` checks that config-dependent executables (`icm`,
   `mcp-proxy`/`uvx`, `claude`, `crush`) are available on `PATH`,
   respecting each tool's config conditions (memory entries, disabled
@@ -184,6 +198,7 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
 - Add Discord community link to README and getting-started guide
 
 ### Fixed
+
 - `capabilities.permissions` and `native_permissions` rules
   (top-level or bundle-contributed) whose `pattern`/`paths` have
   unbalanced parentheses — e.g. a process-substitution deny pattern like
@@ -213,6 +228,7 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
 ## [3.1.0] - 2026-07-10
 
 ### Added
+
 - Auto-activate OS tag in scope resolution — bundles with OS-specific `when:` tags
   (e.g. `linux`, `macos`, `windows`) now activate automatically without requiring
   manual scope configuration (#638)
@@ -220,6 +236,7 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
   and add `llmenv prune --plugin-cache` flag for explicit shared plugin cache cleanup (#643)
 
 ### Fixed
+
 - Build static Linux binaries with musl (`*-linux-musl`) instead of glibc
   (`*-linux-gnu`) so the pre-built Homebrew-tap binaries work on any Linux
   distro regardless of system glibc version (#647)
@@ -367,7 +384,7 @@ the rc.1 and rc.2 sections below.
   bundle-authored relative script path broken under Crush. (#551)
 - Fix `CrushAdapter` rendering MCP servers, LSP `init_options`, and permissions in
   Claude Code's shapes instead of Crush's actual schema
-  (https://charm.land/crush.json), found by auditing the adapter against it: every
+  (<https://charm.land/crush.json>), found by auditing the adapter against it: every
   MCP server previously failed to initialize because Crush's required `type` field
   (`stdio`/`sse`/`http`) was either missing (stdio entries) or set to the
   nonexistent value `"remote"` (remote entries) — Crush's MCP client hits an
@@ -498,6 +515,7 @@ the rc.1 and rc.2 sections below.
 ## [2.4.0] - 2026-07-10
 
 ### Added
+
 - Add per-hash temp directory isolation for Claude Code subprocesses: `CLAUDE_CODE_TMPDIR`,
   `TMPDIR`, `TMP`, and `TEMP` env vars now point to `<cache_dir>/<hash>/tmp/`, scoping
   temporary files to the current content hash (#630)

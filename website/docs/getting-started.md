@@ -20,7 +20,8 @@ brew upgrade llmenv     # upgrade later
 ```
 
 > The [phaedrus1992/tap](https://github.com/phaedrus1992/homebrew-tap) is a Homebrew
-> repository maintained alongside llmenv. If you're on Linux, `brew` is [Linuxbrew](https://docs.brew.sh/Homebrew-on-Linux).
+> repository maintained alongside llmenv. If you're on Linux, `brew` is
+> [Linuxbrew](https://docs.brew.sh/Homebrew-on-Linux). <!-- markdownlint-disable-line MD013 -->
 
 **Cargo:**
 
@@ -143,13 +144,13 @@ See [Configuration](configuration.md) for the complete schema.
 ## Commands reference
 
 | Command | Purpose |
-|---------|---------|
+| --------- | --------- |
 | `llmenv init [PATH] [--repo URL]` | Initialize configuration |
 | `llmenv export [--scope ID] [--tag TAG] [--explain]` | Export environment variables |
 | `llmenv regenerate` | Apply config changes to the cache without exporting env vars |
 | `llmenv hook <zsh\|bash>` | Generate shell hook code |
 | `llmenv login [--global]` | Capture and cache Claude Code auth credentials |
-| `llmenv status [bundles\|tags\|scopes\|mcps\|marketplaces\|plugins]` | Show status; add subcommand for a detailed listing |
+| `llmenv status [bundles\|tags\|scopes\|mcps\|marketplaces\|plugins]` | Show status; add subcommand for a detailed listing <!-- markdownlint-disable-line MD013 --> |
 | `llmenv context [--bundle NAME] [--why] [--json]` | Show the resolved environment in detail |
 | `llmenv validate` | Check config for structural issues |
 | `llmenv edit [BUNDLE-NAME]` | Open config (or a bundle file) in `$EDITOR` |

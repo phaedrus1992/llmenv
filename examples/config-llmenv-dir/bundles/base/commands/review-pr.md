@@ -1,10 +1,12 @@
+<!-- markdownlint-disable MD013 -->
 # Review and Fix PR
 
----
-description: "Review an existing PR with parallel agents, fix findings, and push"
-arguments: |
-  $PR_NUMBER: GitHub PR number to review and fix
----
+___
+
+- description: "Review an existing PR with parallel agents, fix findings, and push"
+- arguments: `$PR_NUMBER`: GitHub PR number to review and fix
+
+___
 
 Read PR #$ARGUMENTS via `gh pr view`—context: description, linked issues, commits, diff vs base.
 
@@ -23,7 +25,7 @@ Run two review passes in parallel, then merge findings.
 Launch agents **in parallel** (single message, multiple calls) with `subagent_type` from pr-review-toolkit. Tell each which files changed (`git diff --name-only <base>...HEAD`):
 
 | agent | focus |
-|-------|-------|
+| ------- | ------- |
 | `pr-review-toolkit:code-reviewer` | Code quality, style, project guidelines |
 | `pr-review-toolkit:silent-failure-hunter` | Silent failures, swallowed errors, bad fallbacks |
 | `pr-review-toolkit:pr-test-analyzer` | Test coverage gaps and missing edge cases |
@@ -132,13 +134,13 @@ Run in order. Use CI-discovered command if found; else fallback.
 
 **Rust** (detected by `Cargo.toml`):
 
-| step         | command                                        |
-|--------------|------------------------------------------------|
-| build        | `cargo build`                                  |
-| test         | `cargo test`                                   |
-| lint         | `cargo clippy -- --deny warnings`              |
-| format       | `cargo fmt --check`                            |
-| supply chain | `cargo deny check` (if `deny.toml` exists)    |
+| step         | command                                             |
+|--------------|-----------------------------------------------------|
+| build        | `cargo build`                                       |
+| test         | `cargo test`                                        |
+| lint         | `cargo clippy -- --deny warnings`                   |
+| format       | `cargo fmt --check`                                 |
+| supply chain | `cargo deny check` (if `deny.toml` exists)          |
 | careful      | `cargo careful test` (if `cargo-careful` installed) |
 
 **Python** (detected by `pyproject.toml` or `setup.py`):
@@ -190,7 +192,7 @@ Post a review summary as a PR comment using
 
 Format the comment body as:
 
-```
+```markdown
 ## Review Summary
 
 ### Findings

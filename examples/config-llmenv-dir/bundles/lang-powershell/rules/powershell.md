@@ -14,16 +14,19 @@ called out with 5.1-compatible alternatives.
 ## Naming & Casing
 
 **PascalCase for:**
+
 - Function names (e.g., `Get-ChildItem`, `Invoke-WebRequest`)
 - Class names (e.g., `MyClass`)
 - Enum names
 - Module names
 
 **camelCase for:**
+
 - Parameter names (e.g., `-FilePath`, `-MaxRetries`)
 - Variable names (e.g., `$userName`, `$maxRetries`)
 
 **SCREAMING_SNAKE_CASE for:**
+
 - Constants (rare; prefer `[Readonly]` on PSObjects instead)
 
 ## Function Design
@@ -50,6 +53,7 @@ function GetUser($u, $r) {
 ```
 
 **Required patterns:**
+
 - `[CmdletBinding()]` attribute for any exported function (enables `-Verbose`,
   `-Debug`, etc.)
 - `[Parameter()]` attributes for advanced binding (ValueFromPipeline,
@@ -84,6 +88,7 @@ Get-Item -Path "C:\nonexistent" -ErrorAction Stop
 ```
 
 **5.1 specifics:**
+
 - No `try-catch` with pattern matching (PS7+ feature)—use `$_.GetType().Name` to branch
 - No `&&` / `||` pipeline chaining (PS7+ feature)—use `if/else` or `; if ($?) { }`
 - No `ForEach-Object -Parallel` (PS7+ only)—use sequential `foreach` or threadpool manually
@@ -91,6 +96,7 @@ Get-Item -Path "C:\nonexistent" -ErrorAction Stop
 ## Scripting Best Practices
 
 **Explicit over implicit:**
+
 ```powershell
 # Good: parameter types, explicit property access
 function Test-Path {
@@ -106,6 +112,7 @@ function test-path($p) { ... }
 ```
 
 **Prefer hash tables and custom PSObjects over magic strings:**
+
 ```powershell
 # Good: structured output
 $result = @{
@@ -119,6 +126,7 @@ Write-Host "Done"
 ```
 
 **Loop idioms (5.1-compatible):**
+
 ```powershell
 # Preferred: foreach statement (most readable, fastest)
 foreach ($item in $collection) {
@@ -170,6 +178,7 @@ https://docs.microsoft.com/en-us/powershell/...
 ```
 
 **Inline comments only for "why," not "what":**
+
 ```powershell
 # Good: explains non-obvious decision
 if ($retries -gt 3) {

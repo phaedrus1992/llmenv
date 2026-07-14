@@ -15,6 +15,7 @@ informed by the real config shapes of three engines: Crush, Pi
 ### Real-world schema survey
 
 **Crush** (`internal/config/config.go`, Go):
+
 - `ProviderConfig{ID, Name, BaseURL, Type, APIKey, OAuthToken, Disable,
   SystemPromptPrefix, ExtraHeaders, ExtraBody, ProviderOptions, ExtraParams,
   FlatRate, AutoDiscoverModels, Models []catwalk.Model}`
@@ -29,6 +30,7 @@ informed by the real config shapes of three engines: Crush, Pi
   Crush's own runtime — confirmed present, not assumed.
 
 **Pi** (`packages/coding-agent/docs/{providers,models}.md`, TS):
+
 - Provider (`models.json`): `{baseUrl, api, apiKey, headers, authHeader,
   models: Model[], modelOverrides}`. `api` is one of `openai-completions`,
   `openai-responses`, `anthropic-messages`, `google-generative-ai`.
@@ -42,6 +44,7 @@ informed by the real config shapes of three engines: Crush, Pi
   written to disk as a separate materialized artifact.
 
 **OpenCode** (`packages/core/src/v1/config/provider.ts`, TS/Effect schema):
+
 - Provider (`Info`): `{api, name, env: string[], id, npm, whitelist, blacklist,
   options: {apiKey, baseURL, enterpriseUrl, setCacheKey, timeout,
   headerTimeout, chunkTimeout, ...arbitrary}, models: Record<id, Model>}`.

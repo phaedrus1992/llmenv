@@ -13,6 +13,7 @@ Recommendations are scoped to the envelope layer (llmenv), not ICM internals.
 The paper formalizes agent memory as a **write–manage–read loop** in a POMDP framework.
 
 **3D taxonomy:**
+
 - *Temporal scope*: working / episodic / semantic / procedural
 - *Representational substrate*: context-resident, external vector/DB, parametric weights
 - *Control policy*: heuristic, prompted, policy-learned (RL)
@@ -21,6 +22,7 @@ The paper formalizes agent memory as a **write–manage–read loop** in a POMDP
 reflective self-improvement, hierarchical virtual context, policy-learned management.
 
 **Key empirical data:**
+
 - Removing reflection → agents degenerate from coherent multi-day planning to repetitive
   context-free responses within 48 simulated hours (Generative Agents ablation)
 - Memory-augmented vs. no-memory gap often exceeds different-model gap
@@ -40,7 +42,7 @@ llmenv is Pattern B. This is the correct call.
 Three lifecycle hooks wired via `hook-run`:
 
 | Hook | Event | ICM tool | What it does |
-|------|-------|----------|--------------|
+| ------ | ------- | ---------- | -------------- |
 | `session_start` | `SessionStart` | `icm_wake_up` | Injects critical memories by importance + recency |
 | `turn_start` | `TurnStart` | `icm_memory_recall` | Project-scoped recall + per-tag + per-bundle recalls |
 | `session_end` | `SessionEnd` | `icm_memory_store` | Stores active scope context chunk |
@@ -52,6 +54,7 @@ both project-unfiltered. Correct design — matches paper §4.2 (RAG with struct
 explicit instructions for scoped storage.
 
 **What llmenv delegates entirely to ICM with no signal:**
+
 - Importance scoring
 - Memory eviction / expiry
 - Retrieval ranking
@@ -146,7 +149,7 @@ Add a `type` field to ICM store calls at SessionEnd. Convention: store keyword a
 
 Agent specifies type via structured marker in the context chunk:
 
-```
+```html
 <!-- llmenv-type: semantic -->
 ```
 
@@ -154,6 +157,7 @@ llmenv reads the marker and passes it as metadata to `icm_memory_store`. If abse
 to `episodic`.
 
 **Files:**
+
 - `src/hook_run/action.rs` — `Action::Store` gains `memory_type: Option<MemoryType>`
 - `src/icm.rs` — `generate_context_chunk()` documents the marker convention;
   `store_tag_memory()` reads it from the chunk before the MCP call
@@ -168,7 +172,7 @@ to `episodic`.
 
 New CLI subcommand surfacing memory store state:
 
-```
+```text
 llmenv memory stats              # record count by tag/bundle/type, last-written dates
 llmenv memory list [--tag <t>]   # show stored memories for active scope
 llmenv memory diff               # what changed since last session
@@ -182,6 +186,7 @@ Output format mirrors `llmenv doctor` — scannable, actionable.
 there gives a clean before/after.
 
 **Files:**
+
 - `src/cli/mod.rs` — new `Subcommand::Memory` with sub-subcommands
 - `src/memory/` — new module: `stats.rs`, `list.rs`, `diff.rs`
 - `src/hook_run/mcp_client.rs` — expose query methods already used by hook-run
@@ -202,7 +207,7 @@ the context chunk is structurally identical to the last stored chunk (compare ha
 
 **Part B — Importance passthrough:** Agent annotates chunk with importance level:
 
-```
+```html
 <!-- llmenv-importance: critical -->
 ```
 
@@ -211,6 +216,7 @@ importance with no external signal. With this change, llmenv can also apply conf
 defaults per type (e.g., procedural memories always stored as `high`).
 
 **Files:**
+
 - `src/icm.rs` — dedup check against state file; parse importance marker
 - `src/hook_run/action.rs` — `Action::Store` gains `importance: Option<Importance>`
 - `src/config/schema.rs` — `features.memory.default_importance` + per-type overrides
@@ -240,6 +246,7 @@ Optionally wire to `llmenv materialize` via `features.memory.auto_prune: false` 
 opt-in).
 
 **Files:**
+
 - `src/config/schema.rs` — `RetentionConfig` struct under `features.memory`
 - `src/memory/prune.rs` — new; query + filter + forget logic
 - `src/materialize/mod.rs` — optional prune call if `auto_prune: true`
@@ -257,7 +264,7 @@ memories into semantic rules, stores them as `type: semantic` under active tags.
 
 Prompt pattern (ExpeL-inspired, paper §4.3):
 
-```
+```text
 Given these recent session memories for tag <tag>:
 <recent episodic memories>
 
@@ -271,6 +278,7 @@ Result stored via `icm_memory_store` with `type: semantic`, `importance: high`.
 Gated by `features.memory.consolidation.enabled: false` — opt-in, off by default.
 
 **Files:**
+
 - `src/hook_run/mod.rs` — new `HookEvent::PostSession`
 - `src/hook_run/action.rs` — new `Action::Consolidate`
 - `src/consolidation/` — new module: prompt construction, LLM call, result store

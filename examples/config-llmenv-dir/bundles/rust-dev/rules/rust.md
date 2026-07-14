@@ -1,7 +1,10 @@
+<!-- markdownlint-disable MD003 MD013 MD022 MD041 -->
 ---
 paths:
-  - "**/*.rs"
-  - "**/Cargo.toml"
+
+- "**/*.rs"
+- "**/Cargo.toml"
+
 ---
 
 # Rust Conventions
@@ -88,6 +91,7 @@ silent bug.
 **Don't:** wrap unconstrained types with no confusion risk — that's just noise.
 
 **Structure — keep the inner field private:**
+
 ```rust
 pub struct AxisValue(i16);
 
@@ -103,11 +107,13 @@ impl AxisValue {
 ```
 
 **Derive traits generously** — downstream can't add them later due to the orphan rule:
+
 - Always: `Debug, Clone, PartialEq`
 - When the inner type allows: `Eq, PartialOrd, Ord, Hash, Copy`
 - Skip `Default` unless zero/empty is meaningful
 
 **`TryFrom` delegates to `new()` — never duplicate validation:**
+
 ```rust
 impl TryFrom<i16> for AxisValue {
     type Error = AxisError;
@@ -116,6 +122,7 @@ impl TryFrom<i16> for AxisValue {
 ```
 
 **Access:** prefer `AsRef` over `Deref` for constrained types. Use explicit accessors:
+
 ```rust
 impl AxisValue {
     pub fn into_inner(self) -> i16 { self.0 }
