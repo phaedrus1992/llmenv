@@ -590,7 +590,19 @@ fn merge_mcp_into_claude_json(
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     match servers_val.as_object_mut() {
         Some(servers_obj) => {
-            for (name, entry) in llmenv_servers {
+            for (name, mut entry) in llmenv_servers {
+                // Preserve runtime-added sub-keys (e.g., auth tokens) from the
+                // previous session's .claude.json so they survive re-materialization
+                // in Loose/Normal mode where the same file is reused.
+                if let Some(existing) = servers_obj.get(&name).and_then(|v| v.as_object())
+                    && let Some(ref mut new_obj) = entry.as_object_mut()
+                {
+                    for (k, v) in existing.iter() {
+                        if !new_obj.contains_key(k) {
+                            new_obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
                 servers_obj.insert(name, entry);
             }
         }
@@ -2055,6 +2067,7 @@ mod tests {
                 transcript: Some(crate::config::TranscriptSinkConfig {
                     enabled: false,
                     level: crate::config::LogLevel::Info,
+                    retention_days: None,
                 }),
                 ..Default::default()
             },
@@ -2141,6 +2154,7 @@ mod tests {
                 transcript: Some(crate::config::TranscriptSinkConfig {
                     enabled: true,
                     level: crate::config::LogLevel::Info,
+                    retention_days: None,
                 }),
                 ..Default::default()
             },
@@ -2520,6 +2534,37 @@ mod tests {
         assert_eq!(doc["mcpServers"]["extra"]["command"], "native-bin");
         // enabledMcpjsonServers is never emitted into .claude.json (#244).
         assert!(doc.get("enabledMcpjsonServers").is_none());
+    }
+
+    #[test]
+    fn merge_mcp_preserves_existing_server_sub_keys() {
+        // #814: when an llmenv-managed server entry already exists in
+        // .claude.json with runtime-added sub-keys (auth tokens, etc.), a
+        // re-materialization must preserve those keys alongside the fresh
+        // config-driven keys.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        // Pre-existing entry for "icm" with an auth block Claude Code added.
+        write_json(
+            &path,
+            &serde_json::json!({
+                "mcpServers": {
+                    "icm": {
+                        "command": "icm-bin-old",
+                        "auth": { "token": "abc123" }
+                    }
+                }
+            }),
+        );
+        // Re-materialize with a fresh entry that only has the command.
+        merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("icm", "icm-bin")], None).unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // Command is the fresh value.
+        assert_eq!(doc["mcpServers"]["icm"]["command"], "icm-bin");
+        // Auth is preserved from the existing entry.
+        assert_eq!(doc["mcpServers"]["icm"]["auth"]["token"], "abc123");
     }
 
     // #311: hardcoded config-path rejection.
