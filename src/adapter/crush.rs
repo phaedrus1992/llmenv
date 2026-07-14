@@ -130,7 +130,7 @@ impl AgentAdapter for CrushAdapter {
 
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
         'plugin: for plugin in &manifest.plugins {
-            let payload = resolve_plugin_payload(plugin, &manifest.marketplaces)?;
+            let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
             for bad_dir in &["agents", "commands", "hooks"] {
                 if payload.join(bad_dir).is_dir() {
                     eprintln!(
@@ -372,53 +372,8 @@ impl AgentAdapter for CrushAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        if text.is_empty() {
-            return String::new();
-        }
-        let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}");
-        serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": hook_event_name,
-                "additionalContext": wrapped
-            }
-        })
-        .to_string()
+        super::emit_hook_context(hook_event_name, text)
     }
-}
-
-/// Resolve the on-disk payload directory for a plugin.
-///
-/// External plugins (`install_path = Some`) use that path directly.
-/// First-party plugins look up their marketplace `install_location`.
-pub(crate) fn resolve_plugin_payload(
-    plugin: &crate::plugins::resolve::ResolvedPlugin,
-    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
-) -> anyhow::Result<PathBuf> {
-    // P2-5/#534: guard before any path join, regardless of which path is taken.
-    if !crate::paths::is_valid_short_name(&plugin.plugin) {
-        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
-    }
-    if let Some(p) = &plugin.install_path {
-        return Ok(PathBuf::from(p));
-    }
-    let mkt = marketplaces
-        .iter()
-        .find(|m| m.name == plugin.marketplace)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
-                plugin.plugin,
-                plugin.marketplace
-            )
-        })?;
-    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
-            plugin.plugin,
-            plugin.marketplace
-        )
-    })?;
-    Ok(PathBuf::from(install_location).join(&plugin.plugin))
 }
 
 /// Build the `lsp` JSON object (keyed by server name) from a slice of LSP servers.
@@ -2041,9 +1996,11 @@ mod tests {
             text in ".{1,200}",
         ) {
             let out = CrushAdapter.emit_hook_context(&event, &text);
+            // Store-only events (SessionStart/SessionEnd) return empty;
+            // all other events return valid JSON wrapping the text.
             prop_assert!(
-                serde_json::from_str::<serde_json::Value>(&out).is_ok(),
-                "non-empty text must produce valid JSON; event={event}, text={text}, got={out}"
+                out.is_empty() || serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+                "output must be empty or valid JSON; event={event}, text={text}, got={out}"
             );
         }
 

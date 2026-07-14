@@ -342,6 +342,80 @@ pub(crate) fn resolve_command_paths_against_files(
     if resolved { Some(result) } else { None }
 }
 
+/// Format injected hook context in the adapter-native hook-output shape.
+///
+/// Empty input always returns an empty string. Store-only events
+/// (SessionStart, SessionEnd) also return empty — they have no model turn
+/// to inject context into, and all known adapter schemas reject
+/// `additionalContext` in their `hookSpecificOutput` for these events.
+///
+/// This is the shared implementation behind every adapter's
+/// [`AgentAdapter::emit_hook_context`], replacing the three copies that
+/// previously existed in claude_code.rs, crush.rs, and opencode.rs.
+///
+/// # Arguments
+/// * `hook_event_name` — the event name (e.g. `"SessionStart"`), echoed
+///   back as `hookEventName` inside `hookSpecificOutput`.
+/// * `text` — the injected context, placed as `additionalContext`.
+#[must_use]
+pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    // Store-only events (SessionStart, SessionEnd) have no model turn to inject
+    // context into, and most adapters' hook schemas reject additionalContext in
+    // hookSpecificOutput. Return empty so these events emit no output. (#558)
+    if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
+        return String::new();
+    }
+    let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}");
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": hook_event_name,
+            "additionalContext": wrapped
+        }
+    })
+    .to_string()
+}
+
+/// Resolve the on-disk payload directory for a plugin.
+///
+/// External plugins (`install_path = Some`) use that path directly.
+/// First-party plugins look up their marketplace `install_location`.
+///
+/// Shared across adapters: previously lived in `crush.rs` and was
+/// cross-imported by opencode via `super::crush::resolve_plugin_payload`.
+pub(crate) fn resolve_plugin_payload(
+    plugin: &crate::plugins::resolve::ResolvedPlugin,
+    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
+) -> anyhow::Result<PathBuf> {
+    // P2-5/#534: guard before any path join, regardless of which path is taken.
+    if !crate::paths::is_valid_short_name(&plugin.plugin) {
+        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
+    }
+    if let Some(p) = &plugin.install_path {
+        return Ok(PathBuf::from(p));
+    }
+    let mkt = marketplaces
+        .iter()
+        .find(|m| m.name == plugin.marketplace)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
+                plugin.plugin,
+                plugin.marketplace
+            )
+        })?;
+    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
+            plugin.plugin,
+            plugin.marketplace
+        )
+    })?;
+    Ok(PathBuf::from(install_location).join(&plugin.plugin))
+}
+
 /// Map a resolved remote transport onto the `type` discriminator string shared
 /// by every engine's remote-MCP config shape (`"http"` / `"sse"`).
 ///
