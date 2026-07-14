@@ -377,33 +377,52 @@ fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
     }
 }
 
+/// Check whether `mtime` is older than `older_than` relative to `now`.
+/// Clock skew (mtime in the future) is treated as expired and logged.
+fn is_expired(now: SystemTime, mtime: SystemTime, older_than: Duration) -> bool {
+    match now.duration_since(mtime) {
+        Ok(elapsed) => elapsed > older_than,
+        Err(e) => {
+            tracing::warn!(
+                skew_secs = e.duration().as_secs(),
+                "clock skew: mtime {}s in future; treating as expired for GC",
+                e.duration().as_secs()
+            );
+            true
+        }
+    }
+}
+
 /// Remove cache subdirectories whose newest mtime is older than `older_than`.
 /// `*.tmp` staging directories are removed regardless of age — they represent
 /// orphaned partial writes from a previous crashed `materialize` call.
 ///
-/// `hashing` and `current_version` control how folders are identified and
-/// whether per-shape collection applies (#738):
+/// `hashing` controls how folders are identified and whether per-shape
+/// collection applies (#738):
 /// - [`HashingMode::Loose`] — every shape folder is a direct child of
 ///   `cache_root`; each is age-checked individually.
 /// - [`HashingMode::Normal`] — direct children are `<version_mm>` generation
-///   dirs. When a child matches `current_version`, [`gc_normal_shapes`] walks
-///   into it and age-checks each per-shape leaf dir individually, so a single
-///   stale shape doesn't block cleanup of the others. Non-current generation
-///   dirs are age-checked as a unit (they'll be collected entirely next
-///   upgrade).
+///   dirs. When a child matches the current generation (computed internally
+///   from [`version_mm()`]), [`gc_normal_shapes`] walks into it and age-checks
+///   each per-shape leaf dir individually, so a single stale shape doesn't
+///   block cleanup of the others. Non-current generation dirs are age-checked
+///   as a unit (they'll be collected entirely next upgrade).
 /// - [`HashingMode::Strict`] — each `{VERSION_TAG}-{content_hash}` folder is a
 ///   direct child; each is age-checked individually.
 pub fn gc(
     cache_root: &Path,
     older_than: Duration,
     hashing: HashingMode,
-    current_version: Option<&str>,
 ) -> anyhow::Result<GcReport> {
     let mut report = GcReport::default();
     if !cache_root.exists() {
         return Ok(report);
     }
     let now = SystemTime::now();
+    let current_version = match hashing {
+        HashingMode::Normal => Some(version_mm()),
+        _ => None,
+    };
     for entry in std::fs::read_dir(cache_root)? {
         let entry = entry?;
         let p = entry.path();
@@ -434,22 +453,14 @@ pub fn gc(
         // In Normal mode, a top-level dir matching the current generation version
         // is a container for per-shape leaf dirs. Walk into it and age-check each
         // shape individually instead of treating the whole generation as a unit.
-        if hashing == HashingMode::Normal && entry.file_name().to_str() == current_version {
+        if hashing == HashingMode::Normal
+            && entry.file_name().to_str() == current_version.as_deref()
+        {
             gc_normal_shapes(&p, older_than, &now, &mut report)?;
             continue;
         }
         let m = newest_mtime(&p)?;
-        let expired = match now.duration_since(m) {
-            Ok(elapsed) => elapsed > older_than,
-            Err(e) => {
-                tracing::warn!(
-                    skew_secs = e.duration().as_secs(),
-                    "clock skew: mtime {}s in future; treating as expired for GC",
-                    e.duration().as_secs()
-                );
-                true
-            }
-        };
+        let expired = is_expired(now, m, older_than);
         if expired {
             std::fs::remove_dir_all(&p)?;
             report.removed.push(p);
@@ -473,12 +484,32 @@ fn gc_normal_shapes(
     now: &SystemTime,
     report: &mut GcReport,
 ) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(version_dir)? {
+    for entry in match std::fs::read_dir(version_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                "gc_normal_shapes: version dir vanished: {}",
+                version_dir.display()
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    } {
         let entry = entry?;
         let p = entry.path();
-        // Skip symlinks and non-dirs (they shouldn't be here, but be safe).
         let ft = entry.file_type()?;
         if ft.is_symlink() || !ft.is_dir() {
+            tracing::trace!(
+                "gc_normal_shapes: skipping unexpected entry: {}",
+                p.display()
+            );
+            continue;
+        }
+        // Unconditionally remove .tmp staging directories — they represent
+        // orphaned partial writes from a previous crashed materialize call.
+        if p.extension().is_some_and(|e| e == "tmp") {
+            std::fs::remove_dir_all(&p)?;
+            report.removed.push(p);
             continue;
         }
         // The durable state dir (#175) may appear nested under a version dir
@@ -488,17 +519,7 @@ fn gc_normal_shapes(
             continue;
         }
         let m = newest_mtime(&p)?;
-        let expired = match now.duration_since(m) {
-            Ok(elapsed) => elapsed > older_than,
-            Err(e) => {
-                tracing::warn!(
-                    skew_secs = e.duration().as_secs(),
-                    "clock skew: mtime {}s in future; treating as expired for GC",
-                    e.duration().as_secs()
-                );
-                true
-            }
-        };
+        let expired = is_expired(*now, m, older_than);
         if expired {
             std::fs::remove_dir_all(&p)?;
             report.removed.push(p);
@@ -809,7 +830,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = touch_dir(tmp.path(), STATE_DIR_NAME);
         let stale = touch_dir(tmp.path(), &format!("{VERSION_TAG}-deadbeef"));
-        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict, None).unwrap();
+        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict).unwrap();
         assert!(state.exists(), "state dir must survive gc");
         assert!(
             !report.removed.contains(&state),
@@ -941,7 +962,7 @@ mod tests {
             .unwrap();
         // gc with older_than=0 — normal path would keep it (mtime in future means
         // elapsed=0), but clock skew handling must prune it anyway.
-        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict, None).unwrap();
+        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict).unwrap();
         assert!(
             report.removed.contains(&dir),
             "future-mtime dir must be pruned on clock skew"
@@ -981,13 +1002,13 @@ mod tests {
         let state = touch_dir(tmp.path(), STATE_DIR_NAME);
 
         // A non-current version dir is still age-checked as a unit by gc().
-        let stale_old_version = tmp.path().join("0.0");
-        let old_version_shape = touch_dir(tmp.path(), "0.0/old_ver_dir");
+        let stale_old_version = tmp.path().join("other_ver");
+        let old_version_shape = touch_dir(tmp.path(), "other_ver/old_ver_dir");
 
         // Use a 1-second retention so only the shape with backdated files is
         // collected; everything else was just created (mtime ≈ now) and survives.
         let retention = Duration::from_secs(1);
-        let report = gc(tmp.path(), retention, HashingMode::Normal, Some(&v)).unwrap();
+        let report = gc(tmp.path(), retention, HashingMode::Normal).unwrap();
 
         // Stale shape was collected — the file inside had its mtime backdated.
         assert!(
@@ -1010,7 +1031,7 @@ mod tests {
             "state dir must not be removed by gc_normal_shapes"
         );
 
-        // A non-current version dir (0.0) was just created, so it is NOT
+        // A non-current version dir (other_ver) was just created, so it is NOT
         // expired. This also confirms the per-shape walk only applies to the
         // current version dir — sibling version dirs use the unit-level age
         // check.
@@ -1025,8 +1046,8 @@ mod tests {
             "live generation container must survive"
         );
 
-        // Verify kept counts: fresh_shape + stale_old_version (0.0 dir as a
-        // unit, not expired) + state dir.
+        // Verify kept counts: fresh_shape + stale_old_version (other_ver dir as
+        // a unit, not expired) + state dir.
         assert_eq!(
             report.kept, 3,
             "fresh shape + old version unit + state dir kept"
