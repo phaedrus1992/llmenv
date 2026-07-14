@@ -127,19 +127,14 @@ const ICM_MUTATION: &[&str] = &[
 const ICM_DESTRUCTIVE: &[&str] = &["icm_memory_forget", "icm_memory_forget_topic"];
 
 /// #694: Built-in context-mode MCP plugin tool tiers (without the common prefix).
-const CTX_READ_ONLY: &[&str] = &[
-    "ctx_search",
-    "ctx_stats",
-    "ctx_doctor",
-    "ctx_insight",
-    "ctx_execute_file",
-];
+const CTX_READ_ONLY: &[&str] = &["ctx_search", "ctx_stats", "ctx_doctor", "ctx_insight"];
 
 const CTX_MUTATION: &[&str] = &[
     "ctx_index",
+    "ctx_execute",
+    "ctx_execute_file",
     "ctx_fetch_and_index",
     "ctx_batch_execute",
-    "ctx_execute",
 ];
 
 const CTX_DESTRUCTIVE: &[&str] = &["ctx_purge", "ctx_upgrade"];
@@ -1212,15 +1207,25 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         PermissionAction::Deny,
     );
 
-    // #694: Tiered MCP permission rules for built-in servers.
+    // #694/#273: Tiered MCP permission rules for built-in servers.
     // Read-only tools → allow, mutation → ask, destructive → deny.
+    // Each tiered rule is suppressed when a more authoritative native rule
+    // already covers it (deny > ask > allow), matching the `render_action`
+    // native-wins invariant — see the suppressors closure at the top of this
+    // function.
     if icm_active {
         let icm_prefix = format!("mcp__{}__", MEMORY_MCP_NAME);
         for &tool in ICM_READ_ONLY {
-            allow.push(format!("{icm_prefix}{tool}"));
+            let s = format!("{icm_prefix}{tool}");
+            if !native_deny.contains(s.as_str()) && !native_ask.contains(s.as_str()) {
+                allow.push(s);
+            }
         }
         for &tool in ICM_MUTATION {
-            ask.push(format!("{icm_prefix}{tool}"));
+            let s = format!("{icm_prefix}{tool}");
+            if !native_deny.contains(s.as_str()) {
+                ask.push(s);
+            }
         }
         for &tool in ICM_DESTRUCTIVE {
             deny.push(format!("{icm_prefix}{tool}"));
@@ -1233,10 +1238,16 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     }) {
         let prefix = crate::config::CONTEXT_MODE_MCP_PREFIX;
         for &tool in CTX_READ_ONLY {
-            allow.push(format!("{prefix}{tool}"));
+            let s = format!("{prefix}{tool}");
+            if !native_deny.contains(s.as_str()) && !native_ask.contains(s.as_str()) {
+                allow.push(s);
+            }
         }
         for &tool in CTX_MUTATION {
-            ask.push(format!("{prefix}{tool}"));
+            let s = format!("{prefix}{tool}");
+            if !native_deny.contains(s.as_str()) {
+                ask.push(s);
+            }
         }
         for &tool in CTX_DESTRUCTIVE {
             deny.push(format!("{prefix}{tool}"));
