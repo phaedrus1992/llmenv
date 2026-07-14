@@ -87,12 +87,11 @@ impl Env {
     /// Avoids 3 subprocess forks (hostname, route, arp) on repeated calls.
     #[must_use]
     pub fn detect() -> Self {
-        if let Ok(lock) = ENV_CACHE.lock() {
-            if let Some(cached) = lock.as_ref() {
-                if cached.detected.elapsed() < Duration::from_secs(30) {
-                    return cached.env.clone();
-                }
-            }
+        if let Ok(lock) = ENV_CACHE.lock()
+            && let Some(cached) = lock.as_ref()
+            && cached.detected.elapsed() < Duration::from_secs(30)
+        {
+            return cached.env.clone();
         }
         let env = Self::detect_fresh();
         if let Ok(mut lock) = ENV_CACHE.lock() {
