@@ -183,13 +183,8 @@ fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
     emitted.extend(active.tags.iter().cloned());
     let marker_enabled = super::marker_enabled_bundle_names(&active);
 
-    let firing_names: HashSet<&str> = config
-        .bundle
+    let firing_names: HashSet<&str> = super::firing_bundles(&config.bundle, &active, None)
         .iter()
-        .filter(|b| {
-            b.when.iter().any(|t| active.tags.contains(t))
-                || marker_enabled.contains(b.name.as_str())
-        })
         .map(|b| b.name.as_str())
         .collect();
 
@@ -238,19 +233,7 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
     let mut emitted = super::all_emitted_tags(&config);
     emitted.extend(active.tags.iter().cloned());
 
-    let manually_enabled: std::collections::HashSet<&str> = active
-        .scopes
-        .iter()
-        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-        .collect();
-    let firing: Vec<&Bundle> = config
-        .bundle
-        .iter()
-        .filter(|b| {
-            b.when.iter().any(|bt| active.tags.contains(bt))
-                || manually_enabled.contains(b.name.as_str())
-        })
-        .collect();
+    let firing: Vec<&Bundle> = super::firing_bundles(&config.bundle, &active, None);
     let bundle_refs = super::build_bundle_refs(config_dir, &active, &firing);
     let bundle_caps = if !bundle_refs.is_empty() {
         crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
