@@ -779,16 +779,49 @@ fn run_export(
     //     in a marker file,
     // minus anything a scope disables via `disable_bundles` (#194). The
     // optional --tag filter still gates the tag/enable path.
-    let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, tag.as_deref());
-
     let mut vars = std::collections::BTreeMap::new();
 
-    // TODO: Scope filtering would require evaluating scope match conditions
-    // (network gateway/ssid/cidr, host hostname, user user, project path/marker)
-    // For now, only tag filtering is implemented
-    if scope.is_some() {
-        eprintln!("warning: scope filtering not yet implemented, exporting all matching tags");
-    }
+    // When --scope <id> is passed, restrict to only that scope's tags so
+    // `llmenv export --scope office` exports only what fires from the
+    // "office" network scope, not all active scopes.  Scope match conditions
+    // (network gateway/ssid/cidr, host hostname, user user, project path/
+    // marker) are already evaluated by evaluate() above — this simply
+    // narrows the result to one scope's contribution.
+    let (firing, use_active) = {
+        if let Some(ref scope_id) = scope {
+            let filtered_scopes = active
+                .scopes
+                .iter()
+                .filter(|s| s.id == *scope_id)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if filtered_scopes.is_empty() {
+                eprintln!(
+                    "warning: scope '{scope_id}' not active in current environment \
+                     — no bundles will fire for this scope"
+                );
+            }
+
+            let mut filtered_tags: BTreeSet<String> = filtered_scopes
+                .iter()
+                .flat_map(|s| s.tags.iter().cloned())
+                .collect();
+            if !env.os.is_empty() {
+                filtered_tags.insert(env.os.clone());
+            }
+
+            let filtered = ActiveScopes {
+                scopes: filtered_scopes,
+                tags: filtered_tags,
+            };
+            let firing = firing_bundles(&config.bundle, &filtered, tag.as_deref());
+            (firing, filtered)
+        } else {
+            let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
+            (firing, active.clone())
+        }
+    };
 
     // Merge + materialize the agent config directory for each installed adapter
     // and collect env vars. PATH-gating skips adapters whose binary is absent so
@@ -879,13 +912,18 @@ fn run_export(
     // a `<kind>:<id>` prefix so the kind is visible without re-running
     // `llmenv scope ls`. Tags come from a BTreeSet (already sorted); bundles
     // are emitted in declaration order.
-    let scopes_csv = active
+    let scopes_csv = use_active
         .scopes
         .iter()
         .map(|s| format!("{}:{}", s.kind, s.id))
         .collect::<Vec<_>>()
         .join(",");
-    let tags_csv = active.tags.iter().cloned().collect::<Vec<_>>().join(",");
+    let tags_csv = use_active
+        .tags
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
     let bundles_csv = firing
         .iter()
         .map(|b| b.name.clone())
@@ -898,7 +936,7 @@ fn run_export(
     // LLMENV_ACTIVE_PROJECT / LLMENV_PROJECT_ROOT: deepest matched project
     // scope wins (most specific for nested project layouts). Both vars are
     // skipped when no project scope is active.
-    let winning_project = active
+    let winning_project = use_active
         .scopes
         .iter()
         .filter(|s| s.kind == "project")
@@ -916,11 +954,11 @@ fn run_export(
     // retrieval across projects. Agents can store memory under keyword
     // "llmenv-tag:<tag>" and it will be retrieved in any scope with that tag.
     let bundles_for_icm = firing.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
-    let icm_chunk = crate::icm::generate_context_chunk(&active, &bundles_for_icm);
+    let icm_chunk = crate::icm::generate_context_chunk(&use_active, &bundles_for_icm);
     vars.insert("LLMENV_ICM_CONTEXT".into(), icm_chunk);
 
     // Store tag/bundle mappings for SessionStart hook retrieval
-    if let Err(e) = crate::icm::store_tag_memory(&active, &bundles_for_icm) {
+    if let Err(e) = crate::icm::store_tag_memory(&use_active, &bundles_for_icm) {
         tracing::debug!("failed to store ICM tag memory (non-fatal): {e}");
     }
 
