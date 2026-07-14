@@ -50,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Upgrade `debug_assert!` to `tracing::warn!` in scope matcher — walkdir
   entries outside the workspace root are now surfaced as warnings instead
   of only being checked in debug builds (#761)
+### Added
+- Migrate ephemeral state (`projects/`) across hash changes in Strict
+  mode materialization (#746, #797)
+
+### Fixed
+- GC in Normal mode now age-checks each shape individually instead of
+  treating the entire version generation as one unit (#738, #797)
+- Clock-skew handling in GC — entries with future mtimes are now
+  treated as expired with a logged warning instead of silently skipped
+  (#797)
 
 ## [3.3.0] - 2026-07-13
 
