@@ -202,7 +202,13 @@ pub(crate) fn handle_pre_tool_use_inner(
     // convention, but accept PascalCase fallback for synthetic test payloads.
     let Some(file_path) = tool_input
         .get("file_path")
-        .or_else(|| tool_input.get("filePath"))
+        .or_else(|| {
+            let v = tool_input.get("filePath");
+            if v.is_some() {
+                eprintln!("llmenv: read-once using deprecated PascalCase 'filePath' key instead of 'file_path'");
+            }
+            v
+        })
         .and_then(|v| v.as_str())
     else {
         return String::new();
@@ -230,6 +236,10 @@ pub(crate) fn handle_pre_tool_use_inner(
     };
     let canonical = std::fs::canonicalize(path)
         .inspect_err(|e| {
+            eprintln!(
+                "llmenv: cannot canonicalize read-once cache path {}: {e}, using raw path",
+                path.display()
+            );
             tracing::warn!(
                 error = %e,
                 path = %path.display(),
