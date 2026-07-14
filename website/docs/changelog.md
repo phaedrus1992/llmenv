@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Version 4.x
 
 ## [Unreleased] - ReleaseDate
 
@@ -61,7 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `tracing::warn!` diagnostics to `read_owned_servers` I/O and
   parse error paths
 
+## Version 3.x
+
 ## [Unreleased] - ReleaseDate
+
+### Fixed
+- Remove dead process-static CONFIG_CACHE from hook_run that never saved a parse (each hook event is a fresh process); poisoned-cache log no longer fires on cold-start misses (#706)
+- Add eprintln! diagnostic when fs::canonicalize() fails in read-once, so operators can detect non-canonicalized cache keys (#728)
+- Add eprintln! diagnostic when deprecated PascalCase 'filePath' key is used in read-once, surfacing format drift (#729)
 
 ## [3.4.0] - 2026-07-14
 
@@ -575,6 +583,8 @@ the rc.1 and rc.2 sections below.
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
+## Version 2.x
+
 ## [2.4.1] - 2026-07-10
 
 - CI updates to support trusted publishing to crates.io
@@ -862,6 +872,8 @@ the rc.1 and rc.2 sections below.
 - Fix missing `plugin.json` after a plugin sync being silently ignored; `llmenv` now
   logs a `warn` when the plugin manifest is absent after materializing the plugin,
   making broken plugin installs diagnosable (#379)
+
+## Version 1.x
 
 ## [1.0.10] - 2026-06-11
 

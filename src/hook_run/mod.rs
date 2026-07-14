@@ -390,52 +390,10 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
 /// The memory backend (recall/store) and session logging are independent: a
 /// missing/unreachable memory MCP skips memory actions but must not prevent
 /// the file-sink session log from being written (see `handle_session_log`).
-/// Mtime-keyed cache entry for the parsed config. Avoids re-parsing the YAML
-/// file on every hook event when the file hasn't changed (the common case —
-/// consecutive events in one agent turn).
-struct CachedConfig {
-    mtime: SystemTime,
-    config: crate::config::Config,
-}
-
-/// Module-level cache so `run_inner` (called once per hook event) skips
-/// `Config::load` when the file mtime hasn't changed. The lock is held only
-/// during the stat-and-compare or load-and-store window — never across the
-/// rest of `run_inner` or any `.await`.
-static CONFIG_CACHE: Mutex<Option<CachedConfig>> = Mutex::new(None);
-
-/// Load config from `path`, consulting the mtime cache to skip re-parsing
-/// when the file hasn't changed. Falls back to a fresh load on stat errors
-/// or cache-miss.
+/// Load config from `path`. Each hook-run is a fresh process that loads
+/// config exactly once, so no cache is needed.
 fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
-    let mtime = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .inspect_err(|e| tracing::warn!("failed to stat config file {}: {e}", path.display()))
-        .ok();
-    if let Some(mtime) = mtime
-        && let Ok(lock) = CONFIG_CACHE.lock()
-        && let Some(cached) = lock.as_ref()
-        && cached.mtime == mtime
-    {
-        return Ok(cached.config.clone());
-    }
-    if mtime.is_some() {
-        // Mutex was poisoned — degraded performance path
-        tracing::debug!("CONFIG_CACHE poisoned, falling back to fresh load");
-    }
-    let config = crate::config::Config::load(path)?;
-    if let Some(mtime) = mtime
-        && let Ok(mut lock) = CONFIG_CACHE.lock()
-    {
-        *lock = Some(CachedConfig {
-            mtime,
-            config: config.clone(),
-        });
-    } else if mtime.is_some() {
-        // Still poisoned after re-load — log once per config access
-        tracing::debug!("CONFIG_CACHE still poisoned after load");
-    }
-    Ok(config)
+    crate::config::Config::load(path)
 }
 
 fn run_inner(
