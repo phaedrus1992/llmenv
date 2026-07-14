@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.4.0] - 2026-07-14
+
 This release tightens error diagnostic coverage across two dozen silent-fallthrough
 sites, adds PermissionMode variants for granular permission control, hardens cache
 GC edge cases, and normalizes JSON/YAML merge null-strip behavior.

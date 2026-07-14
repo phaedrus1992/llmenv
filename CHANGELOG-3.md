@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.4.0] - 2026-07-14
+
 This release tightens error diagnostic coverage across two dozen silent-fallthrough
 sites, adds PermissionMode variants for granular permission control, hardens cache
 GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
@@ -505,7 +507,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.3.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.4.0...HEAD
+[3.4.0]: https://github.com/phaedrus1992/llmenv/compare/v3.3.0...v3.4.0
 [3.3.0]: https://github.com/phaedrus1992/llmenv/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/phaedrus1992/llmenv/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/phaedrus1992/llmenv/compare/v3.0.0...v3.1.0
