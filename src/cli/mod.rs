@@ -550,16 +550,6 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn expand_tilde(path: &str) -> anyhow::Result<PathBuf> {
-    if path.starts_with("~/") || path == "~" {
-        let home = std::env::var("HOME").context("HOME env var not set")?;
-        let expanded = path.replacen("~", &home, 1);
-        Ok(PathBuf::from(expanded))
-    } else {
-        Ok(PathBuf::from(path))
-    }
-}
-
 fn is_git_repo(dir: &Path) -> bool {
     match git::secure_git()
         .args(["rev-parse", "--git-dir"])
@@ -828,7 +818,7 @@ fn run_export(
     // Merge + materialize the agent config directory for each installed adapter
     // and collect env vars. PATH-gating skips adapters whose binary is absent so
     // a machine without a given tool sees zero behavior change. (#502)
-    let cache_dir_root = expand_tilde(&config.cache.cache_dir)?;
+    let cache_dir_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
     let materialize_ctx = MaterializeContext {
         config: &config,
         config_dir: &config_dir,
@@ -1465,7 +1455,7 @@ fn build_manifest(
         }
     }
 
-    let cache_root = expand_tilde(&config.cache.cache_dir)?;
+    let cache_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
 
     let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags)
         .context("resolving plugins")?;
@@ -1985,7 +1975,7 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
             let path_str = p
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("init path is not valid UTF-8: {}", p.display()))?;
-            expand_tilde(path_str)?
+            PathBuf::from(paths::expand_tilde(path_str))
         }
         None => paths::config_dir()?,
     };
@@ -2154,7 +2144,8 @@ This directory contains your llmenv configuration.
     // Intentionally Claude Code-only: Crush has no auth/settings concept yet.
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
-        let adapter_root = expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
+        let adapter_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir))
+            .join(ClaudeCodeAdapter.name());
         run_init_auth_prompt(&adapter_root)?;
         run_init_settings_prompt(&config_path)?;
     }
@@ -2290,7 +2281,8 @@ fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
 fn run_login(global: bool) -> anyhow::Result<()> {
     let config = Config::load(&paths::config_path()?)?;
     // Intentionally Claude Code-only: Crush has no auth concept yet (#544).
-    let adapter_root = expand_tilde(&config.cache.cache_dir)?.join(ClaudeCodeAdapter.name());
+    let adapter_root =
+        PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)).join(ClaudeCodeAdapter.name());
 
     if global {
         eprintln!("Capturing global auth (will be inherited by all new folders)...");
@@ -2718,7 +2710,7 @@ fn annotate(active: bool, orphan: bool, use_color: bool) -> String {
 fn run_plugin_sync() -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let cache_root = expand_tilde(&config.cache.cache_dir)?;
+    let cache_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
 
     let context_mode_enabled = config.context_mode_enabled();
 
@@ -2990,7 +2982,7 @@ fn run_prune(
 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let cache_dir = expand_tilde(&config.cache.cache_dir)?;
+    let cache_dir = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
 
     // --plugin-cache: remove shared plugin cache dirs. Independent of other flags.
     let mut plugin_removed: Vec<std::path::PathBuf> = Vec::new();
@@ -3668,7 +3660,7 @@ mod tests {
         let home = std::env::var("HOME")
             .context("HOME env var not set")
             .unwrap();
-        let result = expand_tilde("~/test").unwrap();
+        let result = PathBuf::from(paths::expand_tilde("~/test"));
         assert_eq!(result, PathBuf::from(format!("{}/test", home)));
     }
 
@@ -3677,13 +3669,13 @@ mod tests {
         let home = std::env::var("HOME")
             .context("HOME env var not set")
             .unwrap();
-        let result = expand_tilde("~").unwrap();
+        let result = PathBuf::from(paths::expand_tilde("~"));
         assert_eq!(result, PathBuf::from(&home));
     }
 
     #[test]
     fn expand_tilde_no_tilde() {
-        let result = expand_tilde("/absolute/path").unwrap();
+        let result = PathBuf::from(paths::expand_tilde("/absolute/path"));
         assert_eq!(result, PathBuf::from("/absolute/path"));
     }
 
