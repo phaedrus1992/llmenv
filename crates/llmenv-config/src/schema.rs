@@ -609,6 +609,15 @@ pub struct NativePermissionRules {
 
 /// Neutral default permission mode. Adopts Claude Code's vocabulary as the
 /// engine-neutral set (open question O2 resolved in favor of reuse).
+///
+/// ## Scope notes
+///
+/// - `Auto` — Claude Code only honors this from user-scope
+///   `~/.claude/settings.json`, not project/local. An llmenv-rendered
+///   project-scoped settings.json with `auto` will silently fall back to
+///   `default` on the Claude Code side. Worth documenting on
+///   `capabilities.permissions.default_mode`.
+/// - `Manual` — alias for `Default` in Claude Code's own string mapping.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
@@ -616,6 +625,9 @@ pub enum PermissionMode {
     Plan,
     Default,
     BypassPermissions,
+    Auto,
+    DontAsk,
+    Manual,
 }
 
 /// A neutral permission rule: a tool plus either a glob `pattern` or a list of
@@ -2154,5 +2166,26 @@ small:
             serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(map["large"].provider, "anthropic");
         assert_eq!(map["small"].model, "llama3.1:8b");
+    }
+
+    // ---- PermissionMode serde roundtrip ----
+
+    #[test]
+    fn permission_mode_serde_roundtrip() {
+        for (mode, expected) in [
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::Plan, "plan"),
+            (PermissionMode::Default, "default"),
+            (PermissionMode::BypassPermissions, "bypassPermissions"),
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::DontAsk, "dontAsk"),
+            (PermissionMode::Manual, "manual"),
+        ] {
+            let json = serde_json::to_string(&mode).expect("serialize PermissionMode");
+            assert_eq!(json, format!("\"{expected}\""), "serialize {mode:?}");
+            let back: PermissionMode =
+                serde_json::from_str(&json).expect("deserialize PermissionMode");
+            assert_eq!(back, mode, "roundtrip {mode:?}");
+        }
     }
 }
