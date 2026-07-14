@@ -109,7 +109,14 @@ pub fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
                         // the merge produces is dedup-free regardless of which
                         // path created it (see `merge_yaml` for the rationale).
                         normalize_json(&mut v);
-                        d.insert(k, v);
+                        // Skip null-valued keys — normalize_json strips them
+                        // from objects, so introducing one on the insert path
+                        // would make merge_json non-idempotent (re-merging
+                        // the same src would re-insert a null that was just
+                        // stripped).
+                        if !v.is_null() {
+                            d.insert(k, v);
+                        }
                     }
                 }
             }
@@ -128,9 +135,15 @@ pub fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
     }
 }
 
-/// Recursively dedup every array in a JSON value so it matches what
-/// [`merge_json`] produces. Used on insert/overwrite paths to keep the merge
-/// idempotent.
+/// Recursively normalize a JSON value for stable `PartialEq` comparison.
+///
+/// 1. **Dedup arrays** — removes duplicate entries.
+/// 2. **Strip null-valued object keys** — removes entries where the value is
+///    `null`, so objects differing only by null vs absent key collapse during
+///    [`merge_json`]'s `PartialEq`-based dedup across render generations.
+///
+/// Used on insert/overwrite paths to keep every `merge_json` caller
+/// null-tolerant without per-caller post-processing.
 fn normalize_json(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {
@@ -141,6 +154,10 @@ fn normalize_json(value: &mut serde_json::Value) {
             dedup(items);
         }
         Value::Object(map) => {
+            // Strip null-valued keys so merge_json's PartialEq-based dedup
+            // collapses objects differing only by null vs absent across
+            // render generations (e.g. `"tool": null` vs absent key).
+            map.retain(|_, v| !v.is_null());
             for (_, v) in map.iter_mut() {
                 normalize_json(v);
             }
@@ -152,7 +169,7 @@ fn normalize_json(value: &mut serde_json::Value) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{dedup, merge_json, merge_yaml};
+    use super::{dedup, merge_json, merge_yaml, normalize_json};
 
     fn yaml(s: &str) -> serde_yaml::Value {
         serde_yaml::from_str(s).unwrap()
@@ -233,6 +250,25 @@ mod tests {
         let mut dst = jsn(r#"{"k": ["a", "b"]}"#);
         merge_json(&mut dst, jsn(r#"{"k": "scalar"}"#));
         assert_eq!(dst, jsn(r#"{"k": "scalar"}"#));
+    }
+
+    #[test]
+    fn normalize_json_strips_null_keys() {
+        let mut v = jsn(r#"{"a": null, "b": 1, "c": {"d": null, "e": [{"f": null, "g": 2}]}}"#);
+        normalize_json(&mut v);
+        assert_eq!(v, jsn(r#"{"b": 1, "c": {"e": [{"g": 2}]}}"#));
+    }
+
+    #[test]
+    fn merge_json_dedups_when_null_vs_absent_differs() {
+        // Objects differing only by null vs absent key (e.g. "tool": null
+        // from an older render vs absent key from the current) must collapse
+        // during merge_json's PartialEq-based dedup. This is the #699/#718
+        // fix: normalize_json strips nulls first so the compare succeeds.
+        let mut dst = jsn(r#"[{"command": "test", "tool": null}]"#);
+        let src = jsn(r#"[{"command": "test"}]"#);
+        merge_json(&mut dst, src);
+        assert_eq!(dst, jsn(r#"[{"command": "test"}]"#));
     }
 
     #[test]
