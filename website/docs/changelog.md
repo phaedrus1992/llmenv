@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   previously owned by llmenv but absent from the resolved set are
   removed from `.claude.json`, preserving user-added servers
   ([#739](https://github.com/phaedrus1992/llmenv/issues/739))
+- Add tiered MCP permission rules for built-in servers (ICM,
+  context-mode) — read-only tools are auto-allowed, mutation tools
+  prompt the user, and destructive tools are denied, matching the
+  sensitivity tier of each tool
+  ([#694](https://github.com/phaedrus1992/llmenv/issues/694))
 
 ### Changed
 - **Breaking:** Remove the deprecated boolean `session_log` shape
