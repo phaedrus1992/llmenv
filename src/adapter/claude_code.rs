@@ -382,28 +382,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        if text.is_empty() {
-            return String::new();
-        }
-
-        // Store-only events (SessionStart, SessionEnd) have no model turn to inject context
-        // into, and Claude Code's hook schema rejects additionalContext in their
-        // hookSpecificOutput. Return empty so these events emit no output. (#558)
-        if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
-            return String::new();
-        }
-
-        // Wrap in a system barrier to prevent prompt injection: the MCP response
-        // (possibly from an untrusted memory backend) is wrapped so any attempts
-        // to escape the context block are trapped as unparseable markdown.
-        let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{}", text);
-        serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": hook_event_name,
-                "additionalContext": wrapped
-            }
-        })
-        .to_string()
+        super::emit_hook_context(hook_event_name, text)
     }
 }
 

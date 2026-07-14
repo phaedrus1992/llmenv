@@ -344,7 +344,7 @@ impl AgentAdapter for OpencodeAdapter {
         std::fs::create_dir_all(out.join("command"))?;
 
         for plugin in &manifest.plugins {
-            let payload = super::crush::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
+            let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
 
             // Does this plugin provide native opencode support (e.g. a
             // TypeScript plugin registered via "plugin" key in opencode.json)?
@@ -831,16 +831,7 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        if text.is_empty() {
-            return String::new();
-        }
-        serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": hook_event_name,
-                "additionalContext": format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}"),
-            }
-        })
-        .to_string()
+        super::emit_hook_context(hook_event_name, text)
     }
 }
 
