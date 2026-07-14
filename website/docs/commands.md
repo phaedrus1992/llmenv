@@ -17,7 +17,7 @@ repository instead of writing a template. No-op if a config already exists.
 ## `export`
 
 ```text
-llmenv export [--scope ID] [--tag TAG] [--explain]
+llmenv export [--scope ID] [--tag TAG] [--explain] [--compress]
 ```
 
 Resolve the current environment and print shell `export` lines. This is what the
@@ -31,6 +31,8 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 - `--explain` annotates each exported variable with a `# source:` comment line
   showing whether it comes from the adapter (with the firing bundle names) or
   from llmenv introspection.
+- `--compress` strips trailing whitespace and collapses repeated blank lines in
+  the materialized `CLAUDE.md` / `AGENTS.md` to reduce token cost.
 
 ## `regenerate`
 
@@ -201,6 +203,19 @@ down. Per-event transcript records dispatch via a short-lived detached child
 (`llmenv session-log-record`, internal plumbing) so `hook-run` itself never
 blocks on the network round trip.
 
+## `memory`
+
+```text
+llmenv memory stats|list|diff|prune [--dry-run]
+```
+
+Inspect ICM memory state for the active scope.
+
+- `memory stats` — record counts by tag/bundle/type, last-written.
+- `memory list` — list stored memories for the active scope.
+- `memory diff` — show what changed since the last session.
+- `memory prune [--dry-run]` — preview or apply TTL-based forgetting.
+
 ## `prune`
 
 ```text
@@ -217,6 +232,17 @@ Clean stale cache folders.
   (e.g. `14d`, `1w`).
 - `--dry-run` — preview deletions without removing (works with `--all` and
   `--older-than`).
+- `--plugin-cache` — also remove the shared plugin cache directory.
+
+## `read-once`
+
+```text
+llmenv read-once clear
+```
+
+Manage the read-once file dedup cache (#318). `read-once clear` clears all
+cached read-once entries — use after reorganizing bundle content to force
+re-ingestion on the next turn.
 
 ## `login`
 
@@ -237,6 +263,21 @@ Runs `claude auth login` in a temporary directory, extracts the resulting
 
 `llmenv init` includes auth setup; use `llmenv login` to authenticate separately
 or to re-authenticate.
+
+## `setup`
+
+```text
+llmenv setup [PATH] [--repo URL] [--no-launch] [--rescan]
+```
+
+Interactive setup wizard for new llmenv users. Walks through auth setup (login
+fresh via `claude auth login`, import from `~/.claude`, or skip) and settings
+import (choose which keys to seed from your global `settings.json` into the
+materialized config). Writes a template `config.yaml` and an agent orientation
+guide, then optionally hands off to the AI engine for further configuration.
+
+- `--no-launch` skips the AI engine handoff at the end.
+- `--rescan` re-scans existing configs without overwriting files.
 
 ## `config-context`
 
@@ -310,11 +351,11 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - `--gc` runs cache garbage collection after the diagnostics.
 - `--verbose` prints detailed per-check reasoning alongside each pass/fail result.
 
-## Deprecated commands (removed in 2.1)
+## Deprecated commands
 
-The following top-level listing commands are still accepted in 2.0.x as hidden
-shims but will be removed in 2.1. Use the `status <subcommand>` equivalents
-instead:
+The following top-level listing commands are hidden shims that print a
+deprecation warning and delegate to `status <subcommand>`. Use the
+`status` equivalents directly:
 
 | Deprecated | Replacement |
 | --- | --- |

@@ -143,24 +143,17 @@ See [Configuration](configuration.md) for the complete schema.
 
 ## Commands reference
 
+Everyday commands:
+
 | Command | Purpose |
-| --------- | --------- |
-| `llmenv init [PATH] [--repo URL]` | Initialize configuration |
-| `llmenv export [--scope ID] [--tag TAG] [--explain]` | Export environment variables |
-| `llmenv regenerate` | Apply config changes to the cache without exporting env vars |
-| `llmenv hook <zsh\|bash>` | Generate shell hook code |
-| `llmenv login [--global]` | Capture and cache Claude Code auth credentials |
-| `llmenv status [bundles\|tags\|scopes\|mcps\|marketplaces\|plugins]` | Show status; add subcommand for a detailed listing <!-- markdownlint-disable-line MD013 --> |
-| `llmenv context [--bundle NAME] [--why] [--json]` | Show the resolved environment in detail |
-| `llmenv validate` | Check config for structural issues |
-| `llmenv edit [BUNDLE-NAME]` | Open config (or a bundle file) in `$EDITOR` |
-| `llmenv completions <bash\|zsh\|fish>` | Generate shell completion scripts |
-| `llmenv plugin-sync` | Sync plugin marketplaces into the cache |
-| `llmenv sync [--dry-run]` | Commit and push config to GitHub |
-| `llmenv check-stale [--auto-fix]` | Warn if the running agent's config drifted |
-| `llmenv hook-run <session_start\|turn_start\|session_end>` | Inject ICM memory context (invoked by agent runtime) |
-| `llmenv prune [--all] [--older-than DUR] [--dry-run]` | Clean stale cache folders |
-| `llmenv doctor [--gc] [--all] [--verbose]` | Run diagnostics (optionally GC or full orphan analysis) |
+| ------- | ------- |
+| `llmenv init` | Write a template config |
+| `llmenv hook <zsh\|bash>` | Print shell integration code |
+| `llmenv export [--compress]` | Resolve + export the environment |
+| `llmenv regenerate` | Re-materialize without exporting env vars |
+| `llmenv status [section]` | Show active scopes, tags, and config status |
+| `llmenv doctor [--gc]` | Validate wiring |
+| `llmenv prune [--all]` | Clean stale cache folders |
 
 Full per-command reference: [commands.md](commands.md).
 
