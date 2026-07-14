@@ -87,6 +87,58 @@ const SESSION_LOG_HOOK_EVENTS: &[(&str, &str)] = &[
     ("pre_compact", "PreCompact"),
 ];
 
+/// #694: Built-in ICM MCP server tool tiers.
+/// Read-only tools → allow, mutation tools → ask, destructive → deny.
+const ICM_READ_ONLY: &[&str] = &[
+    "icm_wake_up",
+    "icm_memory_recall",
+    "icm_memory_stats",
+    "icm_memory_health",
+    "icm_memory_list_topics",
+    "icm_feedback_stats",
+    "icm_feedback_search",
+    "icm_transcript_search",
+    "icm_transcript_stats",
+    "icm_transcript_show",
+    "icm_memoir_search",
+    "icm_memoir_search_all",
+    "icm_memoir_show",
+    "icm_memoir_inspect",
+    "icm_memoir_list",
+];
+
+const ICM_MUTATION: &[&str] = &[
+    "icm_memory_store",
+    "icm_memory_update",
+    "icm_memory_consolidate",
+    "icm_memory_embed_all",
+    "icm_memory_extract_patterns",
+    "icm_learn",
+    "icm_transcript_start_session",
+    "icm_transcript_record",
+    "icm_feedback_record",
+    "icm_memoir_create",
+    "icm_memoir_add_concept",
+    "icm_memoir_export",
+    "icm_memoir_refine",
+    "icm_memoir_link",
+];
+
+const ICM_DESTRUCTIVE: &[&str] = &["icm_memory_forget", "icm_memory_forget_topic"];
+
+/// #694: Built-in context-mode MCP plugin tool tiers (without the common prefix).
+const CTX_READ_ONLY: &[&str] = &["ctx_search", "ctx_stats", "ctx_doctor", "ctx_insight"];
+
+const CTX_MUTATION: &[&str] = &[
+    "ctx_index",
+    "ctx_execute",
+    "ctx_execute_file",
+    "ctx_fetch_and_index",
+    "ctx_batch_execute",
+];
+
+const CTX_DESTRUCTIVE: &[&str] = &["ctx_purge", "ctx_upgrade"];
+
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
 /// `out` as its config root.
@@ -1144,25 +1196,66 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         native.map_or(&[], |n| &n.allow),
         PermissionAction::Allow,
     );
-    let ask = render_action(
+    let mut ask = render_action(
         &perms.ask,
         native.map_or(&[], |n| &n.ask),
         PermissionAction::Ask,
     );
-    let deny = render_action(
+    let mut deny = render_action(
         &perms.deny,
         native.map_or(&[], |n| &n.deny),
         PermissionAction::Deny,
     );
 
-    // #490: Grant wildcard MCP permission for the context-mode built-in plugin.
+    // #694/#273: Tiered MCP permission rules for built-in servers.
+    // Read-only tools → allow, mutation → ask, destructive → deny.
+    // Each tiered rule is suppressed when a more authoritative native rule
+    // already covers it (deny > ask > allow), matching the `render_action`
+    // native-wins invariant — see the suppressors closure at the top of this
+    // function.
+    if icm_active {
+        let icm_prefix = format!("mcp__{}__", MEMORY_MCP_NAME);
+        for &tool in ICM_READ_ONLY {
+            let s = format!("{icm_prefix}{tool}");
+            if !native_deny.contains(s.as_str()) && !native_ask.contains(s.as_str()) {
+                allow.push(s);
+            }
+        }
+        for &tool in ICM_MUTATION {
+            let s = format!("{icm_prefix}{tool}");
+            if !native_deny.contains(s.as_str()) {
+                ask.push(s);
+            }
+        }
+        for &tool in ICM_DESTRUCTIVE {
+            deny.push(format!("{icm_prefix}{tool}"));
+        }
+    }
+
     if manifest.plugins.iter().any(|p| {
         p.marketplace == crate::config::CONTEXT_MODE_MARKETPLACE
             && p.plugin == crate::config::CONTEXT_MODE_PLUGIN
     }) {
-        allow.push(format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX));
-        dedup(&mut allow);
+        let prefix = crate::config::CONTEXT_MODE_MCP_PREFIX;
+        for &tool in CTX_READ_ONLY {
+            let s = format!("{prefix}{tool}");
+            if !native_deny.contains(s.as_str()) && !native_ask.contains(s.as_str()) {
+                allow.push(s);
+            }
+        }
+        for &tool in CTX_MUTATION {
+            let s = format!("{prefix}{tool}");
+            if !native_deny.contains(s.as_str()) {
+                ask.push(s);
+            }
+        }
+        for &tool in CTX_DESTRUCTIVE {
+            deny.push(format!("{prefix}{tool}"));
+        }
     }
+    dedup(&mut allow);
+    dedup(&mut ask);
+    dedup(&mut deny);
 
     let has_perms =
         !allow.is_empty() || !ask.is_empty() || !deny.is_empty() || perms.default_mode.is_some();
@@ -1668,7 +1761,8 @@ mod tests {
     use super::super::AgentAdapter;
     use super::{
         CLAUDE_JSON_FILE, CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND,
-        CONFIG_GUARD_COMMAND, ClaudeCodeAdapter, HOOK_RUN_COMMAND, MODELED_SETTINGS_KEYS,
+        CONFIG_GUARD_COMMAND, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter,
+        HOOK_RUN_COMMAND, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, MODELED_SETTINGS_KEYS,
         STALE_CHECK_COMMAND, classify_claude_path, generate_installed_plugins_json,
         generate_settings_json, is_hook_json, merge_mcp_into_claude_json, overlay_native,
         read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
@@ -2252,9 +2346,9 @@ mod tests {
     }
 
     #[test]
-    fn context_mode_plugin_grants_mcp_permission() {
-        // #490: context-mode plugin in manifest → permissions.allow must contain
-        // the wildcard for its MCP server.
+    fn context_mode_plugin_grants_tiered_mcp_permissions() {
+        // #694: context-mode plugin in manifest → read-only tools in allow,
+        // mutation in ask, destructive in deny.
         let manifest = crate::merge::MergedManifest {
             plugins: vec![crate::plugins::resolve::ResolvedPlugin {
                 marketplace: crate::config::CONTEXT_MODE_MARKETPLACE.into(),
@@ -2267,16 +2361,35 @@ mod tests {
         };
         let settings = render_settings_for_test(&manifest);
         let allow = settings["permissions"]["allow"].as_array().unwrap();
-        let expected = format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX);
-        assert!(
-            allow.iter().any(|v| v == &expected),
-            "expected {expected:?} in allow, got {allow:?}"
-        );
+        let ask = settings["permissions"]["ask"].as_array().unwrap();
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        let prefix = crate::config::CONTEXT_MODE_MCP_PREFIX;
+        for &tool in CTX_READ_ONLY {
+            let expected = format!("{prefix}{tool}");
+            assert!(
+                allow.iter().any(|v| v == &expected),
+                "expected {expected:?} in allow, got {allow:?}"
+            );
+        }
+        for &tool in CTX_MUTATION {
+            let expected = format!("{prefix}{tool}");
+            assert!(
+                ask.iter().any(|v| v == &expected),
+                "expected {expected:?} in ask, got {ask:?}"
+            );
+        }
+        for &tool in CTX_DESTRUCTIVE {
+            let expected = format!("{prefix}{tool}");
+            assert!(
+                deny.iter().any(|v| v == &expected),
+                "expected {expected:?} in deny, got {deny:?}"
+            );
+        }
     }
 
     #[test]
-    fn context_mode_absent_no_mcp_grant() {
-        // #490: no context-mode plugin in manifest → MCP grant must NOT appear.
+    fn context_mode_absent_no_tiered_permissions() {
+        // #694: no context-mode plugin → no ctx_* rules in any permission array.
         let manifest = crate::merge::MergedManifest::default();
         let settings = render_settings_for_test(&manifest);
         let allow = settings
@@ -2285,11 +2398,177 @@ mod tests {
             .and_then(|a| a.as_array())
             .cloned()
             .unwrap_or_default();
-        let prefix = format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX);
-        assert!(
-            !allow.iter().any(|v| v == &prefix),
-            "context-mode MCP grant must be absent when plugin is absent; got {allow:?}"
-        );
+        let ask = settings
+            .get("permissions")
+            .and_then(|p| p.get("ask"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let deny = settings
+            .get("permissions")
+            .and_then(|p| p.get("deny"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let prefix = crate::config::CONTEXT_MODE_MCP_PREFIX;
+        for v in allow.iter().chain(ask.iter()).chain(deny.iter()) {
+            assert!(
+                !v.as_str().is_some_and(|s| s.starts_with(prefix)),
+                "ctx tool rule found when plugin absent: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn icm_active_grants_tiered_permissions() {
+        // #694: ICM MCP active → read-only tools in allow, mutation in ask,
+        // destructive in deny.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let ask = settings["permissions"]["ask"].as_array().unwrap();
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        let icm_prefix = format!("mcp__{}__", crate::mcp::resolve::MEMORY_MCP_NAME);
+        for &tool in ICM_READ_ONLY {
+            let expected = format!("{icm_prefix}{tool}");
+            assert!(
+                allow.iter().any(|v| v == &expected),
+                "expected ICM read-only {expected:?} in allow, got {allow:?}"
+            );
+        }
+        for &tool in ICM_MUTATION {
+            let expected = format!("{icm_prefix}{tool}");
+            assert!(
+                ask.iter().any(|v| v == &expected),
+                "expected ICM mutation {expected:?} in ask, got {ask:?}"
+            );
+        }
+        for &tool in ICM_DESTRUCTIVE {
+            let expected = format!("{icm_prefix}{tool}");
+            assert!(
+                deny.iter().any(|v| v == &expected),
+                "expected ICM destructive {expected:?} in deny, got {deny:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn icm_absent_no_tiered_rules() {
+        // #694: no ICM MCP → no icm_* rules in any permission array.
+        let manifest = crate::merge::MergedManifest::default();
+        let settings = render_settings_for_test(&manifest);
+        let allow = settings
+            .get("permissions")
+            .and_then(|p| p.get("allow"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let ask = settings
+            .get("permissions")
+            .and_then(|p| p.get("ask"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let deny = settings
+            .get("permissions")
+            .and_then(|p| p.get("deny"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for v in allow.iter().chain(ask.iter()).chain(deny.iter()) {
+            assert!(
+                !v.as_str().is_some_and(|s| s.starts_with("mcp__icm__")),
+                "ICM tool rule found when MCP absent: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn icm_and_context_mode_both_grant_tiered_rules() {
+        // #694: both ICM and context-mode active → tools from both in their
+        // correct arrays.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+            }],
+            plugins: vec![crate::plugins::resolve::ResolvedPlugin {
+                marketplace: crate::config::CONTEXT_MODE_MARKETPLACE.into(),
+                plugin: crate::config::CONTEXT_MODE_PLUGIN.into(),
+                collection: "context_mode (built-in)".into(),
+                install_path: None,
+                git_commit_sha: None,
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let ask = settings["permissions"]["ask"].as_array().unwrap();
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        let icm_prefix = format!("mcp__{}__", crate::mcp::resolve::MEMORY_MCP_NAME);
+        let ctx_prefix = crate::config::CONTEXT_MODE_MCP_PREFIX;
+        // ICM tools
+        for &tool in ICM_READ_ONLY {
+            let expected = format!("{icm_prefix}{tool}");
+            assert!(
+                allow.iter().any(|v| v == &expected),
+                "ICM read-only {expected:?} not in allow"
+            );
+        }
+        for &tool in ICM_MUTATION {
+            let expected = format!("{icm_prefix}{tool}");
+            assert!(
+                ask.iter().any(|v| v == &expected),
+                "ICM mutation {expected:?} not in ask"
+            );
+        }
+        for &tool in ICM_DESTRUCTIVE {
+            let expected = format!("{icm_prefix}{tool}");
+            assert!(
+                deny.iter().any(|v| v == &expected),
+                "ICM destructive {expected:?} not in deny"
+            );
+        }
+        // Context-mode tools
+        for &tool in CTX_READ_ONLY {
+            let expected = format!("{ctx_prefix}{tool}");
+            assert!(
+                allow.iter().any(|v| v == &expected),
+                "ctx read-only {expected:?} not in allow"
+            );
+        }
+        for &tool in CTX_MUTATION {
+            let expected = format!("{ctx_prefix}{tool}");
+            assert!(
+                ask.iter().any(|v| v == &expected),
+                "ctx mutation {expected:?} not in ask"
+            );
+        }
+        for &tool in CTX_DESTRUCTIVE {
+            let expected = format!("{ctx_prefix}{tool}");
+            assert!(
+                deny.iter().any(|v| v == &expected),
+                "ctx destructive {expected:?} not in deny"
+            );
+        }
     }
 
     #[test]
