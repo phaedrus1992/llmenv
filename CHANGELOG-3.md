@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+This release tightens error diagnostic coverage across two dozen silent-fallthrough
+sites, adds PermissionMode variants for granular permission control, hardens cache
+GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
+
 ### Fixed
 - Fold `strip_json_nulls` into `normalize_json` so every merge path (not just
   `reconcile_settings`) benefits from null-tolerant merge dedup (#718)
@@ -20,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Add `tracing::warn!` diagnostics to 7 additional silent-error swallowing
   sites in file_sink, event serialization, read-once canonicalize, throttle
   error body, consolidation error body, and MCP client error body reads (#773)
+- Enrich pre-subscriber diagnostics — promote event serialization failures
+  to `error!`, add URL context to throttle/consolidation error messages,
+  and log fallback path in `state_path()` warnings (#784)
 - Surface silent error swallowing in read-once hook — `state_dir()`
   resolution failures are now logged as warnings before returning empty
   strings (#760)
@@ -55,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   entries outside the workspace root are now surfaced as warnings instead
   of only being checked in debug builds (#761)
 ### Added
+- Add `auto`, `dontAsk`, and `manual` PermissionMode variants alongside
+  existing boolean/string forms — `auto` is only honored from user-scope
+  settings, `dontAsk` skips the permission prompt, and `manual` matches
+  the default deny-mode behavior (#748)
 - Migrate ephemeral state (`projects/`) across hash changes in Strict
   mode materialization (#746, #797)
 
@@ -64,6 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Clock-skew handling in GC — entries with future mtimes are now
   treated as expired with a logged warning instead of silently skipped
   (#797)
+- Edge-case hardening in cache lifecycle — log I/O errors in ephemeral
+  migration, attempt older siblings on copy failure, clean up `.tmp`
+  staging directories in GC, and log unexpected entries (#797)
 
 ## [3.3.0] - 2026-07-13
 
