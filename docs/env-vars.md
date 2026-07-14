@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Environment Variables — Naming & Usage
 
 This document standardizes how llmenv handles environment variables across its codebase, configuration, and user-facing features.
@@ -9,7 +10,7 @@ This document standardizes how llmenv handles environment variables across its c
 Variables used for llmenv-internal communication, state management, or integration with its own subsystems. **Must** use the `LLMENV_` prefix.
 
 | Variable | Purpose | Set By | Scope |
-|----------|---------|--------|-------|
+| ---------- | --------- | -------- | ------- |
 | `LLMENV_STATE_DIR` | llmenv state directory (config, cache, sessions) | llmenv adapter | Session/process |
 | `LLMENV_CONFIG` | Path to active config file | llmenv adapter | Session/process |
 | `LLMENV_CONFIG_DIR` | Path to config directory | llmenv adapter | Session/process |
@@ -34,7 +35,7 @@ This table covers llmenv-managed variables and well-known system vars.
 there for the canonical list instead of maintaining a stale local copy.
 
 | Variable | Purpose | Tool | Scope |
-|----------|---------|------|-------|
+| ---------- | --------- | ------ | ------- |
 | `CLAUDE_CODE_PLUGIN_CACHE_DIR` | Plugin cache root for Claude Code (overrides `<CLAUDE_CONFIG_DIR>/plugins/`). Set to `<adapter_root>/state/plugins/` — outside the per-hash config dir so plugins survive agent re-materialization without re-download (#632) | Claude Code | Process |
 | `CLAUDE_CODE_TMPDIR` | Per-hash temp directory for Claude Code intermediate files, session scratch space, and large tool outputs. Set to `<hash_dir>/tmp/` in the per-hash cache folder, so it is automatically garbage-collected by `llmenv prune` (#630). Also exported as `TMPDIR`, `TMP`, and `TEMP` | Claude Code | Process |
 | `CONTEXT_MODE_DATA_DIR` | context-mode plugin state directory, normalized to forward slashes for cross-platform compatibility. Set by llmenv's durable-state relocation (#175, #490) | context-mode marketplace plugin | Process |
@@ -74,16 +75,19 @@ env:
 ## Validation & Enforcement
 
 **At bundle load time:**
+
 - Any env var in a bundle starting with `LLMENV_` must be in the explicit `LLMENV_OWNED_SETTINGS_KEYS` allowlist. Rejected bundles fail with a clear error message.
 - New internal variables require an entry in both the code (adapter / scope matcher) and the allowlist constant.
 
 **At test time:**
+
 - Property tests verify that capabilities validation correctly rejects non-allowlisted `LLMENV_*` keys.
 - Example bundles are validated by the test suite to catch documentation drift.
 
 ## Auditing for New Variables
 
 When auditing for new or inconsistent variables:
+
 1. Search codebase for env var usage: `grep -r 'env::var\|std::env'`
 2. Categorize each by purpose (internal, external, bundle-config)
 3. Update code/docs as needed

@@ -84,7 +84,7 @@ The stream is fed from three places, all converging on the same sinks:
 
 ### `SessionLogEvent`
 
-```
+```text
 ts:        RFC 3339
 kind:      lifecycle_start | scope | internal | prompt | tool_use
            | tool_result | notification | stop | lifecycle_end
@@ -130,15 +130,15 @@ and it runs when the real session begins.
 In addition to the baseline, inject llmenv handlers on **all** remaining Claude
 Code hook events and record each as an event:
 
-| Hook event       | event kind     | role  |
-|------------------|----------------|-------|
-| UserPromptSubmit | prompt         | user  |
-| PreToolUse       | tool_use       | tool  |
-| PostToolUse      | tool_result    | tool  |
-| Notification     | notification   | system|
+| Hook event       | event kind     | role      |
+|------------------|----------------|-----------|
+| UserPromptSubmit | prompt         | user      |
+| PreToolUse       | tool_use       | tool      |
+| PostToolUse      | tool_result    | tool      |
+| Notification     | notification   | system    |
 | Stop             | stop           | assistant |
 | SubagentStop     | stop           | assistant |
-| PreCompact       | notification   | system|
+| PreCompact       | notification   | system    |
 
 `tool_name` is taken from the hook payload for tool events. Content is the
 prompt text / tool input / tool result, **truncated to `max_content_bytes`**
@@ -298,4 +298,5 @@ feature** and the issue milestone should be updated to match.
   hooks today).
 - Recording into the agent's *own* ICM MCP session (llmenv owns a distinct
   session; not shared).
-```
+
+```text

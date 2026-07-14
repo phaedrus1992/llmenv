@@ -1741,6 +1741,9 @@ fn permission_mode_str(mode: crate::config::PermissionMode) -> &'static str {
         PermissionMode::Plan => "plan",
         PermissionMode::Default => "default",
         PermissionMode::BypassPermissions => "bypassPermissions",
+        PermissionMode::Auto => "auto",
+        PermissionMode::DontAsk => "dontAsk",
+        PermissionMode::Manual => "manual",
     }
 }
 
@@ -1765,8 +1768,9 @@ mod tests {
         HOOK_RUN_COMMAND, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, MODELED_SETTINGS_KEYS,
         STALE_CHECK_COMMAND, classify_claude_path, generate_installed_plugins_json,
         generate_settings_json, is_hook_json, merge_mcp_into_claude_json, overlay_native,
-        read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
-        render_marketplace_source, render_permission_rule, seed_install_method, strip_json_nulls,
+        permission_mode_str, read_owned_servers, reconcile_settings,
+        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
+        seed_install_method, strip_json_nulls,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -3821,5 +3825,27 @@ mod tests {
             baseline_json, with_providers_json,
             "model_providers/default_models must not affect Claude Code settings.json output"
         );
+    }
+
+    // ---- PermissionMode -> string mapping ----
+
+    #[test]
+    fn permission_mode_str_maps_all_variants() {
+        use crate::config::PermissionMode;
+        for (mode, expected) in [
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::Plan, "plan"),
+            (PermissionMode::Default, "default"),
+            (PermissionMode::BypassPermissions, "bypassPermissions"),
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::DontAsk, "dontAsk"),
+            (PermissionMode::Manual, "manual"),
+        ] {
+            assert_eq!(
+                permission_mode_str(mode),
+                expected,
+                "permission_mode_str({mode:?})"
+            );
+        }
     }
 }

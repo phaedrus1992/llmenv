@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # MCP servers in Codex
 
 Codex registers MCP servers as **`[mcp_servers.<id>]` tables inside

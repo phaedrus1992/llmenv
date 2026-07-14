@@ -7,6 +7,7 @@ priority: critical
 
 When a skill's instructions explicitly hand off to another skill (e.g. dev-sprint → ship-issue,
 ship-issue → pre-pr-review), invoke that skill immediately. Do NOT:
+
 - Stop to summarize "Phase N complete"
 - Ask if you should continue
 - Treat the handoff as a natural stopping point

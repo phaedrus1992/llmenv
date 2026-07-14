@@ -1,4 +1,6 @@
+<!-- markdownlint-disable MD013 -->
 # Comprehensive Audit: Security, Performance, Property-Test Gaps
+
 **Date:** 2026-05-26  
 **Sprint:** M9 — Polish & release  
 **Issue:** #56 (composite #64)
@@ -124,6 +126,7 @@ Three-axis audit of llmenv codebase identified **5 security structural concerns*
 **Module affected:** `config::validate`
 
 **Properties to test:**
+
 - CIDR validation: round-trip parsing, invalid formats rejected
 - Hostname validation: label rules enforced, no leading hyphens
 - Var name validation: matches regex, invalid names rejected
@@ -142,6 +145,7 @@ Three-axis audit of llmenv codebase identified **5 security structural concerns*
 **Module affected:** `scope::matcher`
 
 **Properties to test:**
+
 - Glob patterns: match idempotence, no spurious matches
 - Prefix matching: order independence of prefix sets
 
@@ -158,6 +162,7 @@ Three-axis audit of llmenv codebase identified **5 security structural concerns*
 **Module affected:** `merge::agents_md`
 
 **Properties to test:**
+
 - Determinism: same inputs → same output across runs
 - Order preservation: bundles appear in declaration order
 - Idempotence: concat(concat(a, b), c) == concat(a, concat(b, c))
@@ -175,6 +180,7 @@ Three-axis audit of llmenv codebase identified **5 security structural concerns*
 **Module affected:** `config`
 
 **Properties to test:**
+
 - Round-trip: Config → TOML → Config preserves all fields
 - Determinism: serialize always produces identical TOML
 
@@ -191,6 +197,7 @@ Three-axis audit of llmenv codebase identified **5 security structural concerns*
 **Module affected:** `paths`
 
 **Properties to test:**
+
 - Tilde expansion: `~` expands correctly, `~user` rejected
 - Relative paths: no traversal sequences in result
 - Canonicalization: multiple forms of same path normalize identically
@@ -204,7 +211,7 @@ Three-axis audit of llmenv codebase identified **5 security structural concerns*
 ## 4. Deferred & Follow-Up Issues
 
 | Issue | Category | Priority | Rationale |
-|-------|----------|----------|-----------|
+| ------- | ---------- | ---------- | ----------- |
 | Improve cache dir path validation | security | high | String matching misses edge cases |
 | Canonicalize bundle paths in merge | bug | high | Symlinks prevent cache reuse |
 | Validate adapter-returned env var names | chore | medium | Defense-in-depth |

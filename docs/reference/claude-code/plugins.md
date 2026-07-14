@@ -8,7 +8,7 @@ a distributable unit, installed from marketplaces.
 
 ## Plugin layout
 
-```
+```text
 my-plugin/
   plugin.json          # manifest
   commands/*.md
@@ -108,6 +108,7 @@ place (no clone). `llmenv export` never hits the network — it uses whatever is
 already cached.
 
 **Rendering.** The Claude Code adapter writes into `settings.json`:
+
 - `extraKnownMarketplaces` — keyed by marketplace name, `source: directory`
   pointing at llmenv's local clone, so Claude loads the synced checkout instead
   of re-fetching. Unsynced marketplaces are skipped.

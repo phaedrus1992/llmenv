@@ -55,7 +55,7 @@ Use `tracing` with structured fields and `#[instrument]`:
 ## Garbage Collection
 
 | Scenario | Mechanism |
-|----------|-----------|
+| ---------- | ----------- |
 | K8s child object cleanup | Owner references (automatic) |
 | External resource cleanup | Finalizers (programmatic) |
 | Simple object deletion | Neither — `kubectl delete` suffices |

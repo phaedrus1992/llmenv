@@ -30,18 +30,22 @@ and wait for the user to complete the flow before continuing.
 ## Sources (gather all four, in parallel)
 
 1. **llmenv session logs** — what the user actually did at the keyboard.
+
    ```bash
    "${CLAUDE_CONFIG_DIR}/skills/daily-update/scripts/scan-sessions.mjs" --date <YYYY-MM-DD>
    ```
+
    Emits a per-project digest: human prompts (noise-filtered) + the intent of any
    compacted sessions. It scans **all** llmenv profile hashes plus user global claude
    -- a single day routinely spans several projects and profiles, so trust the script
    over any single transcript.
 
 2. **GitHub** — what shipped. Scope to the work org to cut noise.
+
    ```bash
    "${CLAUDE_CONFIG_DIR}/skills/daily-update/scripts/gh-activity.sh" <YYYY-MM-DD> <owner>
    ```
+
    Returns PRs updated/merged, commits authored, and issues touched. Merged PRs and
    commit subjects are the strongest "done" signal — prefer them over log chatter.
 

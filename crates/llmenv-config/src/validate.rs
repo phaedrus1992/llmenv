@@ -792,6 +792,9 @@ mod tests {
             Just(PermissionMode::Plan),
             Just(PermissionMode::Default),
             Just(PermissionMode::BypassPermissions),
+            Just(PermissionMode::Auto),
+            Just(PermissionMode::DontAsk),
+            Just(PermissionMode::Manual),
         ]
     }
 

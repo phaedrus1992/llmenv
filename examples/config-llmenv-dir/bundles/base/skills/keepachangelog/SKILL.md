@@ -1,8 +1,11 @@
----
-name: keepachangelog
-description: Keep a Changelog format guidelines and entry writing best practices. Use when writing changelog entries, updating CHANGELOG.md, or following Keep a Changelog specification.
+<!-- markdownlint-disable MD003 MD013 MD022 MD041 -->
 ---
 
+name: keepachangelog
+description: Keep a Changelog format guidelines and entry writing best practices. Use when writing changelog entries, updating CHANGELOG.md, or following Keep a Changelog specification
+---
+
+<!-- markdownlint-disable MD024 -->
 # Keep a Changelog Format
 
 This skill provides guidelines for writing and formatting changelogs following the [Keep a Changelog](https://keepachangelog.com/) specification.
@@ -31,39 +34,39 @@ Use these categories in this order:
 
 ### Category Guidelines
 
-**Added**
+#### Added
 
 - New user-facing features
 - New API endpoints
 - New configuration options
 - New integrations
 
-**Changed**
+#### Changed
 
 - Performance improvements
 - UX/UI changes
 - Default value changes
 - Behavior modifications
 
-**Deprecated**
+#### Deprecated
 
 - Features planned for removal
 - APIs being replaced
 - Include migration path when possible
 
-**Removed**
+#### Removed
 
 - Breaking changes (removed functionality)
 - Deleted APIs or features
 - Always note what replaced it (if applicable)
 
-**Fixed**
+#### Fixed
 
 - Bug corrections
 - Error handling improvements
 - Edge case fixes
 
-**Security**
+#### Security
 
 - Vulnerability patches
 - Security-related fixes
@@ -104,7 +107,7 @@ Write from the user's perspective:
 
 Use parenthetical context for clarity:
 
-```
+```text
 - Add OAuth2 support (Google, GitHub)
 - Fix timezone handling (UTC offset calculation)
 - Change rate limit (100 -> 500 requests/minute)
@@ -174,7 +177,7 @@ Changelog categories map to version bumps:
 
 #### Good Examples
 
-```
+```text
 - Add user authentication with email/password and OAuth (Google, GitHub)
 - Add bulk export of transactions to CSV and Excel formats
 - Add keyboard shortcuts for common actions (Ctrl+S to save, Ctrl+Z to undo)
@@ -196,7 +199,7 @@ Changelog categories map to version bumps:
 
 #### Good Examples
 
-```
+```text
 - Improve search performance (3x faster for large datasets)
 - Change default session timeout from 30 minutes to 2 hours
 - Update password requirements: minimum 12 characters, 1 number required
@@ -218,7 +221,7 @@ Changelog categories map to version bumps:
 
 #### Good Examples
 
-```
+```text
 - Fix crash when uploading files larger than 10MB
 - Fix incorrect tax calculation for international orders
 - Fix login button not responding on mobile Safari
@@ -240,7 +243,7 @@ Changelog categories map to version bumps:
 
 #### Good Examples
 
-```
+```text
 - Remove deprecated /api/v1 endpoints (use /api/v2 instead)
 - Remove support for Internet Explorer 11
 - Remove "Classic" theme (migrate to "Modern" theme in settings)
@@ -260,7 +263,7 @@ Changelog categories map to version bumps:
 
 #### Good Examples
 
-```
+```text
 - Deprecate /api/v1/users endpoint (use /api/v2/users, removal in v3.0)
 - Deprecate XML export format (use JSON export, removal in 6 months)
 - Deprecate "Classic" theme (will be removed in next major version)
@@ -329,7 +332,7 @@ When technical details help users, include them appropriately:
 
 #### Good Examples
 
-```
+```text
 - Add GraphQL API alongside existing REST API
 - Add WebSocket support for real-time updates (replaces polling)
 - Fix N+1 query issue causing slow dashboard load
