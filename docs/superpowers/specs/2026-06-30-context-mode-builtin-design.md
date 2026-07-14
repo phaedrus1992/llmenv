@@ -51,12 +51,14 @@ so a future reader doesn't try to "unify" the two feature mechanisms.
 ## Scope
 
 In scope:
+
 - Delete `LLMENV_BASH_BAN` deny-wiring and its documentation example.
 - Add `features.context_mode` schema (`enabled: bool`, no tag-scoping).
 - Auto-inject marketplace + plugin + state-dir env var + MCP permission when enabled.
 - Update `doctor` token-efficiency check to report the built-in feature.
 
 Out of scope:
+
 - Tag-scoping context-mode (decided: enable/disable only).
 - Pinning context-mode to a version (decided: track latest via normal marketplace sync).
 - Fixing context-mode's own self-heal hook that writes into the config dir ignoring
@@ -208,7 +210,7 @@ if cm_enabled {
 
 ## Data flow
 
-```
+```text
 config.yaml: features.context_mode.enabled: true
         │
         ├─ resolve_plugins ──► inject context-mode marketplace + plugin
@@ -317,4 +319,5 @@ collection that already lists context-mode (dedup).
 - `CHANGELOG.md` — Unreleased entry (added: context-mode built-in; removed: LLMENV_BASH_BAN)
 - `examples/config-llmenv-dir/config.yaml` — illustrative: show `features.context_mode`
   replacing the manual wiring (docs-only; example is not product code)
-```
+
+```text

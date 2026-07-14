@@ -47,7 +47,7 @@ capabilities:
 You're on `ranger-mbp` inside `restricted-project/`. Two scopes are active:
 
 | Scope | Source | Tags added |
-|---|---|---|
+| --- | --- | --- |
 | `host:my-laptop` | config.yaml | `me` |
 | `project` | `.llmenv.yaml` | `restricted` |
 
@@ -62,7 +62,7 @@ Active tag set: `{me, restricted}`
 
 The project marker declares its own `capabilities.permissions`. Project scope wins:
 
-```
+```text
 Final permissions:
   allow: "Bash(git *)"
   allow: "Read(*)"

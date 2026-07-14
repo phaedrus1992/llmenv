@@ -4,18 +4,18 @@ Quick reference for parsing cleave JSON output. Full docs: `~/git/reference/clea
 
 ## Finding Fields
 
-| Field        | Type            | Notes                                                    |
-|--------------|-----------------|----------------------------------------------------------|
-| `id`         | string          | e.g. `objectives/evasion/process::injection`             |
-| `kind`       | string          | `capability` (default, omitted), `structural`, `indicator`, `weakness` |
-| `desc`       | string          | Human-readable description                               |
-| `conf`       | float [0,1]     | 0.5 = heuristic, 1.0 = definitive                       |
-| `crit`       | int 0-5         | See criticality table below                              |
-| `mbc`        | string          | MBC code, e.g. `C0002` (omitted if unset)               |
-| `attack`     | string          | ATT&CK technique, e.g. `T1055` (omitted if unset)       |
-| `trait_refs` | string[]        | Trait IDs that contributed                               |
-| `evidence`   | Evidence[]      | Supporting evidence items                                |
-| `match_count`| int             | Total matches when evidence is truncated                 |
+| Field         | Type        | Notes                                                                  |
+|---------------|-------------|------------------------------------------------------------------------|
+| `id`          | string      | e.g. `objectives/evasion/process::injection`                           |
+| `kind`        | string      | `capability` (default, omitted), `structural`, `indicator`, `weakness` |
+| `desc`        | string      | Human-readable description                                             |
+| `conf`        | float [0,1] | 0.5 = heuristic, 1.0 = definitive                                      |
+| `crit`        | int 0-5     | See criticality table below                                            |
+| `mbc`         | string      | MBC code, e.g. `C0002` (omitted if unset)                              |
+| `attack`      | string      | ATT&CK technique, e.g. `T1055` (omitted if unset)                      |
+| `trait_refs`  | string[]    | Trait IDs that contributed                                             |
+| `evidence`    | Evidence[]  | Supporting evidence items                                              |
+| `match_count` | int         | Total matches when evidence is truncated                               |
 
 ## Criticality
 
@@ -39,7 +39,7 @@ Quick reference for parsing cleave JSON output. Full docs: `~/git/reference/clea
 
 ## Top-level JSON Shape (full scan)
 
-```
+```json
 {
   "version": "3",
   "analysis_timestamp": "<RFC3339>",
@@ -62,7 +62,7 @@ Quick reference for parsing cleave JSON output. Full docs: `~/git/reference/clea
 
 When running `cleave diff`, the top-level `diff` field is populated:
 
-```
+```json
 {
   ...,                        // same as full scan
   "diff": {

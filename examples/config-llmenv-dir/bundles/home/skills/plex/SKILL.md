@@ -1,4 +1,6 @@
+<!-- markdownlint-disable MD003 MD013 MD022 MD041 -->
 ---
+
 name: plex
 description: >
   Interact with the local Plex Media Server using plexctl. Use for: browsing and
@@ -6,7 +8,7 @@ description: >
   playback history, collections); and curating music playlists from abstract
   descriptions of mood, energy, atmosphere, or style. Triggers: "what's in plex",
   "show me my music", "create a playlist for", "plex query", "what have I been
-  watching", "find me something to listen to", "make a playlist that feels like".
+  watching", "find me something to listen to", "make a playlist that feels like"
 ---
 
 # Plex Skill
@@ -29,17 +31,18 @@ plexctl library list -o json-pretty
 ```
 
 Libraries (cached; re-run if uncertain):
-| key | title | type |
-|-----|-------|------|
-| 1   | Anime | show |
-| 2   | Movies | movie |
-| 3   | TV Shows | show |
-| 8   | Music | artist |
-| 10  | Miscellaneous | movie |
-| 14  | Audiobooks | artist |
-| 22  | Music Videos | artist |
-| 23  | Hockey | show |
-| 27  | Whisky | movie |
+
+| key | title         | type   |
+|-----|---------------|--------|
+| 1   | Anime         | show   |
+| 2   | Movies        | movie  |
+| 3   | TV Shows      | show   |
+| 8   | Music         | artist |
+| 10  | Miscellaneous | movie  |
+| 14  | Audiobooks    | artist |
+| 22  | Music Videos  | artist |
+| 23  | Hockey        | show   |
+| 27  | Whisky        | movie  |
 
 ---
 
@@ -94,6 +97,7 @@ plexctl history -o json-pretty --since 3h
 Parse JSON with `uv run python3` inline:
 
 **Genre breakdown for music library:**
+
 ```bash
 plexctl library show 8 -o json-pretty --all | uv run python3 -c "
 import json, sys
@@ -109,6 +113,7 @@ for genre, count in genres.most_common(20):
 ```
 
 **Artists by country:**
+
 ```bash
 plexctl library show 8 -o json-pretty --all | uv run python3 -c "
 import json, sys
@@ -124,6 +129,7 @@ for country, count in countries.most_common(20):
 ```
 
 **Recently added (last N days):**
+
 ```bash
 plexctl library show 8 -o json-pretty --all | uv run python3 -c "
 import json, sys, time
@@ -139,6 +145,7 @@ for i in recent:
 ```
 
 **History summary (most-played artists this week):**
+
 ```bash
 plexctl history -o json-pretty --since 1w | uv run python3 -c "
 import json, sys
@@ -164,7 +171,7 @@ When user describes mood/energy/atmosphere/style, produce curated track list fro
 Map description to genre tags, keywords, artist archetypes. Be specific:
 
 | Abstract | Genre signals to look for |
-|----------|--------------------------|
+| ---------- | -------------------------- |
 | Late-night driving | Synthwave, Dark Ambient, Post-Rock, Shoegaze |
 | High energy / workout | Metal, Industrial, Punk, Drum & Bass, Hardcore |
 | Focus / concentration | Ambient, Drone, Minimalist, Classical, Lo-Fi |
@@ -226,7 +233,8 @@ cat ~/.plexctl.yaml
 ```
 
 The Plex API endpoint for creating a playlist:
-```
+
+```text
 POST /playlists?type=audio&title=<name>&smart=0&uri=<track-uris>&X-Plex-Token=<token>
 ```
 

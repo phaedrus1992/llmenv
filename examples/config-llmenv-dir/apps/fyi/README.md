@@ -50,7 +50,7 @@ Cron alternative (if you don't want launchd):
 ## Files
 
 | File | Role |
-|------|------|
+| ------ | ------ |
 | `server.py` | localhost server: UI + JSON API + check persistence |
 | `merge.py` | deterministic smart-merge (`python3 merge.py --selftest` to verify) |
 | `refresh.sh` | headless scan -> `data/scan.json` -> merge |

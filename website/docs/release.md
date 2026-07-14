@@ -9,7 +9,8 @@ Releases are triggered by pushing a `v*` tag. The release workflow:
 1. **Builds binaries** for macOS (arm64, x86_64) and Linux (x86_64)
 2. **Generates SHA256 checksums** and SLSA v1.0 provenance attestations
 3. **Publishes to crates.io** (requires valid `CARGO_REGISTRY_TOKEN` secret)
-4. **Creates a GitHub Release** with binaries, checksums, SLSA provenance, and the changelog notes for the version in the release body
+4. **Creates a GitHub Release** with binaries, checksums, SLSA provenance, and the changelog
+   notes for the version in the release body
 
 ## Changelog
 
@@ -56,7 +57,8 @@ cargo release <patch|minor|major> --execute  # apply
 ```
 
 It is configured (in `release.toml`) to **not** tag, publish, or push — all
-three happen in the steps below. Full details in [`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RELEASING.md).
+three happen in the steps below. Full details in
+[`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RELEASING.md). <!-- markdownlint-disable-line MD013 -->
 
 ## Version Tags
 
@@ -82,6 +84,7 @@ commit would still fire — make sure you're tagging the merged result.
 ### GitHub Releases
 
 Pre-built binaries are attached to each release on GitHub:
+
 - `llmenv-linux-x86_64` — Linux x86_64
 - `llmenv-macos-x86_64` — macOS Intel (x86_64)
 - `llmenv-macos-aarch64` — macOS Apple Silicon (arm64)
@@ -117,8 +120,9 @@ cargo install llmenv
 ```
 
 **Prerequisites:**
+
 - A valid `CARGO_REGISTRY_TOKEN` must be set as a GitHub Actions secret
-- Generate tokens at https://crates.io/me
+- Generate tokens at `https://crates.io/me`
 
 ### Homebrew
 
@@ -145,8 +149,9 @@ To add a new platform (e.g., Windows, aarch64 Linux):
 1. Update `.github/workflows/release.yml`:
    - Add a new matrix entry under `build-binaries`
    - Set `os`, `target`, `asset_name`
-   
+
 2. Test locally:
+
    ```bash
    rustup target add <target>
    cargo build --release --target <target>
@@ -175,6 +180,7 @@ The release workflow requires two secrets (repo Settings → Secrets and variabl
 - `HOMEBREW_TAP_TOKEN` — GitHub PAT with write access to `phaedrus1992/homebrew-tap`
 
 **Security notes:**
+
 - The token is passed via environment variable (never command-line arguments)
 - GitHub Actions automatically masks secret values in logs
 - Always use fine-grained tokens with minimal scope (publish-only)
@@ -188,7 +194,7 @@ without picking up new feature work.
 **Backport policy** — fixes are applied (when feasible) to:
 
 | Branch | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `release/X.X.x` | Current major.minor — always patched |
 | `release/X.(X-1).x` | Previous minor of the current major — always patched |
 | `release/(X-1).Y.x` | Last minor branch of the previous major — always patched |
@@ -200,21 +206,25 @@ workflow in [`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RE
 
 ## Troubleshooting
 
-**Release workflow doesn't trigger**
+### Release workflow doesn't trigger
+
 - Verify the tag was pushed: `git push origin "vX.Y.Z"`
 - Check GitHub Actions tab for the workflow run
 - Confirm the tag format matches `v*` (the workflow trigger pattern)
 
-**Publish fails with "unauthorized"**
+### Publish fails with "unauthorized"
+
 - Verify `CARGO_REGISTRY_TOKEN` is valid and has `publish` scope
 - Check token hasn't expired
 
-**Binary artifacts missing from release**
+### Binary artifacts missing from release
+
 - Check the `build-binaries` job succeeded in Actions tab
 - Verify artifact paths match in `create-release`
 - Checksums should always be generated automatically
 
-**Checksum verification fails**
+### Checksum verification fails
+
 - Ensure you're on the same system/shell as the release CI
 - Download the binary and checksums.txt from the same release
 - Run `sha256sum -c checksums.txt` in the download directory

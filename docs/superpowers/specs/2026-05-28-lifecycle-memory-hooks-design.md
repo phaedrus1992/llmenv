@@ -74,11 +74,11 @@ Claude Code and Codex use nearly identical hook vocabularies and the *same*
 context-injection JSON (`hookSpecificOutput.additionalContext`). The two intents
 this feature most needs map 1:1 across both engines; the third has a gap on Codex:
 
-| Neutral event  | Intent                              | Claude Code       | Codex            |
-| -------------- | ----------------------------------- | ----------------- | ---------------- |
-| `session_start`| inject context once at session begin| `SessionStart`    | `SessionStart`   |
-| `turn_start`   | inject context per user prompt/turn | `UserPromptSubmit`| `UserPromptSubmit`|
-| `session_end`  | run on session end (store)          | `SessionEnd`      | no equivalent¹   |
+| Neutral event | Intent | Claude Code | Codex |
+| --- | --- | --- | --- |
+| `session_start` | inject context once at session begin | `SessionStart` | `SessionStart` |
+| `turn_start` | inject context per user prompt/turn | `UserPromptSubmit` | `UserPromptSubmit` |
+| `session_end` | run on session end (store) | `SessionEnd` | no equivalent¹ |
 
 ¹ Codex has no documented session-end hook; the closest is `Stop` (per-turn). A
 future Codex adapter decides whether to map `session_end` to `Stop`, polyfill, or
@@ -88,7 +88,7 @@ omit. That decision lives in the adapter, not the dispatcher.
 
 ### Command surface
 
-```
+```text
 llmenv hook-run <event>      # event ∈ { session_start, turn_start, session_end }
 ```
 
@@ -109,7 +109,7 @@ command surface.
 
 New module `src/hook_run/` (sibling to `src/icm.rs`):
 
-```
+```text
 src/hook_run/
   mod.rs        # dispatch(event) -> ordered actions; run() entry called by CLI
   action.rs     # Action enum { WakeUp, Recall, Store } + per-action logic

@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # Design: engine capabilities (replacing the `settings.json` stub)
 
 Status: proposed — 2026-05-27
@@ -15,7 +17,7 @@ wrong-shaped stub:
 
 Issue #34 ("generate settings.json from merged hook + permission bundles") was
 once marked CLOSED/COMPLETED but never implemented. It is now implemented across
-#90 (hooks), #91 (native passthrough), and #34 itself (neutral permission
+issues #90 (hooks), #91 (native passthrough), and #34 itself (neutral permission
 rendering): bundles declare capabilities in `bundle.yaml` (the TOML proposal in
 the original ticket predates the YAML switch and is dropped), the cross-bundle
 merge lives in `crate::merge`, and `ClaudeCodeAdapter::generate_settings_json`
@@ -83,7 +85,7 @@ inside it).
 
 ```yaml
 permissions:
-  default_mode: acceptEdits        # neutral: acceptEdits | plan | default | bypassPermissions
+  default_mode: acceptEdits        # neutral: acceptEdits | plan | default | auto | dontAsk | manual | bypassPermissions
   allow:
     - { tool: Bash, pattern: "git diff *" }
     - { tool: Read, paths: ["./src"] }
@@ -269,7 +271,7 @@ bundle fragments compose identically.
   a `native_mcp` fragment's `enabledMcpjsonServers` key is dropped rather than
   propagated.
 - **O2** — Neutral `default_mode` vocabulary: adopt Claude's
-  (`acceptEdits`/`plan`/`default`/`bypassPermissions`) as the neutral set, or
+  (`acceptEdits`/`plan`/`default`/`auto`/`dontAsk`/`manual`/`bypassPermissions`) as the neutral set, or
   invent engine-neutral names? Claude's are reasonable defaults.
 - **O3** — Conflict policy between modeled capability and `native` passthrough.
   *Partially resolved:* the **mergeable** case is a deep-merge, not a conflict —
@@ -303,7 +305,7 @@ bundle fragments compose identically.
 Tracking the two-layer invariant (generic + per-engine `native`) per feature:
 
 | Feature | (a) generic | (b) native override | Notes |
-|---------|-------------|---------------------|-------|
+| --------- | ------------- | --------------------- | ------- |
 | Permissions | done | done (`native_permissions.<engine>`) | rendered into `settings.json`; native wins over conflicting neutral rule |
 | Hooks | done | done (`native_hooks.<engine>`) | fragment deep-merged onto the `hooks` object; shared events concat entries |
 | Plugins | done | done (`native_plugins.<engine>`) | fragment deep-merged onto settings top-level |

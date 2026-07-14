@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Global Development Standards
 
 Project CLAUDE.md override defaults.
@@ -37,6 +38,7 @@ Project CLAUDE.md override defaults.
 ## Code Quality
 
 Hard limits:
+
 1. ≤100 lines/function, complexity ≤8
 2. ≤5 positional params
 3. 100 char lines
@@ -52,6 +54,7 @@ Error handling: fail fast w/ context (operation, input, fix). Never swallow sile
 Code review: architecture → quality → tests → performance. Sync remote first. Concrete file:line issues, options + tradeoffs, one recommendation.
 
 Testing:
+
 - Test behavior not implementation (refactors no break tests)
 - Test edges + errors (empty, boundary, malformed, missing, network failure)
 - Mock boundaries only (network, filesystem, external). Never internal logic
@@ -64,6 +67,7 @@ Testing:
 Two separate things. No conflate.
 
 **Issue tracking** = bug/feature/etc. dev — permanent planning.
+
 - Project use GitHub + Issues enabled → use GitHub Issues for ALL permanent planning.
 - Only if GitHub Issues unavailable → use `yx` (Yaks) for project planning.
 
@@ -72,6 +76,7 @@ Two separate things. No conflate.
 **Before coding:** check existing issue/task for work.
 
 **File GitHub Issue (or Yaks task if no GitHub) when user:**
+
 - Asks fix/feature/code change
 - Asks investigation/plan resulting in code changes
 - Mentions future work ("should also…", "what about…")
@@ -81,7 +86,8 @@ No use Claude's TaskCreate/TaskList/TaskUpdate (ephemeral multi-agent only).
 Check list at breaks (finishing task). Put enough context for offline implementation.
 
 Yaks commands:
-```
+
+```text
 yx ls --format json                         # Discover work
 yx state "fix bug" wip                      # Claim
 echo "notes" | yx field "fix bug" progress  # Update
@@ -96,7 +102,7 @@ Look up current stable versions for deps/CI/tools. Never assume from memory.
 ### CLI Tools
 
 | Tool | Replaces | Usage |
-|------|----------|-------|
+| ------ | ---------- | ------- |
 | `rg` | grep | Fast regex search |
 | `fd` | find | Fast file finder |
 | `ast-grep` | - | AST code search |
@@ -115,7 +121,7 @@ Prefer `ast-grep` for code structure. Use `rg` for strings/logs. Use `git grep` 
 **Runtime:** 3.13 + `uv venv`
 
 | Purpose | Tool |
-|---------|------|
+| --------- | ------ |
 | deps | `uv` |
 | lint/format | `ruff check` / `ruff format` |
 | types | `ty check` |
@@ -129,7 +135,7 @@ Tests: `tests/` mirror package structure. Audit before deploy. Pin versions. Has
 **Runtime:** Node 22 LTS, ESM only
 
 | Purpose | Tool |
-|---------|------|
+| --------- | ------ |
 | lint | `oxlint` |
 | format | `oxfmt` |
 | test | `vitest` |
@@ -146,7 +152,7 @@ Colocate `*.test.ts`. Supply chain: audit before install, pin versions (no `^`/`
 **Runtime:** Latest stable via `rustup`
 
 | Purpose | Tool |
-|---------|------|
+| --------- | ------ |
 | build | `cargo` |
 | lint | `cargo clippy --all-targets --all-features -- -D warnings` |
 | format | `cargo fmt` |
@@ -175,22 +181,25 @@ Pin to SHA + version comment. Scan w/ `zizmor`. Dependabot: 7-day cooldown, grou
 
 ### Kubernetes
 
-Use `kubernetes` MCP server when possible. Install if missing: https://github.com/containers/kubernetes-mcp-server/
+Use `kubernetes` MCP server when possible. Install if missing: <https://github.com/containers/kubernetes-mcp-server/>
 
 ## Workflow
 
 **Before commit:**
+
 1. Re-read changes (complexity, duplication, naming)
 2. Run relevant tests
 3. Run linters + type checker (fix all)
 
 **Branch Protection:**
+
 - **NEVER commit direct to `main`** — protected branch, all changes via feature branch + PR
 - Create feature branch **before** triggering subagents that interact w/ code
 - Always use feature branch (`fix/`, `docs/`, `feat/`, etc.)
 - Subagents auto work on current branch; if on main, switch to feature branch first
 
 **Commits:**
+
 - Imperative mood, ≤72 char subject, one logical change
 - No description field, no "by claude", no "Co-Authored-By"
 - Never amend/rebase pushed commits
@@ -198,10 +207,12 @@ Use `kubernetes` MCP server when possible. Install if missing: https://github.co
 - Never commit secrets. Use `.env` + env vars
 
 **Hooks + Worktrees:**
+
 - Install prek (`prek install`). Run before commit. Auto-update: `prek auto-update --cooldown-days 7`
 - Parallel subagents = separate worktrees (`wt switch <branch>`). Never share directories.
 
 **PRs:**
+
 - Title ≤70 chars
 - Describe what code does now, not discarded approaches
 - Plain language: bug fix = bug fix (no "critical stability")
@@ -211,7 +222,7 @@ Use `kubernetes` MCP server when possible. Install if missing: https://github.co
 - Monitor CI (`gh run watch` / `gh pr checks --watch`)
 - No Copilot review wait if not enabled
 
-# RTK - Rust Token Killer
+## RTK - Rust Token Killer
 
 **Usage**: Token-optimized CLI proxy (60-90% savings on dev operations)
 

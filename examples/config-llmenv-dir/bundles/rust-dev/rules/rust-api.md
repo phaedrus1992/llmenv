@@ -90,14 +90,17 @@ closed-source / internal crates, skip `C-METADATA`, `C-PERMISSIVE`, `C-STABLE`.
 
 - **Sealed traits for internal extension points (C-SEALED).** Seal traits you control so adding
   methods later isn't a breaking change:
+
   ```rust
   mod private { pub trait Sealed {} }
   pub trait Factory<T>: private::Sealed { /* ... */ }
   ```
+
   Documents intent and prevents accidental impls in sibling crates.
 - **Private struct fields by default (C-STRUCT-PRIVATE).** Public fields freeze layout and prevent
   adding invariants. Use accessors or constructors.
 - **No trait bounds on struct definitions (C-STRUCT-BOUNDS).** Bound the `impl` blocks instead:
+
   ```rust
   // Bad
   struct Foo<T: Clone> { data: T }
