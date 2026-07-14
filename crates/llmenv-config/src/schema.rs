@@ -610,14 +610,14 @@ pub struct NativePermissionRules {
 /// Neutral default permission mode. Adopts Claude Code's vocabulary as the
 /// engine-neutral set (open question O2 resolved in favor of reuse).
 ///
-/// ## Scope notes
+/// `Auto` — Claude Code only honors this from user-scope settings. With
+/// llmenv's single-config model (`CLAUDE_CONFIG_DIR`) it always applies.
+/// The restriction only matters for Claude Code's own multi-source config
+/// discovery when running without llmenv.
 ///
-/// - `Auto` — Claude Code only honors this from user-scope
-///   `~/.claude/settings.json`, not project/local. An llmenv-rendered
-///   project-scoped settings.json with `auto` will silently fall back to
-///   `default` on the Claude Code side. Worth documenting on
-///   `capabilities.permissions.default_mode`.
-/// - `Manual` — alias for `Default` in Claude Code's own string mapping.
+/// `Manual` — maps to the string `"manual"`, which Claude Code treats
+/// equivalently to `default`. Prefer `Default` unless you specifically need
+/// the `manual` identity for Claude Code compatibility.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {

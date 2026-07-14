@@ -3053,18 +3053,20 @@ mod tests {
     #[test]
     fn permission_mode_str_maps_all_variants() {
         use crate::config::PermissionMode;
-        assert_eq!(
-            permission_mode_str(PermissionMode::AcceptEdits),
-            "acceptEdits"
-        );
-        assert_eq!(permission_mode_str(PermissionMode::Plan), "plan");
-        assert_eq!(permission_mode_str(PermissionMode::Default), "default");
-        assert_eq!(
-            permission_mode_str(PermissionMode::BypassPermissions),
-            "bypassPermissions"
-        );
-        assert_eq!(permission_mode_str(PermissionMode::Auto), "auto");
-        assert_eq!(permission_mode_str(PermissionMode::DontAsk), "dontAsk");
-        assert_eq!(permission_mode_str(PermissionMode::Manual), "manual");
+        for (mode, expected) in [
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::Plan, "plan"),
+            (PermissionMode::Default, "default"),
+            (PermissionMode::BypassPermissions, "bypassPermissions"),
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::DontAsk, "dontAsk"),
+            (PermissionMode::Manual, "manual"),
+        ] {
+            assert_eq!(
+                permission_mode_str(mode),
+                expected,
+                "permission_mode_str({mode:?})"
+            );
+        }
     }
 }
