@@ -1,7 +1,10 @@
+<!-- markdownlint-disable MD003 MD013 MD022 MD041 -->
 ---
 paths:
-  - "**/*.ts"
-  - "**/*.tsx"
+
+- "**/*.ts"
+- "**/*.tsx"
+
 ---
 
 # TypeScript Rules
@@ -25,7 +28,7 @@ ESM only (`"type": "module"` in `package.json`). No CommonJS, no `require`.
 ## Naming
 
 | Style | Use for |
-|-------|---------|
+| ------- | --------- |
 | `UpperCamelCase` | Classes, interfaces, types, enums, type parameters, React components |
 | `lowerCamelCase` | Variables, parameters, functions, methods, properties |
 | `CONSTANT_CASE` | Global constants, enum values, `static readonly` class properties |
@@ -280,7 +283,7 @@ const POLL_TIMEOUT_MS = 30_000;
 ## Anti-Patterns
 
 | Never do this | Do this instead |
-|---------------|-----------------|
+| --------------- | ----------------- |
 | `any` | `unknown` + type narrowing |
 | `export default` | Named exports |
 | `var` | `const` / `let` |
@@ -290,7 +293,7 @@ const POLL_TIMEOUT_MS = 30_000;
 | Type assertions (`as Foo`) without justification | Runtime type guards / narrowing |
 | `as unknown as Foo` chains | Create type-safe wrappers or add proper narrowing — chaining through `unknown` bypasses the type system |
 | Non-null assertions (`x!`) without justification | Null checks |
-| `== ` / `!=` (except `== null`) | `===` / `!==` |
+| `==` / `!=` (except `== null`) | `===` / `!==` |
 | `new String()` / `new Boolean()` / `new Number()` | Primitive literals |
 | `Array()` constructor | Array literals `[]` |
 | `namespace` | ES modules |

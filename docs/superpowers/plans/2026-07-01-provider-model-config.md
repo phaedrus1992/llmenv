@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Provider/Model Config Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -41,6 +42,7 @@ a dev-dependency).
 ### Task 1: Schema types + `Capabilities` fields
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/schema.rs` (add types after `LspServer`,
   which ends around line 705; add `Capabilities` fields after `host` at
   line ~319; update `Capabilities::is_empty()` around line ~334)
@@ -49,6 +51,7 @@ a dev-dependency).
   search `mod tests` in the same file)
 
 **Interfaces:**
+
 - Produces: `ModelProvider{id: String, name: Option<String>, when: Vec<String>,
   base_url: Option<String>, api_type: Option<String>, api_key: Option<String>,
   headers: BTreeMap<String,String>, disabled: bool, models: Vec<ModelSource>}`
@@ -297,6 +300,7 @@ requires Capabilities: Eq as a trait bound."
 ### Task 2: Validation rules
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/validate.rs` (add error variants to
   `ValidateError` enum at line ~154, add `validate_model_providers`/
   `validate_default_models` methods near `validate_lsp` at line ~518, wire
@@ -306,6 +310,7 @@ requires Capabilities: Eq as a trait bound."
   `config_with_lsp`-style helper or build one following that pattern)
 
 **Interfaces:**
+
 - Consumes: `ModelProvider`, `ModelSource`, `ModelRef` from Task 1.
 - Produces: `ValidateError::ModelProviderEmptyId`,
   `ValidateError::ModelProviderDuplicateId(String)`,
@@ -499,6 +504,7 @@ strings, never joined to a filesystem path."
 ### Task 3: Merge rules
 
 **Files:**
+
 - Modify: `src/merge/capabilities.rs` (extend `merge_capabilities` around
   line 43-157; add a `resolve_default_models` function alongside
   `resolve_env` at line ~243)
@@ -506,6 +512,7 @@ strings, never joined to a filesystem path."
   helper and the existing `lsp`/`mcp` merge tests near line 632+)
 
 **Interfaces:**
+
 - Consumes: `ModelProvider`, `ModelRef` from Task 1; `dedup` from
   `crate::util` (already imported at line 23).
 - Produces: `merge_capabilities` now populates
@@ -770,6 +777,7 @@ error, matching the env/default_mode scalar policy."
 ### Task 4: `AgentAdapter` capability probe
 
 **Files:**
+
 - Modify: `src/adapter/mod.rs` (add trait method after `supports_lsp` at
   line 32; extend the `registry_adapter_trait_probes` test at the bottom of
   the file)
@@ -778,6 +786,7 @@ error, matching the env/default_mode scalar policy."
 - Modify: `src/adapter/crush.rs` (add impl after `supports_lsp` at line 35)
 
 **Interfaces:**
+
 - Produces: `AgentAdapter::supports_model_providers(&self) -> bool`
 
 - [ ] **Step 1: Write the failing test**
@@ -868,10 +877,12 @@ no provider switching), CrushAdapter true."
 ### Task 5: `CrushAdapter` rendering — confirm `catwalk.Model` field names
 
 **Files:**
+
 - None modified — this is a research-only task that produces the exact
   field mapping Task 6 needs. Its output is a comment block, not code.
 
 **Interfaces:**
+
 - Produces: a confirmed mapping from `ModelSource` fields to
   `catwalk.Model`'s literal JSON tags, to paste into Task 6's render
   function as a doc comment.
@@ -918,6 +929,7 @@ any `json!()` calls that depend on it.
 ### Task 6: `CrushAdapter` rendering
 
 **Files:**
+
 - Modify: `src/adapter/crush.rs` (add `render_model_providers` and
   `render_default_models` functions alongside `render_lsp` at line 369; call
   both from `materialize()` where `render_lsp`'s result is inserted into
@@ -928,6 +940,7 @@ any `json!()` calls that depend on it.
   `materialize_lsp_server_written`/`materialize_lsp_empty_omitted`)
 
 **Interfaces:**
+
 - Consumes: `ModelProvider`, `ModelSource`, `ModelCost`, `ModelRef` from
   Task 1; the confirmed `catwalk.Model` field-name mapping from Task 5.
 - Produces: `render_model_providers(providers: &[ModelProvider]) ->
@@ -1142,10 +1155,12 @@ pre-validate."
 ### Task 7: Property tests
 
 **Files:**
+
 - Modify: `src/adapter/crush.rs` (add proptest cases in the existing
   `proptest! { ... }` block alongside `prop_render_lsp_*`)
 
 **Interfaces:**
+
 - Consumes: `render_model_providers`, `render_model_source`,
   `render_default_models` from Task 6.
 
@@ -1230,6 +1245,7 @@ no-panic on arbitrary input."
 ### Task 8: Docs + changelog
 
 **Files:**
+
 - Modify: `CHANGELOG.md` (add an `[Unreleased]` entry)
 - Modify: any user-facing config reference docs that enumerate
   `Capabilities` fields (check `docs/` for an existing `mcp`/`lsp`
@@ -1237,6 +1253,7 @@ no-panic on arbitrary input."
   them — search `docs/` for where `lsp:` is documented as a config key)
 
 **Interfaces:**
+
 - None — documentation only.
 
 - [ ] **Step 1: Find the existing LSP documentation**
@@ -1250,6 +1267,7 @@ grep -rln "lsp:" docs/ README.md 2>/dev/null | grep -v superpowers
 Following whatever format the found file(s) use for `lsp:`/`mcp:` (field
 table, YAML example, or prose — match the existing style exactly rather than
 introducing a new format), document:
+
 - `model_providers`: full field list from Task 1, with a minimal example
   (the Ollama example from Task 1's round-trip test works as-is).
 - `default_models`: the role-map shape, with an example showing both
@@ -1272,6 +1290,7 @@ git commit -m "docs: document model_providers/default_models config for #508"
 ## Self-Review
 
 **Spec coverage:**
+
 - Schema (ModelProvider/ModelSource/ModelCost/ModelRef, Capabilities fields) → Task 1. ✓
 - Merge & validation rules → Tasks 2, 3. ✓
 - Adapter rendering (capability probe, CrushAdapter render, ClaudeCodeAdapter no-op) → Tasks 4, 5, 6. ✓

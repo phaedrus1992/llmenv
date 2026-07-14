@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Consolidated gap analysis — what a CodexAdapter must build
 
 llmenv has **no Codex adapter**. This page consolidates the per-surface findings

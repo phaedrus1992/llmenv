@@ -12,7 +12,7 @@ This is the synthesis page. Per-surface detail lives in the sibling docs.
 | --- | --- | --- | --- |
 | Instructions | `CLAUDE.md` | ✅ Full | — |
 | Rules | `rules/*.md` | ✅ Full (native convention) | — |
-| MCP servers | `.claude.json` `mcpServers` | ✅ Full (merged read-write; minor: no auth headers, no stale-server pruning) | Low |
+| MCP servers | `.claude.json` `mcpServers` | ✅ Full (merged read-write; minor: no auth headers, no stale-server pruning) | Low <!-- markdownlint-disable-line MD013 --> |
 | Memory backend | (via MCP) | ✅ Full (ICM desugars to MCP) | — |
 | **settings.json** | `settings.json` | ❌ **Stub, wrong shape** | **Critical** |
 | **Hooks wiring** | `settings.json.hooks` | ❌ Files copied, never registered | **High** |

@@ -1,6 +1,8 @@
+<!-- markdownlint-disable MD003 MD013 MD022 MD041 -->
 ---
+
 name: cleave-scan
-description: This skill should be used when the user asks to "run cleave", "scan with cleave", "cleave this project", "check for supply-chain issues", "run a security scan", or "find malware indicators". Runs cleave static analysis on a project and files GitHub issues for findings. Uses ICM memory to track the last-scanned git revision per project and uses `cleave diff` on subsequent runs instead of a full scan.
+description: This skill should be used when the user asks to "run cleave", "scan with cleave", "cleave this project", "check for supply-chain issues", "run a security scan", or "find malware indicators". Runs cleave static analysis on a project and files GitHub issues for findings. Uses ICM memory to track the last-scanned git revision per project and uses `cleave diff` on subsequent runs instead of a full scan
 ---
 
 # Cleave Scan
@@ -31,11 +33,12 @@ If the path is not a git repo, `CURRENT_REV` stays empty — full scan always, n
 
 ## Step 3 — Check ICM for Last Scan
 
-```
+```text
 mcp__icm__icm_memory_recall { "topic": "cleave:scan:<PROJECT_NAME>" }
 ```
 
 Expected payload (if previously scanned):
+
 ```json
 {
   "rev": "<git-sha>",
@@ -109,12 +112,14 @@ jq -s '[.[].files[] | {file: .path, traits: [.traits[]? | select(.crit >= 3)]} |
 ```
 
 For diff scans (the diff shape matches the schema reference — `.diff.findings.added[]` etc.):
+
 ```bash
 jq -s '[.[].diff.findings.added[]? | select(.crit >= 3)],
        [.[].diff.findings.changed[]?.new | select(.crit >= 3)]' "$REPORT"
 ```
 
 Criticality reference:
+
 - `3` = Notable — defines program purpose, flagged in diffs
 - `4` = Suspicious — unusual or evasive, investigate
 - `5` = Hostile — almost certainly malicious
@@ -133,6 +138,7 @@ For each crit ≥ 4 finding (and any crit 3 from a diff):
    - **False positive** — the behavior is intentional and benign; skip, mention in summary only.
 
 Common false positive patterns to recognize and skip:
+
 - `cargo-path-rat-topic` triggered by workspace path deps (`path = "../..."`) in a Rust monorepo — expected.
 - SSH/authorized_keys chown/chmod in a bastion or deployment operator — expected infra management.
 - `exec`/`process create` calls in a CLI or operator codebase that intentionally spawns subprocesses.
@@ -187,7 +193,8 @@ EOF
 Criticality names for the body: 3=Notable, 4=Suspicious, 5=Hostile.
 
 **Evidence section** (include when `finding.evidence` is non-empty):
-```
+
+```markdown
 ### Evidence
 <for each evidence item: file path, offset/line, matched string or description>
 ```
@@ -195,6 +202,7 @@ Criticality names for the body: 3=Notable, 4=Suspicious, 5=Hostile.
 Create issues one at a time. After each, confirm the issue number and URL before proceeding to the next. If `gh issue create` fails (e.g., no GitHub remote, not authenticated), report the findings in the conversation instead.
 
 **Labels:** Create the `cleave` label if missing:
+
 ```bash
 gh label create cleave --color "D93F0B" --description "Cleave static analysis finding" 2>/dev/null || true
 ```
@@ -203,7 +211,7 @@ gh label create cleave --color "D93F0B" --description "Cleave static analysis fi
 
 After all issues are created (or attempted), store the current scan state:
 
-```
+```text
 mcp__icm__icm_memory_store {
   "topic": "cleave:scan:<PROJECT_NAME>",
   "content": "{\"rev\": \"<CURRENT_REV>\", \"path\": \"<PROJECT_PATH>\", \"scanned_at\": \"<ISO8601-UTC>\"}"
@@ -215,6 +223,7 @@ If no git rev exists (non-git directory), skip this step — the next run will a
 ## Step 10 — Report Summary
 
 After completing, summarize:
+
 - Scan type (full or diff vs `<short-rev>`)
 - Total findings parsed, count by criticality
 - Triage breakdown: N confirmed, N uncertain, N false positives (with brief FP reason for each)

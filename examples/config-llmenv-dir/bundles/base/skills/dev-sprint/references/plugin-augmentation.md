@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Plugin Augmentation for ship-issue
 
 Pick which trailofbits plugins run alongside `pre-pr-review` standard agents during PR review.
@@ -28,6 +29,7 @@ fp-check → after standard agents finish.
 ## Message to ship-issue
 
 Include plugin determination. Example:
-```
+
+```text
 Standard agents parallel + fp-check (after, for data-flow context) + mutation-testing.
 ```

@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # fyi — living web todo
 
 Turn the `fyi` skill's one-shot briefing into a living, interactive
@@ -20,7 +21,7 @@ The `fyi` SKILL.md stays untouched. All JSON/merge/web logic lives here.
 
 ## Layout
 
-```
+```text
 apps/fyi/
   SPEC.md            this file
   README.md          run + schedule instructions
@@ -76,11 +77,13 @@ Input: fresh `scan.json` (list of `{id,tier,title,note,refs}`), prior `data.json
 Output: new `data.json`.
 
 For each scan item, keyed by `id`:
+
 - **not in prior data** -> `status:"new"`, `checked:false`, `firstSeen:now`.
 - **in prior data** -> keep `checked`, `manual`, `firstSeen`; refresh `tier/title/note/refs`
   from scan; `status:"open"`.
 
 For each prior item **absent from the scan** (work that cleared):
+
 - it dropped out (PR merged, issue Done, etc.) -> `status:"done"`, `checked:true`.
   Kept visible for the rest of the day so you see what got cleared. Pruned on the
   first scan of a new date (date rollover wipes `done` items).
@@ -116,6 +119,7 @@ Checking a box POSTs immediately and optimistically updates.
 ## Headless scan — `refresh.sh` + `refresh-prompt.md`
 
 `refresh.sh`:
+
 ```bash
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -147,4 +151,5 @@ load/unload and a cron one-liner alternative.
 - Auth / multi-user (localhost, single user).
 - Editing/adding items by hand in the UI (the scan owns the list).
 - History/trends across days (each day is its own `data.json`; date rollover resets).
-```
+
+```text

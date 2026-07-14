@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Crush engine support (multi-engine foundation)
 
 ## Goals
@@ -57,7 +58,7 @@ What's missing: the call sites that consume `AgentAdapter` hardcode
 ## Feature comparison: llmenv/Claude Code vs. Crush
 
 | Domain | llmenv today (Claude Code) | Crush | Gap |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Config format | YAML (`config.yaml`, `bundle.yaml`) → rendered to Claude's native JSON | JSON (`crush.json`), priority: `.crush.json` > `crush.json` > global | Rendering-only difference, no schema impact |
 | Env vars | `CLAUDE_CONFIG_DIR` (+ `LLMENV_STATE_DIR` workaround via `StateConfig`) | `CRUSH_GLOBAL_CONFIG`, `CRUSH_GLOBAL_DATA`, `CRUSH_SKILLS_DIR` | Crush's clean config/data split means it doesn't need the `StateConfig` workaround at all |
 | MCP | `McpServer { name, when, transport, command, args, env, url }` | adds `headers`, `disabled`, `disabled_tools`, `timeout` | Field parity gap, additive |

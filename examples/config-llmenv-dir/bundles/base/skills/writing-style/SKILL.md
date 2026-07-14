@@ -45,14 +45,15 @@ it in a Slack message: direct, specific, no ceremony.
 
 Format: imperative mood, ≤72 characters, present tense.
 
-```
+```text
 Add rate limiting to the ingest endpoint
 Fix off-by-one in page cursor calculation
 Drop unused `legacy_auth` middleware
 ```
 
 What NOT to do:
-```
+
+```text
 # Too long, passive voice, vague
 Added some changes to fix the issue with the rate limiting that was
 causing problems in the endpoint
@@ -103,6 +104,7 @@ let _guard = GLOBAL_LOCK.lock().await;
 ```
 
 Not:
+
 ```rust
 // Lock the global lock to ensure thread safety
 let _guard = GLOBAL_LOCK.lock().await;

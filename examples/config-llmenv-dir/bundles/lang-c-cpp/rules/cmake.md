@@ -27,7 +27,7 @@ Modern CMake's central abstraction is the **target**. A target encapsulates ever
 to build and use a library or executable. Avoid all commands that operate globally:
 
 | Old (bad) | Modern replacement |
-|-----------|-------------------|
+| ----------- | ------------------- |
 | `include_directories()` | `target_include_directories()` |
 | `link_directories()` | `target_link_libraries()` to a target |
 | `add_definitions()` | `target_compile_definitions()` |
@@ -38,7 +38,7 @@ to build and use a library or executable. Avoid all commands that operate global
 Every `target_*` command requires a visibility keyword. Never omit it.
 
 | Keyword | Meaning |
-|---------|---------|
+| --------- | --------- |
 | `PRIVATE` | Only this target needs it. Not propagated to consumers. |
 | `PUBLIC` | This target and all consumers need it. Propagated. |
 | `INTERFACE` | Only consumers need it (e.g., header-only library). |
@@ -297,7 +297,7 @@ natively. If you own the library, generate a proper `Config.cmake`.
 ## Antipatterns Checklist
 
 | Antipattern | Fix |
-|-------------|-----|
+| ------------- | ----- |
 | `include_directories()` globally | `target_include_directories()` with scope |
 | `link_libraries()` globally | `target_link_libraries()` with scope |
 | Warning flags as `PUBLIC` | Make them `PRIVATE` |

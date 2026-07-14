@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Session Log Levels Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -20,7 +21,7 @@
 ## File Map
 
 | File | Role |
-|------|------|
+| ------ | ------ |
 | `crates/llmenv-config/src/schema.rs` | `SessionLog`, `FileSinkConfig`, `TranscriptSinkConfig`, `LogLevel`, custom deserializer |
 | `crates/llmenv-config/src/lib.rs` | Re-exports, `session_log_resolved()`, config tests |
 | `crates/llmenv-config/src/validate.rs` | `arb_session_log()` proptest strategy |
@@ -35,15 +36,18 @@
 ### Task 1: Config types — LogLevel, FileSinkConfig, TranscriptSinkConfig, new SessionLog
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/schema.rs:163-240`
 - Modify: `crates/llmenv-config/src/lib.rs:1-10` (re-exports)
 - Modify: `crates/llmenv-config/src/validate.rs:735-753`
 
 **Interfaces:**
+
 - Produces: `LogLevel` enum (Trace, Debug, Info), `FileSinkConfig` struct, `TranscriptSinkConfig` struct, updated `SessionLog` struct
 - Produces: backward-compatible `Deserialize` for `SessionLog` — old `verbose: bool` → per-sink levels
 
 **Design notes:**
+
 - `LogLevel` derives `Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize`
 - Serialize: lowercase strings (`"trace"`, `"debug"`, `"info"`)
 - `FileSinkConfig { enabled: bool, level: LogLevel, path: Option<String> }`
@@ -305,9 +309,11 @@ In `crates/llmenv-config/src/lib.rs`, add to the existing `pub use` block:
 ```
 
 Update line 33 from:
+
 ```rust
 RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, Scopes, SessionLog, S...
 ```
+
 to include `LogLevel, FileSinkConfig, TranscriptSinkConfig`.
 
 - [ ] **Step 6: Update config-level tests in lib.rs**
@@ -315,6 +321,7 @@ to include `LogLevel, FileSinkConfig, TranscriptSinkConfig`.
 Read the existing tests at `crates/llmenv-config/src/lib.rs:115-155`. Update:
 
 `session_log_absent_resolves_to_transcript_on` (line 115):
+
 ```rust
 #[test]
 fn session_log_absent_resolves_to_transcript_on() {
@@ -332,6 +339,7 @@ fn session_log_absent_resolves_to_transcript_on() {
 ```
 
 `session_log_table_parses_flags` (line 128):
+
 ```rust
 #[test]
 fn session_log_old_shape_translates_to_new() {
@@ -430,9 +438,11 @@ git commit -m "feat: add LogLevel, per-sink configs, backward-compat deserialize
 ### Task 2: SessionLogEvent — add log_level() and trace_fields
 
 **Files:**
+
 - Modify: `src/session_log/event.rs`
 
 **Interfaces:**
+
 - Produces: `SessionLogEvent::log_level() -> LogLevel`
 - Produces: `SessionLogEvent.trace_fields: Option<Value>` (serialized, new field)
 
@@ -492,6 +502,7 @@ Add field to the struct (after `fields`):
 - [ ] **Step 3: Update all existing SessionLogEvent constructors in the codebase to set trace_fields: None**
 
 These are currently:
+
 - `tracing_layer.rs:49-53` — add `trace_fields: None,`
 - `hook_run/mod.rs:796-806` (agent_session_event) — add `trace_fields: None,`
 - `hook_run/mod.rs:809-816` (lifecycle_session_event) — goes through agent_session_event, already covered
@@ -567,9 +578,11 @@ git commit -m "feat: add log_level() to SessionLogEvent and trace_fields for hoo
 ### Task 3: hook_run — replace verbose gating with level filtering
 
 **Files:**
+
 - Modify: `src/hook_run/mod.rs`
 
 **Interfaces:**
+
 - Consumes: `SessionLog::any_sink_enabled()`, `SessionLog::any_sink_wants()`, `SessionLog::file_wants()`, `SessionLog::transcript_wants()`, `EventKind::log_level()`, `LogLevel`
 - Produces: Updated `run_session_log`, `emit_session_log`, `event_to_log_kind`
 - Removes: `verbose_session_event`
@@ -687,10 +700,13 @@ async fn run_session_log(
 - [ ] **Step 3b: Update handle_session_log gate**
 
 In `handle_session_log` (line 694), replace:
+
 ```rust
 if !(cfg.file || cfg.transcript) {
 ```
+
 with:
+
 ```rust
 if !cfg.any_sink_enabled() {
 ```
@@ -698,10 +714,13 @@ if !cfg.any_sink_enabled() {
 - [ ] **Step 3c: Update ensure_transcript_session gate**
 
 In `ensure_transcript_session` (line 735), replace:
+
 ```rust
 let (true, Some(client)) = (cfg.transcript, client) else {
 ```
+
 with:
+
 ```rust
 let (true, Some(client)) = (cfg.transcript_wants(LogLevel::Info), client) else {
 ```
@@ -757,6 +776,7 @@ The tests at lines 1139-1260 test `event_to_log_kind` and `verbose_content` — 
 The tests at lines 1865-1966 test `ensure_transcript_session` and `handle_session_log` — these construct `SessionLog` directly and need updating:
 
 Update `file_only_cfg`:
+
 ```rust
 fn file_only_cfg(path: &std::path::Path) -> SessionLog {
     SessionLog {
@@ -775,6 +795,7 @@ fn file_only_cfg(path: &std::path::Path) -> SessionLog {
 ```
 
 Update test at line 1897-1900 to use `transcript_wants`:
+
 ```rust
 // Existing test ensures transcript: true — now it's a TranscriptSinkConfig:
 let cfg = SessionLog {
@@ -805,6 +826,7 @@ git commit -m "feat: replace verbose gating with per-sink level filtering in hoo
 ### Task 4: Adapter — register turn hooks when any sink is enabled
 
 **Files:**
+
 - Modify: `src/adapter/claude_code.rs:73-88, 987-998`
 - Modify: `src/adapter/claude_code.rs` — tests at lines 2053-2166
 
@@ -956,6 +978,7 @@ git commit -m "feat: register session-log turn hooks when any sink is enabled"
 ### Task 5: main.rs — update file sink wiring
 
 **Files:**
+
 - Modify: `src/main.rs:8-37`
 
 - [ ] **Step 1: Update session_log_file_path and file sink wiring**
@@ -1030,6 +1053,7 @@ git commit -m "feat: wire file sink from new SessionLog.file config"
 ### Task 6: Integration — end-to-end test and final verification
 
 **Files:**
+
 - No new files — verify the full pipeline
 
 - [ ] **Step 1: Full test suite**
@@ -1067,6 +1091,7 @@ git status
 ### Task 7: Changelog
 
 **Files:**
+
 - Modify: `CHANGELOG.md`
 
 - [ ] **Step 1: Add entry under [Unreleased]**

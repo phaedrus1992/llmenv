@@ -61,7 +61,7 @@ auto f = std::async(std::launch::async, work);    // GOOD: store the future
 ### Always use RAII wrappers — never raw `lock()`/`unlock()`
 
 | Wrapper | Use when |
-|---------|----------|
+| --------- | ---------- |
 | `std::lock_guard<M>` | Single mutex, no early unlock needed |
 | `std::scoped_lock<M...>` (C++17) | Multiple mutexes at once (deadlock-safe) |
 | `std::unique_lock<M>` | Need deferred lock, timed lock, or condition variable |
@@ -172,7 +172,7 @@ cv.notify_one();
 Three forms of the same abstraction — a typed data channel between threads:
 
 | Form | Use when |
-|------|----------|
+| ------ | ---------- |
 | `std::async` | Simple fire-off-and-get, exception propagation |
 | `std::packaged_task` | Need to control when/where work executes (thread pool) |
 | `std::promise`/`std::future` | Manual signal: set value or exception from any context |
@@ -195,7 +195,7 @@ int result = f.get();  // blocks until producer calls set_value
 Most `<algorithm>` functions accept an execution policy as their first argument.
 
 | Policy | Meaning |
-|--------|---------|
+| -------- | --------- |
 | `std::execution::seq` | Sequential (same as no policy) |
 | `std::execution::par` | Parallel across threads |
 | `std::execution::par_unseq` | Parallel + SIMD vectorization |
@@ -206,6 +206,7 @@ std::transform(std::execution::par, in.begin(), in.end(), out.begin(), f);
 ```
 
 **Rules for parallel-safe callbacks:**
+
 - No exceptions in callbacks for `par_unseq` — `std::terminate()` is called.
 - No data races — each element must be independent or protected.
 - No locks inside callbacks with `par_unseq` — vectorized code cannot call `mutex::lock()`.
@@ -276,7 +277,7 @@ undefined behavior — even a plain `int`.
 ### Three ordering levels
 
 | Level | `memory_order` | Cost | Guarantee |
-|-------|---------------|------|-----------|
+| ------- | --------------- | ------ | ----------- |
 | Sequential consistency | `seq_cst` (default) | Highest | Global total order visible to all threads |
 | Acquire-release | `acquire` / `release` / `acq_rel` | Medium | Synchronize one producer–consumer pair |
 | Relaxed | `relaxed` | Lowest | Only atomicity; no ordering |
@@ -385,7 +386,7 @@ Don't store references to non-`thread_local` objects with shorter lifetimes.
 ## Pitfalls Summary
 
 | Mistake | Consequence | Fix |
-|---------|-------------|-----|
+| --------- | ------------- | ----- |
 | `volatile` for threading | No synchronization; data race | `std::atomic<T>` |
 | Bare `condVar.wait(lock)` | Lost wakeup or spurious wakeup hang | Always pass predicate |
 | Discard `std::async` future | Blocks on destruction | Store the future |

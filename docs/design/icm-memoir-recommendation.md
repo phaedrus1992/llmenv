@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # ICM Memoir Audit — Recommendation
 
 **Issue:** [#555](https://github.com/phaedrus1992/llmenv/issues/555)
@@ -13,12 +14,13 @@
 Concrete comparison for the three touchpoints where llmenv steers agents:
 
 | Touchpoint | Today (flat topic) | Hypothethical memoir | Verdict |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Session memory store** (per-session context) | `icm_memory_store` with `topic: llmenv-scope-context` — one call, fire-and-forget | `icm_memoir_create("session-xxx")` → `add_concept` per observation → `link` them — 3-5× calls per session | **Flat topic wins.** Session context is ephemeral; a memoir's structure buys nothing for a one-shot write. |
 | **Post-session consolidation** (#595) | `icm_memory_store` with `type: semantic, importance: high` — stores distilled rules | Same via memoir: create memoir per rule set, add concepts per rule — no retrieval benefit since consolidation already returns precisely the rules it stored | **Flat topic wins.** The consolidation pipeline writes its own output; memoir linking provides no signal here. |
 | **Agent-initiated recall** | Agent calls `icm_memory_recall("query")` — BM25 search over all stored memories | Agent calls `icm_memoir_search_all("query")` — same BM25 surface, different namespace | **No difference.** Both are BM25 full-text search. A structured graph helps when navigating *relationships* between concepts; an agent looking for "how does auth work" gets the same answer from both. |
 
 **Where memoirs WOULD win** (outside llmenv's scope):
+
 - A human-authored project wiki / design-decision log that needs cross-referencing between decisions
 - An agent that actively curates its own knowledge base (reads old memoirs, creates links to new ones)
 - Multi-agent systems where one agent's memoir becomes another's context
@@ -70,7 +72,7 @@ The concern in the issue is: "does steering toward flat topics actively prevent 
 ## Tokens & Cost Appendix
 
 | Operation | Approx MCP calls | Token cost (input) | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `icm_memory_store` (topic) | 1 | ~100 | One-shot, no setup |
 | Memoir: create + N concepts + N links | 2N + 1 | ~150 + N×50 | Each concept/link call burns tokens for both the request and response |
 | Memoir: search | 1 | ~80 | Same BM25 as `icm_memory_recall` |
@@ -84,7 +86,7 @@ Memoir setup costs 2-5× what a flat store costs, with no corresponding recall-p
 Per the issue's acceptance criteria, here is every ICM touchpoint in the repo identified by `rg`:
 
 | File | Usage | Would memoir help? |
-|---|---|---|
+| --- | --- | --- |
 | `src/icm.rs` — `generate_context_chunk()` | Writes the context chunk documenting `icm_memory_store`/`recall` with topic keywords | No (Q2) |
 | `src/icm.rs` — `store_tag_memory()` | Stores tag/bundle context via `icm_memory_store` | No (Q1) |
 | `src/adapter/claude_code.rs` | SessionStart injects context chunk; SessionEnd triggers store+consolidation | No |

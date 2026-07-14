@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # context-mode Built-in Feature Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -29,11 +30,13 @@
 ### Task 1: Schema — `ContextMode` struct, `Features.context_mode`, constants
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/schema.rs` (add struct + `Features` field)
 - Modify: `crates/llmenv-config/src/lib.rs:5-19` (add constants + re-export `ContextMode`)
 - Modify: `src/config/mod.rs:3-11` (re-export `ContextMode` + constants)
 
 **Interfaces:**
+
 - Produces: `pub struct ContextMode { pub enabled: bool }`; `Features.context_mode: Option<ContextMode>`; constants `CONTEXT_MODE_MARKETPLACE`, `CONTEXT_MODE_SOURCE`, `CONTEXT_MODE_PLUGIN`, `CONTEXT_MODE_MCP_PREFIX`, `CONTEXT_MODE_DATA_ENV`, `CONTEXT_MODE_STATE_SUBDIR` (all `pub const &str`).
 
 - [ ] **Step 1: Write the failing test**
@@ -138,9 +141,11 @@ git commit -m "feat: add features.context_mode schema and constants (#490)"
 ### Task 2: Inject context-mode marketplace + plugin in `resolve_plugins`
 
 **Files:**
+
 - Modify: `src/plugins/resolve.rs:96-160` (`resolve_plugins`) + its test module
 
 **Interfaces:**
+
 - Consumes: `ContextMode`, `CONTEXT_MODE_MARKETPLACE`, `CONTEXT_MODE_SOURCE`, `CONTEXT_MODE_PLUGIN` from Task 1; existing `ResolvedPlugin`, `ResolvedMarketplace`, `ResolvedPlugins`.
 - Produces: when `config.features.context_mode.enabled`, the returned `ResolvedPlugins` contains the context-mode plugin + marketplace (deduped vs user-declared). When the feature is enabled **and** the user has also manually declared the context-mode plugin in a `plugin-collection`, emit a `tracing::warn!` flagging the redundant manual declaration (the built-in feature already wires it).
 
@@ -334,10 +339,12 @@ git commit -m "feat: inject context-mode plugin when features.context_mode enabl
 ### Task 3: Inject durable `CONTEXT_MODE_DATA_DIR` via StateTool
 
 **Files:**
+
 - Modify: `src/materialize/state.rs` (add `effective_state_config` helper + tests)
 - Modify: `src/cli/mod.rs:873-880` (use the helper at the `state_env_vars`/`ensure_state_dirs` call site)
 
 **Interfaces:**
+
 - Consumes: `StateConfig`, `StateTool` (existing); `CONTEXT_MODE_DATA_ENV`, `CONTEXT_MODE_STATE_SUBDIR` from Task 1.
 - Produces: `pub fn effective_state_config(cfg: &StateConfig, context_mode_enabled: bool) -> std::borrow::Cow<'_, StateConfig>` — returns the input unchanged when the feature is off or the env var is already declared; otherwise a clone with the synthetic tool appended.
 
@@ -453,9 +460,11 @@ git commit -m "feat: relocate CONTEXT_MODE_DATA_DIR to durable state dir when en
 ### Task 4: Remove `LLMENV_BASH_BAN`; add context-mode MCP permission grant
 
 **Files:**
+
 - Modify: `src/adapter/claude_code.rs:778-816` (delete bash-ban block); permission render area (~768-830) for the grant + its test module
 
 **Interfaces:**
+
 - Consumes: `CONTEXT_MODE_MCP_PREFIX` from Task 1; existing `manifest.plugins`, the `allow` Vec built near `claude_code.rs:768`.
 - Produces: settings.json `permissions.allow` contains `mcp__plugin_context-mode_context-mode__*` iff the context-mode plugin is in `manifest.plugins`.
 
@@ -547,9 +556,11 @@ git commit -m "feat: grant context-mode MCP permission; remove LLMENV_BASH_BAN w
 ### Task 5: doctor — report the built-in feature
 
 **Files:**
+
 - Modify: `src/cli/doctor.rs:62-68` (replace `config.mcp` scan)
 
 **Interfaces:**
+
 - Consumes: `config.features.context_mode.enabled` (Task 1); existing `pass`/`warn`/`info` strings + `super::doctor_info`.
 
 - [ ] **Step 1: Replace the check**
@@ -593,9 +604,11 @@ git commit -m "feat: doctor reports context-mode built-in feature status (#490)"
 ### Task 6: Regression test — self-registered cache-heal hook survives re-render
 
 **Files:**
+
 - Modify: `src/adapter/claude_code.rs` test module (test `reconcile_settings`)
 
 **Interfaces:**
+
 - Consumes: existing private `reconcile_settings(path, fresh) -> anyhow::Result<Value>` (claude_code.rs:1072).
 
 - [ ] **Step 1: Write the test**
@@ -663,6 +676,7 @@ git commit -m "test: guard context-mode self-registered hook survives reconcile 
 ### Task 7: Docs, example config, changelog
 
 **Files:**
+
 - Modify: `docs/env-vars.md:52-61` (drop bash-ban example)
 - Modify: `examples/config-llmenv-dir/config.yaml` (illustrate `features.context_mode`; docs-only, not product code)
 - Modify: `CHANGELOG.md` (Unreleased)
@@ -747,20 +761,24 @@ Expected: matches only in `CHANGELOG.md` (the removal note). Any match in `src/`
 - [ ] **Step 2: Full test + lint + fmt**
 
 Run:
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
+
 Expected: fmt clean, zero warnings, all tests pass.
 
 - [ ] **Step 3: Manual smoke (optional but recommended)**
 
 Build and run doctor against the example config:
+
 ```bash
 cargo build -p llmenv
 LLMENV_CONFIG_DIR=examples/config-llmenv-dir ./target/debug/llmenv doctor 2>&1 | grep -i context-mode
 ```
+
 Expected: "context-mode built-in feature enabled (token-efficiency)".
 
 - [ ] **Step 4: Hand off to ship-issue** for PR creation, pre-pr-review scans, CI watch, and merge (dev-sprint Phase 4 owns this).
@@ -770,6 +788,7 @@ Expected: "context-mode built-in feature enabled (token-efficiency)".
 ## Self-Review
 
 **Spec coverage:**
+
 - Drop LLMENV_BASH_BAN → Task 4 (code) + Task 7 (docs) + Task 8 (sweep). ✓
 - `features.context_mode` schema, no tag-scoping → Task 1. ✓
 - Inject in resolve_plugins, track latest → Task 2. ✓

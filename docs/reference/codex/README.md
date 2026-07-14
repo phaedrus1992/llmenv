@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # OpenAI Codex CLI configuration reference
 
 Reference notes on the **OpenAI Codex CLI's** configuration surfaces, captured
