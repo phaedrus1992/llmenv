@@ -222,9 +222,18 @@ pub fn migrate_ephemeral(adapter_root: &Path, new_name: &str) {
         return;
     }
 
-    let mut siblings: Vec<PathBuf> = match std::fs::read_dir(adapter_root) {
+    let siblings: Vec<PathBuf> = match std::fs::read_dir(adapter_root) {
         Ok(rd) => rd
-            .filter_map(|e| e.ok())
+            .filter_map(|e| match e {
+                Ok(entry) => Some(entry),
+                Err(err) => {
+                    tracing::debug!(
+                        "migrate_ephemeral: error reading entry in {:?}: {err}",
+                        adapter_root
+                    );
+                    None
+                }
+            })
             .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
             .map(|e| e.path())
             .filter(|p| {
@@ -244,17 +253,15 @@ pub fn migrate_ephemeral(adapter_root: &Path, new_name: &str) {
     }
 
     // Sort by dir mtime, newest first — more likely to have current state.
-    siblings.sort_by(|a, b| {
-        let ma = a
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        let mb = b
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        mb.cmp(&ma)
-    });
+    let mut with_mtime: Vec<(PathBuf, SystemTime)> = Vec::with_capacity(siblings.len());
+    for p in &siblings {
+        match p.metadata().and_then(|m| m.modified()) {
+            Ok(mtime) => with_mtime.push((p.clone(), mtime)),
+            Err(e) => tracing::debug!("migrate_ephemeral: cannot stat {}: {e}", p.display()),
+        }
+    }
+    with_mtime.sort_by_key(|b| std::cmp::Reverse(b.1));
+    let siblings: Vec<PathBuf> = with_mtime.into_iter().map(|(p, _)| p).collect();
 
     for dir_name in EPHEMERAL_SUBDIRS {
         let dest = new_path.join(dir_name);
@@ -266,14 +273,14 @@ pub fn migrate_ephemeral(adapter_root: &Path, new_name: &str) {
         for sibling in &siblings {
             let src = sibling.join(dir_name);
             if src.is_dir() {
-                if let Err(e) = copy_dir_all(&src, &dest) {
-                    tracing::warn!(
+                match copy_dir_all(&src, &dest) {
+                    Ok(()) => break, // Migrate from first (newest) matching sibling.
+                    Err(e) => tracing::warn!(
                         "migrate_ephemeral: failed to copy {} -> {}: {e}",
                         src.display(),
                         dest.display(),
-                    );
+                    ), // Continue to try older siblings.
                 }
-                break; // Migrate from first (newest) matching sibling.
             }
         }
     }
@@ -288,6 +295,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
         let ft = entry.file_type()?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
+        if ft.is_symlink() {
+            tracing::debug!("copy_dir_all: skipping symlink {}", src_path.display());
+            continue;
+        }
         if ft.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else if ft.is_file() {
