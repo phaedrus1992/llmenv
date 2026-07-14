@@ -421,6 +421,27 @@ session_log:
 | `path` | no | Override the file sink's path; default `<state_dir>/session-log.jsonl` |
 | `max_content_bytes` | no | Cap each event's `content` field to this many bytes before it's written/recorded; default `16384` |
 
+For finer control, `transcript` can be a mapping instead of a boolean:
+
+```yaml
+session_log:
+  transcript:
+    enabled: true
+    retention_days: 30    # best-effort delete stale file transcripts after 30 days
+  file:
+    enabled: false
+    path: "~/custom/path.jsonl"
+```
+
+| Sub-field | Required | Notes |
+| --------- | -------- | ----- |
+| `enabled` | yes | Enable/disable the ICM transcript sink |
+| `level` | no | Minimum event level (`info`, `debug`, `trace`); default `info` |
+| `retention_days` | no | Stale file-sink transcripts on disk are best-effort removed when older than this many days; `null` = disabled; must be >= 1 |
+
+In this shape, `file` is also a mapping (`FileSinkConfig: enabled, level, path`) and the
+shorthand `verbose` flag is unavailable — set `level: debug` on each sink instead.
+
 Omitting the `session_log:` block entirely is equivalent to `transcript: true`
 (everything else off) — ICM transcript logging is **on by default**. To turn
 logging off entirely, set both flags to `false`:
