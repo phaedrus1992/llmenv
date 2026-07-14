@@ -27,11 +27,27 @@ The config directory is resolved in this order:
 | `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
 | `marketplace:` | list | Plugin marketplaces (git URL or local path) |
 | `plugin-collection:` | list | Named bags of plugins, selected by tag |
+| `skills:` | list | First-class skill declarations, selected by tag (same model as `lsp:`) |
 | `host:` | map | Host name → reachable address (used by `features.memory:`) |
+| `init:` | map | Settings seeded into new materialized folders by `llmenv init` |
+| `disabled_engines` | list | Engine IDs to skip during materialization (#562) |
 
 All blocks are optional. Scopes (except project), bundles, MCP servers, plugin
-collections, and the memory backend all share the same selection model: they
-activate when one of their `tags` is in the active tag set.
+collections, skills, LSP servers, and the memory backend all share the same
+selection model: they activate when one of their `tags` is in the active tag
+set.
+
+## `disabled_engines`
+
+A list of engine IDs whose adapters are skipped during materialization, even
+when the engine's binary is on `PATH` (#562). Uses the underscore form (e.g.
+`claude_code`, `crush`), matching the `native.<engine>` and `--engine` flag
+convention.
+
+```yaml
+disabled_engines:
+  - crush            # skip Crush materialization even when `crush` is on PATH
+```
 
 ## `cache:`
 
@@ -361,6 +377,23 @@ features:
 |---------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `track` | no       | `"release"` (default) or `"beta"`. `release` uses the GitHub latest-stable endpoint; `beta` uses the first non-draft release from the recent list. |
 
+### `features.context_mode:`
+
+Built-in context-saving support (#490). When enabled, llmenv wires the
+context-mode plugin automatically — marketplace, plugin registration, durable
+`CONTEXT_MODE_DATA_DIR` state dir, and MCP permission grants — replacing the
+manual `plugin-collection` / `state` / `native_permissions` boilerplate.
+
+```yaml
+features:
+  context_mode:
+    enabled: true
+```
+
+| Field     | Required | Notes                                                        |
+|-----------|----------|--------------------------------------------------------------|
+| `enabled` | no       | Default `false`. Set to `true` to activate the built-in plugin. |
+
 ## `session_log:`
 
 llmenv records session activity — lifecycle events, the active scope, and
@@ -497,6 +530,48 @@ host:
   fixed:
     addr: "fixed.local"
 ```
+
+## `init:`
+
+Settings pre-seeded into new materialized folders during `llmenv init` (#172).
+The interactive setup wizard lets you import keys from your global
+`~/.claude/settings.json`; selected keys are stored here and survive every
+re-materialization.
+
+```yaml
+init:
+  seeded_settings:
+    enabledPlugins:
+      superpowers@claude-plugins-official: true
+    autoMemoryEnabled: false
+```
+
+`llmenv init` writes this block automatically during the interactive import
+step; it is not normally hand-authored.
+
+## `skills:`
+
+First-class skill declarations at the top level, selected onto scopes by tag
+intersection — the same model as `mcp:` and `lsp:`. Skills are supported by
+every adapter with a skills-directory concept; adapters without one silently
+skip them (#661).
+
+```yaml
+skills:
+  - name: my-skill
+    when: [me]
+    source: "./path/to/skill/dir"    # local path or marketplace-relative
+```
+
+| Field    | Required | Notes |
+|----------|----------|-------|
+| `name`   | yes      | Registration name; deduplicated first-bundle-wins |
+| `when`   | no       | Activation tags (empty = always active) |
+| `source` | yes      | Path to skill directory — absolute, `~/`-relative, or bundle-content-relative |
+
+Skills declared here are merged with per-bundle skills from `bundle.yaml`; the
+union is what gets wired up for the active scope. Name collisions are resolved
+by declaration order (first wins).
 
 ## Project markers
 
