@@ -15,8 +15,13 @@ pub(crate) mod read_once;
 use std::io::Write;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::SystemTime;
+
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use action::Action;
 use mcp_client::McpHttpClient;
@@ -324,6 +329,9 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     let claude_session_id = stdin_json
         .as_ref()
         .and_then(|v| v["session_id"].as_str().map(str::to_owned));
+    let claude_code_version = std::env::var("CLAUDE_CODE_VERSION")
+        .ok()
+        .unwrap_or_default();
 
     let parsed = match HookEvent::from_str(event) {
         Ok(e) => e,
@@ -340,6 +348,7 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
         claude_session_id.as_deref(),
         payload,
         adapter.name(),
+        &claude_code_version,
     ) {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
@@ -434,6 +443,7 @@ fn run_inner(
     claude_session_id: Option<&str>,
     stdin_payload: &serde_json::Value,
     adapter_name: &str,
+    claude_code_version: &str,
 ) -> anyhow::Result<String> {
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
@@ -511,12 +521,42 @@ fn run_inner(
         // logging (independent of the memory backend) still proceeds.
         eprintln!("llmenv: memory {event} skipped: no memory backend active for this scope");
     }
-    let client = url
-        .map(|u| McpHttpClient::new(u, HOOK_TIMEOUT))
-        .transpose()
-        .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
+    // Reuse MCP HTTP client across events: the memory backend URL doesn't
+    // change mid-session, so the reqwest Client (connection pool, TLS state,
+    // DNS cache) is only built once. Cloning the cached McpHttpClient is
+    // cheap — reqwest::Client is internally Arc, and the MCP session_id is
+    // shared via Arc so re-initialization is also avoided.
+    static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
+    let client: Option<McpHttpClient> = match url {
+        Some(u) => {
+            let clients = MCP_CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
+            match clients.entry(u.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    match McpHttpClient::new(u.clone(), HOOK_TIMEOUT) {
+                        Ok(client) => Some(entry.insert(client).clone()),
+                        Err(e) => {
+                            eprintln!(
+                                "llmenv: memory {event} skipped: invalid memory backend URL: {e}"
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+        }
+        None => None,
+    };
     let state_path = Some(state::state_path());
-    let ctx = build_scope_context(&active, &tags, &bundles, &env.cwd, adapter_name);
+    let ctx = build_scope_context(
+        &active,
+        &tags,
+        &bundles,
+        &env.cwd,
+        adapter_name,
+        claude_code_version,
+    );
 
     // Dedup: skip Store when the context chunk hasn't changed since the last
     // SessionEnd (R3). Avoids redundant ICM writes when hooks re-run.
@@ -535,13 +575,21 @@ fn run_inner(
         }
     }
 
-    // Current-thread runtime: lifecycle hooks run on the agent's hot path (session
-    // start + every prompt turn) and only need to `block_on` a short sequence of
-    // HTTP round-trips. A multi-threaded runtime would spin up a worker thread pool
-    // that's pure overhead for this single sequential await. (#186)
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    // Reusable current-thread runtime: lifecycle hooks run on the agent's hot
+    // path (session start + every prompt turn) and only need to `block_on` a
+    // short sequence of HTTP round-trips. A multi-threaded runtime would spin up
+    // a worker thread pool — pure overhead for this single sequential await. (#186)
+    // Shared via OnceLock so the ~3ms builder overhead is paid once per session.
+    static RUNTIME: OnceLock<std::io::Result<tokio::runtime::Runtime>> = OnceLock::new();
+    let rt = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+    });
+    let rt = match rt {
+        Ok(rt) => rt,
+        Err(e) => return Err(anyhow::anyhow!("failed to build tokio runtime: {e}")),
+    };
     let session_log = SessionLogCall {
         log_cfg: &log_cfg,
         client: client.as_ref(),
@@ -684,6 +732,7 @@ fn build_scope_context(
     bundles: &[String],
     cwd: &str,
     adapter_name: &str,
+    claude_code_version: &str,
 ) -> ScopeContext {
     let project = active
         .scopes
@@ -697,6 +746,7 @@ fn build_scope_context(
         cwd: cwd.to_string(),
         adapter: adapter_name.to_string(),
         llmenv_version: env!("CARGO_PKG_VERSION").to_string(),
+        claude_code_version: claude_code_version.to_string(),
     }
 }
 
@@ -853,6 +903,32 @@ fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
 
 /// Find the resolved memory backend's HTTP URL for the active tags, if any.
 ///
+/// Cached result of a bundle merge: the memory entries and host map extracted
+/// from `MergedManifest`. Keyed by config + bundle identity so the full merge
+/// (disk I/O + YAML parse + tree walk) is skipped on repeat calls.
+struct MergeCacheEntry {
+    key: u64,
+    bundle_memory: Vec<crate::config::Memory>,
+    bundle_host: std::collections::BTreeMap<String, crate::config::HostEntry>,
+}
+
+/// Compute a cache key for the merge result: config mtime (detects config.yaml
+/// edits) + sorted firing bundle names. Does not hash bundle file contents —
+/// those don't change mid-session.
+fn merge_cache_key(firing: &[&crate::config::Bundle]) -> anyhow::Result<u64> {
+    let config_path = crate::paths::config_path()?;
+    let mtime = config_path
+        .metadata()
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut hasher = DefaultHasher::new();
+    mtime.hash(&mut hasher);
+    for b in firing {
+        b.name.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
+}
+
 /// Mirrors the `build_manifest` merge strategy: top-level config memory is
 /// combined with bundle-contributed memory entries so a daemon declared only
 /// in a `bundle.yaml` is reachable from lifecycle hooks.
@@ -887,17 +963,35 @@ pub(crate) fn memory_url(
         .collect();
 
     let bundle_refs = build_hook_bundle_refs(config_dir, &firing);
+    // ponytail: merge cache keyed on config mtime + firing bundle names. Does not
+    // detect bundle file content edits (AGENTS.md, subdir files) — acceptable
+    // since they never change mid-session. Config mtime covers config.yaml edits.
+    static MERGE_CACHE: Mutex<Option<MergeCacheEntry>> = Mutex::new(None);
     let (bundle_memory, bundle_host) = if bundle_refs.is_empty() {
         (Vec::new(), std::collections::BTreeMap::new())
     } else {
-        let merged = crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
-            .unwrap_or_default();
-        let mem = merged
-            .capabilities
-            .features
-            .map(|f| f.memory)
-            .unwrap_or_default();
-        (mem, merged.capabilities.host)
+        let cache_key = merge_cache_key(&firing)?;
+        let mut cache = MERGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache.as_ref()
+            && entry.key == cache_key
+        {
+            (entry.bundle_memory.clone(), entry.bundle_host.clone())
+        } else {
+            let merged = crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
+                .unwrap_or_default();
+            let mem = merged
+                .capabilities
+                .features
+                .map(|f| f.memory)
+                .unwrap_or_default();
+            let host = merged.capabilities.host;
+            *cache = Some(MergeCacheEntry {
+                key: cache_key,
+                bundle_memory: mem.clone(),
+                bundle_host: host.clone(),
+            });
+            (mem, host)
+        }
     };
 
     let mut all_memory: Vec<crate::config::Memory> = top_memory
@@ -1806,6 +1900,7 @@ mod session_log_tests {
             cwd: "/tmp".into(),
             adapter: "claude-code".into(),
             llmenv_version: "3.0.0".into(),
+            claude_code_version: String::new(),
         }
     }
 
