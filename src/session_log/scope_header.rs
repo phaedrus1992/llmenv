@@ -14,6 +14,7 @@ pub struct ScopeContext {
     pub cwd: String,
     pub adapter: String,
     pub llmenv_version: String,
+    pub claude_code_version: String,
 }
 
 /// FTS-searchable header line: project plus one `llmenv-tag:<t>` /
@@ -43,6 +44,7 @@ pub fn scope_metadata_json(ctx: &ScopeContext) -> serde_json::Value {
         "cwd": ctx.cwd,
         "adapter": ctx.adapter,
         "llmenv_version": ctx.llmenv_version,
+        "claude_code_version": ctx.claude_code_version,
     })
 }
 
@@ -59,6 +61,7 @@ mod tests {
             cwd: "/Users/x/git/llmenv".into(),
             adapter: "claude_code".into(),
             llmenv_version: "3.0.0".into(),
+            claude_code_version: "3.4.0".into(),
         }
     }
 
@@ -94,6 +97,7 @@ mod tests {
                 cwd: "/".into(),
                 adapter: "claude_code".into(),
                 llmenv_version: "3.0.0".into(),
+                claude_code_version: String::new(),
             });
             for t in &tags {
                 let needle = format!("llmenv-tag:{}", t);

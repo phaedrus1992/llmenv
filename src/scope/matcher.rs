@@ -1,6 +1,8 @@
 use crate::config::{ContentScope, HostScope, NetworkScope, UserScope};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Resolved project (discovered from `.llmenv.yaml` walking upward from cwd).
 /// All fields default permissively; malformed YAML is logged as a warning
@@ -58,6 +60,16 @@ pub struct Env {
     pub os: String,
 }
 
+/// 30-second TTL cache for [`Env::detect`]. Hostname, user, OS never change
+/// mid-session. Gateway MAC only changes on network switch — ~30s staleness is
+/// harmless.
+struct CachedEnv {
+    detected: Instant,
+    env: Env,
+}
+
+static ENV_CACHE: Mutex<Option<CachedEnv>> = Mutex::new(None);
+
 impl Env {
     #[must_use]
     pub fn empty() -> Self {
@@ -71,8 +83,29 @@ impl Env {
         }
     }
 
+    /// Detect environment, returning a cached result if fresher than 30 s.
+    /// Avoids 3 subprocess forks (hostname, route, arp) on repeated calls.
     #[must_use]
     pub fn detect() -> Self {
+        if let Ok(lock) = ENV_CACHE.lock() {
+            if let Some(cached) = lock.as_ref() {
+                if cached.detected.elapsed() < Duration::from_secs(30) {
+                    return cached.env.clone();
+                }
+            }
+        }
+        let env = Self::detect_fresh();
+        if let Ok(mut lock) = ENV_CACHE.lock() {
+            *lock = Some(CachedEnv {
+                detected: Instant::now(),
+                env: env.clone(),
+            });
+        }
+        env
+    }
+
+    /// Unconditional env detection — the 3 subprocess forks run every call.
+    fn detect_fresh() -> Self {
         let hostname = detect_hostname().unwrap_or_else(|| {
             tracing::warn!("hostname detection failed; host-scope matching disabled");
             String::new()
