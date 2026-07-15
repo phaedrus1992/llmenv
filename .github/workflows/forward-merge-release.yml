@@ -149,7 +149,12 @@ jobs:
                 bash scripts/sync-changelog-doc.sh
                 git add website/docs/changelog.md
                 if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
-                  git merge --abort
+                  if ! git merge --abort; then
+                    echo "::error::Failed to abort merge; working tree may be inconsistent"
+                    echo "::endgroup::"
+                    HALTED="merge abort failed at $TARGET"
+                    break
+                  fi
                   bail_on_conflict "$CURRENT" "$TARGET" || true
                   echo "::endgroup::"
                   HALTED="conflict at $TARGET"
