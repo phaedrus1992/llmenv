@@ -56,12 +56,24 @@ cache:
   cache_dir: "~/.cache/llmenv"      # where materialized configs are stored
   sync_interval_minutes: 15         # how often `export` pulls config from git
   cache_retention_hours: 168        # GC retention window (default: 7 days)
+  remote_sync: true                 # enable remote git ops (fetch, pull, push)
   hashing: normal                   # loose | normal | strict (default: normal)
 ```
 
 Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
-`cache_retention_hours` = `168`. Set `cache_retention_hours` to `null` to
-disable age-based GC.
+`cache_retention_hours` = `168`, `remote_sync` = `true`. Set
+`cache_retention_hours` to `null` to disable age-based GC.
+
+### `remote_sync` — toggle remote git operations
+
+When enabled (default), llmenv fetches and pulls config from git on `export`,
+pushes commits on `llmenv sync`, and clones/pulls plugin marketplaces on
+`llmenv plugin-sync`.
+
+Set to `false` to disable all remote git operations while keeping local
+commits working. Useful when your SSH credential helper (e.g. 1Password's SSH
+agent) is locked and an SSH askpass prompt would hang terminal-based git
+operations:
 
 ### `hashing` — how materialized folders are named
 
