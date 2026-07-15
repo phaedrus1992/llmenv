@@ -23,9 +23,9 @@ cache:
   #   strict — folder = <version>-<content_hash>; every input change makes a new
   #            folder. Strongest isolation, but fragments the cache.
   # hashing: normal
-  # Allow remote git operations (fetch, pull, push) on the config directory
-  # and plugin marketplaces (default: true). Set to false to prevent shell
-  # freezes when 1Password or other SSH credential helpers are locked.
+  # Allow background remote git operations (throttled pull on export) when
+  # the SSH credential helper is locked (e.g. 1Password). Manual commands
+  # like `llmenv sync` and `llmenv plugin-sync` are unaffected.
   # remote_sync: false
 
 # Scopes: match environment conditions (network, host, user, project) and emit tags.
