@@ -2940,6 +2940,9 @@ fn run_sync(dry_run: bool) -> anyhow::Result<()> {
         crate::sync::SyncOutcome::Pushed => {
             eprintln!("✓ Synced config to GitHub");
         }
+        crate::sync::SyncOutcome::CommittedLocally => {
+            eprintln!("✓ Committed locally (remote sync disabled — push skipped)");
+        }
     }
     Ok(())
 }
