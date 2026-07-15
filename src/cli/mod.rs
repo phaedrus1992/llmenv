@@ -819,17 +819,42 @@ fn run_export(
     // and collect env vars. PATH-gating skips adapters whose binary is absent so
     // a machine without a given tool sees zero behavior change. (#502)
     let cache_dir_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
-    let materialize_ctx = MaterializeContext {
-        config: &config,
-        config_dir: &config_dir,
-        active: &use_active,
-        firing: &firing,
+
+    // Build the merged manifest once before the adapter loop — the manifest
+    // is adapter-independent, so re-building it per adapter is wasted work (#708).
+    // Each adapter gets its own clone since materialize_from_manifest mutates it
+    // (tag filtering, compression, etc.).
+    let shared_manifest = match build_manifest(&config, &config_dir, &use_active, &firing, false) {
+        Ok(v) => v,
+        Err(e) => return Err(e).context("failed to build merged manifest"),
     };
+
     let mut any_adapter_failed = false;
     let mut any_adapter_eligible = false;
     for adapter in installed_adapters(&config) {
         any_adapter_eligible = true;
-        match build_and_materialize(adapter.as_ref(), materialize_ctx, compress) {
+
+        let result = match &shared_manifest {
+            Some((m, cache_root)) => {
+                let mut cloned = m.clone();
+                materialize_from_manifest(
+                    adapter.as_ref(),
+                    &mut cloned,
+                    cache_root,
+                    &use_active,
+                    &config,
+                    compress,
+                )
+            }
+            None => {
+                if let Err(e) = crate::throttle::store_active_throttle(None) {
+                    tracing::debug!("failed to clear throttle state (non-fatal): {e}");
+                }
+                Ok(None)
+            }
+        };
+
+        match result {
             Ok(Some((ref cache_path, ref extra_vars))) => {
                 tracing::debug!(
                     adapter = adapter.name(),
@@ -1012,16 +1037,35 @@ fn run_regenerate() -> anyhow::Result<()> {
 
     // Materialize the config for every installed adapter, same PATH-gating as
     // run_export (#543) — a machine without a given tool sees zero behavior change.
-    let materialize_ctx = MaterializeContext {
-        config: &config,
-        config_dir: &config_dir,
-        active: &active,
-        firing: &firing,
+    // Build the merged manifest once; each adapter clones what it needs (#708).
+    let shared_manifest = match build_manifest(&config, &config_dir, &active, &firing, false) {
+        Ok(v) => v,
+        Err(e) => return Err(e).context("failed to build merged manifest"),
     };
     let mut materialized_any = false;
     let mut any_adapter_failed = false;
     for adapter in installed_adapters(&config) {
-        match build_and_materialize(adapter.as_ref(), materialize_ctx, false) {
+        let result = match &shared_manifest {
+            Some((m, cache_root)) => {
+                let mut cloned = m.clone();
+                materialize_from_manifest(
+                    adapter.as_ref(),
+                    &mut cloned,
+                    cache_root,
+                    &active,
+                    &config,
+                    false,
+                )
+            }
+            None => {
+                if let Err(e) = crate::throttle::store_active_throttle(None) {
+                    tracing::debug!("failed to clear throttle state (non-fatal): {e}");
+                }
+                Ok(None)
+            }
+        };
+
+        match result {
             Ok(Some((cache_path, _))) => {
                 materialized_any = true;
                 eprintln!(
@@ -1155,32 +1199,20 @@ fn claude_code_only_post_materialize(
     Ok(inject_cached_auth_if_available(adapter_root, cache_path))
 }
 
-/// Build BundleRefs for firing bundles in scope-precedence order, merge them
-/// into a manifest, materialize through `adapter`, and return the env vars the
-/// adapter wants exported. Returns `Ok(None)` when no firing bundle has a
-/// content directory on disk.
-fn build_and_materialize(
+/// Materialize a pre-built manifest through `adapter`, returning the cache path
+/// and env vars the adapter wants exported.
+///
+/// Called once per adapter from the export/regenerate loop. The merged manifest
+/// is adapter-independent up until `adapter.materialize` — build it once outside
+/// the loop via [`build_manifest`] instead of rebuilding it per adapter (#708).
+fn materialize_from_manifest(
     adapter: &dyn AgentAdapter,
-    ctx: MaterializeContext<'_>,
+    manifest: &mut MergedManifest,
+    cache_root: &Path,
+    active: &ActiveScopes,
+    config: &Config,
     compress: bool,
 ) -> anyhow::Result<Option<Materialized>> {
-    let MaterializeContext {
-        config,
-        config_dir,
-        active,
-        firing,
-    } = ctx;
-    let Some((mut manifest, cache_root)) =
-        build_manifest(config, config_dir, active, firing, false)?
-    else {
-        // No content dirs — clear any stale throttle state so a since-removed
-        // throttle config doesn't keep throttling.
-        if let Err(e) = crate::throttle::store_active_throttle(None) {
-            tracing::debug!("failed to clear throttle state (non-fatal): {e}");
-        }
-        return Ok(None);
-    };
-
     // Filter skills and lsp entries by active tags — mirror the mcp resolution
     // model: empty `when` means always active; non-empty must intersect active.tags.
     let tags = &active.tags;
@@ -1230,9 +1262,9 @@ fn build_and_materialize(
 
     let adapter_root = cache_root.join(adapter.name());
     let rendered = crate::materialize::materialize_with_mode(
-        &manifest,
+        manifest,
         &adapter_root,
-        ctx.config.cache.hashing,
+        config.cache.hashing,
         &shape,
     )?;
     let cache_path = rendered.path;
@@ -1241,7 +1273,7 @@ fn build_and_materialize(
     // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
     // Returns the paths it owns; we union them with the generic bundle files to
     // form llmenv's complete owned set (#196). Idempotent.
-    let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
+    let adapter_owned = adapter.materialize(manifest, &cache_path)?;
 
     let auth_status =
         claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;
@@ -1252,7 +1284,7 @@ fn build_and_materialize(
     let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
         .with_selection(tags.clone(), bundles)
         .with_auth_status(auth_status);
-    write_cache_manifest(&cache_path, &current, ctx.config.cache.hashing)?;
+    write_cache_manifest(&cache_path, &current, config.cache.hashing)?;
 
     // Compute the state dir (stable sibling of the hashed config dir) and pass
     // both to the adapter so it can set per-hash temp vars (#630) and durable
@@ -1294,6 +1326,45 @@ fn build_and_materialize(
     // `export NAME=...` shell contract.
     reject_invalid_var_names(&env_vars)?;
     Ok(Some((cache_path, env_vars)))
+}
+
+/// Build BundleRefs for firing bundles in scope-precedence order, merge them
+/// into a manifest, materialize through `adapter`, and return the env vars the
+/// adapter wants exported. Returns `Ok(None)` when no firing bundle has a
+/// content directory on disk.
+///
+/// Prefer building the manifest once and calling [`materialize_from_manifest`]
+/// per adapter when materializing multiple adapters in a loop (#708).
+fn build_and_materialize(
+    adapter: &dyn AgentAdapter,
+    ctx: MaterializeContext<'_>,
+    compress: bool,
+) -> anyhow::Result<Option<Materialized>> {
+    let MaterializeContext {
+        config,
+        config_dir,
+        active,
+        firing,
+    } = ctx;
+    let Some((mut manifest, cache_root)) =
+        build_manifest(config, config_dir, active, firing, false)?
+    else {
+        // No content dirs — clear any stale throttle state so a since-removed
+        // throttle config doesn't keep throttling.
+        if let Err(e) = crate::throttle::store_active_throttle(None) {
+            tracing::debug!("failed to clear throttle state (non-fatal): {e}");
+        }
+        return Ok(None);
+    };
+
+    materialize_from_manifest(
+        adapter,
+        &mut manifest,
+        &cache_root,
+        active,
+        config,
+        compress,
+    )
 }
 
 /// Inject the most-recently-cached auth entry into a materialized folder (#172).
