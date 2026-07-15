@@ -66,10 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+- Configurable session-log retention: `session_log.transcript.retention_days` — best-effort deletion of stale session-log files before each SessionStart; validated >= 1 (#812)
+
 ### Fixed
 - Remove dead process-static CONFIG_CACHE from hook_run that never saved a parse (each hook event is a fresh process); poisoned-cache log no longer fires on cold-start misses (#706)
 - Add eprintln! diagnostic when fs::canonicalize() fails in read-once, so operators can detect non-canonicalized cache keys (#728)
 - Add eprintln! diagnostic when deprecated PascalCase 'filePath' key is used in read-once, surfacing format drift (#729)
+- Preserve MCP server sub-keys (runtime auth tokens) across re-materialization in `merge_mcp_into_claude_json` — fixes silent auth loss on every materialize in Loose/Normal mode (#814)
 
 ## [3.4.0] - 2026-07-14
 

@@ -574,6 +574,7 @@ fn native_hooks_merge_into_settings_hooks() {
             transcript: Some(llmenv::config::TranscriptSinkConfig {
                 enabled: false,
                 level: llmenv::config::LogLevel::Info,
+                retention_days: None,
             }),
             ..Default::default()
         },
@@ -1228,6 +1229,7 @@ fn two_bundles_merge_into_deterministic_settings_json() {
         transcript: Some(llmenv::config::TranscriptSinkConfig {
             enabled: false,
             level: llmenv::config::LogLevel::Info,
+            retention_days: None,
         }),
         ..Default::default()
     };
