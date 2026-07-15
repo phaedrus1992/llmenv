@@ -2932,7 +2932,11 @@ fn run_sync(dry_run: bool) -> anyhow::Result<()> {
     match crate::sync::commit_and_push(
         &config_dir,
         "Update llmenv config",
-        config.cache.remote_sync,
+        if config.cache.remote_sync {
+            crate::sync::PushMode::Push
+        } else {
+            crate::sync::PushMode::SkipPush
+        },
     )? {
         crate::sync::SyncOutcome::NothingToCommit => {
             eprintln!("No changes to commit (working tree clean)");

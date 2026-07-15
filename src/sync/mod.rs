@@ -50,6 +50,15 @@ fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether [`commit_and_push`] should push to origin after committing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushMode {
+    /// Push committed changes to origin.
+    Push,
+    /// Skip the push step — commit locally only.
+    SkipPush,
+}
+
 /// Stage and commit every change in `repo`, and optionally push to origin.
 ///
 /// "Nothing to commit" is detected up front by inspecting the working tree
@@ -58,13 +67,14 @@ fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
 /// instead of being mistaken for a clean tree. A failed `git push` is likewise
 /// surfaced rather than silently treated as success (#307).
 ///
-/// When `push` is `false`, the add + commit step still runs — local history is
-/// preserved — but the remote push is skipped. This lets users disable remote
-/// git operations (e.g. when 1Password is locked) while keeping local commits.
+/// When [`PushMode::SkipPush`] is used, the add + commit step still runs —
+/// local history is preserved — but the remote push is skipped. This lets users
+/// disable remote git operations (e.g. when 1Password is locked) while keeping
+/// local commits.
 ///
 /// # Errors
 /// Returns an error if any git step fails to spawn or exits non-zero.
-pub fn commit_and_push(repo: &Path, message: &str, push: bool) -> Result<SyncOutcome> {
+pub fn commit_and_push(repo: &Path, message: &str, push: PushMode) -> Result<SyncOutcome> {
     run_git_checked(repo, &["add", "-A"], "stage changes (git add -A)")?;
 
     // After staging, an empty `status --porcelain` means there is genuinely
@@ -78,7 +88,7 @@ pub fn commit_and_push(repo: &Path, message: &str, push: bool) -> Result<SyncOut
         &["commit", "-m", message],
         "create commit (git commit)",
     )?;
-    if push {
+    if push == PushMode::Push {
         run_git_checked(repo, &["push"], "push config (git push)")?;
         Ok(SyncOutcome::Pushed)
     } else {

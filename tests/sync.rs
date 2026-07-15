@@ -94,7 +94,8 @@ fn commit_and_push_reports_nothing_when_clean() {
     init_repo(tmp.path());
 
     // Fresh repo, no files staged → nothing to commit, not an error.
-    let outcome = sync::commit_and_push(tmp.path(), "Update llmenv config", true).unwrap();
+    let outcome =
+        sync::commit_and_push(tmp.path(), "Update llmenv config", sync::PushMode::Push).unwrap();
     assert_eq!(outcome, sync::SyncOutcome::NothingToCommit);
 }
 
@@ -108,7 +109,8 @@ fn commit_and_push_surfaces_push_failure() {
     // failure must be surfaced as an error (not silently swallowed). This is
     // the #307 regression guard: previously `git push` ran via `.status()`
     // without checking success, so a failed push looked like success.
-    let err = sync::commit_and_push(tmp.path(), "Update llmenv config", true).unwrap_err();
+    let err = sync::commit_and_push(tmp.path(), "Update llmenv config", sync::PushMode::Push)
+        .unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("push"),
@@ -139,7 +141,8 @@ fn commit_and_push_pushes_change_to_remote() {
 
     // A new change should be staged, committed, and pushed.
     std::fs::write(work.join("config.yaml"), b"x: 2\n").unwrap();
-    let outcome = sync::commit_and_push(&work, "Update llmenv config", true).unwrap();
+    let outcome =
+        sync::commit_and_push(&work, "Update llmenv config", sync::PushMode::Push).unwrap();
     assert_eq!(outcome, sync::SyncOutcome::Pushed);
 
     // Confirm the commit actually landed in the bare remote — guards against a
@@ -165,7 +168,8 @@ fn commit_and_push_local_only_commits_without_pushing() {
 
     // No remote configured; push=false means add+commit but skip push.
     std::fs::write(tmp.path().join("config.yaml"), b"x: 1\n").unwrap();
-    let outcome = sync::commit_and_push(tmp.path(), "Local commit", false).unwrap();
+    let outcome =
+        sync::commit_and_push(tmp.path(), "Local commit", sync::PushMode::SkipPush).unwrap();
     assert_eq!(outcome, sync::SyncOutcome::CommittedLocally);
 
     // Confirm the commit exists locally.
