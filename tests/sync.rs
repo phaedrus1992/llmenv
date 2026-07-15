@@ -157,3 +157,28 @@ fn commit_and_push_pushes_change_to_remote() {
         remote_head.trim()
     );
 }
+
+#[test]
+fn commit_and_push_local_only_commits_without_pushing() {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+
+    // No remote configured; push=false means add+commit but skip push.
+    std::fs::write(tmp.path().join("config.yaml"), b"x: 1\n").unwrap();
+    let outcome = sync::commit_and_push(tmp.path(), "Local commit", false).unwrap();
+    assert_eq!(outcome, sync::SyncOutcome::CommittedLocally);
+
+    // Confirm the commit exists locally.
+    let log = std::process::Command::new("git")
+        .args(["log", "--oneline", "-1"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(log.status.success(), "reading local log failed");
+    let head = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        head.contains("Local commit"),
+        "local HEAD should contain the commit, got: {}",
+        head.trim()
+    );
+}
