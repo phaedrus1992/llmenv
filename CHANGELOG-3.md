@@ -15,12 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - Configurable session-log retention: `session_log.transcript.retention_days` — best-effort deletion of stale session-log files before each SessionStart; validated >= 1 (#812)
+- Add `cache.remote_sync` config option (default `true`) to disable remote git operations — prevents shell freezes when 1Password's SSH agent is locked and an SSH askpass prompt hangs terminal-based git ops (#833)
+
+### Changed
+- Build manifest once per export/regenerate instead of once per adapter, reducing repeated work in multi-engine setups (#708)
+- Hot-path optimizations for hook-run pipeline: cache Env::detect() results (30s TTL), cache bundle merge by config mtime, reuse Tokio runtime and MCP HTTP client via OnceLock (#813)
 
 ### Fixed
 - Remove dead process-static CONFIG_CACHE from hook_run that never saved a parse (each hook event is a fresh process); poisoned-cache log no longer fires on cold-start misses (#706)
 - Add eprintln! diagnostic when fs::canonicalize() fails in read-once, so operators can detect non-canonicalized cache keys (#728)
 - Add eprintln! diagnostic when deprecated PascalCase 'filePath' key is used in read-once, surfacing format drift (#729)
 - Preserve MCP server sub-keys (runtime auth tokens) across re-materialization in `merge_mcp_into_claude_json` — fixes silent auth loss on every materialize in Loose/Normal mode (#814)
+- Fail fast on manifest build error with preserved error chain instead of silently falling back to stale manifest (#708)
+- Gate git marketplace and external plugin sync behind `cache.remote_sync` to prevent hangs when remote sync is disabled
+- Distinguish local-only commits from pushed commits — prints "Committed locally (remote sync disabled — push skipped)" instead of misleading "Synced config to GitHub" when remote_sync is off
+- Add `## Version X.x` headers to the generated website changelog for correct section hierarchy across major versions
 
 ## [3.4.0] - 2026-07-14
 
