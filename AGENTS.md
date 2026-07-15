@@ -27,6 +27,22 @@ the resolved endpoint. The only non-MCP use of the `icm` binary is launching
 Before doing **anything** that touches the version number, the changelog, or a
 release — read [`RELEASING.md`](RELEASING.md) and follow it.
 
+**Hard rule — every user-facing change needs a changelog entry.** Any code
+change that a user can observe (bug fix, new feature, behavior change,
+deprecation, performance improvement, security fix, removed feature) gets an
+entry under `## [Unreleased]` following
+[keepachangelog](https://keepachangelog.com) formatting. No exceptions.
+Internal refactors, test-only changes, and documentation-only changes that
+don't alter behavior are exempt. If unsure, write the entry — silence about a
+change is worse than a changelog entry that's slightly too verbose.
+
+**Hard rule — changelog entries must be backed by up-to-date docs.** Any time
+you add or modify a changelog entry, verify that the relevant feature or
+change is adequately documented in `website/docs/`. If the docs don't cover
+it, or if they describe the old behavior, update them in the same change.
+"Search the docs for the feature name" is not enough — the docs must
+correctly describe the new behavior end-to-end.
+
 Key invariants (full details in `RELEASING.md`):
 
 - **A version only exists once it has been git-tagged.** Until then every change
