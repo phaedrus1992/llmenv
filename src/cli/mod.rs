@@ -824,7 +824,10 @@ fn run_export(
     // is adapter-independent, so re-building it per adapter is wasted work (#708).
     // Each adapter gets its own clone since materialize_from_manifest mutates it
     // (tag filtering, compression, etc.).
-    let shared_manifest = build_manifest(&config, &config_dir, &use_active, &firing, false);
+    let shared_manifest = match build_manifest(&config, &config_dir, &use_active, &firing, false) {
+        Ok(v) => v,
+        Err(e) => return Err(e).context("failed to build merged manifest"),
+    };
 
     let mut any_adapter_failed = false;
     let mut any_adapter_eligible = false;
@@ -832,7 +835,7 @@ fn run_export(
         any_adapter_eligible = true;
 
         let result = match &shared_manifest {
-            Ok(Some((m, cache_root))) => {
+            Some((m, cache_root)) => {
                 let mut cloned = m.clone();
                 materialize_from_manifest(
                     adapter.as_ref(),
@@ -843,13 +846,12 @@ fn run_export(
                     compress,
                 )
             }
-            Ok(None) => {
+            None => {
                 if let Err(e) = crate::throttle::store_active_throttle(None) {
                     tracing::debug!("failed to clear throttle state (non-fatal): {e}");
                 }
                 Ok(None)
             }
-            Err(e) => Err(anyhow::anyhow!("{e}")),
         };
 
         match result {
@@ -1036,12 +1038,15 @@ fn run_regenerate() -> anyhow::Result<()> {
     // Materialize the config for every installed adapter, same PATH-gating as
     // run_export (#543) — a machine without a given tool sees zero behavior change.
     // Build the merged manifest once; each adapter clones what it needs (#708).
-    let shared_manifest = build_manifest(&config, &config_dir, &active, &firing, false);
+    let shared_manifest = match build_manifest(&config, &config_dir, &active, &firing, false) {
+        Ok(v) => v,
+        Err(e) => return Err(e).context("failed to build merged manifest"),
+    };
     let mut materialized_any = false;
     let mut any_adapter_failed = false;
     for adapter in installed_adapters(&config) {
         let result = match &shared_manifest {
-            Ok(Some((m, cache_root))) => {
+            Some((m, cache_root)) => {
                 let mut cloned = m.clone();
                 materialize_from_manifest(
                     adapter.as_ref(),
@@ -1052,13 +1057,12 @@ fn run_regenerate() -> anyhow::Result<()> {
                     false,
                 )
             }
-            Ok(None) => {
+            None => {
                 if let Err(e) = crate::throttle::store_active_throttle(None) {
                     tracing::debug!("failed to clear throttle state (non-fatal): {e}");
                 }
                 Ok(None)
             }
-            Err(e) => Err(anyhow::anyhow!("{e}")),
         };
 
         match result {
@@ -1258,7 +1262,7 @@ fn materialize_from_manifest(
 
     let adapter_root = cache_root.join(adapter.name());
     let rendered = crate::materialize::materialize_with_mode(
-        &manifest,
+        manifest,
         &adapter_root,
         config.cache.hashing,
         &shape,
@@ -1269,7 +1273,7 @@ fn materialize_from_manifest(
     // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
     // Returns the paths it owns; we union them with the generic bundle files to
     // form llmenv's complete owned set (#196). Idempotent.
-    let adapter_owned = adapter.materialize(&manifest, &cache_path)?;
+    let adapter_owned = adapter.materialize(manifest, &cache_path)?;
 
     let auth_status =
         claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;
