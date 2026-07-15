@@ -229,36 +229,6 @@ pub(super) fn orphan_native_permission_keys(config: &Config) -> Vec<&str> {
         .collect()
 }
 
-/// Tool names Claude Code's `hook.matcher` regex can legitimately target — it
-/// matches only the tool name, never a file path or extension. Kept local to
-/// this check since no shared canonical list exists elsewhere in the codebase.
-const CLAUDE_CODE_TOOL_NAMES: &[&str] = &[
-    "Read",
-    "Write",
-    "Edit",
-    "MultiEdit",
-    "Bash",
-    "Glob",
-    "Grep",
-    "WebFetch",
-    "WebSearch",
-    "Task",
-];
-
-/// Whether `matcher` is a bare tool name, `^Name$`, or a `^(A|B|C)$`
-/// alternation over `CLAUDE_CODE_TOOL_NAMES`.
-fn matches_known_tool_pattern(matcher: &str) -> bool {
-    let prefix_stripped = matcher.strip_prefix('^').unwrap_or(matcher);
-    let inner = prefix_stripped.strip_suffix('$').unwrap_or(prefix_stripped);
-    let inner = inner
-        .strip_prefix('(')
-        .and_then(|s| s.strip_suffix(')'))
-        .unwrap_or(inner);
-    inner
-        .split('|')
-        .all(|part| CLAUDE_CODE_TOOL_NAMES.contains(&part))
-}
-
 /// Whether `matcher` is shaped like a file-extension glob (`*.rs`, `**/*.py`)
 /// or a bare extension (`.rs`) rather than a tool-name pattern.
 fn looks_like_file_glob(matcher: &str) -> bool {
@@ -284,7 +254,7 @@ pub(super) fn hooks_with_glob_like_matchers(config: &Config) -> Vec<String> {
         .iter()
         .filter_map(|hook| {
             let matcher = hook.matcher.as_deref()?;
-            (looks_like_file_glob(matcher) && !matches_known_tool_pattern(matcher))
+            looks_like_file_glob(matcher)
                 .then(|| format!("{} (matcher: '{}')", hook.event, matcher))
         })
         .collect()
