@@ -15,6 +15,12 @@ real integration silently no-op'd. The wire schema is documented in
 `tool_input` shapes here are cross-checked against the already-correct
 snake_case usage in `src/hook_run/read_once.rs`.
 
+**Caveat:** the fixtures currently committed here were hand-constructed by
+cross-referencing `src/hook_run/read_once.rs` and
+`docs/reference/claude-code/hooks.md`, not captured from live Claude Code
+hook traffic — they do not yet meet the "real invocation" bar stated above.
+Replace them with genuine captured payloads as they become available.
+
 Load fixtures via `crate::test_fixtures::load_hook_payload("edit.json")`
 (parsed `serde_json::Value`) or `load_hook_payload_raw("edit.json")` (raw
 string, e.g. for feeding a stdin-shaped parser under test).
