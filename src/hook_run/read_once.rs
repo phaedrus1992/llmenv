@@ -347,14 +347,21 @@ mod tests {
     }
 
     fn non_read_payload() -> serde_json::Value {
-        serde_json::json!({
-            "tool_name": "Edit",
-            "tool_input": {
-                "file_path": "/some/file.rs",
-                "oldString": "foo",
-                "newString": "bar",
-            },
-        })
+        crate::test_fixtures::load_hook_payload("edit.json")
+    }
+
+    #[test]
+    fn edit_fixture_uses_snake_case_keys() {
+        let payload = crate::test_fixtures::load_hook_payload("edit.json");
+        let tool_input = &payload["tool_input"];
+        assert!(
+            tool_input.get("old_string").is_some(),
+            "edit fixture must use snake_case old_string, not oldString"
+        );
+        assert!(
+            tool_input.get("new_string").is_some(),
+            "edit fixture must use snake_case new_string, not newString"
+        );
     }
 
     #[test]
