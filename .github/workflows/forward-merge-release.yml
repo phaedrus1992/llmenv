@@ -138,34 +138,50 @@ jobs:
             MERGE_BRANCH="forward-merge/$CURRENT-to-$TARGET"
 
             if ! git merge --no-commit --no-ff "origin/$CURRENT" 2>/dev/null; then
+              # website/docs/changelog.md is a generated artifact (from scripts/sync-changelog-doc.sh)
+              # that almost always conflicts on forward-merge. If it's the only conflicted file,
+              # resolve by regenerating from the merged CHANGELOG-*.md sources and continue.
+              CONFLICTED=$(git diff --name-only --diff-filter=U)
+              if echo "$CONFLICTED" | grep -q "^website/docs/changelog.md$" \
+                  && [ "$(echo "$CONFLICTED" | wc -l)" -eq 1 ]; then
+                echo "Resolving website/docs/changelog.md conflict: regenerating from merged CHANGELOG-*.md"
+                git checkout --ours website/docs/changelog.md
+                bash scripts/sync-changelog-doc.sh
+                git add website/docs/changelog.md
+                if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+                  git merge --abort
+                  bail_on_conflict "$CURRENT" "$TARGET" || true
+                  echo "::endgroup::"
+                  HALTED="conflict at $TARGET"
+                  break
+                fi
+                git commit --no-edit
+              else
+                if ! git merge --abort; then
+                  echo "::error::Failed to abort merge; working tree may be inconsistent"
+                  echo "::endgroup::"
+                  HALTED="merge abort failed at $TARGET"
+                  break
+                fi
+                bail_on_conflict "$CURRENT" "$TARGET" || true
+                echo "::endgroup::"
+                HALTED="conflict at $TARGET"
+                break
+              fi
+            else
               if ! git merge --abort; then
                 echo "::error::Failed to abort merge; working tree may be inconsistent"
                 echo "::endgroup::"
                 HALTED="merge abort failed at $TARGET"
                 break
               fi
-              bail_on_conflict "$CURRENT" "$TARGET" || true
-              echo "::endgroup::"
-              HALTED="conflict at $TARGET"
-              break
-            fi
-
-            if ! git merge --abort; then
-              echo "::error::Failed to abort merge; working tree may be inconsistent"
-              echo "::endgroup::"
-              HALTED="merge abort failed at $TARGET"
-              break
-            fi
-
-            git checkout -q "origin/$TARGET"
-            # The dry-run above proved this merges cleanly, but guard it anyway:
-            # an unchecked failure here trips `set -e` and crashes the shell,
-            # bypassing HALTED tracking and the ::endgroup:: marker.
-            if ! git merge --no-edit "origin/$CURRENT"; then
-              echo "::error::Failed to merge $CURRENT into $TARGET"
-              echo "::endgroup::"
-              HALTED="merge failed at $TARGET"
-              break
+              git checkout -q "origin/$TARGET"
+              if ! git merge --no-edit "origin/$CURRENT"; then
+                echo "::error::Failed to merge $CURRENT into $TARGET"
+                echo "::endgroup::"
+                HALTED="merge failed at $TARGET"
+                break
+              fi
             fi
 
             # Land the merge directly so the fix propagates automatically — main
