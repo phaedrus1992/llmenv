@@ -340,6 +340,11 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - git connectivity
 - orphans — scopes/tags/bundles/MCP/plugins that can never activate, a memory
   `server_host` missing from `host:`, and unknown fields in project markers
+- glob-shaped hook matchers — warns when a `hook.matcher` looks like a
+  file-extension glob (e.g. `*.rs`, `.py`) instead of a tool-name pattern;
+  Claude Code matches `hook.matcher` against tool name only, never file path,
+  so such a matcher silently never fires. Use a `scope.content` glob to gate
+  the hook's bundle by file type instead.
 - token-efficiency settings — warns when `BASH_MAX_OUTPUT_LENGTH`,
   `MAX_MCP_OUTPUT_TOKENS`, `ENABLE_PROMPT_CACHING_1H`, and
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` are not set; reports (info) whether
