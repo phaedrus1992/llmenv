@@ -101,6 +101,41 @@ adapter:
     )
 }
 
+/// Config with a bundle definition declared in the `bundle:` section, so
+/// `build_manifest` receives non-empty refs and exercises the merged-manifest
+/// code path (#708, #830).  The bundle directory must be created on disk at
+/// `{config_dir}/bundles/{name}/bundle.yaml` before running the command.
+fn config_with_bundle(adapter: &str, bundle_name: &str) -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: {bundle}
+    when: [test]
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: {adapter}
+"#,
+        user = current_user(),
+        bundle = bundle_name,
+        adapter = adapter,
+    )
+}
+
 /// Build a `Command` for `llmenv <subcommand>` pointed at the temp config.
 fn llmenv_cmd(
     config_dir: &std::path::Path,
@@ -303,4 +338,39 @@ fn smoke_crush_status_succeeds() {
     assert_completes_within(cmd, 10)
         .success()
         .stderr(predicate::str::contains("Scopes"));
+}
+
+// ============================================================================
+// Test Cases: Bundle Manifest (Shared-Manifest Code Path, #708 / #830)
+// ============================================================================
+//
+// Unlike the basic-export tests above (which have no `bundle:` section, so
+// `build_manifest` early-returns `None`), these tests declare a bundle that
+// *fires* for the active `test` tag, causing `build_manifest` to return
+// `Some(...)` and exercise the full merge → resolve → throttle pipeline.
+// The shared-manifest optimization (#708) builds the manifest once before the
+// adapter loop; these tests verify the entire path stays wired.
+
+#[test]
+fn smoke_claude_code_export_with_bundle() {
+    let (dir, config_path) = setup_config(&config_with_bundle("claude-code", "test-bundle"));
+    let bundle_dir = dir.path().join("bundles").join("test-bundle");
+    fs::create_dir_all(&bundle_dir).unwrap();
+    fs::write(bundle_dir.join("bundle.yaml"), "{}").unwrap();
+    let cmd = llmenv_cmd(dir.path(), &config_path, "export");
+    assert_completes_within(cmd, 10)
+        .success()
+        .stdout(predicate::str::contains(
+            "LLMENV_ACTIVE_BUNDLES='test-bundle'",
+        ));
+}
+
+#[test]
+fn smoke_claude_code_regenerate_with_bundle() {
+    let (dir, config_path) = setup_config(&config_with_bundle("claude-code", "test-bundle"));
+    let bundle_dir = dir.path().join("bundles").join("test-bundle");
+    fs::create_dir_all(&bundle_dir).unwrap();
+    fs::write(bundle_dir.join("bundle.yaml"), "{}").unwrap();
+    let cmd = llmenv_cmd(dir.path(), &config_path, "regenerate");
+    assert_completes_within(cmd, 10).success();
 }
