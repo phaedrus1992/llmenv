@@ -2798,14 +2798,6 @@ fn run_plugin_sync() -> anyhow::Result<()> {
     }
 
     for m in &config.marketplace {
-        if !config.cache.remote_sync && m.classify_source() == crate::config::MarketplaceSource::Git
-        {
-            eprintln!(
-                "⏭ {} [remote_sync disabled — skipping git marketplace]",
-                m.name
-            );
-            continue;
-        }
         let state = crate::plugins::cache::sync_marketplace(&cache_root, m, true)
             .with_context(|| format!("syncing marketplace '{}'", m.name))?;
         let head = state.head.as_deref().unwrap_or("(local path)");
@@ -2829,22 +2821,15 @@ fn run_plugin_sync() -> anyhow::Result<()> {
             name: crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
             source: crate::config::CONTEXT_MODE_SOURCE.to_string(),
         };
-        if !config.cache.remote_sync {
-            eprintln!(
-                "⏭ {} [remote_sync disabled — skipping git marketplace]",
-                builtin.name
-            );
-        } else {
-            let state = crate::plugins::cache::sync_marketplace(&cache_root, &builtin, true)
-                .with_context(|| format!("syncing built-in marketplace '{}'", builtin.name))?;
-            let head = state.head.as_deref().unwrap_or("(local path)");
-            println!(
-                "✓ {} → {} [{}]",
-                builtin.name,
-                state.install_location.display(),
-                head
-            );
-        }
+        let state = crate::plugins::cache::sync_marketplace(&cache_root, &builtin, true)
+            .with_context(|| format!("syncing built-in marketplace '{}'", builtin.name))?;
+        let head = state.head.as_deref().unwrap_or("(local path)");
+        println!(
+            "✓ {} → {} [{}]",
+            builtin.name,
+            state.install_location.display(),
+            head
+        );
     }
 
     // Sync external plugin payloads: plugins whose source in marketplace.json is
@@ -2871,13 +2856,6 @@ fn run_plugin_sync() -> anyhow::Result<()> {
             continue;
         };
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
-            continue;
-        }
-        if !config.cache.remote_sync {
-            eprintln!(
-                "⏭ {}@{mkt_name} [remote_sync disabled — skipping external plugin]",
-                plugin_name
-            );
             continue;
         }
         let state = crate::plugins::cache::sync_external_plugin(
@@ -2927,16 +2905,10 @@ fn run_sync(dry_run: bool) -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
     match crate::sync::commit_and_push(
         &config_dir,
         "Update llmenv config",
-        if config.cache.remote_sync {
-            crate::sync::PushMode::Push
-        } else {
-            crate::sync::PushMode::SkipPush
-        },
+        crate::sync::PushMode::Push,
     )? {
         crate::sync::SyncOutcome::NothingToCommit => {
             eprintln!("No changes to commit (working tree clean)");

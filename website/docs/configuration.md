@@ -64,16 +64,18 @@ Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
 `cache_retention_hours` = `168`, `remote_sync` = `true`. Set
 `cache_retention_hours` to `null` to disable age-based GC.
 
-### `remote_sync` — toggle remote git operations
+### `remote_sync` — toggle background remote git operations
 
-When enabled (default), llmenv fetches and pulls config from git on `export`,
-pushes commits on `llmenv sync`, and clones/pulls plugin marketplaces on
-`llmenv plugin-sync`.
+When enabled (default), llmenv fetches and pulls config from git on `export`.
 
-Set to `false` to disable all remote git operations while keeping local
-commits working. Useful when your SSH credential helper (e.g. 1Password's SSH
-agent) is locked and an SSH askpass prompt would hang terminal-based git
-operations:
+Set to `false` to disable *background* remote git operations (the throttled
+pull that runs during `llmenv export`). Manual commands like `llmenv sync` and
+`llmenv plugin-sync` are unaffected — they always perform remote operations
+regardless of this setting.
+
+Useful when your SSH credential helper (e.g. 1Password's SSH agent) is locked
+and an SSH askpass prompt would hang terminal-based git operations during
+startup:
 
 ### `hashing` — how materialized folders are named
 

@@ -66,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+- `remote_sync` no longer blocks manual `llmenv sync` and `llmenv plugin-sync` commands — it only gates the non-interactive throttled pull during `llmenv export` (#835)
+
 ## [3.5.0] - 2026-07-15
 
 ### Added
