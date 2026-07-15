@@ -4134,6 +4134,11 @@ mod config_guard_tests {
     }
 
     #[test]
+    fn extract_hook_file_path_missing_tool_input_is_none() {
+        assert_eq!(extract_hook_file_path(r#"{"tool_name": "SomeTool"}"#), None);
+    }
+
+    #[test]
     fn extract_hook_file_path_from_malformed_json_is_none() {
         assert_eq!(extract_hook_file_path("not valid json{"), None);
     }

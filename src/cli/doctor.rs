@@ -248,11 +248,8 @@ const CLAUDE_CODE_TOOL_NAMES: &[&str] = &[
 /// Whether `matcher` is a bare tool name, `^Name$`, or a `^(A|B|C)$`
 /// alternation over `CLAUDE_CODE_TOOL_NAMES`.
 fn matches_known_tool_pattern(matcher: &str) -> bool {
-    let inner = matcher
-        .strip_prefix('^')
-        .unwrap_or(matcher)
-        .strip_suffix('$')
-        .unwrap_or(matcher);
+    let prefix_stripped = matcher.strip_prefix('^').unwrap_or(matcher);
+    let inner = prefix_stripped.strip_suffix('$').unwrap_or(prefix_stripped);
     let inner = inner
         .strip_prefix('(')
         .and_then(|s| s.strip_suffix(')'))
