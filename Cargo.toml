@@ -86,6 +86,7 @@ predicates = "3.1.4"
 proptest = "1.11.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 wiremock = "0.6.5"
+filetime = "0.2"
 
 [profile.release]
 lto = true
