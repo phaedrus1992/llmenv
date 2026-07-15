@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.5.0] - 2026-07-15
+
 ### Added
 - Configurable session-log retention: `session_log.transcript.retention_days` — best-effort deletion of stale session-log files before each SessionStart; validated >= 1 (#812)
 
@@ -533,7 +535,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.4.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.5.0...HEAD
+[3.5.0]: https://github.com/phaedrus1992/llmenv/compare/v3.4.0...v3.5.0
 [3.4.0]: https://github.com/phaedrus1992/llmenv/compare/v3.3.0...v3.4.0
 [3.3.0]: https://github.com/phaedrus1992/llmenv/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/phaedrus1992/llmenv/compare/v3.1.0...v3.2.0
