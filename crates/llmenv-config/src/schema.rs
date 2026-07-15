@@ -221,6 +221,11 @@ pub struct TranscriptSinkConfig {
     /// Minimum event level recorded to the transcript.
     #[serde(default)]
     pub level: LogLevel,
+    /// Optional reaping of the file-sink session log: transcripts older than
+    /// `retention_days` are best-effort deleted during SessionStart. Absent
+    /// (default) means no reaping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u64>,
 }
 
 impl Default for TranscriptSinkConfig {
@@ -228,6 +233,7 @@ impl Default for TranscriptSinkConfig {
         Self {
             enabled: true,
             level: LogLevel::Info,
+            retention_days: None,
         }
     }
 }
@@ -351,11 +357,13 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
                     Some(TranscriptSinkConfig {
                         enabled: true,
                         level,
+                        retention_days: None,
                     })
                 } else {
                     Some(TranscriptSinkConfig {
                         enabled: false,
                         level,
+                        retention_days: None,
                     })
                 },
                 max_content_bytes: old.max_content_bytes,
@@ -1478,6 +1486,7 @@ mod tests {
             transcript: Some(TranscriptSinkConfig {
                 enabled: false,
                 level: LogLevel::Trace,
+                retention_days: None,
             }),
             max_content_bytes: Some(1024),
         };
@@ -1495,7 +1504,7 @@ mod tests {
         ) {
             let original = SessionLog {
                 file: file.map(|(enabled, level, path)| FileSinkConfig { enabled, level, path }),
-                transcript: Some(TranscriptSinkConfig { enabled: transcript_enabled, level: transcript_level }),
+                transcript: Some(TranscriptSinkConfig { enabled: transcript_enabled, level: transcript_level, retention_days: None }),
                 max_content_bytes,
             };
             let yaml = serde_yaml::to_string(&original).expect("serialize");

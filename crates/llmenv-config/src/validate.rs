@@ -30,6 +30,8 @@ pub enum ValidateError {
     CacheDirTraversal(String),
     #[error("cache_retention_hours must be > 0")]
     CacheRetentionInvalid,
+    #[error("transcript.retention_days must be >= 1")]
+    RetentionDaysInvalid,
     #[error("duplicate mcp name: {0}")]
     DuplicateMcpName(String),
     #[error("mcp name '{0}' is reserved for the memory backend")]
@@ -368,6 +370,15 @@ impl Config {
             && hours == 0
         {
             return Err(ValidateError::CacheRetentionInvalid);
+        }
+        if let Some(days) = self
+            .session_log
+            .as_ref()
+            .and_then(|s| s.transcript.as_ref())
+            .and_then(|t| t.retention_days)
+            && days == 0
+        {
+            return Err(ValidateError::RetentionDaysInvalid);
         }
         let mut seen_scope_ids = std::collections::HashSet::new();
         let ids = self
@@ -747,15 +758,23 @@ mod tests {
             prop::option::of((any::<bool>(), arb_level(), arb_opt_string())),
             (any::<bool>(), arb_level()),
             prop::option::of(0usize..65_536),
+            // retention_days: None or 1..3650 (0 is invalid but valid
+            // configs are still round-trippable — the roundtrip test
+            // doesn't validate, it just serializes/deserializes).
+            prop::option::of(0u64..3650),
         )
             .prop_map(
-                |(file, (enabled, level), max_content_bytes)| crate::SessionLog {
+                |(file, (enabled, level), max_content_bytes, retention_days)| crate::SessionLog {
                     file: file.map(|(fe, fl, path)| crate::FileSinkConfig {
                         enabled: fe,
                         level: fl,
                         path,
                     }),
-                    transcript: Some(crate::TranscriptSinkConfig { enabled, level }),
+                    transcript: Some(crate::TranscriptSinkConfig {
+                        enabled,
+                        level,
+                        retention_days,
+                    }),
                     max_content_bytes,
                 },
             )
@@ -2082,6 +2101,70 @@ mod tests {
             session_log: None,
             lsp: vec![],
             skills: vec![],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn retention_days_zero_is_rejected() {
+        let config = Config {
+            session_log: Some(crate::SessionLog {
+                transcript: Some(crate::TranscriptSinkConfig {
+                    enabled: true,
+                    level: crate::LogLevel::Info,
+                    retention_days: Some(0),
+                }),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::RetentionDaysInvalid)
+        ));
+    }
+
+    #[test]
+    fn retention_days_positive_is_accepted() {
+        let config = Config {
+            session_log: Some(crate::SessionLog {
+                transcript: Some(crate::TranscriptSinkConfig {
+                    enabled: true,
+                    level: crate::LogLevel::Info,
+                    retention_days: Some(7),
+                }),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn retention_days_none_is_accepted() {
+        let config = Config {
+            session_log: Some(crate::SessionLog {
+                transcript: Some(crate::TranscriptSinkConfig {
+                    enabled: true,
+                    level: crate::LogLevel::Info,
+                    retention_days: None,
+                }),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn retention_days_zero_without_transcript_is_not_rejected() {
+        // If transcript is None entirely, no retention_days to validate.
+        let config = Config {
+            session_log: Some(crate::SessionLog {
+                transcript: None,
+                ..Default::default()
+            }),
+            ..Config::default()
         };
         assert!(config.validate().is_ok());
     }
