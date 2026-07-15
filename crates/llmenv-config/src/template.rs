@@ -23,6 +23,10 @@ cache:
   #   strict — folder = <version>-<content_hash>; every input change makes a new
   #            folder. Strongest isolation, but fragments the cache.
   # hashing: normal
+  # Allow remote git operations (fetch, pull, push) on the config directory
+  # and plugin marketplaces (default: true). Set to false to prevent shell
+  # freezes when 1Password or other SSH credential helpers are locked.
+  # remote_sync: false
 
 # Scopes: match environment conditions (network, host, user, project) and emit tags.
 # Uncomment and fill in as needed.

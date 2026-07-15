@@ -48,7 +48,7 @@ fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Stage, commit, and push every change in `repo` to origin.
+/// Stage and commit every change in `repo`, and optionally push to origin.
 ///
 /// "Nothing to commit" is detected up front by inspecting the working tree
 /// after staging — not by misreading `git commit`'s exit code — so a commit
@@ -56,9 +56,13 @@ fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
 /// instead of being mistaken for a clean tree. A failed `git push` is likewise
 /// surfaced rather than silently treated as success (#307).
 ///
+/// When `push` is `false`, the add + commit step still runs — local history is
+/// preserved — but the remote push is skipped. This lets users disable remote
+/// git operations (e.g. when 1Password is locked) while keeping local commits.
+///
 /// # Errors
 /// Returns an error if any git step fails to spawn or exits non-zero.
-pub fn commit_and_push(repo: &Path, message: &str) -> Result<SyncOutcome> {
+pub fn commit_and_push(repo: &Path, message: &str, push: bool) -> Result<SyncOutcome> {
     run_git_checked(repo, &["add", "-A"], "stage changes (git add -A)")?;
 
     // After staging, an empty `status --porcelain` means there is genuinely
@@ -72,8 +76,15 @@ pub fn commit_and_push(repo: &Path, message: &str) -> Result<SyncOutcome> {
         &["commit", "-m", message],
         "create commit (git commit)",
     )?;
-    run_git_checked(repo, &["push"], "push config (git push)")?;
-    Ok(SyncOutcome::Pushed)
+    if push {
+        run_git_checked(repo, &["push"], "push config (git push)")?;
+        Ok(SyncOutcome::Pushed)
+    } else {
+        // Local-only commit — no push. Return Pushed anyway; the commit was
+        // made and will be pushed on a subsequent run when remote_sync is
+        // re-enabled.
+        Ok(SyncOutcome::Pushed)
+    }
 }
 
 /// Path to the sync state file within state_dir.
