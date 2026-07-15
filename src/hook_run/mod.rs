@@ -727,6 +727,19 @@ async fn handle_session_log(
     }
     let session_id = match (event, claude_session_id) {
         (HookEvent::SessionStart, Some(csid)) => {
+            // Best-effort reaping before any session-log activity.
+            if let Some(days) = cfg.transcript.as_ref().and_then(|t| t.retention_days) {
+                let log_path = cfg.file_path().map(std::path::PathBuf::from).or_else(|| {
+                    crate::session_log::default_file_path()
+                        .inspect_err(|e| {
+                            tracing::debug!("session_log reaper: cannot resolve default path: {e}")
+                        })
+                        .ok()
+                });
+                if let Some(p) = log_path.as_ref() {
+                    crate::session_log::reap_session_log(p, days);
+                }
+            }
             ensure_transcript_session(cfg, client, csid, ctx, state_path).await
         }
         (_, Some(csid)) => state_path.and_then(|p| state::lookup_session_at(p, csid)),
@@ -1872,6 +1885,7 @@ mod session_log_tests {
             transcript: Some(llmenv_config::TranscriptSinkConfig {
                 enabled: false,
                 level: LogLevel::Info,
+                retention_days: None,
             }),
             max_content_bytes: None,
         }
@@ -1941,6 +1955,7 @@ mod session_log_tests {
             transcript: Some(llmenv_config::TranscriptSinkConfig {
                 enabled: false,
                 level: LogLevel::Info,
+                retention_days: None,
             }),
             max_content_bytes: None,
         };
@@ -1977,6 +1992,7 @@ mod session_log_tests {
             transcript: Some(llmenv_config::TranscriptSinkConfig {
                 enabled: true,
                 level: LogLevel::Info,
+                retention_days: None,
             }),
             ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
@@ -2006,6 +2022,7 @@ mod session_log_tests {
             transcript: Some(llmenv_config::TranscriptSinkConfig {
                 enabled: true,
                 level: LogLevel::Info,
+                retention_days: None,
             }),
             ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
