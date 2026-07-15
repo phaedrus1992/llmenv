@@ -1,13 +1,5 @@
 name: coverage
 on:
-  push:
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'scripts/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/coverage.yml'
   pull_request:
     paths:
       - 'src/**'

@@ -412,6 +412,15 @@ pub struct Cache {
     /// reconciliation are identical across modes — the manifest dotfile carries
     /// the content hash and owned-file set regardless.
     pub hashing: HashingMode,
+    /// Allow remote git operations (fetch, pull, push) on the config directory
+    /// and plugin marketplaces. Set to `false` to prevent shell freezes when
+    /// 1Password or other SSH credential helpers are locked. Default: `true`.
+    #[serde(default = "default_remote_sync")]
+    pub remote_sync: bool,
+}
+
+const fn default_remote_sync() -> bool {
+    true
 }
 
 impl Default for Cache {
@@ -421,6 +430,7 @@ impl Default for Cache {
             sync_interval_minutes: 15,
             cache_retention_hours: Some(168), // 7 days
             hashing: HashingMode::default(),
+            remote_sync: default_remote_sync(),
         }
     }
 }
