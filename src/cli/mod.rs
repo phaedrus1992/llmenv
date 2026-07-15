@@ -1534,12 +1534,16 @@ fn build_manifest(
     let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags)
         .context("resolving plugins")?;
     manifest.plugins = sync_plugin_payloads(&cache_root, resolved.plugins);
-    manifest.marketplaces = sync_marketplaces(
-        config,
-        &cache_root,
-        resolved.marketplaces,
-        refresh_marketplaces,
-    )?;
+    manifest.marketplaces = if config.cache.remote_sync {
+        sync_marketplaces(
+            config,
+            &cache_root,
+            resolved.marketplaces,
+            refresh_marketplaces,
+        )?
+    } else {
+        resolved.marketplaces
+    };
 
     // Resolve the active throttle entry (tag intersection, single-active).
     let top_throttle = config
