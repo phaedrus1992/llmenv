@@ -439,9 +439,12 @@ mod tests {
             b"recent",
         )
         .expect("write recent state");
-        // Backdate old so recent is clearly newer.
-        let old_time = SystemTime::now() - Duration::from_secs(3600);
-        set_mtime_recursive(&old, old_time);
+        // Explicit timestamps, widely separated — immune to mtime-granularity flakes.
+        set_mtime_recursive(&old, SystemTime::UNIX_EPOCH + Duration::from_secs(100_000));
+        set_mtime_recursive(
+            &recent,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(200_000),
+        );
 
         std::fs::create_dir_all(&new_path).expect("mkdir new");
         migrate_ephemeral(tmp.path(), new_name);
@@ -555,9 +558,7 @@ mod tests {
                 set_mtime_recursive(&entry.path(), t);
             }
         }
-        // set_modified requires an open handle on some platforms.
-        if let Ok(f) = std::fs::File::options().write(true).open(p) {
-            let _ = f.set_modified(t);
-        }
+        filetime::set_file_mtime(p, filetime::FileTime::from_system_time(t))
+            .expect("set_file_mtime");
     }
 }
