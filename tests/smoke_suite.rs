@@ -350,6 +350,11 @@ fn smoke_crush_status_succeeds() {
 // `Some(...)` and exercise the full merge → resolve → throttle pipeline.
 // The shared-manifest optimization (#708) builds the manifest once before the
 // adapter loop; these tests verify the entire path stays wired.
+//
+// Unlike other sections, only the `claude-code` adapter is tested here — the
+// manifest builder is adapter-agnostic (it runs before the adapter loop), so
+// a single adapter exercises the bundle code path. Crush variants would pass
+// trivially without adding meaningful coverage.
 
 #[test]
 fn smoke_claude_code_export_with_bundle() {
