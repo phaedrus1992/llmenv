@@ -21,6 +21,8 @@ fn has_unpushed_commits(repo: &Path) -> bool {
 pub enum SyncOutcome {
     /// A commit was created and pushed to origin.
     Pushed,
+    /// A commit was created locally but push was skipped (remote_sync disabled).
+    CommittedLocally,
     /// The working tree was clean — nothing to commit or push.
     NothingToCommit,
 }
@@ -80,10 +82,9 @@ pub fn commit_and_push(repo: &Path, message: &str, push: bool) -> Result<SyncOut
         run_git_checked(repo, &["push"], "push config (git push)")?;
         Ok(SyncOutcome::Pushed)
     } else {
-        // Local-only commit — no push. Return Pushed anyway; the commit was
-        // made and will be pushed on a subsequent run when remote_sync is
-        // re-enabled.
-        Ok(SyncOutcome::Pushed)
+        // Local-only commit — no push. Return CommittedLocally so callers
+        // can distinguish a real push from a local-only commit.
+        Ok(SyncOutcome::CommittedLocally)
     }
 }
 
