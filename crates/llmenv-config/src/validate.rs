@@ -794,13 +794,23 @@ mod tests {
             0u64..120,
             prop::option::of(0u64..10_000),
             arb_hashing_mode(),
+            prop::bool::ANY,
         )
             .prop_map(
-                |(cache_dir, sync_interval_minutes, cache_retention_hours, hashing)| Cache {
+                |(
                     cache_dir,
                     sync_interval_minutes,
                     cache_retention_hours,
                     hashing,
+                    remote_sync,
+                )| {
+                    Cache {
+                        cache_dir,
+                        sync_interval_minutes,
+                        cache_retention_hours,
+                        hashing,
+                        remote_sync,
+                    }
                 },
             )
     }
