@@ -1,0 +1,14 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/path/to/transcript.jsonl",
+  "cwd": "/path/to/project",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "MultiEdit",
+  "tool_input": {
+    "file_path": "/path/to/file.rs",
+    "edits": [
+      { "old_string": "foo", "new_string": "bar" },
+      { "old_string": "baz", "new_string": "qux" }
+    ]
+  }
+}
