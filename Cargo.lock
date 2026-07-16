@@ -1320,6 +1320,7 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml_ng",
