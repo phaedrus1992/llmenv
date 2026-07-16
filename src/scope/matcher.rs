@@ -202,20 +202,52 @@ pub fn matches_user(s: &UserScope, env: &Env) -> bool {
     s.r#match.user.as_deref().is_some_and(|u| u == env.user)
 }
 
+/// Evaluate every content scope against `cwd` in a single directory walk.
+///
+/// Each content scope previously triggered its own `walkdir` traversal
+/// (#703) — N active content scopes meant N full tree walks on every hook
+/// fire and export. Here all globs are compiled up front and evaluated
+/// per entry against a single walk; a scope drops out of the pending set as
+/// soon as it matches, and the walk ends early once none remain pending.
+///
+/// Returns the `id`s of scopes whose glob matched.
 #[must_use]
-pub fn matches_content(s: &ContentScope, cwd: &std::path::Path) -> bool {
-    let Ok(glob) = globset::Glob::new(&s.r#match.glob) else {
-        tracing::debug!("content scope {}: invalid glob pattern", s.id);
-        return false;
-    };
-    let matcher = glob.compile_matcher();
+pub fn matches_content_all<'a>(
+    scopes: &'a [ContentScope],
+    cwd: &std::path::Path,
+) -> std::collections::BTreeSet<&'a str> {
+    let mut pending: Vec<(&str, globset::GlobMatcher, Option<usize>)> = scopes
+        .iter()
+        .filter_map(|s| match globset::Glob::new(&s.r#match.glob) {
+            Ok(glob) => Some((s.id.as_str(), glob.compile_matcher(), s.r#match.depth)),
+            Err(_) => {
+                tracing::debug!("content scope {}: invalid glob pattern", s.id);
+                None
+            }
+        })
+        .collect();
+
+    let mut matched = std::collections::BTreeSet::new();
+    if pending.is_empty() {
+        return matched;
+    }
+
+    // Cap the walk at the loosest per-scope depth limit; any scope with no
+    // limit forces an unbounded walk (short-circuits to `None` below).
+    let max_depth = pending
+        .iter()
+        .map(|(_, _, d)| *d)
+        .try_fold(0usize, |acc, d| d.map(|d| acc.max(d)));
 
     let mut walker = walkdir::WalkDir::new(cwd).follow_links(false);
-    if let Some(depth) = s.r#match.depth {
+    if let Some(depth) = max_depth {
         walker = walker.max_depth(depth);
     }
 
     for entry in walker {
+        if pending.is_empty() {
+            break;
+        }
         let Ok(entry) =
             entry.inspect_err(|e| tracing::warn!(error = %e, "walkdir entry error; skipping"))
         else {
@@ -239,11 +271,20 @@ pub fn matches_content(s: &ContentScope, cwd: &std::path::Path) -> bool {
             );
             continue;
         };
-        if matcher.is_match(relative) {
-            return true;
-        }
+        let entry_depth = entry.depth();
+        pending.retain(|(id, matcher, depth)| {
+            if depth.is_some_and(|d| entry_depth > d) {
+                return true;
+            }
+            if matcher.is_match(relative) {
+                matched.insert(*id);
+                false
+            } else {
+                true
+            }
+        });
     }
-    false
+    matched
 }
 
 /// Discover project by walking cwd upward looking for `.llmenv.yaml`.
@@ -361,9 +402,20 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{Env, discover_project, glob_matches};
+    use super::{ContentScope, Env, discover_project, glob_matches, matches_content_all};
     use proptest::prelude::*;
     use std::path::Path;
+
+    fn content_scope(id: &str, glob: &str, depth: Option<usize>) -> ContentScope {
+        ContentScope {
+            id: id.to_string(),
+            r#match: crate::config::ContentMatch {
+                glob: glob.to_string(),
+                depth,
+            },
+            tags: Vec::new(),
+        }
+    }
 
     fn write_project_file(temp_dir: &Path, body: &str) {
         let path = temp_dir.join(".llmenv.yaml");
@@ -637,6 +689,69 @@ mod tests {
         // Pattern with middle parts matching exactly
         assert!(glob_matches("a*b*c", "abc")); // a + nothing + b + nothing + c
         assert!(!glob_matches("a*x*c", "abc")); // a + nothing + x (missing) + nothing + c
+    }
+
+    #[test]
+    fn matches_content_all_evaluates_every_scope_in_one_walk() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let root = temp_dir.path();
+        std::fs::write(root.join("main.rs"), "").expect("write");
+        std::fs::write(root.join("readme.md"), "").expect("write");
+        std::fs::create_dir(root.join("sub")).expect("mkdir");
+        std::fs::write(root.join("sub").join("nested.py"), "").expect("write");
+
+        let scopes = vec![
+            content_scope("rust", "*.rs", None),
+            content_scope("markdown", "*.md", None),
+            content_scope("no-match", "*.go", None),
+        ];
+
+        let matched = matches_content_all(&scopes, root);
+        assert!(matched.contains("rust"));
+        assert!(matched.contains("markdown"));
+        assert!(!matched.contains("no-match"));
+        assert_eq!(matched.len(), 2);
+    }
+
+    #[test]
+    fn matches_content_all_respects_per_scope_depth() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let root = temp_dir.path();
+        std::fs::create_dir(root.join("sub")).expect("mkdir");
+        std::fs::write(root.join("sub").join("nested.py"), "").expect("write");
+
+        // depth 0 = root only, so the nested file (depth 2) must not match.
+        let shallow = content_scope("shallow", "*.py", Some(0));
+        // No depth limit, so the same nested file must match.
+        let deep = content_scope("deep", "*.py", None);
+
+        let scopes = [shallow, deep];
+        let matched = matches_content_all(&scopes, root);
+        assert!(!matched.contains("shallow"));
+        assert!(matched.contains("deep"));
+    }
+
+    #[test]
+    fn matches_content_all_skips_invalid_glob_but_evaluates_rest() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let root = temp_dir.path();
+        std::fs::write(root.join("main.rs"), "").expect("write");
+
+        let scopes = vec![
+            content_scope("bad", "[", None),
+            content_scope("good", "*.rs", None),
+        ];
+
+        let matched = matches_content_all(&scopes, root);
+        assert!(!matched.contains("bad"));
+        assert!(matched.contains("good"));
+    }
+
+    #[test]
+    fn matches_content_all_empty_scopes_returns_empty() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let matched = matches_content_all(&[], temp_dir.path());
+        assert!(matched.is_empty());
     }
 
     proptest! {

@@ -69,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 - `llmenv doctor` flags `hook.matcher` values shaped like file-extension globs (e.g. `*.rs`, `.py`) — Claude Code matches `hook.matcher` against tool name only, never file path, so these silently never fire; warning points at `scope.content` to gate a bundle by file type instead (#837)
 
+### Changed
+- Evaluate all `scope.content` matchers in a single directory walk instead of one walk per matcher — N active content scopes previously meant N full tree walks on every hook fire and every export (#703)
+
 ## [3.5.1] - 2026-07-15
 
 ### Fixed
