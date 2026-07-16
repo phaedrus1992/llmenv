@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Added
+- Opt-in per-phase hook-run timing via `LLMENV_TRACE_TIMING` env var — emits a single `llmenv-trace {json}` stderr line with config-load/scope-eval/prep/mcp phase durations in microseconds; off by default, stdout unaffected
 - `llmenv doctor` flags `hook.matcher` values shaped like file-extension globs (e.g. `*.rs`, `.py`) — Claude Code matches `hook.matcher` against tool name only, never file path, so these silently never fire; warning points at `scope.content` to gate a bundle by file type instead (#837)
 
 ### Changed
