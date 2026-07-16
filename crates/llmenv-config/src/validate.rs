@@ -4,10 +4,10 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::{
-    Bundle, Cache, Capabilities, Features, Hook, HookHandler, HookHandlerKind, HostEntry,
-    HostMatch, HostScope, Marketplace, McpServer, McpTransport, Memory, NativePermissionRules,
-    NetworkMatch, NetworkScope, PermissionMode, Permissions, PluginCollection, Scopes, Throttle,
-    UserMatch, UserScope,
+    Bundle, Cache, Capabilities, ContentMatch, ContentScope, Features, Hook, HookHandler,
+    HookHandlerKind, HostEntry, HostMatch, HostScope, Marketplace, McpServer, McpTransport, Memory,
+    NativePermissionRules, NetworkMatch, NetworkScope, PermissionMode, Permissions,
+    PluginCollection, Scopes, Throttle, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -387,7 +387,8 @@ impl Config {
             .iter()
             .map(|s| &s.id)
             .chain(self.scope.host.iter().map(|s| &s.id))
-            .chain(self.scope.user.iter().map(|s| &s.id));
+            .chain(self.scope.user.iter().map(|s| &s.id))
+            .chain(self.scope.content.iter().map(|s| &s.id));
         for id in ids {
             if !seen_scope_ids.insert(id) {
                 return Err(ValidateError::DuplicateScopeId(id.clone()));
@@ -1216,6 +1217,50 @@ mod tests {
             prop_assert!(
                 config.validate().is_err(),
                 "config with duplicate scope IDs should fail validation"
+            );
+        }
+
+        // #703: content scopes are batched by id in matches_content_all, so a
+        // duplicate content-scope id would activate both scopes if only one's
+        // glob matched — validation must reject it same as the other kinds.
+        #[test]
+        fn prop_config_validate_enforces_unique_content_scope_ids(
+            id in arb_string(),
+        ) {
+            let content = vec![
+                ContentScope {
+                    id: id.clone(),
+                    r#match: ContentMatch { glob: "*.rs".to_string(), depth: None },
+                    tags: vec![],
+                },
+                ContentScope {
+                    id, // Duplicate ID
+                    r#match: ContentMatch { glob: "*.md".to_string(), depth: None },
+                    tags: vec![],
+                },
+            ];
+
+            let config = Config {
+                disabled_engines: vec![],
+                cache: Cache::default(),
+                capabilities: Default::default(),
+                native: Default::default(),
+                scope: Scopes { network: vec![], host: vec![], user: vec![], content },
+                bundle: vec![],
+                mcp: vec![],
+                features: None,
+                marketplace: vec![],
+                plugin_collection: vec![],
+                state: Default::default(),
+                host: Default::default(),
+                init: Default::default(),
+                session_log: None,
+                lsp: vec![],
+                skills: vec![],
+            };
+            prop_assert!(
+                config.validate().is_err(),
+                "config with duplicate content-scope IDs should fail validation"
             );
         }
 
