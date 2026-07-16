@@ -212,10 +212,10 @@ pub fn matches_user(s: &UserScope, env: &Env) -> bool {
 ///
 /// Returns the `id`s of scopes whose glob matched.
 #[must_use]
-pub fn matches_content_all(
-    scopes: &[ContentScope],
+pub fn matches_content_all<'a>(
+    scopes: &'a [ContentScope],
     cwd: &std::path::Path,
-) -> std::collections::BTreeSet<String> {
+) -> std::collections::BTreeSet<&'a str> {
     let mut pending: Vec<(&str, globset::GlobMatcher, Option<usize>)> = scopes
         .iter()
         .filter_map(|s| match globset::Glob::new(&s.r#match.glob) {
@@ -277,7 +277,7 @@ pub fn matches_content_all(
                 return true;
             }
             if matcher.is_match(relative) {
-                matched.insert((*id).to_string());
+                matched.insert(*id);
                 false
             } else {
                 true
@@ -725,7 +725,8 @@ mod tests {
         // No depth limit, so the same nested file must match.
         let deep = content_scope("deep", "*.py", None);
 
-        let matched = matches_content_all(&[shallow, deep], root);
+        let scopes = [shallow, deep];
+        let matched = matches_content_all(&scopes, root);
         assert!(!matched.contains("shallow"));
         assert!(matched.contains("deep"));
     }
