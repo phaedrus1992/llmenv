@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - Evaluate all `scope.content` matchers in a single directory walk instead of one walk per matcher — N active content scopes previously meant N full tree walks on every hook fire and every export (#703)
+- Resolve the hostname via the `uname(2)` syscall instead of spawning the `hostname` binary on every hook-run — the fork/exec dominated hook-run scope evaluation (~15ms/event, ~35% of hook-run CPU); each hook is a fresh process so the process-static env cache never helped this path
 
 ## [3.5.1] - 2026-07-15
 
