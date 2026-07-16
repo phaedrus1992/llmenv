@@ -33,7 +33,7 @@ pub struct ReadEntry {
 
 /// Per-session cache of read-once tracked file reads. Stored as a flat JSON
 /// file under `state_dir/read_once/{session_id}.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionCache {
     /// Claude Code session id.
     pub session_id: String,
@@ -616,5 +616,59 @@ mod tests {
         let entry = loaded.entries.get("/foo/bar.rs").expect("test");
         assert_eq!(entry.hits, 2);
         assert_eq!(entry.tokens_saved, 500);
+    }
+
+    // #792: ReadEntry and SessionCache derive Serialize/Deserialize and persist
+    // as JSON. A serde roundtrip must be lossless — a drifted derive (renamed
+    // field, wrong rename attr) would silently corrupt a user's session cache.
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_read_entry() -> impl Strategy<Value = ReadEntry> {
+            (
+                ".{0,40}",
+                any::<i64>(),
+                any::<i64>(),
+                any::<u64>(),
+                any::<u64>(),
+            )
+                .prop_map(|(path, mtime_unix, first_read_at, hits, tokens_saved)| {
+                    ReadEntry {
+                        path,
+                        mtime_unix,
+                        first_read_at,
+                        hits,
+                        tokens_saved,
+                    }
+                })
+        }
+
+        fn arb_session_cache() -> impl Strategy<Value = SessionCache> {
+            (
+                ".{0,20}",
+                proptest::collection::hash_map(".{0,30}", arb_read_entry(), 0..5),
+            )
+                .prop_map(|(session_id, entries)| SessionCache {
+                    session_id,
+                    entries,
+                })
+        }
+
+        proptest! {
+            #[test]
+            fn read_entry_json_roundtrips(entry in arb_read_entry()) {
+                let json = serde_json::to_string(&entry).unwrap();
+                let back: ReadEntry = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back, entry);
+            }
+
+            #[test]
+            fn session_cache_json_roundtrips(cache in arb_session_cache()) {
+                let json = serde_json::to_string(&cache).unwrap();
+                let back: SessionCache = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back, cache);
+            }
+        }
     }
 }
