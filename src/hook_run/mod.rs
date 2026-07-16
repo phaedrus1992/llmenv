@@ -403,8 +403,10 @@ fn run_inner(
     adapter_name: &str,
     claude_code_version: &str,
 ) -> anyhow::Result<String> {
+    let t0 = std::time::Instant::now();
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
+    let t_config = std::time::Instant::now();
 
     // #318: read-once file dedup hook — runs before scope/memory resolution
     // since it doesn't need any of that. Gated on features.read_once.enabled
@@ -443,6 +445,7 @@ fn run_inner(
 
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
+    let t_scope = std::time::Instant::now();
 
     let config_dir = config_path
         .parent()
@@ -552,7 +555,8 @@ fn run_inner(
         ctx: &ctx,
         state_path: state_path.as_deref(),
     };
-    rt.block_on(async {
+    let t_chunk = std::time::Instant::now();
+    let out = rt.block_on(async {
         let mut out = String::new();
         if let Some(client) = &client {
             let actions = dispatch(event, &tag_queries, &bundle_queries);
@@ -586,7 +590,35 @@ fn run_inner(
         }
 
         Ok::<String, anyhow::Error>(out)
-    })
+    })?;
+    let t_end = std::time::Instant::now();
+
+    // Per-phase timing marker. When `LLMENV_TRACE_TIMING` is set (any value) we
+    // emit exactly ONE line to stderr:
+    //   llmenv-trace {"config_load_us":N,"scope_eval_us":N,"prep_us":N,"mcp_us":N}
+    // `prep_us` spans t_scope→t_chunk: recall-query building, context-chunk
+    // generation, MCP client construction (reqwest/TLS on a cache miss), the
+    // scope-context build, and the one-time ~3ms tokio runtime build — i.e. all
+    // setup before the async MCP round-trips. `mcp_us` is the `block_on` window:
+    // the round-trips plus session logging. The clock always runs (Instant::now
+    // is ~20ns); only emission is gated, so normal runs are unaffected and stdout
+    // is never touched. Events that early-return, and runs that error before this
+    // point (e.g. a failed MCP round-trip), emit nothing.
+    if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
+        // Cap rather than panic on the (unreachable) overflow of an in-process
+        // Instant delta past u64::MAX microseconds (~585,000 years).
+        let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+        eprintln!(
+            "llmenv-trace {}",
+            json!({
+                "config_load_us": us(t_config.saturating_duration_since(t0)),
+                "scope_eval_us": us(t_scope.saturating_duration_since(t_config)),
+                "prep_us": us(t_chunk.saturating_duration_since(t_scope)),
+                "mcp_us": us(t_end.saturating_duration_since(t_chunk)),
+            })
+        );
+    }
+    Ok(out)
 }
 
 /// Run one event's ordered memory actions and concatenate their text output.

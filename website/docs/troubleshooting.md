@@ -87,6 +87,31 @@ llmenv doctor --gc                # diagnostics + GC in one pass
 
 See [MCP & Memory](mcp.md) for the full topology and security model.
 
+## Profiling hook-run latency
+
+Lifecycle hooks run on the agent's hot path, so a slow `hook-run` shows up as
+prompt lag. To see where the time goes, set `LLMENV_TRACE_TIMING` (to any value)
+before the hook fires. Each `hook-run` that completes the memory/session-log
+stage then emits one line to **stderr** (stdout is untouched):
+
+```
+llmenv-trace {"config_load_us":123,"scope_eval_us":456,"prep_us":78,"mcp_us":9012}
+```
+
+Each value is an integer microsecond count for that phase:
+
+- `config_load_us` — reading and parsing config.
+- `scope_eval_us` — evaluating scopes against the environment.
+- `prep_us` — everything between scope evaluation and the MCP round-trip:
+  building recall queries, generating the context chunk, constructing the MCP
+  client (reqwest/TLS on a connection cache miss), building the scope context,
+  and the one-time ~3 ms tokio runtime build on the session's first hook-run.
+- `mcp_us` — the MCP round-trip plus session logging; usually the dominant term.
+
+Events that early-return before the MCP stage (e.g. a `PreToolUse` with no
+active sinks), and runs that error mid-round-trip, emit nothing. The var is off
+by default and adds no measurable overhead when unset.
+
 ## Sync conflicts
 
 `llmenv sync` runs `git add`/`commit`/`push` on the config repo. If the remote
