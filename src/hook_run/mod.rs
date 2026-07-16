@@ -443,7 +443,7 @@ fn run_inner(
         return Ok(String::new());
     }
 
-    let env = crate::scope::matcher::Env::detect();
+    let env = crate::scope::matcher::Env::detect_for_config(&config);
     let active = crate::scope::evaluate(&config, &env);
     let t_scope = std::time::Instant::now();
 
