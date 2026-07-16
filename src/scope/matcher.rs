@@ -115,7 +115,7 @@ impl Env {
     /// detection is cheap, and caching a MAC-less env could shadow a later
     /// [`detect`] that needs it within the same process.
     #[must_use]
-    pub fn detect_for_config(config: &crate::config::Config) -> Self {
+    pub(crate) fn detect_for_config(config: &crate::config::Config) -> Self {
         if config.scope.network.is_empty() {
             Self::detect_fresh(false)
         } else {
