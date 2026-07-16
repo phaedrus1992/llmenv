@@ -147,20 +147,22 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
         }
     }
     let cwd = std::path::Path::new(&env.cwd);
-    for s in &cfg.scope.content {
-        tracing::trace!(id = %s.id, glob = %s.r#match.glob, "evaluating content scope");
-        if cwd.exists() && matcher::matches_content(s, cwd) {
-            scopes.push(ActiveScope {
-                id: s.id.clone(),
-                kind: "content",
-                tags: s.tags.clone(),
-                project_root: None,
-                enable_bundles: Vec::new(),
-                disable_bundles: Vec::new(),
-                name: None,
-                description: None,
-                unknown_fields: Vec::new(),
-            });
+    if cwd.exists() && !cfg.scope.content.is_empty() {
+        let matched_ids = matcher::matches_content_all(&cfg.scope.content, cwd);
+        for s in &cfg.scope.content {
+            if matched_ids.contains(s.id.as_str()) {
+                scopes.push(ActiveScope {
+                    id: s.id.clone(),
+                    kind: "content",
+                    tags: s.tags.clone(),
+                    project_root: None,
+                    enable_bundles: Vec::new(),
+                    disable_bundles: Vec::new(),
+                    name: None,
+                    description: None,
+                    unknown_fields: Vec::new(),
+                });
+            }
         }
     }
     if let Some(p) = matcher::discover_project(env) {
