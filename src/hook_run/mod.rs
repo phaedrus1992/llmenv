@@ -403,8 +403,10 @@ fn run_inner(
     adapter_name: &str,
     claude_code_version: &str,
 ) -> anyhow::Result<String> {
+    let t0 = std::time::Instant::now();
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
+    let t_config = std::time::Instant::now();
 
     // #318: read-once file dedup hook — runs before scope/memory resolution
     // since it doesn't need any of that. Gated on features.read_once.enabled
@@ -443,6 +445,7 @@ fn run_inner(
 
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
+    let t_scope = std::time::Instant::now();
 
     let config_dir = config_path
         .parent()
@@ -552,7 +555,8 @@ fn run_inner(
         ctx: &ctx,
         state_path: state_path.as_deref(),
     };
-    rt.block_on(async {
+    let t_chunk = std::time::Instant::now();
+    let out = rt.block_on(async {
         let mut out = String::new();
         if let Some(client) = &client {
             let actions = dispatch(event, &tag_queries, &bundle_queries);
@@ -586,7 +590,28 @@ fn run_inner(
         }
 
         Ok::<String, anyhow::Error>(out)
-    })
+    })?;
+    let t_end = std::time::Instant::now();
+
+    // Per-phase timing marker. When `LLMENV_TRACE_TIMING` is set (any value) we
+    // emit exactly ONE line to stderr:
+    //   llmenv-trace {"config_load_us":N,"scope_eval_us":N,"chunk_gen_us":N,"mcp_us":N}
+    // The clock always runs (Instant::now is ~20ns); only emission is gated, so
+    // normal runs are unaffected and stdout is never touched. Events that
+    // early-return before this point emit nothing.
+    if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
+        let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+        eprintln!(
+            "llmenv-trace {}",
+            json!({
+                "config_load_us": us(t_config.saturating_duration_since(t0)),
+                "scope_eval_us": us(t_scope.saturating_duration_since(t_config)),
+                "chunk_gen_us": us(t_chunk.saturating_duration_since(t_scope)),
+                "mcp_us": us(t_end.saturating_duration_since(t_chunk)),
+            })
+        );
+    }
+    Ok(out)
 }
 
 /// Run one event's ordered memory actions and concatenate their text output.
