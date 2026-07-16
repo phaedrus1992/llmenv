@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Deduplicate byte-identical memory blocks across a TurnStart's recalls before injecting them into agent context — a memory stored under several tag/bundle keywords came back from multiple recalls and was injected 2–3× (~60% of the TurnStart context payload in the common case); only exact-duplicate blocks are dropped, order preserved, so no unique recall is lost
 - Skip gateway-MAC detection (`route`+`arp` subprocess forks) on hook-triggered paths — the synchronous hook-run and the detached memory-store, consolidation, and session-log children it spawns — when no `network` scope is configured; nothing can match the gateway MAC then, and each is a fresh process so the env cache never covered it, so the two forks were pure waste dominating the remaining hook-run scope-evaluation cost
 
+### Fixed
+- Bundle- and user-declared hooks no longer emit null-valued `tool`/`command` keys into the generated engine config — the Claude Code adapter rendered `"tool": null` for a `command`-type handler (and `"command": null` for an `mcp_tool` handler), and the Crush adapter rendered `"command": null` when a command hook had no command; absent fields are now omitted in both adapters (#720)
+
 ## [3.5.1] - 2026-07-15
 
 ### Fixed
