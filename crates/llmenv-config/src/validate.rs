@@ -1164,6 +1164,7 @@ mod tests {
                         host,
                         init: Default::default(),
                         session_log,
+                        statusline: None,
                         lsp: vec![],
                         skills: vec![],
                     }
@@ -1211,6 +1212,7 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                statusline: None,
                 lsp: vec![],
                 skills: vec![],
             };
@@ -1255,6 +1257,7 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                statusline: None,
                 lsp: vec![],
                 skills: vec![],
             };
@@ -1289,6 +1292,7 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                statusline: None,
                 lsp: vec![],
                 skills: vec![],
             };
@@ -1320,6 +1324,7 @@ mod tests {
                 host: Default::default(),
                 init: Default::default(),
                 session_log: None,
+                statusline: None,
                 lsp: vec![],
                 skills: vec![],
             };
@@ -1363,6 +1368,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1399,6 +1405,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1435,6 +1442,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1469,6 +1477,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1501,6 +1510,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         }
@@ -1566,6 +1576,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1604,6 +1615,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1642,6 +1654,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1682,6 +1695,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1718,6 +1732,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1752,6 +1767,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1786,6 +1802,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1820,6 +1837,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1856,6 +1874,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1893,6 +1912,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1927,6 +1947,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1961,6 +1982,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -1989,6 +2011,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -2019,6 +2042,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -2047,6 +2071,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -2070,6 +2095,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -2098,6 +2124,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -2126,6 +2153,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -2154,6 +2182,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         };
@@ -2243,6 +2272,7 @@ mod tests {
             host: Default::default(),
             init: Default::default(),
             session_log: None,
+            statusline: None,
             lsp: vec![],
             skills: vec![],
         }
