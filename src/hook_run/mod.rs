@@ -625,23 +625,29 @@ fn run_inner(
 }
 
 /// Run one event's ordered memory actions and concatenate their text output.
+///
+/// TurnStart fans out to a project-scoped recall plus one per active tag and
+/// bundle. When the same memory is stored under several of those keywords it
+/// comes back from more than one recall, so the naive concatenation injects the
+/// identical block two or three times — pure context/token cost with no added
+/// information. Exact-duplicate action outputs are dropped (order preserved,
+/// first wins); only byte-identical blocks are removed, so no unique recall is
+/// ever lost.
 async fn run_memory_actions(
     client: &McpHttpClient,
     actions: Vec<Action>,
     query: &str,
     chunk: &str,
 ) -> anyhow::Result<String> {
-    let mut out = String::new();
+    let mut kept: Vec<String> = Vec::new();
     for action in actions {
         let text = action.run(client, query, chunk).await?;
-        if !text.is_empty() {
-            if !out.is_empty() {
-                out.push_str("\n\n");
-            }
-            out.push_str(&text);
+        if text.is_empty() || kept.contains(&text) {
+            continue;
         }
+        kept.push(text);
     }
-    Ok(out)
+    Ok(kept.join("\n\n"))
 }
 
 /// Borrowed inputs `run_session_log` needs, grouped to keep the function under
