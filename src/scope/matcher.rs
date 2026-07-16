@@ -135,7 +135,21 @@ impl Env {
 }
 
 fn detect_hostname() -> Option<String> {
-    super::capture_stdout("hostname detection", "hostname", &[]).map(|s| s.trim().to_string())
+    // uname(2) syscall rather than spawning the `hostname` binary: each hook-run
+    // is a fresh process, so the process-static Env cache never helps the hook
+    // path — the subprocess fork/exec ran on every hook and dominated scope
+    // evaluation (~15ms/event). rustix reads the kernel nodename with one
+    // syscall, no subprocess, no unsafe.
+    let nodename = rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .into_owned();
+    let trimmed = nodename.trim();
+    if trimmed.is_empty() {
+        tracing::warn!("uname nodename empty; host-scope matching disabled");
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 #[must_use]

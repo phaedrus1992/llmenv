@@ -75,6 +75,10 @@ glob = "0.3.3"
 globset = { workspace = true }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
 url = "2.5.8"
+# Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
+# every hook-run. rustix is already in the tree transitively; "system" enables
+# uname. No unsafe.
+rustix = { version = "1.1.4", features = ["system"] }
 tempfile = "3.27"
 pulldown-cmark = { workspace = true }
 dialoguer = "0.12.0"
