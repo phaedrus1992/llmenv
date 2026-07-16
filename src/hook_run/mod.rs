@@ -636,20 +636,15 @@ async fn run_memory_actions(
     query: &str,
     chunk: &str,
 ) -> anyhow::Result<String> {
-    let mut out = String::new();
-    let mut seen: Vec<String> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
     for action in actions {
         let text = action.run(client, query, chunk).await?;
-        if text.is_empty() || seen.iter().any(|prev| prev == &text) {
+        if text.is_empty() || kept.contains(&text) {
             continue;
         }
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(&text);
-        seen.push(text);
+        kept.push(text);
     }
-    Ok(out)
+    Ok(kept.join("\n\n"))
 }
 
 /// Borrowed inputs `run_session_log` needs, grouped to keep the function under
