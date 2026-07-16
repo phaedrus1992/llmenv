@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 mod doctor;
 mod setup;
 mod status;
+mod statusline;
 mod style;
 mod upgrade;
 
