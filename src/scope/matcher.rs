@@ -84,7 +84,9 @@ impl Env {
     }
 
     /// Detect environment, returning a cached result if fresher than 30 s.
-    /// Avoids 3 subprocess forks (hostname, route, arp) on repeated calls.
+    /// Detects the gateway MAC (route+arp subprocess forks); prefer
+    /// [`Env::detect_for_config`] on the hook path, which skips those forks when
+    /// no network scope can match.
     #[must_use]
     pub fn detect() -> Self {
         if let Ok(lock) = ENV_CACHE.lock()
@@ -93,7 +95,7 @@ impl Env {
         {
             return cached.env.clone();
         }
-        let env = Self::detect_fresh();
+        let env = Self::detect_fresh(true);
         if let Ok(mut lock) = ENV_CACHE.lock() {
             *lock = Some(CachedEnv {
                 detected: Instant::now(),
@@ -103,8 +105,27 @@ impl Env {
         env
     }
 
-    /// Unconditional env detection — the 3 subprocess forks run every call.
-    fn detect_fresh() -> Self {
+    /// Detect environment for a specific config. Gateway-MAC detection shells out
+    /// to `route`+`arp` (macOS) / `ip route`+`ip neigh` (Linux) — two subprocess
+    /// forks on every call. Nothing can match on the gateway MAC unless a network
+    /// scope is declared, so when there are none this skips those forks entirely.
+    /// Each hook-run is a fresh process (the 30s cache never warms on that path),
+    /// so on the common no-network-scope config this removes the dominant
+    /// remaining hook-run subprocess cost. Not cached: without the forks the
+    /// detection is cheap, and caching a MAC-less env could shadow a later
+    /// [`detect`] that needs it within the same process.
+    #[must_use]
+    pub(crate) fn detect_for_config(config: &crate::config::Config) -> Self {
+        if config.scope.network.is_empty() {
+            Self::detect_fresh(false)
+        } else {
+            Self::detect()
+        }
+    }
+
+    /// Fresh env detection. `need_gateway_mac` gates the route+arp forks; the
+    /// hostname (uname syscall), user, and cwd probes always run.
+    fn detect_fresh(need_gateway_mac: bool) -> Self {
         let hostname = detect_hostname().unwrap_or_else(|| {
             tracing::warn!("hostname detection failed; host-scope matching disabled");
             String::new()
@@ -127,7 +148,9 @@ impl Env {
             hostname: hostname.to_ascii_lowercase(),
             user,
             cwd,
-            gateway_mac: super::network::detect_gateway_mac(),
+            gateway_mac: need_gateway_mac
+                .then(super::network::detect_gateway_mac)
+                .flatten(),
             home,
             os: std::env::consts::OS.to_string(),
         }
