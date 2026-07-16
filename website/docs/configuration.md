@@ -103,7 +103,7 @@ touching foreign state.
 ## `scope:`
 
 Scopes are conditions on the current environment. When a scope matches, its tags
-join the active set. Three kinds are declared here; the fourth (`project`) is
+join the active set. Four kinds are declared here; the fifth (`project`) is
 discovered from marker files — see [Project markers](#project-markers).
 
 ```yaml
@@ -120,6 +120,10 @@ scope:
     - id: me
       match: { user: "alice" }            # matches $USER
       tags: [me]
+  content:
+    - id: rust-project
+      match: { glob: "*.rs", depth: 2 }    # depth omitted = unbounded
+      tags: [lang-rust]
 ```
 
 Each scope has an `id` (used in diagnostics and `LLMENV_ACTIVE_SCOPES`), a
@@ -129,6 +133,15 @@ Each scope has an `id` (used in diagnostics and `LLMENV_ACTIVE_SCOPES`), a
   is evaluated today; `ssid`/`cidr` parse but are ignored.
 - **Host** `match` field: `hostname` (compared case-insensitively).
 - **User** `match` field: `user` (exact match against `$USER`).
+- **Content** `match` fields: `glob` (matched against paths relative to the
+  working directory) and `depth` (optional; caps how many directories deep
+  the search descends — omit for an unbounded search). Unlike `network`/
+  `host`/`user`, which check environment facts (network gateway, hostname,
+  `$USER`), `content` scopes activate based on what files exist in the
+  working tree — e.g. gating a bundle's hooks to only fire when `*.rs` files
+  are present. All active content scopes are evaluated together in a single
+  directory walk, so adding more content scopes doesn't multiply the cost of
+  the walk.
 
 > There is no `scope.project` block. Project scopes come from `.llmenv.yaml`
 > markers, not `config.yaml`.
