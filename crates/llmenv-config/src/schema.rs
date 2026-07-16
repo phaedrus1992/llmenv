@@ -156,6 +156,9 @@ pub struct Config {
     /// Session logging configuration. Absent → ICM transcript on (info), file off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_log: Option<SessionLog>,
+    /// Status line widget configuration (`statusline:` section).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statusline: Option<StatuslineConfig>,
 }
 
 /// Per-sink log level for session-log events. Each level includes all events
@@ -814,6 +817,68 @@ pub struct ContextMode {
     /// Whether the built-in context-mode plugin is wired up.
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// Widget layout, formatting, and colour config for `llmenv statusline`
+/// (`statusline:` section of `config.yaml`). See
+/// `docs/superpowers/specs/2026-07-15-statusline-design.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatuslineConfig {
+    /// One row template per rendered status line. `{widget_name}`
+    /// placeholders are resolved against `widgets` or widget defaults.
+    pub rows: Vec<String>,
+    pub style: StatuslineStyle,
+    /// Per-widget overrides. Keyed by widget name (`model`, `scopes`, ...).
+    pub widgets: std::collections::BTreeMap<String, WidgetConfig>,
+    /// Named icon overrides (`config_stale`, `throttle`, ...).
+    pub icons: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for StatuslineConfig {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            style: StatuslineStyle::default(),
+            widgets: std::collections::BTreeMap::new(),
+            icons: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatuslineStyle {
+    pub separator: String,
+    pub icon_set: IconSet,
+}
+
+impl Default for StatuslineStyle {
+    fn default() -> Self {
+        Self {
+            separator: " │ ".to_string(),
+            icon_set: IconSet::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IconSet {
+    #[default]
+    Auto,
+    Nerd,
+    Simple,
+    None,
+}
+
+/// Per-widget override: display format, truncation, and style.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetConfig {
+    pub format: Option<String>,
+    pub max_len: Option<usize>,
+    pub style: Option<String>,
 }
 
 /// ReadOnce mode: what happens when a file that was already read is requested
@@ -2206,5 +2271,48 @@ small:
                 serde_json::from_str(&json).expect("deserialize PermissionMode");
             assert_eq!(back, mode, "roundtrip {mode:?}");
         }
+    }
+
+    #[test]
+    fn statusline_config_parses_full_example() {
+        let yaml = r#"
+rows:
+  - "{model} │ {context_pct} │ {budget}"
+  - "{scopes:t} · {plugins} {config_stale}"
+style:
+  separator: " │ "
+  icon_set: auto
+widgets:
+  model:
+    format: "{short_name} {version}"
+    style: "bold cyan"
+  scopes:
+    format: "║ {tags}"
+    max_len: 40
+    style: "dim"
+icons:
+  config_ok: ""
+  config_stale: "◌"
+"#;
+        let cfg: StatuslineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.rows.len(), 2);
+        assert_eq!(cfg.style.separator, " │ ");
+        assert_eq!(cfg.style.icon_set, IconSet::Auto);
+        let model = cfg.widgets.get("model").unwrap();
+        assert_eq!(model.format.as_deref(), Some("{short_name} {version}"));
+        assert_eq!(model.style.as_deref(), Some("bold cyan"));
+        let scopes = cfg.widgets.get("scopes").unwrap();
+        assert_eq!(scopes.max_len, Some(40));
+        assert_eq!(cfg.icons.get("config_stale").map(String::as_str), Some("◌"));
+    }
+
+    #[test]
+    fn statusline_config_defaults_on_empty_yaml() {
+        let cfg: StatuslineConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(cfg.rows.is_empty());
+        assert_eq!(cfg.style.separator, " │ ");
+        assert_eq!(cfg.style.icon_set, IconSet::Auto);
+        assert!(cfg.widgets.is_empty());
+        assert!(cfg.icons.is_empty());
     }
 }
