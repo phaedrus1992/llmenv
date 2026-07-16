@@ -1,0 +1,10 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/path/to/transcript.jsonl",
+  "cwd": "/path/to/project",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "WebSearch",
+  "tool_input": {
+    "query": "rust serde json snake_case"
+  }
+}
