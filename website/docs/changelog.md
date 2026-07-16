@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Deduplicate byte-identical memory blocks across a TurnStart's recalls before injecting them into agent context — a memory stored under several tag/bundle keywords came back from multiple recalls and was injected 2–3× (~60% of the TurnStart context payload in the common case); only exact-duplicate blocks are dropped, order preserved, so no unique recall is lost
 
 ### Fixed
-- Bundle- and user-declared hooks no longer emit null-valued `tool`/`command` keys into `settings.json` — a `command`-type hook handler previously rendered `"tool": null` (and an `mcp_tool` handler `"command": null`); absent fields are now omitted (#720)
+- Bundle- and user-declared hooks no longer emit null-valued `tool`/`command` keys into the generated engine config — the Claude Code adapter rendered `"tool": null` for a `command`-type handler (and `"command": null` for an `mcp_tool` handler), and the Crush adapter rendered `"command": null` when a command hook had no command; absent fields are now omitted in both adapters (#720)
 
 ## [3.5.1] - 2026-07-15
 
