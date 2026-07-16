@@ -687,4 +687,76 @@ mod tests {
             Some("bash /cache/hooks/pre.sh /cache/hooks/post.sh".to_string())
         );
     }
+
+    // #793: resolve_bundle_relative_paths rewrites bundle-relative tokens in a
+    // hook command against an absolute bundle dir. It runs on untrusted,
+    // bundle-authored command strings, so the invariants that matter are
+    // no-panic on any input, idempotence (a resolved command has no more
+    // relative tokens to rewrite), and that every rewritten token is absolute
+    // under the bundle dir.
+    #[allow(clippy::expect_used)]
+    mod resolve_bundle_relative_paths_proptests {
+        use super::resolve_bundle_relative_paths;
+        use proptest::prelude::*;
+        use std::path::Path;
+
+        // A single command token biased across every branch of the resolver:
+        // bundle-relative (rewritten), plus the four skip cases (absolute,
+        // tilde, shell-var, flag), plain words, and traversal attempts.
+        fn arb_token() -> impl Strategy<Value = String> {
+            prop_oneof![
+                "[a-z]{1,5}/[a-z]{1,5}",    // bundle-relative → rewritten
+                "/[a-z]{1,8}",              // absolute → skipped
+                "~/[a-z]{1,8}",             // tilde → skipped
+                "[$][A-Z]{1,5}/[a-z]{1,5}", // shell var → skipped
+                "-[a-z]{1,5}",              // flag → skipped
+                "[a-z]{1,8}",               // plain word (no slash) → skipped
+                "[.][.]/[a-z]{1,5}",        // traversal → skipped (unsafe join)
+            ]
+        }
+
+        fn arb_command() -> impl Strategy<Value = String> {
+            proptest::collection::vec(arb_token(), 0..6).prop_map(|toks| toks.join(" "))
+        }
+
+        proptest! {
+            // Arbitrary command strings never panic the resolver.
+            #[test]
+            fn never_panics(command in ".{0,60}") {
+                let _ = resolve_bundle_relative_paths(&command, Path::new("/bundle/dir"));
+            }
+
+            // Idempotence: once resolved, every eligible token is now absolute,
+            // so a second pass finds nothing to rewrite and returns None.
+            #[test]
+            fn is_idempotent(command in arb_command()) {
+                let dir = Path::new("/bundle/dir");
+                if let Some(resolved) = resolve_bundle_relative_paths(&command, dir) {
+                    prop_assert_eq!(
+                        resolve_bundle_relative_paths(&resolved, dir),
+                        None,
+                        "re-resolving an already-resolved command must be a no-op"
+                    );
+                }
+            }
+
+            // A command built only from bundle-relative tokens resolves, and
+            // every resulting token is absolute under the bundle dir.
+            #[test]
+            fn resolved_relative_tokens_are_absolute_under_bundle(
+                rels in proptest::collection::vec("[a-z]{1,5}/[a-z]{1,5}", 1..5),
+            ) {
+                let dir = Path::new("/bundle/dir");
+                let command = rels.join(" ");
+                let resolved = resolve_bundle_relative_paths(&command, dir)
+                    .expect("all-relative command must resolve");
+                for token in resolved.split_whitespace() {
+                    prop_assert!(
+                        token.starts_with("/bundle/dir/"),
+                        "resolved token {token:?} not absolute under bundle dir"
+                    );
+                }
+            }
+        }
+    }
 }
