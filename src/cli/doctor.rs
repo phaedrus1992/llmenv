@@ -229,6 +229,37 @@ pub(super) fn orphan_native_permission_keys(config: &Config) -> Vec<&str> {
         .collect()
 }
 
+/// Whether `matcher` is shaped like a file-extension glob (`*.rs`, `**/*.py`)
+/// or a bare extension (`.rs`) rather than a tool-name pattern.
+fn looks_like_file_glob(matcher: &str) -> bool {
+    if let Some(ext) = matcher.strip_prefix('.') {
+        return !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric());
+    }
+    matcher.match_indices("*.").any(|(idx, _)| {
+        matcher[idx + 2..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+/// Returns `"{event} (matcher: '{matcher}')"` for each hook whose matcher is
+/// shaped like a file-extension glob instead of a Claude Code tool-name
+/// pattern — a common misconfiguration, since Claude Code matches
+/// `hook.matcher` against tool name only, never file path.
+pub(super) fn hooks_with_glob_like_matchers(config: &Config) -> Vec<String> {
+    config
+        .capabilities
+        .hooks
+        .iter()
+        .filter_map(|hook| {
+            let matcher = hook.matcher.as_deref()?;
+            looks_like_file_glob(matcher)
+                .then(|| format!("{} (matcher: '{}')", hook.event, matcher))
+        })
+        .collect()
+}
+
 pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
@@ -264,6 +295,14 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     for key in orphan_native_permission_keys(&config) {
         eprintln!(
             "{warn} native_permissions key '{key}' does not match any configured MCP server, engine, or adapter",
+        );
+    }
+
+    for hit in hooks_with_glob_like_matchers(&config) {
+        eprintln!(
+            "{warn} hook {hit} looks like a file-extension glob, but Claude Code matches \
+             hook.matcher against tool name only, never file path — use a `scope.content` \
+             glob to gate the hook's bundle by file type instead",
         );
     }
 
@@ -729,8 +768,8 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 mod tests {
     use super::*;
     use crate::config::{
-        Bundle, Capabilities, Features, HostEntry, Marketplace, McpServer, McpTransport, Memory,
-        NativePermissionRules, PluginCollection,
+        Bundle, Capabilities, Features, Hook, HostEntry, Marketplace, McpServer, McpTransport,
+        Memory, NativePermissionRules, PluginCollection,
     };
     use std::collections::BTreeMap;
 
@@ -907,6 +946,47 @@ mod tests {
         let config = Config::default();
         let orphans = orphan_native_permission_keys(&config);
         assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    }
+
+    // -- hooks_with_glob_like_matchers --
+
+    fn hook_with_matcher(event: &str, matcher: &str) -> Hook {
+        Hook {
+            event: event.into(),
+            matcher: Some(matcher.into()),
+            handler: crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::Command,
+                command: Some("echo hi".into()),
+                tool: None,
+            },
+            bundle_origin: None,
+        }
+    }
+
+    #[test]
+    fn glob_matchers_flags_file_extension_glob() {
+        let config = Config {
+            capabilities: Capabilities {
+                hooks: vec![hook_with_matcher("PreToolUse", "*.rs")],
+                ..Capabilities::default()
+            },
+            ..Config::default()
+        };
+        let flagged = hooks_with_glob_like_matchers(&config);
+        assert_eq!(flagged, vec!["PreToolUse (matcher: '*.rs')".to_string()]);
+    }
+
+    #[test]
+    fn glob_matchers_accepts_known_tool_name_alternation() {
+        let config = Config {
+            capabilities: Capabilities {
+                hooks: vec![hook_with_matcher("PreToolUse", "^(Write|Edit|MultiEdit)$")],
+                ..Capabilities::default()
+            },
+            ..Config::default()
+        };
+        let flagged = hooks_with_glob_like_matchers(&config);
+        assert!(flagged.is_empty(), "expected empty: {flagged:?}");
     }
 
     // -- is_local_addr --

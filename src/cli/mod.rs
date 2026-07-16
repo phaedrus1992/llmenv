@@ -1766,24 +1766,7 @@ fn run_config_guard() {
         }
     };
 
-    // Non-empty stdin that fails JSON parsing means the hook payload format
-    // changed — log it so payload format mismatches are operator-visible.
-    let parsed = serde_json::from_str::<serde_json::Value>(&stdin_buf);
-    let file_path = match parsed {
-        Ok(v) => v
-            .get("tool_input")
-            .and_then(|ti| ti.get("file_path"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        Err(e) => {
-            if !stdin_buf.trim().is_empty() {
-                eprintln!("llmenv config-guard: failed to parse hook payload: {e}");
-            }
-            None
-        }
-    };
-
-    let Some(path_str) = file_path else {
+    let Some(path_str) = extract_hook_file_path(&stdin_buf) else {
         return;
     };
 
@@ -1798,6 +1781,27 @@ fn run_config_guard() {
              Edit your source config instead: {config_path}\n\
              Then run: llmenv regenerate"
         );
+    }
+}
+
+/// Extract `tool_input.file_path` from a raw hook payload JSON string.
+///
+/// Returns `None` on parse failure (logged to stderr unless the buffer is
+/// empty, which is expected outside a hook invocation) or when the field is
+/// missing/non-string.
+fn extract_hook_file_path(stdin_buf: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(stdin_buf) {
+        Ok(v) => v
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        Err(e) => {
+            if !stdin_buf.trim().is_empty() {
+                eprintln!("llmenv config-guard: failed to parse hook payload: {e}");
+            }
+            None
+        }
     }
 }
 
@@ -4102,6 +4106,46 @@ mod config_guard_tests {
         // which does not start with /cache/llmenv.
         let escaped = "/cache/llmenv/../../../etc/passwd";
         assert!(!is_within_cache(cache_root, escaped));
+    }
+
+    #[test]
+    fn extract_hook_file_path_from_edit_fixture() {
+        let raw = crate::test_fixtures::load_hook_payload_raw("edit.json");
+        assert_eq!(
+            extract_hook_file_path(&raw).as_deref(),
+            Some("/path/to/file.rs")
+        );
+    }
+
+    #[test]
+    fn extract_hook_file_path_from_write_fixture() {
+        let raw = crate::test_fixtures::load_hook_payload_raw("write.json");
+        assert_eq!(
+            extract_hook_file_path(&raw).as_deref(),
+            Some("/path/to/file.rs")
+        );
+    }
+
+    #[test]
+    fn extract_hook_file_path_from_bash_fixture_is_none() {
+        // Bash's tool_input has no file_path field.
+        let raw = crate::test_fixtures::load_hook_payload_raw("bash.json");
+        assert_eq!(extract_hook_file_path(&raw), None);
+    }
+
+    #[test]
+    fn extract_hook_file_path_missing_tool_input_is_none() {
+        assert_eq!(extract_hook_file_path(r#"{"tool_name": "SomeTool"}"#), None);
+    }
+
+    #[test]
+    fn extract_hook_file_path_from_malformed_json_is_none() {
+        assert_eq!(extract_hook_file_path("not valid json{"), None);
+    }
+
+    #[test]
+    fn extract_hook_file_path_from_empty_stdin_is_none() {
+        assert_eq!(extract_hook_file_path(""), None);
     }
 
     // Property-based tests

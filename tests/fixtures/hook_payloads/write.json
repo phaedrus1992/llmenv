@@ -1,0 +1,11 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/path/to/transcript.jsonl",
+  "cwd": "/path/to/project",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/path/to/file.rs",
+    "content": "fn main() {}\n"
+  }
+}
