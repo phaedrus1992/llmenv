@@ -2532,6 +2532,45 @@ mod tests {
                 }
             }
         }
+
+        // Hooks are unioned (not replaced): a foreign hook entry present on disk
+        // survives a re-render, and llmenv's own re-rendered entries are deduped
+        // rather than accumulating. Every render emits SessionStart entries, so
+        // that event is always present to union against.
+        #[test]
+        fn reconcile_unions_hooks_preserving_foreign_and_deduping_own(
+            manifest in arb_merged_manifest(),
+            foreign_cmd in "[a-z]{3,12}",
+        ) {
+            let fresh = render_settings_for_test(&manifest);
+            let foreign = serde_json::json!({
+                "hooks": [{ "type": "command", "command": foreign_cmd }]
+            });
+            // Simulate the on-disk file: llmenv's own last render plus a
+            // plugin-registered foreign SessionStart entry.
+            let mut existing = fresh.clone();
+            existing["hooks"]["SessionStart"]
+                .as_array_mut()
+                .unwrap()
+                .push(foreign.clone());
+            let expected_len = existing["hooks"]["SessionStart"].as_array().unwrap().len();
+
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("settings.json");
+            write_json(&path, &existing);
+            let out = reconcile_settings(&path, fresh).unwrap();
+
+            let session_start = out["hooks"]["SessionStart"].as_array().unwrap();
+            prop_assert!(
+                session_start.contains(&foreign),
+                "foreign hook entry was dropped by the union"
+            );
+            prop_assert_eq!(
+                session_start.len(),
+                expected_len,
+                "re-rendered llmenv entries must dedup, not accumulate"
+            );
+        }
     }
 
     // ---- generate_settings_json (#720): property-based invariants ----
@@ -2549,6 +2588,24 @@ mod tests {
             })
     }
 
+    // Generates both handler kinds so the render exercises the `command`
+    // insertion path AND the `mcp_tool`/`tool` path — the two branches whose
+    // null-key omission the #720 no-null property is asserting.
+    fn arb_hook_handler() -> impl Strategy<Value = crate::config::HookHandler> {
+        prop_oneof![
+            "[a-z][a-z ./-]{0,20}".prop_map(|command| crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::Command,
+                command: Some(command),
+                tool: None,
+            }),
+            "[a-z_]{1,16}".prop_map(|tool| crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::McpTool,
+                command: None,
+                tool: Some(tool),
+            }),
+        ]
+    }
+
     fn arb_hook() -> impl Strategy<Value = crate::config::Hook> {
         (
             proptest::sample::select(vec![
@@ -2559,16 +2616,12 @@ mod tests {
                 "Stop",
             ]),
             proptest::option::of("[a-zA-Z*]{1,8}"),
-            "[a-z][a-z ./-]{0,20}",
+            arb_hook_handler(),
         )
-            .prop_map(|(event, matcher, command)| crate::config::Hook {
+            .prop_map(|(event, matcher, handler)| crate::config::Hook {
                 event: event.to_owned(),
                 matcher,
-                handler: crate::config::HookHandler {
-                    kind: crate::config::HookHandlerKind::Command,
-                    command: Some(command),
-                    tool: None,
-                },
+                handler,
                 bundle_origin: None,
             })
     }
