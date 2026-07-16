@@ -150,7 +150,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     if cwd.exists() && !cfg.scope.content.is_empty() {
         let matched_ids = matcher::matches_content_all(&cfg.scope.content, cwd);
         for s in &cfg.scope.content {
-            if matched_ids.contains(&s.id) {
+            if matched_ids.contains(s.id.as_str()) {
                 scopes.push(ActiveScope {
                     id: s.id.clone(),
                     kind: "content",
