@@ -595,18 +595,25 @@ fn run_inner(
 
     // Per-phase timing marker. When `LLMENV_TRACE_TIMING` is set (any value) we
     // emit exactly ONE line to stderr:
-    //   llmenv-trace {"config_load_us":N,"scope_eval_us":N,"chunk_gen_us":N,"mcp_us":N}
-    // The clock always runs (Instant::now is ~20ns); only emission is gated, so
-    // normal runs are unaffected and stdout is never touched. Events that
-    // early-return before this point emit nothing.
+    //   llmenv-trace {"config_load_us":N,"scope_eval_us":N,"prep_us":N,"mcp_us":N}
+    // `prep_us` spans t_scope→t_chunk: recall-query building, context-chunk
+    // generation, MCP client construction (reqwest/TLS on a cache miss), the
+    // scope-context build, and the one-time ~3ms tokio runtime build — i.e. all
+    // setup before the async MCP round-trips. `mcp_us` is the `block_on` window:
+    // the round-trips plus session logging. The clock always runs (Instant::now
+    // is ~20ns); only emission is gated, so normal runs are unaffected and stdout
+    // is never touched. Events that early-return, and runs that error before this
+    // point (e.g. a failed MCP round-trip), emit nothing.
     if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
+        // Cap rather than panic on the (unreachable) overflow of an in-process
+        // Instant delta past u64::MAX microseconds (~585,000 years).
         let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
         eprintln!(
             "llmenv-trace {}",
             json!({
                 "config_load_us": us(t_config.saturating_duration_since(t0)),
                 "scope_eval_us": us(t_scope.saturating_duration_since(t_config)),
-                "chunk_gen_us": us(t_chunk.saturating_duration_since(t_scope)),
+                "prep_us": us(t_chunk.saturating_duration_since(t_scope)),
                 "mcp_us": us(t_end.saturating_duration_since(t_chunk)),
             })
         );
