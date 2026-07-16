@@ -183,11 +183,12 @@ impl AgentAdapter for CrushAdapter {
             if let Some(matcher) = &hook.matcher {
                 entry.insert("matcher".into(), json!(matcher));
             }
-            debug_assert!(
-                resolved_command.is_some(),
-                "command is always Some for Command-kind hooks"
-            );
-            entry.insert("command".into(), json!(resolved_command));
+            // Omit `command` when absent rather than emitting `"command": null`
+            // — a null-valued key violates the no-null invariant and Crush
+            // rejects a wrapper carrying an empty command anyway (#720).
+            if let Some(command) = &resolved_command {
+                entry.insert("command".into(), json!(command));
+            }
             hooks_by_event
                 .entry(hook.event.clone())
                 .or_default()
@@ -694,6 +695,35 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(doc["hooks"]["PreToolUse"].is_array());
+    }
+
+    #[test]
+    fn materialize_command_hook_without_command_omits_null_key() {
+        // A Command-kind hook with no command string must not render
+        // `"command": null` — a null-valued key violates the no-null invariant
+        // (#720) and Crush rejects a wrapper carrying an empty command anyway.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: Some("Bash".into()),
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: None,
+                tool: None,
+            },
+            bundle_origin: None,
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entry = &doc["hooks"]["PreToolUse"][0];
+        assert!(
+            !entry.as_object().unwrap().contains_key("command"),
+            "absent command must be omitted, not rendered as null: {entry}"
+        );
     }
 
     #[test]

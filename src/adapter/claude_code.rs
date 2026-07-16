@@ -979,7 +979,8 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         // macro would produce `"tool": null` for None, which later differs
         // from absent in JSON PartialEq — causing duplicate hooks across
         // renders when reconcile_settings merges fresh with existing disk
-        // state that happens to lack the null key.
+        // state that happens to lack the null key (#720 / the #699 no-null
+        // invariant).
         let handler = {
             let mut m = serde_json::Map::new();
             if let Some(ref cmd) = resolved_command {
@@ -1758,12 +1759,12 @@ mod tests {
     use super::{
         CLAUDE_JSON_FILE, CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND,
         CONFIG_GUARD_COMMAND, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter,
-        HOOK_RUN_COMMAND, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, MODELED_SETTINGS_KEYS,
-        STALE_CHECK_COMMAND, classify_claude_path, generate_installed_plugins_json,
-        generate_settings_json, is_hook_json, merge_mcp_into_claude_json, overlay_native,
-        permission_mode_str, read_owned_servers, reconcile_settings,
-        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        seed_install_method, strip_json_nulls,
+        HOOK_RUN_COMMAND, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS,
+        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
+        generate_installed_plugins_json, generate_settings_json, is_hook_json,
+        merge_mcp_into_claude_json, overlay_native, permission_mode_str, read_owned_servers,
+        reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
+        render_permission_rule, seed_install_method, strip_json_nulls,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -1992,6 +1993,61 @@ mod tests {
             let err = reject_modeled_keys_in_catch_all(&frag);
             prop_assert!(err.is_err());
             prop_assert!(err.unwrap_err().to_string().contains(modeled));
+        }
+
+        // #768 overlay_native completeness: every top-level key of a mapping
+        // fragment is present in the destination after the overlay (the
+        // fragment's keys are additively layered onto whatever was there).
+        #[test]
+        fn overlay_native_maps_fragment_keys_into_dst(
+            keys in proptest::collection::vec("[a-z]{1,8}", 0..6),
+        ) {
+            let mut map = serde_yaml::Mapping::new();
+            for k in &keys {
+                map.insert(
+                    serde_yaml::Value::String(k.clone()),
+                    serde_yaml::Value::Bool(true),
+                );
+            }
+            let frag = serde_yaml::Value::Mapping(map);
+            let mut dst = serde_json::json!({ "preexisting": 1 });
+            overlay_native(&mut dst, Some(&frag)).unwrap();
+            let obj = dst.as_object().unwrap();
+            prop_assert!(obj.contains_key("preexisting"), "existing key dropped");
+            for k in &keys {
+                prop_assert!(obj.contains_key(k), "fragment key {k:?} missing after overlay");
+            }
+        }
+
+        // #768 overlay_native deep merge: a nested mapping merges key-by-key into
+        // an existing nested object rather than clobbering it — the untouched
+        // sibling key survives alongside the fragment's addition.
+        #[test]
+        fn overlay_native_deep_merges_nested_objects(add_key in "[a-z]{1,8}") {
+            let mut dst = serde_json::json!({ "nested": { "keep": "old" } });
+            let mut inner = serde_yaml::Mapping::new();
+            inner.insert(
+                serde_yaml::Value::String(add_key.clone()),
+                serde_yaml::Value::String("new".to_owned()),
+            );
+            let mut outer = serde_yaml::Mapping::new();
+            outer.insert(
+                serde_yaml::Value::String("nested".to_owned()),
+                serde_yaml::Value::Mapping(inner),
+            );
+            let frag = serde_yaml::Value::Mapping(outer);
+            overlay_native(&mut dst, Some(&frag)).unwrap();
+            let nested = dst["nested"].as_object().unwrap();
+            // The fragment's key is present…
+            prop_assert_eq!(nested.get(&add_key).and_then(|v| v.as_str()), Some("new"));
+            // …and unless the fragment overwrote it, the sibling `keep` survives.
+            if add_key != "keep" {
+                prop_assert_eq!(
+                    nested.get("keep").and_then(|v| v.as_str()),
+                    Some("old"),
+                    "deep merge must not clobber the untouched sibling key"
+                );
+            }
         }
 
         // #110 is_hook_json correctness: returns true iff the path starts with the
@@ -2888,6 +2944,246 @@ mod tests {
             "native passthrough key must survive re-render"
         );
         assert_eq!(out["cleanupPeriodDays"], 365);
+    }
+
+    // ---- reconcile_settings (#719): property-based invariants ----
+
+    // Reuses the module-local `arb_json()` (bounded, null-bearing recursive
+    // JSON) for the on-disk `existing` side.
+
+    // The `fresh` side of reconcile is always a genuine llmenv render, not
+    // arbitrary JSON. Deriving it from a real manifest keeps the properties
+    // honest: reconcile's hooks-merge/dedup and null-stripping are designed for
+    // the exact `{ Event: [{matcher, hooks:[...]}] }` shape a render produces,
+    // and arbitrary "hooks" values (e.g. `{"a":[true]}`) exercise paths that
+    // the function never actually sees.
+    fn arb_fresh_render() -> impl Strategy<Value = serde_json::Value> {
+        arb_merged_manifest().prop_map(|m| render_settings_for_test(&m))
+    }
+
+    proptest! {
+        // Determinism: reconcile is a pure function of (on-disk bytes, fresh) —
+        // the same inputs produce the same output every time.
+        #[test]
+        fn reconcile_is_deterministic(existing in arb_json(), fresh in arb_fresh_render()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("settings.json");
+            write_json(&path, &existing);
+            let a = reconcile_settings(&path, fresh.clone()).unwrap();
+            let b = reconcile_settings(&path, fresh.clone()).unwrap();
+            prop_assert_eq!(a, b);
+        }
+
+        // Idempotency: reconciling against the result of a previous reconcile
+        // (same fresh) yields that same result — re-renders converge.
+        #[test]
+        fn reconcile_is_idempotent(existing in arb_json(), fresh in arb_fresh_render()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("settings.json");
+            write_json(&path, &existing);
+            let once = reconcile_settings(&path, fresh.clone()).unwrap();
+            write_json(&path, &once);
+            let twice = reconcile_settings(&path, fresh).unwrap();
+            prop_assert_eq!(once, twice);
+        }
+
+        // Fresh wins: every owned key (except `hooks`, which is unioned) present
+        // in the fresh render appears verbatim in the output — a stale on-disk
+        // value never survives for an authoritative owned key.
+        #[test]
+        fn reconcile_fresh_wins_for_owned_non_hook_keys(
+            existing in arb_json(),
+            fresh in arb_fresh_render(),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("settings.json");
+            write_json(&path, &existing);
+            let out = reconcile_settings(&path, fresh.clone()).unwrap();
+            let fresh_obj = fresh.as_object().unwrap();
+            for key in LLMENV_OWNED_SETTINGS_KEYS {
+                if key == "hooks" {
+                    continue; // unioned, not replaced
+                }
+                if let Some(fresh_val) = fresh_obj.get(key) {
+                    prop_assert_eq!(
+                        out.get(key),
+                        Some(fresh_val),
+                        "owned key {:?} did not take the fresh value",
+                        key
+                    );
+                }
+            }
+        }
+
+        // Hooks are unioned (not replaced): a foreign hook entry present on disk
+        // survives a re-render, and llmenv's own re-rendered entries are deduped
+        // rather than accumulating. Every render emits SessionStart entries, so
+        // that event is always present to union against.
+        #[test]
+        fn reconcile_unions_hooks_preserving_foreign_and_deduping_own(
+            manifest in arb_merged_manifest(),
+            foreign_cmd in "[a-z]{3,12}",
+        ) {
+            let fresh = render_settings_for_test(&manifest);
+            let foreign = serde_json::json!({
+                "hooks": [{ "type": "command", "command": foreign_cmd }]
+            });
+            // Simulate the on-disk file: llmenv's own last render plus a
+            // plugin-registered foreign SessionStart entry.
+            let mut existing = fresh.clone();
+            existing["hooks"]["SessionStart"]
+                .as_array_mut()
+                .unwrap()
+                .push(foreign.clone());
+            let expected_len = existing["hooks"]["SessionStart"].as_array().unwrap().len();
+
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("settings.json");
+            write_json(&path, &existing);
+            let out = reconcile_settings(&path, fresh).unwrap();
+
+            let session_start = out["hooks"]["SessionStart"].as_array().unwrap();
+            prop_assert!(
+                session_start.contains(&foreign),
+                "foreign hook entry was dropped by the union"
+            );
+            prop_assert_eq!(
+                session_start.len(),
+                expected_len,
+                "re-rendered llmenv entries must dedup, not accumulate"
+            );
+        }
+    }
+
+    // ---- generate_settings_json (#720): property-based invariants ----
+
+    fn arb_permission_rule() -> impl Strategy<Value = PermissionRule> {
+        (
+            "[A-Za-z]{1,8}",
+            proptest::option::of("[^()]{0,10}"),
+            proptest::collection::vec("[^()]{1,8}", 0..3),
+        )
+            .prop_map(|(tool, pattern, paths)| PermissionRule {
+                tool,
+                pattern,
+                paths,
+            })
+    }
+
+    // Generates both handler kinds so the render exercises the `command`
+    // insertion path AND the `mcp_tool`/`tool` path — the two branches whose
+    // null-key omission the #720 no-null property is asserting.
+    fn arb_hook_handler() -> impl Strategy<Value = crate::config::HookHandler> {
+        prop_oneof![
+            "[a-z][a-z ./-]{0,20}".prop_map(|command| crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::Command,
+                command: Some(command),
+                tool: None,
+            }),
+            "[a-z_]{1,16}".prop_map(|tool| crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::McpTool,
+                command: None,
+                tool: Some(tool),
+            }),
+        ]
+    }
+
+    fn arb_hook() -> impl Strategy<Value = crate::config::Hook> {
+        (
+            proptest::sample::select(vec![
+                "SessionStart",
+                "PreToolUse",
+                "PostToolUse",
+                "UserPromptSubmit",
+                "Stop",
+            ]),
+            proptest::option::of("[a-zA-Z*]{1,8}"),
+            arb_hook_handler(),
+        )
+            .prop_map(|(event, matcher, handler)| crate::config::Hook {
+                event: event.to_owned(),
+                matcher,
+                handler,
+                bundle_origin: None,
+            })
+    }
+
+    fn arb_merged_manifest() -> impl Strategy<Value = crate::merge::MergedManifest> {
+        (
+            proptest::collection::vec(arb_permission_rule(), 0..4),
+            proptest::collection::vec(arb_permission_rule(), 0..4),
+            proptest::collection::vec(arb_hook(), 0..4),
+            any::<bool>(),
+        )
+            .prop_map(
+                |(allow, deny, hooks, transcript_on)| crate::merge::MergedManifest {
+                    capabilities: crate::config::Capabilities {
+                        permissions: crate::config::Permissions {
+                            default_mode: None,
+                            allow,
+                            ask: Vec::new(),
+                            deny,
+                        },
+                        hooks,
+                        ..Default::default()
+                    },
+                    session_log: crate::config::SessionLog {
+                        transcript: Some(crate::config::TranscriptSinkConfig {
+                            enabled: transcript_on,
+                            level: crate::config::LogLevel::Info,
+                            retention_days: None,
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+    }
+
+    // Recursively assert no object anywhere in `v` carries a null-valued key.
+    fn assert_no_null_keys(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(map) => map
+                .values()
+                .all(|child| !child.is_null() && assert_no_null_keys(child)),
+            serde_json::Value::Array(items) => items.iter().all(assert_no_null_keys),
+            _ => true,
+        }
+    }
+
+    fn write_settings_bytes(manifest: &crate::merge::MergedManifest) -> Vec<u8> {
+        let tmp = tempfile::tempdir().unwrap();
+        generate_settings_json(tmp.path(), manifest).unwrap();
+        std::fs::read(tmp.path().join("settings.json")).unwrap()
+    }
+
+    proptest! {
+        // The written settings.json is always valid, re-parseable JSON.
+        #[test]
+        fn generate_settings_json_is_valid_json(manifest in arb_merged_manifest()) {
+            let bytes = write_settings_bytes(&manifest);
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let reserialized = serde_json::to_vec(&parsed).unwrap();
+            let reparsed: serde_json::Value = serde_json::from_slice(&reserialized).unwrap();
+            prop_assert_eq!(parsed, reparsed);
+        }
+
+        // #699 core invariant: no hook handler (indeed no object anywhere in the
+        // rendered settings) contains a null-valued key.
+        #[test]
+        fn generate_settings_json_has_no_null_valued_keys(manifest in arb_merged_manifest()) {
+            let settings = render_settings_for_test(&manifest);
+            prop_assert!(
+                assert_no_null_keys(&settings),
+                "settings.json contains a null-valued key: {settings}"
+            );
+        }
+
+        // Determinism: the same manifest renders byte-identical settings.json.
+        #[test]
+        fn generate_settings_json_is_deterministic(manifest in arb_merged_manifest()) {
+            prop_assert_eq!(write_settings_bytes(&manifest), write_settings_bytes(&manifest));
+        }
     }
 
     // ---- merge_mcp_into_claude_json (#244): mcpServers into .claude.json ----
