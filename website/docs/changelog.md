@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Evaluate all `scope.content` matchers in a single directory walk instead of one walk per matcher — N active content scopes previously meant N full tree walks on every hook fire and every export (#703)
 - Resolve the hostname via the `uname(2)` syscall instead of spawning the `hostname` binary on every hook-run — the fork/exec dominated hook-run scope evaluation (~15ms/event, ~35% of hook-run CPU); each hook is a fresh process so the process-static env cache never helped this path
 - Deduplicate byte-identical memory blocks across a TurnStart's recalls before injecting them into agent context — a memory stored under several tag/bundle keywords came back from multiple recalls and was injected 2–3× (~60% of the TurnStart context payload in the common case); only exact-duplicate blocks are dropped, order preserved, so no unique recall is lost
-- Skip gateway-MAC detection (`route`+`arp` subprocess forks) on the hook-run path when no `network` scope is configured — nothing can match the gateway MAC then, and each hook is a fresh process so the env cache never covered it; the two forks dominated the remaining hook-run scope-evaluation cost
+- Skip gateway-MAC detection (`route`+`arp` subprocess forks) on hook-triggered paths — the synchronous hook-run and the detached memory-store, consolidation, and session-log children it spawns — when no `network` scope is configured; nothing can match the gateway MAC then, and each is a fresh process so the env cache never covered it, so the two forks were pure waste dominating the remaining hook-run scope-evaluation cost
 
 ## [3.5.1] - 2026-07-15
 
