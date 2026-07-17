@@ -111,6 +111,84 @@ pub fn doctor_info(use_color: bool) -> String {
     }
 }
 
+/// Truncate `s` to at most `max_len` **characters** (not bytes), appending
+/// `…` (U+2026, itself counted within `max_len`) when truncation occurs.
+/// UTF-8-boundary-safe: always truncates on a `char` boundary since it
+/// iterates `chars()` rather than slicing bytes.
+#[must_use]
+pub fn truncate_ellipsis(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+    if max_len == 0 {
+        return String::new();
+    }
+    let keep = max_len.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// Parse a space-separated style token string (`"bold cyan"`, `"#ff00aa"`,
+/// `"color-208"`) into ANSI escape codes wrapping `s`. Unknown tokens are
+/// ignored (never an error — a typo'd style must not crash the render).
+/// `use_color: false` (or an empty `style`) passes `s` through unchanged.
+#[must_use]
+pub fn apply_style(s: &str, style: &str, use_color: bool) -> String {
+    if !use_color || style.trim().is_empty() {
+        return s.to_string();
+    }
+    let mut codes: Vec<String> = Vec::new();
+    for token in style.split_whitespace() {
+        if let Some(code) = style_token_code(token) {
+            codes.push(code);
+        }
+    }
+    if codes.is_empty() {
+        return s.to_string();
+    }
+    format!("\x1b[{}m{s}\x1b[0m", codes.join(";"))
+}
+
+fn style_token_code(token: &str) -> Option<String> {
+    let named = match token {
+        "bold" => Some("1"),
+        "dim" => Some("2"),
+        "italic" => Some("3"),
+        "underline" => Some("4"),
+        "blink" => Some("5"),
+        "reverse" => Some("7"),
+        "hidden" => Some("8"),
+        "strikethrough" => Some("9"),
+        "black" => Some("30"),
+        "red" => Some("31"),
+        "green" => Some("32"),
+        "yellow" => Some("33"),
+        "blue" => Some("34"),
+        "magenta" => Some("35"),
+        "cyan" => Some("36"),
+        "white" => Some("37"),
+        _ => None,
+    };
+    if let Some(code) = named {
+        return Some(code.to_string());
+    }
+    if let Some(hex) = token.strip_prefix('#') {
+        if hex.len() == 6 && hex.is_ascii() {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            return Some(format!("38;2;{r};{g};{b}"));
+        }
+        return None;
+    }
+    if let Some(n) = token.strip_prefix("color-") {
+        let n: u8 = n.parse().ok()?;
+        return Some(format!("38;5;{n}"));
+    }
+    None
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -199,6 +277,39 @@ mod tests {
     }
 
     #[test]
+    fn test_should_use_color_clicolor_force_empty_string_does_not_force() {
+        // Unlike NO_COLOR (presence-not-value), CLICOLOR_FORCE requires a
+        // non-empty value — an empty string must not force color on.
+        let empty_force_env = |name: &str| -> Option<String> {
+            match name {
+                "CLICOLOR_FORCE" => Some(String::new()),
+                _ => None,
+            }
+        };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            false,
+            &empty_force_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_no_color_takes_precedence_over_clicolor_force() {
+        let both_env = |name: &str| -> Option<String> {
+            match name {
+                "NO_COLOR" => Some("1".to_string()),
+                "CLICOLOR_FORCE" => Some("1".to_string()),
+                _ => None,
+            }
+        };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &both_env
+        ));
+    }
+
+    #[test]
     fn test_marker_functions_plain_when_no_color() {
         // Without color, output contains the bare glyph and no escape codes.
         assert_eq!(active_marker(false), "*");
@@ -233,5 +344,118 @@ mod tests {
         assert!(doctor_pass(true).contains('✓'));
         assert!(doctor_warning(true).contains('⚠'));
         assert!(doctor_fail(true).contains('✗'));
+    }
+
+    #[test]
+    fn truncate_ellipsis_leaves_short_strings_alone() {
+        assert_eq!(truncate_ellipsis("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_ellipsis_truncates_and_appends_ellipsis() {
+        assert_eq!(truncate_ellipsis("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_zero_max_len_yields_empty() {
+        assert_eq!(truncate_ellipsis("hello", 0), "");
+    }
+
+    #[test]
+    fn truncate_ellipsis_is_utf8_safe_on_multibyte_boundary() {
+        // "║" is a 3-byte UTF-8 char; truncating mid-character must not panic
+        // or produce invalid UTF-8.
+        let s = "║║║║║";
+        for max in 0..=6 {
+            let out = truncate_ellipsis(s, max);
+            assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        }
+    }
+
+    #[test]
+    fn apply_style_wraps_bold_cyan() {
+        let out = apply_style("hi", "bold cyan", true);
+        assert!(out.starts_with("\x1b["));
+        assert!(out.ends_with("\x1b[0m"));
+        assert!(out.contains("hi"));
+    }
+
+    #[test]
+    fn apply_style_no_color_passes_through() {
+        assert_eq!(apply_style("hi", "bold cyan", false), "hi");
+    }
+
+    #[test]
+    fn apply_style_empty_style_passes_through() {
+        assert_eq!(apply_style("hi", "", true), "hi");
+    }
+
+    #[test]
+    fn apply_style_hex_token_with_multibyte_char_does_not_panic() {
+        // "#aaaéa" is 6 bytes but 5 chars — a byte-length check without an
+        // ASCII guard would slice mid-character here and panic.
+        let out = apply_style("hi", "#aaaéa", true);
+        assert_eq!(out, "hi");
+    }
+
+    #[test]
+    fn apply_style_valid_hex_token_renders_true_color() {
+        let out = apply_style("hi", "#ff00aa", true);
+        assert!(out.contains("38;2;255;0;170"));
+    }
+
+    #[test]
+    fn apply_style_color_n_token_renders_256_color_code() {
+        let out = apply_style("hi", "color-208", true);
+        assert!(
+            out.contains("38;5;208"),
+            "expected 256-color code in {out:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_ellipsis_exact_boundary_leaves_string_unchanged() {
+        // count() == max_len exactly: must not truncate (off-by-one would
+        // drop the last char and append an unneeded ellipsis).
+        assert_eq!(truncate_ellipsis("hello", 5), "hello");
+    }
+
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn truncate_ellipsis_never_panics_and_stays_utf8(
+            s in ".*",
+            max in 0usize..50,
+        ) {
+            let out = truncate_ellipsis(&s, max);
+            prop_assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        }
+
+        #[test]
+        fn apply_style_never_panics_and_stays_utf8(
+            s in ".*",
+            style in ".*",
+            use_color in any::<bool>(),
+        ) {
+            let out = apply_style(&s, &style, use_color);
+            prop_assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        }
+
+        #[test]
+        fn apply_style_valid_hex_always_renders_matching_rgb_code(
+            r in any::<u8>(),
+            g in any::<u8>(),
+            b in any::<u8>(),
+        ) {
+            let style = format!("#{r:02x}{g:02x}{b:02x}");
+            let out = apply_style("x", &style, true);
+            let expected = format!("38;2;{r};{g};{b}");
+            prop_assert!(out.contains(&expected));
+        }
+
+        #[test]
+        fn style_token_code_never_panics_on_arbitrary_token(token in ".*") {
+            let _ = style_token_code(&token);
+        }
     }
 }

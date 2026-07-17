@@ -26,7 +26,17 @@ use anyhow::Context;
 /// Returns an error if writing the state file fails.
 pub fn store_active_throttle(throttle: Option<&Throttle>) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
-    let path = throttle_state_path(&state_dir);
+    store_active_throttle_with_state_dir(throttle, &state_dir)
+}
+
+/// Internal helper taking an injectable state dir so tests can exercise the
+/// real write path (`write_owner_only_atomic`) against a temp directory
+/// instead of the real state dir, without env var mutation.
+fn store_active_throttle_with_state_dir(
+    throttle: Option<&Throttle>,
+    state_dir: &Path,
+) -> anyhow::Result<()> {
+    let path = throttle_state_path(state_dir);
     match throttle {
         Some(cfg) => {
             let json = serde_json::to_string(cfg)?;
@@ -43,6 +53,35 @@ pub fn store_active_throttle(throttle: Option<&Throttle>) -> anyhow::Result<()> 
 
 fn throttle_state_path(state_dir: &Path) -> std::path::PathBuf {
     state_dir.join("throttle.json")
+}
+
+/// Read back the currently stored throttle state (written by
+/// `store_active_throttle` during materialize/export). Returns `None` when
+/// no state file exists (throttling is off) or the file is unreadable/corrupt
+/// — a stale or hand-edited state file must not crash callers like the
+/// statusline data collector.
+///
+/// # Errors
+/// Returns an error only if the state directory itself cannot be resolved.
+pub fn read_active_throttle() -> anyhow::Result<Option<Throttle>> {
+    let state_dir = crate::paths::state_dir()?;
+    read_active_throttle_with_state_dir(&state_dir)
+}
+
+/// Internal helper taking an injectable state dir so tests can read from a
+/// temp directory instead of the real state dir, without env var mutation.
+fn read_active_throttle_with_state_dir(state_dir: &Path) -> anyhow::Result<Option<Throttle>> {
+    let path = throttle_state_path(state_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)
+            .inspect_err(|e| tracing::warn!("ignoring corrupt throttle state: {e}"))
+            .ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            tracing::warn!("could not read throttle state at {}: {e}", path.display());
+            Ok(None)
+        }
+    }
 }
 
 /// Resolve the single active throttle entry by tag intersection.
@@ -362,5 +401,57 @@ mod tests {
                  lo={lo} d={d_lo:?} hi={hi} d={d_hi:?}"
             );
         }
+    }
+
+    #[test]
+    fn read_active_throttle_returns_none_when_no_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = read_active_throttle_with_state_dir(tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_active_throttle_round_trips_stored_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Throttle {
+            backend: "anthropic".to_string(),
+            when: vec!["dev".to_string()],
+            cache_ttl: 30,
+            max_wait: 60,
+            soft_threshold: 80,
+        };
+
+        // Write via the real store path (write_owner_only_atomic), not a
+        // hand-serialized fixture, so this genuinely exercises the
+        // store -> read round trip rather than just deserialization.
+        store_active_throttle_with_state_dir(Some(&cfg), tmp.path()).unwrap();
+
+        let result = read_active_throttle_with_state_dir(tmp.path()).unwrap();
+        assert_eq!(result.unwrap().backend, "anthropic");
+    }
+
+    #[test]
+    fn store_active_throttle_with_state_dir_removes_file_on_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Throttle {
+            backend: "anthropic".to_string(),
+            when: vec!["dev".to_string()],
+            cache_ttl: 30,
+            max_wait: 60,
+            soft_threshold: 80,
+        };
+        store_active_throttle_with_state_dir(Some(&cfg), tmp.path()).unwrap();
+        assert!(
+            read_active_throttle_with_state_dir(tmp.path())
+                .unwrap()
+                .is_some()
+        );
+
+        store_active_throttle_with_state_dir(None, tmp.path()).unwrap();
+        assert!(
+            read_active_throttle_with_state_dir(tmp.path())
+                .unwrap()
+                .is_none()
+        );
     }
 }
