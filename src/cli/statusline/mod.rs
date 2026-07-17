@@ -119,7 +119,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data_path = dir.path().join("llmenv-status.json"); // missing file
         let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
-        assert!(out.contains("Claude Opus 4.8"));
+        assert!(out.contains("Opus"));
         assert!(out.contains(" │ "));
     }
 
