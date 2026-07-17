@@ -33,16 +33,40 @@ const NERD_ICONS: &[(&str, &str)] = &[
 /// portable terminal-capability probe for this, so `auto` keys off an
 /// explicit opt-in env var — the same mechanism users already set for their
 /// shell prompt (e.g. Starship's `NERD_FONT` convention). Defaults to
-/// `simple` (ASCII/Unicode, safe everywhere) when unset.
-fn nerd_font_detected() -> bool {
-    std::env::var("LLMENV_NERD_FONT").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+/// `simple` (ASCII/Unicode, safe everywhere) when unset. Takes an injectable
+/// env var provider so tests can exercise both branches without mutating
+/// real process state (mirrors `should_use_color_with_env` in
+/// `src/cli/style.rs`).
+fn nerd_font_detected_with_env<F>(get_env: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get_env("LLMENV_NERD_FONT").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by statusline orchestrator, wired up in a follow-up task"
+    )
+)]
 pub fn resolve_icons(
     icon_set: IconSet,
     configured: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
+    resolve_icons_with_env(icon_set, configured, &|name| std::env::var(name).ok())
+}
+
+fn resolve_icons_with_env<F>(
+    icon_set: IconSet,
+    configured: &BTreeMap<String, String>,
+    get_env: &F,
+) -> BTreeMap<String, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut icons: BTreeMap<String, String> = match icon_set {
         IconSet::None => BTreeMap::new(),
         IconSet::Simple => SIMPLE_ICONS
@@ -53,7 +77,7 @@ pub fn resolve_icons(
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect(),
-        IconSet::Auto if nerd_font_detected() => NERD_ICONS
+        IconSet::Auto if nerd_font_detected_with_env(get_env) => NERD_ICONS
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect(),
@@ -122,15 +146,21 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        unsafe_code,
-        reason = "test-only env var manipulation; single-threaded safe"
-    )]
     fn auto_resolves_to_simple_when_nerd_font_env_unset() {
-        // SAFETY (test-only): scoped std::env::remove_var in a single-threaded
-        // test process; no other test in this module reads this var.
-        unsafe { std::env::remove_var("LLMENV_NERD_FONT") };
-        let icons = resolve_icons(IconSet::Auto, &BTreeMap::new());
+        let no_env = |_name: &str| -> Option<String> { None };
+        let icons = resolve_icons_with_env(IconSet::Auto, &BTreeMap::new(), &no_env);
         assert_eq!(icons.get("config_stale").map(String::as_str), Some("~"));
+    }
+
+    #[test]
+    fn auto_resolves_to_nerd_when_nerd_font_env_set() {
+        let nerd_env = |name: &str| -> Option<String> {
+            (name == "LLMENV_NERD_FONT").then(|| "1".to_string())
+        };
+        let icons = resolve_icons_with_env(IconSet::Auto, &BTreeMap::new(), &nerd_env);
+        assert_eq!(
+            icons.get("config_stale").map(String::as_str),
+            Some("\u{f0e7}")
+        );
     }
 }
