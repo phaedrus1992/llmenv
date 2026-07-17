@@ -165,7 +165,16 @@ const ICM_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2)
 /// response can't be parsed — every one of those is an expected, non-error
 /// condition (most sessions have no ICM backend configured at all).
 fn collect_icm() -> Option<IcmData> {
-    let raw = crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT).ok()?;
+    let raw = match crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT) {
+        Ok(raw) => raw,
+        Err(e) => {
+            // Common/expected when no ICM backend is configured for this
+            // scope; debug (not warn) since it isn't necessarily a
+            // misconfiguration.
+            tracing::debug!("icm stat collection unavailable (non-fatal): {e}");
+            return None;
+        }
+    };
     parse_icm_stats(&raw)
 }
 
@@ -206,9 +215,15 @@ fn collect_throttle_with_stored_fallback(
     read_stored: impl FnOnce() -> anyhow::Result<Option<Throttle>>,
 ) -> Option<ThrottleData> {
     let resolved = crate::throttle::resolve_active_throttle(throttle_configs, active_tags)
+        .inspect_err(|e| tracing::warn!("throttle resolution failed (non-fatal): {e}"))
         .ok()
         .flatten()
-        .or_else(|| read_stored().ok().flatten());
+        .or_else(|| {
+            read_stored()
+                .inspect_err(|e| tracing::debug!("stored throttle state unavailable: {e}"))
+                .ok()
+                .flatten()
+        });
     resolved.map(|t| ThrottleData {
         backend: t.backend,
         cooldown_secs: t.max_wait,

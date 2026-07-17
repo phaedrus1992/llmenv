@@ -3492,7 +3492,10 @@ mod tests {
         let raw = std::fs::read_to_string(claude_path.join("settings.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(json["statusLine"]["type"], "command");
-        assert_eq!(json["statusLine"]["command"], "llmenv statusline");
+        assert_eq!(
+            json["statusLine"]["command"],
+            "llmenv statusline --color always"
+        );
     }
 
     // ===== Tests for build_and_materialize adapter dispatch (#543) =====
