@@ -45,6 +45,30 @@ fn throttle_state_path(state_dir: &Path) -> std::path::PathBuf {
     state_dir.join("throttle.json")
 }
 
+/// Read back the currently stored throttle state (written by
+/// `store_active_throttle` during materialize/export). Returns `None` when
+/// no state file exists (throttling is off) or the file is unreadable/corrupt
+/// — a stale or hand-edited state file must not crash callers like the
+/// statusline data collector.
+///
+/// # Errors
+/// Returns an error only if the state directory itself cannot be resolved.
+pub fn read_active_throttle() -> anyhow::Result<Option<Throttle>> {
+    let state_dir = crate::paths::state_dir()?;
+    read_active_throttle_with_state_dir(&state_dir)
+}
+
+/// Internal helper that reads throttle state from a given directory.
+/// This is made public-in-crate for testing purposes (test-injectable state_dir).
+fn read_active_throttle_with_state_dir(state_dir: &Path) -> anyhow::Result<Option<Throttle>> {
+    let path = throttle_state_path(state_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Resolve the single active throttle entry by tag intersection.
 ///
 /// Returns `None` when no entry's `when` tags intersect the active tags.
@@ -362,5 +386,33 @@ mod tests {
                  lo={lo} d={d_lo:?} hi={hi} d={d_hi:?}"
             );
         }
+    }
+
+    #[test]
+    fn read_active_throttle_returns_none_when_no_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = read_active_throttle_with_state_dir(tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_active_throttle_round_trips_stored_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Throttle {
+            backend: "anthropic".to_string(),
+            when: vec!["dev".to_string()],
+            cache_ttl: 30,
+            max_wait: 60,
+            soft_threshold: 80,
+        };
+
+        // Manually write the throttle config to the temp directory.
+        let path = throttle_state_path(tmp.path());
+        let json = serde_json::to_string(&cfg).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        // Read it back.
+        let result = read_active_throttle_with_state_dir(tmp.path()).unwrap();
+        assert_eq!(result.unwrap().backend, "anthropic");
     }
 }
