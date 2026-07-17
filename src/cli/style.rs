@@ -188,7 +188,7 @@ fn style_token_code(token: &str) -> Option<String> {
         return Some(code.to_string());
     }
     if let Some(hex) = token.strip_prefix('#') {
-        if hex.len() == 6 {
+        if hex.len() == 6 && hex.is_ascii() {
             let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
             let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
             let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
@@ -369,6 +369,20 @@ mod tests {
     #[test]
     fn apply_style_empty_style_passes_through() {
         assert_eq!(apply_style("hi", "", true), "hi");
+    }
+
+    #[test]
+    fn apply_style_hex_token_with_multibyte_char_does_not_panic() {
+        // "#aaaéa" is 6 bytes but 5 chars — a byte-length check without an
+        // ASCII guard would slice mid-character here and panic.
+        let out = apply_style("hi", "#aaaéa", true);
+        assert_eq!(out, "hi");
+    }
+
+    #[test]
+    fn apply_style_valid_hex_token_renders_true_color() {
+        let out = apply_style("hi", "#ff00aa", true);
+        assert!(out.contains("38;2;255;0;170"));
     }
 
     use proptest::prelude::*;
