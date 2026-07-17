@@ -54,8 +54,10 @@ status data is correctly scoped to the current session.
 
 1. **Materialization** — final step after writing config files and running hooks.
    llmenv has all the data in memory: scopes, tags, plugins, MCPs, ICM counts.
-2. **`llmenv export`** — refreshes throttle state, cache usage, stale config
-   detection.
+2. **`llmenv export`** — a full re-collect, identical to trigger 1. `export`'s
+   per-adapter loop calls the same materialize function trigger 1 uses, so
+   every field is refreshed (not a narrower throttle/cache/stale-only pass) —
+   there's no separate lighter-weight export code path.
 3. **Session start** — written once before the engine launches, ensures the file
    exists for the first statusline render call.
 
