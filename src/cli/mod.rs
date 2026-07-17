@@ -3382,6 +3382,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_and_materialize_reports_config_stale_after_content_changes() {
+        // Regression guard for the booted-hash read ordering in Task 11: it must
+        // read the pre-existing manifest dotfile *before* this same call
+        // overwrites it, or config_stale would never observe real content
+        // drift (a swapped read-after-write would make every run report
+        // false/None, and a single-materialize test can't tell the difference
+        // since a first-ever run has no booted manifest either way).
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+        assert_eq!(
+            config.cache.hashing,
+            HashingMode::Normal,
+            "test assumes the folder is reused across content edits"
+        );
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let (first_path, _) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("first materialize should succeed");
+
+        let status: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(first_path.join("llmenv-status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            status["config_stale"],
+            serde_json::Value::Null,
+            "first-ever materialize has no booted manifest to compare against — must be None"
+        );
+
+        // Same tags/shape (same folder), but content changed underneath it.
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello, world").unwrap();
+        let (second_path, _) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("second materialize should succeed");
+        assert_eq!(
+            second_path, first_path,
+            "Normal hashing mode must reuse the same folder across content edits"
+        );
+
+        let status: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(second_path.join("llmenv-status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            status["config_stale"], true,
+            "booted hash must be read before this materialize overwrites the manifest dotfile, \
+             or content drift would never be detected"
+        );
+    }
+
     // ===== Tests for build_and_materialize adapter dispatch (#543) =====
 
     #[test]
