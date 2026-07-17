@@ -1228,6 +1228,9 @@ fn claude_code_only_post_materialize(
     crate::adapter::claude_code::apply_seeded_settings(cache_path, &config.init.seeded_settings)?;
     // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
     crate::adapter::claude_code::seed_install_method(cache_path)?;
+    // Seed the default statusLine hook so `llmenv statusline` renders out of the
+    // box; never overwrites a user's own customization (#836).
+    crate::adapter::claude_code::seed_status_line(cache_path)?;
 
     // Auth inheritance (#172): inject cached credentials after the adapter has
     // finished its own .claude.json writes (mcpServers upsert). Only fires
@@ -3448,6 +3451,42 @@ mod tests {
             "booted hash must be read before this materialize overwrites the manifest dotfile, \
              or content drift would never be detected"
         );
+    }
+
+    #[test]
+    fn build_and_materialize_seeds_default_status_line_for_claude_code() {
+        // Full-stack proof that seed_status_line (#836 Task 14) composes correctly
+        // with a real materialize call: nothing configures statusLine, so it must
+        // come out seeded with llmenv's default command.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let (claude_path, _) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("claude adapter should materialize with a firing bundle");
+
+        let raw = std::fs::read_to_string(claude_path.join("settings.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["statusLine"]["type"], "command");
+        assert_eq!(json["statusLine"]["command"], "llmenv statusline");
     }
 
     // ===== Tests for build_and_materialize adapter dispatch (#543) =====
