@@ -340,3 +340,11 @@ doesn't show stale/partial ANSI.
 - **Integration test**: missing data file → engine fields only render
 - **Integration test**: empty config → default single-row output
 - **Integration test**: all widgets empty → empty/no-op stdout
+
+## Known limitations
+
+Crush has no statusline concept in its adapter today (`src/adapter/crush.rs`
+only supports `PreToolUse` hooks) — there is no engine-invoked renderer hook
+to wire `llmenv statusline` into. Claude Code wiring (Task 14) ships in this
+PR; Crush support is deferred to a follow-up issue once Crush's own config
+format grows a statusline-equivalent concept.
