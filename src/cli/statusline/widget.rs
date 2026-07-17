@@ -699,6 +699,63 @@ mod tests {
     }
 
     #[test]
+    fn format_token_count_below_1000_renders_bare_number() {
+        assert_eq!(format_token_count(42), "42");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1000), "1.0k");
+    }
+
+    #[test]
+    fn render_context_pct_rounds_fractional_remaining() {
+        let data = EngineData {
+            context_window: Some(ContextWindow {
+                remaining_percentage: Some(64.5),
+                context_window_size: None,
+                current_usage: None,
+            }),
+            ..Default::default()
+        };
+        // used = 100 - 64.5 = 35.5, rounds up to 36.
+        let out = render_engine_widget("context_pct", &data, None, false).unwrap();
+        assert_eq!(out, "36%");
+    }
+
+    #[test]
+    fn render_progress_bar_rounds_fractional_remaining_pct_but_truncates_bar_fill() {
+        let data = EngineData {
+            context_window: Some(ContextWindow {
+                remaining_percentage: Some(64.5),
+                context_window_size: None,
+                current_usage: None,
+            }),
+            ..Default::default()
+        };
+        // used = 35.5: displayed pct rounds to 36, but fill truncates to 3
+        // cells (35.5 / 10.0 = 3.55 -> 3), matching the doc comment's stated
+        // "truncate, not round" bar-fill behavior.
+        let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+        assert_eq!(out, "36% ███░░░░░░░");
+    }
+
+    #[test]
+    fn render_cache_pct_empty_when_total_tokens_zero_but_context_window_present() {
+        let data = EngineData {
+            context_window: Some(ContextWindow {
+                remaining_percentage: None,
+                context_window_size: Some(200_000),
+                current_usage: Some(TokenUsage {
+                    input_tokens: Some(0),
+                    cache_creation_input_tokens: Some(0),
+                    cache_read_input_tokens: Some(0),
+                }),
+            }),
+            ..Default::default()
+        };
+        let out = render_engine_widget("cache_pct", &data, None, false).unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
     fn tokens_and_cache_pct_saturate_instead_of_overflowing() {
         let data = EngineData {
             context_window: Some(ContextWindow {

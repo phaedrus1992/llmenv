@@ -264,6 +264,62 @@ mod tests {
     }
 
     #[test]
+    fn renders_scopes_empty_when_tags_list_is_empty() {
+        let data = StatusData {
+            scopes: Some(ScopesData { tags: vec![] }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("scopes", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn renders_cache_prunable_bytes_at_kb_and_sub_kb() {
+        let data = StatusData {
+            cache: Some(CacheData {
+                prunable_bytes: 2048,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_llmenv_widget("cache", &data, None, &icons(), false).unwrap(),
+            "2 KB"
+        );
+
+        let data = StatusData {
+            cache: Some(CacheData {
+                prunable_bytes: 512,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_llmenv_widget("cache", &data, None, &icons(), false).unwrap(),
+            "512 B"
+        );
+    }
+
+    #[test]
+    fn renders_config_stale_empty_when_explicitly_not_stale() {
+        let data = StatusData {
+            config_stale: Some(false),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("config_stale", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn renders_config_stale_falls_back_to_default_glyph_when_icon_missing() {
+        let data = StatusData {
+            config_stale: Some(true),
+            ..Default::default()
+        };
+        let empty_icons = BTreeMap::new();
+        let out = render_llmenv_widget("config_stale", &data, None, &empty_icons, false).unwrap();
+        assert_eq!(out, "◌");
+    }
+
+    #[test]
     fn missing_data_renders_empty() {
         let data = StatusData::default();
         for name in [
