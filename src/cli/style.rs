@@ -371,6 +371,22 @@ mod tests {
         assert!(out.contains("38;2;255;0;170"));
     }
 
+    #[test]
+    fn apply_style_color_n_token_renders_256_color_code() {
+        let out = apply_style("hi", "color-208", true);
+        assert!(
+            out.contains("38;5;208"),
+            "expected 256-color code in {out:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_ellipsis_exact_boundary_leaves_string_unchanged() {
+        // count() == max_len exactly: must not truncate (off-by-one would
+        // drop the last char and append an unneeded ellipsis).
+        assert_eq!(truncate_ellipsis("hello", 5), "hello");
+    }
+
     use proptest::prelude::*;
     proptest! {
         #[test]
