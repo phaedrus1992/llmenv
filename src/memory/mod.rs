@@ -47,11 +47,19 @@ fn call_tool_blocking(
     })
 }
 
+/// Same as `stats()` but returns the raw JSON string instead of printing it,
+/// for programmatic callers (the statusline data collector, #836). Returns
+/// `Err` when no memory backend is active for the current scope or the MCP
+/// call fails — callers treat that as "no ICM stats available", not a hard
+/// error.
+pub fn stats_json() -> anyhow::Result<String> {
+    let client = connect()?;
+    call_tool_blocking(client, "icm_memory_stats", serde_json::json!({}))
+}
+
 /// Run the `stats` subcommand: connect to ICM and output memory stats.
 pub fn stats() -> anyhow::Result<()> {
-    let client = connect()?;
-    let result = call_tool_blocking(client, "icm_memory_stats", serde_json::json!({}))?;
-    println!("{result}");
+    println!("{}", stats_json()?);
     Ok(())
 }
 

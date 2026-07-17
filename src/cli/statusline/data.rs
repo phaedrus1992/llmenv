@@ -3,9 +3,14 @@
 //! business logic. All fields written once at data-file-write time by
 //! `src/materialize/status_data.rs`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+// `Serialize` is derived alongside `Deserialize` on every type in this module
+// (not just `StatusData`) so `crate::materialize::status_data` — the writer
+// side — can construct and serialize these exact types instead of maintaining
+// a second, parallel set of structs that could drift out of sync with what
+// this module parses.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct StatusData {
     pub scopes: Option<ScopesData>,
     pub plugins: Option<CountData>,
@@ -17,30 +22,30 @@ pub struct StatusData {
     pub session_log: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ScopesData {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct CountData {
     pub total: u64,
     pub errors: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct IcmData {
     pub memories: u64,
     pub concepts: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ThrottleData {
     pub backend: String,
     pub cooldown_secs: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct CacheData {
     pub prunable_bytes: u64,
 }
