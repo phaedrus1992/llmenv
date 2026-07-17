@@ -824,6 +824,17 @@ mod tests {
         assert_eq!(cache_pct, "100%");
     }
 
+    fn data_with_remaining(remaining: f64) -> EngineData {
+        EngineData {
+            context_window: Some(ContextWindow {
+                remaining_percentage: Some(remaining),
+                context_window_size: None,
+                current_usage: None,
+            }),
+            ..Default::default()
+        }
+    }
+
     /// (name, declared placeholders) for every engine widget that builds its
     /// output via a chained `format.replace()` call.
     const ENGINE_WIDGET_PLACEHOLDERS: &[(&str, &[&str])] = &[
@@ -889,14 +900,7 @@ mod tests {
         /// and must always stay within the documented output contract.
         #[test]
         fn render_context_pct_never_panics_and_stays_in_contract(remaining in any::<f64>()) {
-            let data = EngineData {
-                context_window: Some(ContextWindow {
-                    remaining_percentage: Some(remaining),
-                    context_window_size: None,
-                    current_usage: None,
-                }),
-                ..Default::default()
-            };
+            let data = data_with_remaining(remaining);
             let out = render_engine_widget("context_pct", &data, None, false).unwrap();
             if remaining.is_finite() {
                 let pct: i64 = out.trim_end_matches('%').parse().unwrap();
@@ -908,14 +912,7 @@ mod tests {
 
         #[test]
         fn render_progress_bar_never_panics_and_stays_in_contract(remaining in any::<f64>()) {
-            let data = EngineData {
-                context_window: Some(ContextWindow {
-                    remaining_percentage: Some(remaining),
-                    context_window_size: None,
-                    current_usage: None,
-                }),
-                ..Default::default()
-            };
+            let data = data_with_remaining(remaining);
             let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
             if remaining.is_finite() {
                 let (pct_str, bar) = out.split_once(' ').unwrap();
