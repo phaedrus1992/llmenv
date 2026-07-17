@@ -24,6 +24,7 @@ The config directory is resolved in this order:
 | `lsp:` | list | LSP server declarations (Crush + Claude Code; no-op on engines without an LSP surface) |
 | `features:` | map | Feature flags; holds `memory:` (ICM backend topology), `throttle:` (usage throttling), and `upgrade:` (upgrade release track) |
 | `session_log:` | map | Session-activity logging: local JSONL file and/or ICM transcript |
+| `statusline:` | map | Widget layout, formatting, and colour config for `llmenv statusline` |
 | `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
 | `marketplace:` | list | Plugin marketplaces (git URL or local path) |
 | `plugin-collection:` | list | Named bags of plugins, selected by tag |
@@ -521,6 +522,144 @@ doesn't cover session metadata), which is why the scope header embeds the
 tokens directly in its content rather than only in structured metadata. The
 structured metadata (tags/bundles/project/cwd/adapter/llmenv version) is still
 attached to the session for exact inspection via `icm_transcript_show`.
+
+## `statusline:`
+
+`llmenv statusline` is a statusline renderer built into the `llmenv` binary —
+no separate statusline plugin or binary to install. It reads the engine's
+session JSON from stdin, llmenv's own stats from the materialized
+`llmenv-status.json`, and this config section, then prints one ANSI-styled
+line per row to stdout. See [`statusline`](commands.md#statusline) for how
+it's wired into an engine.
+
+```yaml
+statusline:
+  rows:
+    - "{model} │ {context_pct} │ {budget}"
+    - "{scopes} · {plugins} {config_stale}"
+  style:
+    icon_set: auto            # auto | nerd | simple | none
+  widgets:
+    model:
+      format: "{short_name} {version}"
+      style: "bold cyan"
+    scopes:
+      format: "║ {tags}"
+      max_len: 40
+      style: "dim"
+  icons:
+    config_stale: "◌"
+```
+
+| Field | Required | Notes |
+| ------- | ---------- | ------- |
+| `rows` | no | One row template per rendered status line, each a string with `{widget_name}` placeholders. Default (when `statusline:` is omitted entirely): a single row, `"{model} │ {folder} │ {branch} │ {context_pct} │ {budget}"` |
+| `style.icon_set` | no | `auto`, `nerd`, `simple`, or `none` — see [`icon_set`](#icon_set) below. Default `auto` |
+| `style.separator` | no | Accepted and defaults to `" │ "`, but **no renderer code currently reads it** — it has no effect on output. Put separator characters directly in each `rows` template instead |
+| `widgets` | no | Map of widget name (`model`, `scopes`, ...) to a `format` / `max_len` / `style` override. Only some widgets honor `format` — see the reference table below |
+| `icons` | no | Named icon overrides, merged over the resolved `icon_set` defaults (a name set here always wins) |
+
+Each entry under `widgets:` accepts:
+
+| Sub-field | Notes |
+| --------- | ----- |
+| `format` | Custom display template for the widget's own placeholders (see the table below). Only honored by widgets marked "yes" in the **Format?** column — set on a widget that doesn't support it, it's silently ignored |
+| `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
+| `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below |
+
+A row template can also write `{widget_name:t}` — accepted syntax, but it is a
+no-op beyond what `max_len` already does; truncation is driven entirely by
+`max_len`, not by this shorthand. An unknown widget name in a template, or a
+widget with no data to render, renders as an empty string (not an error). If
+every widget in a row renders empty, that row's line in the output is empty
+too — never a line of bare separator literals.
+
+### Widget reference
+
+Two widget sources, resolved in this order: **engine-sourced** widgets read
+the stdin JSON the engine pipes in every render; **llmenv-sourced** widgets
+read `llmenv-status.json`. A name that matches neither renders empty.
+
+#### Engine-sourced (from the engine's stdin JSON)
+
+Only `model` honors a `format:` override. The other nine always render their
+fixed default layout — `max_len` and `style` still apply to their output.
+
+| Widget | Format? | Default output | Example | `format` placeholders |
+|--------|---------|-----------------|---------|------------------------|
+| `model` | yes | `{short_name} {version}` | `Claude Opus 4.8` | `short_name`, `version`, `full_name` |
+| `folder` | no | basename of the working directory | `llmenv` | — |
+| `branch` | no | git branch name | `release/3.x` | — |
+| `pr` | no | `#<number>` | `#834` | — |
+| `progress_bar` | no | `<pct>% ` + 10-cell block bar | `35% ███░░░░░░░` | — |
+| `tokens` | no | total context tokens, `k`-suffixed | `10.0k` | — |
+| `context_pct` | no | used-context percentage | `35%` | — |
+| `budget` | no | `<used>/<max>`, both `k`-suffixed | `35.0k/200.0k` | — |
+| `duration` | no | `<h>h<m>m` | `3h42m` | — |
+| `cache_pct` | no | cache-hit percentage | `44%` | — |
+
+#### llmenv-sourced (from `llmenv-status.json`)
+
+All eight honor `format:`.
+
+| Widget | Default `format` | Example | Placeholders |
+|--------|-------------------|---------|--------------|
+| `scopes` | `║ {tags}` | `║ dev · rust` | `tags` (tag list, joined with ` · `) |
+| `plugins` | `◇ {total}` | `◇ 12` | `total`, `errors` |
+| `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
+| `icm` | `M{memories}` | `M142` | `memories`, `concepts` |
+| `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes) |
+| `config_stale` | `{stale_icon}` | `◌` | `stale_icon`. Renders empty when the config isn't stale — there's no "fresh" variant |
+| `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
+| `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
+
+An unrecognized placeholder inside a custom `format` string (e.g. `{title}`
+on `pr`, or `{count}` on `scopes`) is left in the output literally rather than
+being stripped — only the placeholders listed above are substituted.
+
+### `icon_set`
+
+- `simple` — ASCII/Unicode glyphs (`*`, `~`, `!`, `x`, `#`, `log`, ...)
+- `nerd` — Nerd Font glyphs (Private Use Area codepoints)
+- `none` — every icon resolves to an empty string
+- `auto` (default) — there's no portable way to probe a terminal for a Nerd
+  Font, so `auto` keys off the `LLMENV_NERD_FONT` environment variable: set it
+  to `1` or `true` (case-insensitive) to get Nerd Font glyphs; unset (or any
+  other value) falls back to `simple`. Set this the same way you'd set it for
+  a shell prompt that has its own Nerd Font auto-detect convention.
+
+Only two icon names are currently consulted by any widget: `config_stale`
+(the `config_stale` widget) and `session_log` (the `session_log` widget). The
+other names resolvable via `icon_set` (`config_ok`, `icm_ok`, `throttle`,
+`plugin_ok`, `plugin_error`, `cache_ok`, `cache_prunable`) are defined and can
+be overridden under `icons:`, but no current widget format reads them.
+
+### Style tokens
+
+`style` (on a widget, or via `finish()` internally) is a space-separated list
+of tokens applied to the widget's entire output:
+
+- Text attributes: `bold`, `dim`, `italic`, `underline`, `blink`, `reverse`,
+  `hidden`, `strikethrough`
+- 16-colour foreground names: `black`, `red`, `green`, `yellow`, `blue`,
+  `magenta`, `cyan`, `white`
+- 256-colour: `color-<n>` (`0`-`255`)
+- True colour: `#rrggbb` hex
+
+Unknown tokens are ignored rather than erroring — a typo in a `style` string
+degrades to no styling for that token, not a broken render. With
+`--color never` (or a non-TTY), all style tokens are skipped entirely and
+widgets render as plain text.
+
+### Claude Code / Crush support
+
+Claude Code gets `llmenv statusline` wired in automatically: the adapter
+seeds `"statusLine": {"type": "command", "command": "llmenv statusline"}`
+into `settings.json` once, only when that key is absent — a user's own
+`/statusline` customization is never overwritten. Crush has no
+statusline-hook concept in its adapter today, so `statusline:` config has no
+effect there yet ([#855](https://github.com/phaedrus1992/llmenv/issues/855)
+tracks adding it).
 
 ## `state:`
 
