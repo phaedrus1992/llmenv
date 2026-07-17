@@ -397,5 +397,32 @@ mod tests {
             let out = truncate_ellipsis(&s, max);
             prop_assert!(std::str::from_utf8(out.as_bytes()).is_ok());
         }
+
+        #[test]
+        fn apply_style_never_panics_and_stays_utf8(
+            s in ".*",
+            style in ".*",
+            use_color in any::<bool>(),
+        ) {
+            let out = apply_style(&s, &style, use_color);
+            prop_assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        }
+
+        #[test]
+        fn apply_style_valid_hex_always_renders_matching_rgb_code(
+            r in any::<u8>(),
+            g in any::<u8>(),
+            b in any::<u8>(),
+        ) {
+            let style = format!("#{r:02x}{g:02x}{b:02x}");
+            let out = apply_style("x", &style, true);
+            let expected = format!("38;2;{r};{g};{b}");
+            prop_assert!(out.contains(&expected));
+        }
+
+        #[test]
+        fn style_token_code_never_panics_on_arbitrary_token(token in ".*") {
+            let _ = style_token_code(&token);
+        }
     }
 }

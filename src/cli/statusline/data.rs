@@ -123,4 +123,46 @@ mod tests {
         assert!(data.scopes.is_none());
         assert!(data.plugins.is_none());
     }
+
+    use proptest::prelude::*;
+
+    fn arb_status_data() -> impl Strategy<Value = StatusData> {
+        (
+            proptest::option::of(proptest::collection::vec("[a-z]{1,8}", 0..4)),
+            proptest::option::of((any::<u64>(), any::<u64>())),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<u64>()),
+        )
+            .prop_map(|(tags, plugins, config_stale, session_log)| StatusData {
+                scopes: tags.map(|tags| ScopesData { tags }),
+                plugins: plugins.map(|(total, errors)| CountData { total, errors }),
+                mcps: None,
+                icm: None,
+                throttle: None,
+                config_stale,
+                cache: None,
+                session_log,
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn load_roundtrips_arbitrary_serialized_status_data(data in arb_status_data()) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("llmenv-status.json");
+            let json = serde_json::to_vec(&data).unwrap();
+            std::fs::write(&path, json).unwrap();
+            prop_assert_eq!(StatusData::load(&path), data);
+        }
+
+        #[test]
+        fn load_never_panics_on_arbitrary_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("llmenv-status.json");
+            std::fs::write(&path, &bytes).unwrap();
+            // Must degrade to default, never panic, on arbitrary (likely
+            // non-JSON) bytes.
+            let _ = StatusData::load(&path);
+        }
+    }
 }
