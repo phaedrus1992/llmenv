@@ -23,7 +23,7 @@ pub enum TemplateToken {
 pub fn parse_template(template: &str) -> Vec<TemplateToken> {
     let mut tokens = Vec::new();
     let mut literal = String::new();
-    let mut chars = template.char_indices().peekable();
+    let mut chars = template.char_indices();
     while let Some((start, c)) = chars.next() {
         if c != '{' {
             literal.push(c);
@@ -61,10 +61,6 @@ pub fn parse_template(template: &str) -> Vec<TemplateToken> {
     tokens
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by Task 8 orchestrator")
-)]
 #[cfg(test)]
 mod tests {
     use super::*;
