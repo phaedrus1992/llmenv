@@ -94,15 +94,15 @@ pub fn render_engine_widget(
 ) -> Option<String> {
     let raw = match name {
         "model" => render_model(data, cfg),
-        "folder" => render_folder(data),
-        "context_pct" => render_context_pct(data),
-        "duration" => render_duration(data),
-        "tokens" => render_tokens(data),
-        "budget" => render_budget(data),
-        "cache_pct" => render_cache_pct(data),
-        "branch" => render_branch(data),
-        "pr" => render_pr(data),
-        "progress_bar" => render_progress_bar(data),
+        "folder" => render_folder(data, cfg),
+        "context_pct" => render_context_pct(data, cfg),
+        "duration" => render_duration(data, cfg),
+        "tokens" => render_tokens(data, cfg),
+        "budget" => render_budget(data, cfg),
+        "cache_pct" => render_cache_pct(data, cfg),
+        "branch" => render_branch(data, cfg),
+        "pr" => render_pr(data, cfg),
+        "progress_bar" => render_progress_bar(data, cfg),
         _ => return None,
     };
     Some(super::finish(raw, cfg, use_color))
@@ -123,7 +123,7 @@ fn render_model(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) ->
         .to_string()
 }
 
-fn render_folder(data: &EngineData) -> String {
+fn render_folder(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(path) = data
         .workspace
         .as_ref()
@@ -131,10 +131,16 @@ fn render_folder(data: &EngineData) -> String {
     else {
         return String::new();
     };
-    std::path::Path::new(path)
+    let basename = std::path::Path::new(path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or("{basename}");
+    format
+        .replace("{basename}", &basename)
+        .replace("{path}", path)
 }
 
 /// Renders the used-context percentage. `remaining_percentage` comes from an
@@ -142,7 +148,7 @@ fn render_folder(data: &EngineData) -> String {
 /// empty rather than a garbled cast result; any other value is clamped to
 /// the valid `0.0..=100.0` range before the `i64` cast so a corrupt/hostile
 /// float (e.g. `1e300`) can't produce a saturated, absurd display string.
-fn render_context_pct(data: &EngineData) -> String {
+fn render_context_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(remaining) = data
         .context_window
         .as_ref()
@@ -154,17 +160,23 @@ fn render_context_pct(data: &EngineData) -> String {
         return String::new();
     }
     let used = (100.0 - remaining).clamp(0.0, 100.0).round() as i64;
-    format!("{used}%")
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{pct}%");
+    format.replace("{pct}", &used.to_string())
 }
 
-fn render_duration(data: &EngineData) -> String {
+fn render_duration(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(ms) = data.cost.as_ref().and_then(|c| c.total_duration_ms) else {
         return String::new();
     };
     let total_secs = ms / 1000;
     let h = total_secs / 3600;
     let m = (total_secs % 3600) / 60;
-    format!("{h}h{m}m")
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{h}h{m}m");
+    format
+        .replace("{h}", &h.to_string())
+        .replace("{m}", &m.to_string())
+        .replace("{s}", &total_secs.to_string())
+        .replace("{total_ms}", &ms.to_string())
 }
 
 /// Sum of the three token-count fields, saturating on overflow. Each field
@@ -179,7 +191,7 @@ fn total_tokens(usage: &TokenUsage) -> u64 {
         .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
 }
 
-fn render_tokens(data: &EngineData) -> String {
+fn render_tokens(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(usage) = data
         .context_window
         .as_ref()
@@ -187,7 +199,22 @@ fn render_tokens(data: &EngineData) -> String {
     else {
         return String::new();
     };
-    format_token_count(total_tokens(usage))
+    let total = format_token_count(total_tokens(usage));
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{total}");
+    format
+        .replace("{total}", &total)
+        .replace(
+            "{input}",
+            &format_token_count(usage.input_tokens.unwrap_or(0)),
+        )
+        .replace(
+            "{cache_read}",
+            &format_token_count(usage.cache_read_input_tokens.unwrap_or(0)),
+        )
+        .replace(
+            "{cache_create}",
+            &format_token_count(usage.cache_creation_input_tokens.unwrap_or(0)),
+        )
 }
 
 fn format_token_count(n: u64) -> String {
@@ -198,7 +225,7 @@ fn format_token_count(n: u64) -> String {
     }
 }
 
-fn render_budget(data: &EngineData) -> String {
+fn render_budget(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(cw) = &data.context_window else {
         return String::new();
     };
@@ -206,10 +233,15 @@ fn render_budget(data: &EngineData) -> String {
         return String::new();
     };
     let used = cw.current_usage.as_ref().map_or(0, total_tokens);
-    format!("{}/{}", format_token_count(used), format_token_count(max))
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or("{used}/{max}");
+    format
+        .replace("{used}", &format_token_count(used))
+        .replace("{max}", &format_token_count(max))
 }
 
-fn render_cache_pct(data: &EngineData) -> String {
+fn render_cache_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(usage) = data
         .context_window
         .as_ref()
@@ -226,21 +258,24 @@ fn render_cache_pct(data: &EngineData) -> String {
         return String::new();
     }
     let pct = (cache as f64 / total as f64 * 100.0).round() as i64;
-    format!("{pct}%")
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{pct}%");
+    format.replace("{pct}", &pct.to_string())
 }
 
-fn render_branch(data: &EngineData) -> String {
-    data.branch
-        .as_ref()
-        .and_then(|b| b.name.clone())
-        .unwrap_or_default()
+fn render_branch(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+    let Some(name) = data.branch.as_ref().and_then(|b| b.name.clone()) else {
+        return String::new();
+    };
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{name}");
+    format.replace("{name}", &name)
 }
 
-fn render_pr(data: &EngineData) -> String {
-    match data.pr.as_ref().and_then(|p| p.number) {
-        Some(n) => format!("#{n}"),
-        None => String::new(),
-    }
+fn render_pr(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+    let Some(n) = data.pr.as_ref().and_then(|p| p.number) else {
+        return String::new();
+    };
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("#{number}");
+    format.replace("{number}", &n.to_string())
 }
 
 /// 10-cell block bar. `used` (100 - remaining) is the displayed percentage.
@@ -250,7 +285,7 @@ fn render_pr(data: &EngineData) -> String {
 /// `f64::clamp` unchanged (NaN comparisons are always false), so it must be
 /// rejected explicitly before the round/cast rather than relying on clamp
 /// alone; infinite values are rejected for the same reason.
-fn render_progress_bar(data: &EngineData) -> String {
+fn render_progress_bar(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(remaining) = data
         .context_window
         .as_ref()
@@ -267,7 +302,13 @@ fn render_progress_bar(data: &EngineData) -> String {
     // 3-cell floor the displayed "35%" label implies.
     let filled = ((used / 10.0) as usize).min(10);
     let bar: String = "█".repeat(filled) + &"░".repeat(10 - filled);
-    format!("{}% {bar}", used.round() as i64)
+    let pct = used.round() as i64;
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or("{pct}% {bar}");
+    format
+        .replace("{pct}", &pct.to_string())
+        .replace("{bar}", &bar)
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -490,6 +531,115 @@ mod tests {
         .unwrap();
         let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
         assert_eq!(out, "0% ░░░░░░░░░░");
+    }
+
+    #[test]
+    fn render_context_pct_honors_custom_format() {
+        let mut data = engine_data();
+        data.context_window = Some(ContextWindow {
+            remaining_percentage: Some(65.0),
+            ..data.context_window.unwrap()
+        });
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("used {pct} percent".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_context_pct(&data, Some(&cfg)), "used 35 percent");
+    }
+
+    #[test]
+    fn render_folder_honors_custom_format() {
+        let data = engine_data(); // workspace.current_dir = "/home/user/llmenv"
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{path}/{basename}".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_folder(&data, Some(&cfg)), "/home/user/llmenv/llmenv");
+    }
+
+    #[test]
+    fn render_duration_honors_custom_format() {
+        let data = engine_data(); // cost.total_duration_ms = 13_320_000
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{s}s total, {total_ms}ms".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_duration(&data, Some(&cfg)),
+            "13320s total, 13320000ms"
+        );
+    }
+
+    #[test]
+    fn render_tokens_honors_custom_format() {
+        let data = engine_data(); // input 5000, cache_create 1000, cache_read 4000
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("in={input} cr={cache_read} cc={cache_create} tot={total}".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_tokens(&data, Some(&cfg)),
+            "in=5.0k cr=4.0k cc=1.0k tot=10.0k"
+        );
+    }
+
+    #[test]
+    fn render_budget_honors_custom_format() {
+        let data = engine_data(); // context_window_size 200_000, used 10_000
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{max} total, {used} used".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_budget(&data, Some(&cfg)), "200.0k total, 10.0k used");
+    }
+
+    #[test]
+    fn render_cache_pct_honors_custom_format() {
+        let data = engine_data(); // cache 5000 / total 10000 = 50%
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("cache={pct}%".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_cache_pct(&data, Some(&cfg)), "cache=50%");
+    }
+
+    #[test]
+    fn render_branch_honors_custom_format() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "branch": { "name": "release/3.x" }
+        }))
+        .unwrap();
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("on {name}".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_branch(&data, Some(&cfg)), "on release/3.x");
+    }
+
+    #[test]
+    fn render_pr_honors_custom_format() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "pr": { "number": 834 }
+        }))
+        .unwrap();
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("PR#{number}".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_pr(&data, Some(&cfg)), "PR#834");
+    }
+
+    #[test]
+    fn render_progress_bar_honors_custom_format() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "context_window": { "remaining_percentage": 65.0 }
+        }))
+        .unwrap();
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{pct}|{bar}".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_progress_bar(&data, Some(&cfg)), "35|███░░░░░░░");
     }
 
     #[test]
