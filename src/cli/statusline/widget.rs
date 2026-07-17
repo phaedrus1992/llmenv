@@ -11,12 +11,9 @@ pub struct EngineData {
     pub model: Option<ModelInfo>,
     pub cost: Option<Cost>,
     pub context_window: Option<ContextWindow>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "part of the stdin contract; no rate-limit widget consumes it yet, added in a follow-up task"
-        )
+    #[expect(
+        dead_code,
+        reason = "part of the stdin contract for forward-compatibility; no widget in the design renders rate-limit data"
     )]
     pub rate_limits: Option<RateLimits>,
 }
@@ -53,12 +50,9 @@ pub struct TokenUsage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "part of the stdin contract; no rate-limit widget consumes these fields yet, added in a follow-up task"
-    )
+#[expect(
+    dead_code,
+    reason = "part of the stdin contract for forward-compatibility; no widget in the design renders rate-limit data"
 )]
 pub struct RateLimits {
     pub five_hour: Option<RateLimitWindow>,
@@ -66,12 +60,9 @@ pub struct RateLimits {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "part of the stdin contract; no rate-limit widget consumes these fields yet, added in a follow-up task"
-    )
+#[expect(
+    dead_code,
+    reason = "part of the stdin contract for forward-compatibility; no widget in the design renders rate-limit data"
 )]
 pub struct RateLimitWindow {
     pub used_percentage: Option<f64>,
