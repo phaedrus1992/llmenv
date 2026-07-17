@@ -707,6 +707,14 @@ mod tests {
         assert_eq!(dir_size(dir.path()), 15);
     }
 
+    /// Writes one file per size in `sizes`, named `<prefix><index>.bin`, each
+    /// filled with that many zero bytes.
+    fn write_sized_files(dir: &Path, prefix: &str, sizes: &[usize]) {
+        for (i, size) in sizes.iter().enumerate() {
+            std::fs::write(dir.join(format!("{prefix}{i}.bin")), vec![0u8; *size]).unwrap();
+        }
+    }
+
     proptest! {
         /// Accumulation correctness across generated directory trees (flat +
         /// one nested level) — must equal the sum of every file's byte count.
@@ -716,14 +724,10 @@ mod tests {
             nested_sizes in prop::collection::vec(0usize..2000, 0..8),
         ) {
             let dir = tempfile::tempdir().unwrap();
-            for (i, size) in flat_sizes.iter().enumerate() {
-                std::fs::write(dir.path().join(format!("f{i}.bin")), vec![0u8; *size]).unwrap();
-            }
+            write_sized_files(dir.path(), "f", &flat_sizes);
             let nested = dir.path().join("nested");
             std::fs::create_dir(&nested).unwrap();
-            for (i, size) in nested_sizes.iter().enumerate() {
-                std::fs::write(nested.join(format!("n{i}.bin")), vec![0u8; *size]).unwrap();
-            }
+            write_sized_files(&nested, "n", &nested_sizes);
             let expected: u64 = flat_sizes
                 .iter()
                 .chain(nested_sizes.iter())
@@ -740,9 +744,7 @@ mod tests {
             extra_size in 0usize..2000,
         ) {
             let dir = tempfile::tempdir().unwrap();
-            for (i, size) in initial_sizes.iter().enumerate() {
-                std::fs::write(dir.path().join(format!("f{i}.bin")), vec![0u8; *size]).unwrap();
-            }
+            write_sized_files(dir.path(), "f", &initial_sizes);
             let before = dir_size(dir.path());
             std::fs::write(dir.path().join("extra.bin"), vec![0u8; extra_size]).unwrap();
             let after = dir_size(dir.path());
