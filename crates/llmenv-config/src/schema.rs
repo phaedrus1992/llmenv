@@ -822,7 +822,7 @@ pub struct ContextMode {
 /// Widget layout, formatting, and colour config for `llmenv statusline`
 /// (`statusline:` section of `config.yaml`). See
 /// `docs/superpowers/specs/2026-07-15-statusline-design.md`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct StatuslineConfig {
     /// One row template per rendered status line. `{widget_name}`
@@ -833,17 +833,6 @@ pub struct StatuslineConfig {
     pub widgets: std::collections::BTreeMap<String, WidgetConfig>,
     /// Named icon overrides (`config_stale`, `throttle`, ...).
     pub icons: std::collections::BTreeMap<String, String>,
-}
-
-impl Default for StatuslineConfig {
-    fn default() -> Self {
-        Self {
-            rows: Vec::new(),
-            style: StatuslineStyle::default(),
-            widgets: std::collections::BTreeMap::new(),
-            icons: std::collections::BTreeMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

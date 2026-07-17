@@ -3,4 +3,8 @@
 
 mod data;
 
+#[expect(
+    unused_imports,
+    reason = "consumed by statusline widget rendering and orchestrator, wired up in a follow-up task"
+)]
 pub use data::StatusData;
