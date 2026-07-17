@@ -555,8 +555,7 @@ statusline:
 | ------- | ---------- | ------- |
 | `rows` | no | One row template per rendered status line, each a string with `{widget_name}` placeholders. Default (when `statusline:` is omitted entirely): a single row, `"{model} │ {folder} │ {branch} │ {context_pct} │ {budget}"` |
 | `style.icon_set` | no | `auto`, `nerd`, `simple`, or `none` — see [`icon_set`](#icon_set) below. Default `auto` |
-| `style.separator` | no | Accepted and defaults to `" │ "`, but **no renderer code currently reads it** — it has no effect on output. Put separator characters directly in each `rows` template instead |
-| `widgets` | no | Map of widget name (`model`, `scopes`, ...) to a `format` / `max_len` / `style` override. Only some widgets honor `format` — see the reference table below |
+| `widgets` | no | Map of widget name (`model`, `scopes`, ...) to a `format` / `max_len` / `style` override — see the reference table below for each widget's default format and placeholders |
 | `icons` | no | Named icon overrides, merged over the resolved `icon_set` defaults (a name set here always wins) |
 
 Each entry under `widgets:` accepts:
@@ -586,7 +585,7 @@ All ten honor `format:` — set on any of them, it replaces the default layout b
 
 | Widget | Format? | Default output | Example | `format` placeholders |
 |--------|---------|-----------------|---------|------------------------|
-| `model` | yes | `{short_name} {version}` | `Claude Opus 4.8` | `short_name`, `version`, `full_name` |
+| `model` | yes | `{short_name} {version}` | `Opus` | `short_name`, `version`, `full_name` |
 | `folder` | yes | basename of the working directory | `llmenv` | `basename`, `path` |
 | `branch` | yes | git branch name | `release/3.x` | `name` |
 | `pr` | yes | `#<number>` | `#834` | `number` |

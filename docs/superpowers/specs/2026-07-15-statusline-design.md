@@ -114,7 +114,6 @@ statusline:
     - "{scopes:t} · {plugins} {config_stale}"
 
   style:
-    separator: " │ "
     icon_set: auto       # auto | nerd | simple | none
 
   # Widget definitions — only needed when overriding defaults
@@ -209,7 +208,7 @@ Controls how icons are selected:
 
 | Widget | Default format | Example output | Available fields |
 |--------|---------------|----------------|-----------------|
-| `model` | `{short_name} {version}` | `Claude Opus 4.8` | `short_name`, `version`, `full_name` |
+| `model` | `{short_name} {version}` | `Opus` | `short_name`, `version`, `full_name` |
 | `folder` | `{basename}` | `llmenv` | `basename`, `path` |
 | `branch` | `{name}` | `release/3.x` | `name` |
 | `pr` | `#{number}` | `#834` | `number`, `title` |
