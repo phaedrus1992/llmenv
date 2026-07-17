@@ -58,8 +58,10 @@ status data is correctly scoped to the current session.
    per-adapter loop calls the same materialize function trigger 1 uses, so
    every field is refreshed (not a narrower throttle/cache/stale-only pass) —
    there's no separate lighter-weight export code path.
-3. **Session start** — written once before the engine launches, ensures the file
-   exists for the first statusline render call.
+3. **Session start** — not a separate mechanism: the shell precmd hook
+   (`llmenv hook zsh`/`bash`) runs `llmenv export` on every prompt, including
+   the one immediately before the user launches the engine, so trigger 2
+   already guarantees the file exists by the time the engine starts.
 
 ```json
 {
