@@ -158,6 +158,7 @@ mod tests {
     use crate::cli::statusline::data::{
         CacheData, CountData, IcmData, ScopesData, StatusData, ThrottleData,
     };
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
 
     fn icons() -> BTreeMap<String, String> {
@@ -474,5 +475,110 @@ mod tests {
             render_llmenv_widget("not_real", &StatusData::default(), None, &icons(), false)
                 .is_none()
         );
+    }
+
+    fn full_status_data() -> StatusData {
+        StatusData {
+            scopes: Some(ScopesData {
+                tags: vec!["dev".into(), "rust".into()],
+            }),
+            plugins: Some(CountData {
+                total: 12,
+                errors: 1,
+            }),
+            mcps: Some(CountData {
+                total: 7,
+                errors: 0,
+            }),
+            icm: Some(IcmData {
+                memories: 142,
+                concepts: 47,
+            }),
+            cache: Some(CacheData {
+                prunable_bytes: 15_728_640,
+            }),
+            config_stale: Some(true),
+            throttle: Some(ThrottleData {
+                backend: "icm".to_string(),
+                cooldown_secs: 45,
+            }),
+            session_log: Some(8),
+        }
+    }
+
+    /// (name, declared placeholders) for every llmenv widget that builds its
+    /// output via a chained `format.replace()` call.
+    const LLMENV_WIDGET_PLACEHOLDERS: &[(&str, &[&str])] = &[
+        ("scopes", &["tags"]),
+        ("plugins", &["total", "errors"]),
+        ("mcps", &["total", "errors"]),
+        ("icm", &["memories", "concepts"]),
+        ("cache", &["prunable", "prunable_raw"]),
+        ("config_stale", &["stale_icon"]),
+        ("throttle", &["raw", "cooldown_secs", "reason"]),
+        ("session_log", &["icon", "entries"]),
+    ];
+
+    proptest! {
+        /// The format string comes from user config — untrusted-ish. No
+        /// arbitrary text should ever make a `.replace()` chain panic.
+        #[test]
+        fn llmenv_widget_never_panics_on_arbitrary_format_string(
+            idx in 0..LLMENV_WIDGET_PLACEHOLDERS.len(),
+            format in ".{0,200}",
+        ) {
+            let (name, _) = LLMENV_WIDGET_PLACEHOLDERS[idx];
+            let cfg = llmenv_config::WidgetConfig {
+                format: Some(format),
+                ..Default::default()
+            };
+            let _ = render_llmenv_widget(name, &full_status_data(), Some(&cfg), &icons(), false);
+        }
+
+        /// Every placeholder a widget declares (present in its default format
+        /// string) must be fully consumed by the `.replace()` chain — none
+        /// should survive into the rendered output.
+        #[test]
+        fn llmenv_widget_consumes_all_declared_placeholders(junk in "[^{}]{0,10}") {
+            let data = full_status_data();
+            for (name, placeholders) in LLMENV_WIDGET_PLACEHOLDERS {
+                let mut format = junk.clone();
+                for p in *placeholders {
+                    format.push('{');
+                    format.push_str(p);
+                    format.push('}');
+                    format.push_str(&junk);
+                }
+                let cfg = llmenv_config::WidgetConfig {
+                    format: Some(format),
+                    ..Default::default()
+                };
+                let out =
+                    render_llmenv_widget(name, &data, Some(&cfg), &icons(), false).unwrap();
+                for p in *placeholders {
+                    let token = format!("{{{p}}}");
+                    prop_assert!(
+                        !out.contains(&token),
+                        "widget {name} left placeholder {token} unconsumed in {out:?}"
+                    );
+                }
+            }
+        }
+
+        /// Boundary behavior at 1024 / 1024^2 across the full `u64` space —
+        /// previously only unit-tested at fixed values.
+        #[test]
+        fn humanize_bytes_respects_unit_thresholds(bytes in any::<u64>()) {
+            const KB: u64 = 1024;
+            const MB: u64 = 1024 * 1024;
+            let out = humanize_bytes(bytes);
+            if bytes >= MB {
+                prop_assert_eq!(out, format!("{} MB", bytes / MB));
+            } else if bytes >= KB {
+                prop_assert_eq!(out, format!("{} KB", bytes / KB));
+            } else {
+                prop_assert_eq!(out, format!("{bytes} B"));
+            }
+        }
     }
 }

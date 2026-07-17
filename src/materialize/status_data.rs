@@ -324,6 +324,7 @@ fn collect_session_log_from_path(path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::config::{Features, Marketplace, Memory, PluginCollection};
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {
@@ -591,6 +592,37 @@ mod tests {
         assert!(parse_icm_stats(r#"{"concepts": 5}"#).is_none());
     }
 
+    proptest! {
+        /// Roundtrip: any `memories`/`concepts` pair serialized to JSON must
+        /// parse back to the same `IcmData`, with `concepts` defaulting to 0
+        /// when omitted.
+        #[test]
+        fn parse_icm_stats_roundtrips_arbitrary_values(
+            memories in any::<u64>(),
+            concepts in proptest::option::of(any::<u64>()),
+        ) {
+            let json = match concepts {
+                Some(c) => serde_json::json!({ "memories": memories, "concepts": c }),
+                None => serde_json::json!({ "memories": memories }),
+            };
+            let result = parse_icm_stats(&json.to_string());
+            prop_assert_eq!(
+                result,
+                Some(IcmData {
+                    memories,
+                    concepts: concepts.unwrap_or(0),
+                })
+            );
+        }
+
+        /// Arbitrary, likely-malformed input must never panic — only ever
+        /// `None` or a valid `IcmData`.
+        #[test]
+        fn parse_icm_stats_never_panics_on_arbitrary_input(raw in ".{0,200}") {
+            let _ = parse_icm_stats(&raw);
+        }
+    }
+
     // --- collect_throttle ---
 
     fn throttle_cfg(backend: &str, tag: &str, max_wait: u64) -> Throttle {
@@ -673,6 +705,52 @@ mod tests {
         std::fs::create_dir(&nested).unwrap();
         std::fs::write(nested.join("b.txt"), b"1234567890").unwrap(); // 10 bytes
         assert_eq!(dir_size(dir.path()), 15);
+    }
+
+    /// Writes one file per size in `sizes`, named `<prefix><index>.bin`, each
+    /// filled with that many zero bytes.
+    fn write_sized_files(dir: &Path, prefix: &str, sizes: &[usize]) {
+        for (i, size) in sizes.iter().enumerate() {
+            std::fs::write(dir.join(format!("{prefix}{i}.bin")), vec![0u8; *size]).unwrap();
+        }
+    }
+
+    proptest! {
+        /// Accumulation correctness across generated directory trees (flat +
+        /// one nested level) — must equal the sum of every file's byte count.
+        #[test]
+        fn dir_size_sums_arbitrary_generated_directory_trees(
+            flat_sizes in prop::collection::vec(0usize..2000, 0..8),
+            nested_sizes in prop::collection::vec(0usize..2000, 0..8),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            write_sized_files(dir.path(), "f", &flat_sizes);
+            let nested = dir.path().join("nested");
+            std::fs::create_dir(&nested).unwrap();
+            write_sized_files(&nested, "n", &nested_sizes);
+            let expected: u64 = flat_sizes
+                .iter()
+                .chain(nested_sizes.iter())
+                .map(|s| *s as u64)
+                .sum();
+            prop_assert_eq!(dir_size(dir.path()), expected);
+        }
+
+        /// Adding a file must monotonically increase the reported size by
+        /// exactly the new file's byte count.
+        #[test]
+        fn dir_size_is_monotonic_when_adding_a_file(
+            initial_sizes in prop::collection::vec(0usize..2000, 0..8),
+            extra_size in 0usize..2000,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            write_sized_files(dir.path(), "f", &initial_sizes);
+            let before = dir_size(dir.path());
+            std::fs::write(dir.path().join("extra.bin"), vec![0u8; extra_size]).unwrap();
+            let after = dir_size(dir.path());
+            prop_assert!(after >= before);
+            prop_assert_eq!(after - before, extra_size as u64);
+        }
     }
 
     #[test]
