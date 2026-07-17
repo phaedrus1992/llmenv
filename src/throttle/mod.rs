@@ -26,7 +26,17 @@ use anyhow::Context;
 /// Returns an error if writing the state file fails.
 pub fn store_active_throttle(throttle: Option<&Throttle>) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
-    let path = throttle_state_path(&state_dir);
+    store_active_throttle_with_state_dir(throttle, &state_dir)
+}
+
+/// Internal helper taking an injectable state dir so tests can exercise the
+/// real write path (`write_owner_only_atomic`) against a temp directory
+/// instead of the real state dir, without env var mutation.
+fn store_active_throttle_with_state_dir(
+    throttle: Option<&Throttle>,
+    state_dir: &Path,
+) -> anyhow::Result<()> {
+    let path = throttle_state_path(state_dir);
     match throttle {
         Some(cfg) => {
             let json = serde_json::to_string(cfg)?;
@@ -58,8 +68,8 @@ pub fn read_active_throttle() -> anyhow::Result<Option<Throttle>> {
     read_active_throttle_with_state_dir(&state_dir)
 }
 
-/// Internal helper that reads throttle state from a given directory.
-/// This is made public-in-crate for testing purposes (test-injectable state_dir).
+/// Internal helper taking an injectable state dir so tests can read from a
+/// temp directory instead of the real state dir, without env var mutation.
 fn read_active_throttle_with_state_dir(state_dir: &Path) -> anyhow::Result<Option<Throttle>> {
     let path = throttle_state_path(state_dir);
     match std::fs::read(&path) {
@@ -406,13 +416,37 @@ mod tests {
             soft_threshold: 80,
         };
 
-        // Manually write the throttle config to the temp directory.
-        let path = throttle_state_path(tmp.path());
-        let json = serde_json::to_string(&cfg).unwrap();
-        std::fs::write(&path, json).unwrap();
+        // Write via the real store path (write_owner_only_atomic), not a
+        // hand-serialized fixture, so this genuinely exercises the
+        // store -> read round trip rather than just deserialization.
+        store_active_throttle_with_state_dir(Some(&cfg), tmp.path()).unwrap();
 
-        // Read it back.
         let result = read_active_throttle_with_state_dir(tmp.path()).unwrap();
         assert_eq!(result.unwrap().backend, "anthropic");
+    }
+
+    #[test]
+    fn store_active_throttle_with_state_dir_removes_file_on_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Throttle {
+            backend: "anthropic".to_string(),
+            when: vec!["dev".to_string()],
+            cache_ttl: 30,
+            max_wait: 60,
+            soft_threshold: 80,
+        };
+        store_active_throttle_with_state_dir(Some(&cfg), tmp.path()).unwrap();
+        assert!(
+            read_active_throttle_with_state_dir(tmp.path())
+                .unwrap()
+                .is_some()
+        );
+
+        store_active_throttle_with_state_dir(None, tmp.path()).unwrap();
+        assert!(
+            read_active_throttle_with_state_dir(tmp.path())
+                .unwrap()
+                .is_none()
+        );
     }
 }
