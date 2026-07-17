@@ -2,6 +2,7 @@
 //! `docs/superpowers/specs/2026-07-15-statusline-design.md`.
 
 mod data;
+mod llmenv_widget;
 mod template;
 mod widget;
 
@@ -10,6 +11,11 @@ mod widget;
     reason = "consumed by statusline widget rendering and orchestrator, wired up in a follow-up task"
 )]
 pub use data::StatusData;
+#[expect(
+    unused_imports,
+    reason = "consumed by statusline orchestrator, wired up in a follow-up task"
+)]
+pub use llmenv_widget::render_llmenv_widget;
 #[expect(
     unused_imports,
     reason = "consumed by statusline orchestrator, wired up in a follow-up task"
