@@ -16,6 +16,10 @@ use crate::hook_run::mcp_client::McpHttpClient;
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn connect() -> anyhow::Result<McpHttpClient> {
+    connect_with_timeout(CLI_TIMEOUT)
+}
+
+fn connect_with_timeout(timeout: Duration) -> anyhow::Result<McpHttpClient> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
     let config_dir = config_path
@@ -25,8 +29,7 @@ fn connect() -> anyhow::Result<McpHttpClient> {
     let active = crate::scope::evaluate(&config, &env);
     let url = crate::hook_run::memory_url(&config, config_dir, &active)?
         .ok_or_else(|| anyhow::anyhow!("no memory backend active for this scope"))?;
-    McpHttpClient::new(url, CLI_TIMEOUT)
-        .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
+    McpHttpClient::new(url, timeout).map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
 }
 
 /// Bridge a synchronous CLI context to an async MCP tool call.
@@ -48,12 +51,21 @@ fn call_tool_blocking(
 }
 
 /// Same as `stats()` but returns the raw JSON string instead of printing it,
-/// for programmatic callers (the statusline data collector, #836). Returns
-/// `Err` when no memory backend is active for the current scope or the MCP
-/// call fails — callers treat that as "no ICM stats available", not a hard
-/// error.
+/// for programmatic callers. Uses `CLI_TIMEOUT` — for an interactive command
+/// where the user is watching and waiting is acceptable.
 pub fn stats_json() -> anyhow::Result<String> {
     let client = connect()?;
+    call_tool_blocking(client, "icm_memory_stats", serde_json::json!({}))
+}
+
+/// Same as `stats_json` but with an injectable timeout, for background
+/// collectors (the statusline data collector, #836) that must not stall a
+/// hot path — materialization, `llmenv export`, or session start — waiting
+/// on a slow/unreachable ICM backend. Returns `Err` when no memory backend
+/// is active for the current scope or the MCP call fails/times out —
+/// callers treat that as "no ICM stats available", not a hard error.
+pub fn stats_json_with_timeout(timeout: Duration) -> anyhow::Result<String> {
+    let client = connect_with_timeout(timeout)?;
     call_tool_blocking(client, "icm_memory_stats", serde_json::json!({}))
 }
 

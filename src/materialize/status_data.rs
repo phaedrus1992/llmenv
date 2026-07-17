@@ -17,7 +17,7 @@ use serde::Serialize;
 use crate::cli::statusline::data::{
     CacheData, CountData, IcmData, ScopesData, StatusData, ThrottleData,
 };
-use crate::config::{Config, HashingMode, Throttle};
+use crate::config::{Config, HashingMode, McpServer, Throttle};
 
 /// The full `llmenv-status.json` document: the schema envelope (`$schema`,
 /// `v`, `ts`) plus the stats themselves (flattened from [`StatusData`], so the
@@ -37,12 +37,18 @@ pub struct StatusDataJson {
 /// throttle list (top-level + bundle) for the fresh-resolve path — pass `&[]`
 /// when unavailable (throttle then reads back only the last-stored state via
 /// `crate::throttle::read_active_throttle`, skipping resolution against
-/// current config).
+/// current config). `bundle_mcp` is the merged manifest's bundle-contributed
+/// MCP servers (`manifest.capabilities.mcp`) — MCPs declared under a bundle's
+/// `mcp:` key resolve through a separate path (`resolve_bundle_mcps`) from
+/// top-level `config.mcp`, and omitting it would silently undercount
+/// `mcps.total` for any config using bundle-scoped MCP servers. Pass `&[]`
+/// when unavailable.
 #[must_use]
 pub fn collect_status_data(
     config: &Config,
     active: &crate::scope::ActiveScopes,
     throttle_configs: &[Throttle],
+    bundle_mcp: &[McpServer],
     cache_root: &Path,
     hashing: HashingMode,
 ) -> StatusDataJson {
@@ -55,7 +61,7 @@ pub fn collect_status_data(
                 tags: active.tags.iter().cloned().collect(),
             }),
             plugins: collect_plugins(config, &active.tags),
-            mcps: collect_mcps(config, &active.tags),
+            mcps: collect_mcps(config, bundle_mcp, &active.tags),
             icm: collect_icm(),
             throttle: collect_throttle(throttle_configs, &active.tags),
             config_stale: collect_config_stale(cache_root),
@@ -99,33 +105,50 @@ fn collect_plugins(config: &Config, active_tags: &BTreeSet<String>) -> Option<Co
     }
 }
 
-/// Best-effort MCP server count. Same top-level-only simplification as
-/// `collect_plugins` (#335): `config.features.memory` is used directly rather
-/// than the bundle-merged list, since only `config` is available here.
-fn collect_mcps(config: &Config, active_tags: &BTreeSet<String>) -> Option<CountData> {
+/// Best-effort MCP server count. Sums both resolution paths: top-level
+/// `config.mcp` (via `resolve_mcps`) and bundle-contributed `mcp:` blocks
+/// (via `resolve_bundle_mcps`, on `bundle_mcp` — the merged manifest's
+/// `capabilities.mcp`). Omitting the bundle path would silently undercount
+/// (potentially to zero) for any config declaring MCP servers only through
+/// bundles, a normal, well-supported configuration shape in this codebase.
+fn collect_mcps(
+    config: &Config,
+    bundle_mcp: &[McpServer],
+    active_tags: &BTreeSet<String>,
+) -> Option<CountData> {
     let memory: &[_] = config
         .features
         .as_ref()
         .map(|f| f.memory.as_slice())
         .unwrap_or_default();
-    match crate::mcp::resolve::resolve_mcps(&config.mcp, memory, &config.host, active_tags) {
-        Ok(resolved) => Some(CountData {
-            total: resolved.len() as u64,
+    let top_level =
+        crate::mcp::resolve::resolve_mcps(&config.mcp, memory, &config.host, active_tags);
+    let bundle = crate::mcp::resolve::resolve_bundle_mcps(bundle_mcp, active_tags);
+    match (top_level, bundle) {
+        (Ok(top), Ok(bundle)) => Some(CountData {
+            total: (top.len() + bundle.len()) as u64,
             errors: 0,
         }),
-        Err(_) => Some(CountData {
+        _ => Some(CountData {
             total: 0,
             errors: 1,
         }),
     }
 }
 
+/// This collector runs on hot paths (materialize, `llmenv export`, session
+/// start) — not an interactive CLI invocation where a user is watching and
+/// waiting is fine. A slow/unreachable ICM backend must not stall one of
+/// those paths, so this uses the same short timeout the hook-run MCP calls
+/// use rather than the 10s interactive-CLI timeout `memory::stats_json` uses.
+const ICM_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Best-effort live ICM query. Returns `None` when no memory backend is
-/// active for the current scope, the MCP call fails, or the response can't
-/// be parsed — every one of those is an expected, non-error condition (most
-/// sessions have no ICM backend configured at all).
+/// active for the current scope, the MCP call fails or times out, or the
+/// response can't be parsed — every one of those is an expected, non-error
+/// condition (most sessions have no ICM backend configured at all).
 fn collect_icm() -> Option<IcmData> {
-    let raw = crate::memory::stats_json().ok()?;
+    let raw = crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT).ok()?;
     parse_icm_stats(&raw)
 }
 
@@ -262,7 +285,14 @@ mod tests {
         let config = Config::default();
         let active = active_scopes(&["dev", "rust"]);
         let dir = tempfile::tempdir().unwrap();
-        let data = collect_status_data(&config, &active, &[], dir.path(), HashingMode::default());
+        let data = collect_status_data(
+            &config,
+            &active,
+            &[],
+            &[],
+            dir.path(),
+            HashingMode::default(),
+        );
         let scopes = data.data.scopes.expect("scopes always populated");
         assert_eq!(scopes.tags, vec!["dev".to_string(), "rust".to_string()]);
     }
@@ -274,7 +304,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Must not panic even though: no plugins configured, no memory
         // backend active (icm stays None), no cache dir exists yet.
-        let data = collect_status_data(&config, &active, &[], dir.path(), HashingMode::default());
+        let data = collect_status_data(
+            &config,
+            &active,
+            &[],
+            &[],
+            dir.path(),
+            HashingMode::default(),
+        );
         assert!(
             data.data.icm.is_none(),
             "no ICM backend active — must degrade to None, not error"
@@ -301,7 +338,14 @@ mod tests {
         let config = Config::default();
         let active = active_scopes(&[]);
         let dir = tempfile::tempdir().unwrap();
-        let data = collect_status_data(&config, &active, &[], dir.path(), HashingMode::default());
+        let data = collect_status_data(
+            &config,
+            &active,
+            &[],
+            &[],
+            dir.path(),
+            HashingMode::default(),
+        );
         let json = serde_json::to_value(&data).unwrap();
         assert_eq!(json["$schema"], "llmenv-status-v1");
         assert_eq!(json["v"], 1);
@@ -377,11 +421,33 @@ mod tests {
     #[test]
     fn collect_mcps_no_servers_configured_is_zero_not_error() {
         let config = Config::default();
-        let result = collect_mcps(&config, &tags(&[]));
+        let result = collect_mcps(&config, &[], &tags(&[]));
         assert_eq!(
             result,
             Some(CountData {
                 total: 0,
+                errors: 0
+            })
+        );
+    }
+
+    #[test]
+    fn collect_mcps_counts_bundle_contributed_servers_with_no_top_level_config() {
+        // A config with zero top-level `mcp:` entries but a bundle-contributed
+        // server must NOT report zero — that's exactly the undercount this
+        // task's review caught (bundle-only MCP configs are a normal shape).
+        let config = Config::default();
+        let bundle_mcp = vec![McpServer {
+            name: "playwright".to_string(),
+            when: vec!["dev".to_string()],
+            command: Some("npx".to_string()),
+            ..Default::default()
+        }];
+        let result = collect_mcps(&config, &bundle_mcp, &tags(&["dev"]));
+        assert_eq!(
+            result,
+            Some(CountData {
+                total: 1,
                 errors: 0
             })
         );
@@ -409,7 +475,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let result = collect_mcps(&config, &tags(&["t"]));
+        let result = collect_mcps(&config, &[], &tags(&["t"]));
         assert_eq!(
             result,
             Some(CountData {
