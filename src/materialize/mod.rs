@@ -3,7 +3,7 @@ pub mod manifest;
 pub mod state;
 mod status_data;
 
-pub use status_data::{StatusDataJson, collect_status_data};
+pub use status_data::{ConfigStaleInputs, StatusDataJson, collect_status_data};
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
