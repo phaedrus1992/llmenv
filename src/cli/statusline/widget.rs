@@ -16,6 +16,18 @@ pub struct EngineData {
         reason = "part of the stdin contract for forward-compatibility; no widget in the design renders rate-limit data"
     )]
     pub rate_limits: Option<RateLimits>,
+    pub branch: Option<BranchInfo>,
+    pub pr: Option<PrInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BranchInfo {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrInfo {
+    pub number: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,6 +108,9 @@ pub fn render_engine_widget(
         "tokens" => render_tokens(data),
         "budget" => render_budget(data),
         "cache_pct" => render_cache_pct(data),
+        "branch" => render_branch(data),
+        "pr" => render_pr(data),
+        "progress_bar" => render_progress_bar(data),
         _ => return None,
     };
     Some(finish(raw, cfg, use_color))
@@ -234,6 +249,47 @@ fn render_cache_pct(data: &EngineData) -> String {
     format!("{pct}%")
 }
 
+fn render_branch(data: &EngineData) -> String {
+    data.branch
+        .as_ref()
+        .and_then(|b| b.name.clone())
+        .unwrap_or_default()
+}
+
+fn render_pr(data: &EngineData) -> String {
+    match data.pr.as_ref().and_then(|p| p.number) {
+        Some(n) => format!("#{n}"),
+        None => String::new(),
+    }
+}
+
+/// 10-cell block bar. `pct` is the used percentage (100 - remaining).
+///
+/// `remaining_percentage` comes from an external engine's stdin JSON —
+/// untrusted, same field `render_context_pct` guards. NaN survives
+/// `f64::clamp` unchanged (NaN comparisons are always false), so it must be
+/// rejected explicitly before the round/cast rather than relying on clamp
+/// alone; infinite values are rejected for the same reason.
+fn render_progress_bar(data: &EngineData) -> String {
+    let Some(remaining) = data
+        .context_window
+        .as_ref()
+        .and_then(|c| c.remaining_percentage)
+    else {
+        return String::new();
+    };
+    if !remaining.is_finite() {
+        return String::new();
+    }
+    let used = (100.0 - remaining).clamp(0.0, 100.0);
+    // Truncate (not round) to the filled cell count: round() bumps a
+    // borderline value like 35.0 up to 4 filled cells, one more than the
+    // 3-cell floor the displayed "35%" label implies.
+    let filled = ((used / 10.0) as usize).min(10);
+    let bar: String = "█".repeat(filled) + &"░".repeat(10 - filled);
+    format!("{}% {bar}", used.round() as i64)
+}
+
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
@@ -357,6 +413,82 @@ mod tests {
             ..Default::default()
         };
         let out = render_engine_widget("context_pct", &inf_data, None, false).unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn renders_branch_name() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "branch": { "name": "release/3.x" }
+        }))
+        .unwrap();
+        assert_eq!(
+            render_engine_widget("branch", &data, None, false).unwrap(),
+            "release/3.x"
+        );
+    }
+
+    #[test]
+    fn renders_pr_number() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "pr": { "number": 834 }
+        }))
+        .unwrap();
+        assert_eq!(
+            render_engine_widget("pr", &data, None, false).unwrap(),
+            "#834"
+        );
+    }
+
+    #[test]
+    fn renders_progress_bar_from_context_pct() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "context_window": { "remaining_percentage": 65.0 }
+        }))
+        .unwrap();
+        let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+        assert_eq!(out, "35% ███░░░░░░░");
+    }
+
+    #[test]
+    fn missing_branch_and_pr_render_empty() {
+        let empty = EngineData::default();
+        assert_eq!(
+            render_engine_widget("branch", &empty, None, false).unwrap(),
+            ""
+        );
+        assert_eq!(render_engine_widget("pr", &empty, None, false).unwrap(), "");
+        assert_eq!(
+            render_engine_widget("progress_bar", &empty, None, false).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn progress_bar_renders_empty_for_nan_and_infinite() {
+        // Same untrusted-input hazard as render_context_pct: NaN survives
+        // f64::clamp unchanged (NaN comparisons are always false), so this
+        // must be checked explicitly rather than relying on clamp alone.
+        let nan_data = EngineData {
+            context_window: Some(ContextWindow {
+                remaining_percentage: Some(f64::NAN),
+                context_window_size: None,
+                current_usage: None,
+            }),
+            ..Default::default()
+        };
+        let out = render_engine_widget("progress_bar", &nan_data, None, false).unwrap();
+        assert_eq!(out, "");
+
+        let inf_data = EngineData {
+            context_window: Some(ContextWindow {
+                remaining_percentage: Some(f64::INFINITY),
+                context_window_size: None,
+                current_usage: None,
+            }),
+            ..Default::default()
+        };
+        let out = render_engine_widget("progress_bar", &inf_data, None, false).unwrap();
         assert_eq!(out, "");
     }
 
