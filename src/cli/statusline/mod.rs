@@ -18,6 +18,19 @@ pub use widget::{EngineData, render_engine_widget};
 
 const DEFAULT_ROW: &str = "{model} │ {folder} │ {branch} │ {context_pct} │ {budget}";
 
+/// Strip C0 (`\x00`-`\x1F`, `\x7F`) and C1 (`\u{80}`-`\u{9F}`) control
+/// characters from free-text sourced from outside our own rendering (engine
+/// JSON fields, filesystem paths/basenames). None of these widgets are
+/// expected to contain control characters, but the data isn't validated at
+/// its source, and a stray escape sequence (e.g. from a directory name
+/// extracted from an untrusted archive) would otherwise be emitted verbatim
+/// into the user's terminal.
+fn strip_control_chars(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
+}
+
 /// Apply per-widget truncation + style. Shared by every widget render path
 /// (engine-sourced in `widget.rs`, llmenv-sourced in `llmenv_widget.rs`) —
 /// hoisted here so the two modules don't each carry a byte-for-byte-identical
@@ -27,9 +40,10 @@ pub(super) fn finish(
     cfg: Option<&llmenv_config::WidgetConfig>,
     use_color: bool,
 ) -> String {
+    let sanitized = strip_control_chars(&raw);
     let truncated = match cfg.and_then(|c| c.max_len) {
-        Some(max) => truncate_ellipsis(&raw, max),
-        None => raw,
+        Some(max) => truncate_ellipsis(&sanitized, max),
+        None => sanitized,
     };
     match cfg.and_then(|c| c.style.as_deref()) {
         Some(style) => apply_style(&truncated, style, use_color),
@@ -243,5 +257,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "\n");
+    }
+
+    #[test]
+    fn strip_control_chars_removes_c0_and_c1_but_keeps_printable_and_newline_tab() {
+        let input = "a\x1bb\u{9b}c\nd\te";
+        assert_eq!(super::strip_control_chars(input), "abc\nd\te");
+    }
+
+    #[test]
+    fn finish_strips_control_chars_before_truncating_and_styling() {
+        let out = finish("Op\x1bus".to_string(), None, false);
+        assert_eq!(out, "Opus");
+    }
+
+    #[test]
+    fn engine_sourced_control_chars_are_stripped_end_to_end() {
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{branch}".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // A branch name embedding a raw ANSI escape (git's own check-ref-format
+        // would reject this in a real ref, but the widget must not trust that
+        // upstream invariant — engine-sourced JSON is a separate trust boundary).
+        let stdin = b"{\"branch\": {\"name\": \"feature\\u001b[31mBAD\"}}";
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
+        assert!(
+            !out.contains('\u{1b}'),
+            "escape char leaked into output: {out:?}"
+        );
+        assert_eq!(out.trim_end(), "feature[31mBAD");
     }
 }

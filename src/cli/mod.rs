@@ -1311,10 +1311,16 @@ fn materialize_from_manifest(
     // Read the pre-existing manifest dotfile (if any) before write_cache_manifest
     // overwrites it below — its content_hash is the "booted" hash (#836 Task 11),
     // mirroring how `llmenv check-stale` reads CLAUDE_CONFIG_DIR's manifest.
-    let booted_hash = crate::materialize::manifest::CacheManifest::read(&cache_path)
-        .ok()
-        .flatten()
-        .map(|m| m.content_hash);
+    let booted_hash = match crate::materialize::manifest::CacheManifest::read(&cache_path) {
+        Ok(manifest) => manifest.map(|m| m.content_hash),
+        Err(e) => {
+            tracing::warn!(
+                "could not read cache manifest at {}: {e}",
+                cache_path.display()
+            );
+            None
+        }
+    };
 
     // Run the adapter writer — materialize writes each adapter's native config
     // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
