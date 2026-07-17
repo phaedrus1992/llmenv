@@ -83,9 +83,11 @@ pub(crate) fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow
 /// rejected for using a colon (#568).
 ///
 /// C0 control characters other than `\n`/`\r`/`\t` are not valid unescaped
-/// inside a YAML double-quoted scalar, so they're hex-escaped (`\u{XXXX}`)
+/// inside a YAML double-quoted scalar, so they're hex-escaped (`\uXXXX`)
 /// rather than passed through literally.
 fn quote_yaml_scalar(value: &str) -> String {
+    use std::fmt::Write as _;
+
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for c in value.chars() {
@@ -95,7 +97,9 @@ fn quote_yaml_scalar(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -376,9 +380,11 @@ mod tests {
     proptest! {
         /// `name`/`description` values come from repo-authored SKILL.md
         /// frontmatter — still arbitrary text as far as this function is
-        /// concerned. No input should make the escaping panic.
+        /// concerned. No input should make the escaping panic. `(?s)` so the
+        /// generator can also produce embedded newlines, exercising the
+        /// `'\n'` escape arm.
         #[test]
-        fn quote_yaml_scalar_never_panics(value in ".{0,200}") {
+        fn quote_yaml_scalar_never_panics(value in "(?s).{0,200}") {
             let _ = quote_yaml_scalar(&value);
         }
 
@@ -386,7 +392,7 @@ mod tests {
         /// to exactly the original string — no unescaped quote or backslash
         /// may leak out of the scalar and corrupt the surrounding YAML (#568).
         #[test]
-        fn quote_yaml_scalar_round_trips(value in ".{0,200}") {
+        fn quote_yaml_scalar_round_trips(value in "(?s).{0,200}") {
             let quoted = quote_yaml_scalar(&value);
             let yaml = format!("key: {quoted}");
             let mapping: serde_yaml::Mapping =
