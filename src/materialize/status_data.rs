@@ -237,14 +237,19 @@ fn collect_config_stale(booted: Option<&str>, current: &str) -> Option<bool> {
 fn collect_cache(cache_root: &Path, hashing: HashingMode) -> Option<CacheData> {
     let current_version =
         matches!(hashing, HashingMode::Normal).then(crate::materialize::cache::version_mm);
-    let report = crate::materialize::cache::prune(
+    let report = match crate::materialize::cache::prune(
         cache_root,
         crate::materialize::cache::PruneMode::StaleOnly,
         hashing,
         current_version.as_deref(),
         true, // dry_run: must not delete anything just to report a stat
-    )
-    .ok()?;
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::debug!("cache stat collection failed (non-fatal): {e}");
+            return None;
+        }
+    };
     let prunable_bytes: u64 = report.removed.iter().map(|p| dir_size(p)).sum();
     Some(CacheData { prunable_bytes })
 }
@@ -275,14 +280,27 @@ fn dir_size(path: &Path) -> u64 {
 
 /// Best-effort session-log line count.
 fn collect_session_log() -> Option<u64> {
-    let path = crate::session_log::file_sink::default_file_path().ok()?;
+    let path = match crate::session_log::file_sink::default_file_path() {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::debug!("session log stat collection failed (non-fatal): {e}");
+            return None;
+        }
+    };
     collect_session_log_from_path(&path)
 }
 
 /// Internal helper taking an injectable path so tests can point at a temp
 /// file instead of the real, ambient state dir.
 fn collect_session_log_from_path(path: &Path) -> Option<u64> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::debug!("session log stat collection failed (non-fatal): {e}");
+            return None;
+        }
+    };
     Some(content.lines().filter(|l| !l.trim().is_empty()).count() as u64)
 }
 

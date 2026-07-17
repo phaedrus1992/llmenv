@@ -73,9 +73,14 @@ pub fn read_active_throttle() -> anyhow::Result<Option<Throttle>> {
 fn read_active_throttle_with_state_dir(state_dir: &Path) -> anyhow::Result<Option<Throttle>> {
     let path = throttle_state_path(state_dir);
     match std::fs::read(&path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)
+            .inspect_err(|e| tracing::warn!("ignoring corrupt throttle state: {e}"))
+            .ok()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Ok(None),
+        Err(e) => {
+            tracing::warn!("could not read throttle state at {}: {e}", path.display());
+            Ok(None)
+        }
     }
 }
 
