@@ -2,7 +2,6 @@
 //! returns a string — no side effects, no shared mutable state (per the
 //! design doc's "Separation of concerns").
 
-use crate::cli::style::{apply_style, truncate_ellipsis};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -87,13 +86,6 @@ pub struct RateLimitWindow {
 /// missing underlying data renders `Some(String::new())`, not `None` —
 /// `None` means "not an engine widget at all", not "no data".
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by statusline orchestrator, wired up in a follow-up task"
-    )
-)]
 pub fn render_engine_widget(
     name: &str,
     data: &EngineData,
@@ -113,19 +105,7 @@ pub fn render_engine_widget(
         "progress_bar" => render_progress_bar(data),
         _ => return None,
     };
-    Some(finish(raw, cfg, use_color))
-}
-
-/// Apply per-widget truncation + style, shared by every widget render path.
-fn finish(raw: String, cfg: Option<&llmenv_config::WidgetConfig>, use_color: bool) -> String {
-    let truncated = match cfg.and_then(|c| c.max_len) {
-        Some(max) => truncate_ellipsis(&raw, max),
-        None => raw,
-    };
-    match cfg.and_then(|c| c.style.as_deref()) {
-        Some(style) => apply_style(&truncated, style, use_color),
-        None => truncated,
-    }
+    Some(super::finish(raw, cfg, use_color))
 }
 
 fn render_model(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
