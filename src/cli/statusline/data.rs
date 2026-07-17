@@ -51,6 +51,13 @@ impl StatusData {
     /// (every field `None`) so the renderer's llmenv-sourced widgets simply
     /// render empty rather than aborting the whole statusline.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "consumed by statusline orchestrator, wired up in a follow-up task"
+        )
+    )]
     pub fn load(path: &std::path::Path) -> Self {
         std::fs::read(path)
             .ok()
@@ -60,6 +67,7 @@ impl StatusData {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
