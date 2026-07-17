@@ -367,6 +367,7 @@ pub(crate) fn arb_yaml_value(
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
 mod tests {
     use proptest::prelude::*;
 
