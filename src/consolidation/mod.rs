@@ -363,7 +363,7 @@ pub async fn run(config: &crate::config::Config, client: &McpHttpClient) -> anyh
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::expect_used, reason = "test code")]
 mod tests {
     use proptest::prelude::*;
 
