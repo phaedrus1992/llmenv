@@ -649,18 +649,21 @@ of tokens applied to the widget's entire output:
 
 Unknown tokens are ignored rather than erroring — a typo in a `style` string
 degrades to no styling for that token, not a broken render. With
-`--color never` (or a non-TTY), all style tokens are skipped entirely and
-widgets render as plain text.
+`--color never` (or, absent an explicit `--color`, a non-TTY — which is what
+every host UI's captured-stdout pipe looks like), all style tokens are
+skipped entirely and widgets render as plain text.
 
 ### Claude Code / Crush support
 
 Claude Code gets `llmenv statusline` wired in automatically: the adapter
-seeds `"statusLine": {"type": "command", "command": "llmenv statusline"}`
+seeds `"statusLine": {"type": "command", "command": "llmenv statusline --color always"}`
 into `settings.json` once, only when that key is absent — a user's own
-`/statusline` customization is never overwritten. Crush has no
-statusline-hook concept in its adapter today, so `statusline:` config has no
-effect there yet ([#855](https://github.com/phaedrus1992/llmenv/issues/855)
-tracks adding it).
+`/statusline` customization is never overwritten. The `--color always` is
+required because Claude Code invokes the command with stdout captured
+(never a TTY), and `--color`'s default (`auto`) would otherwise disable every
+`style:` widget override in that exact path. Crush has no statusline-hook
+concept in its adapter today, so `statusline:` config has no effect there yet
+([#855](https://github.com/phaedrus1992/llmenv/issues/855) tracks adding it).
 
 ## `state:`
 

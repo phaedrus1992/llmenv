@@ -367,6 +367,19 @@ mod tests {
     }
 
     #[test]
+    fn renders_model_default_format_includes_version_field() {
+        // Isolates {version} specifically: renders_model_default_format's
+        // fixture has no separate `version` field, so a mutant swapping which
+        // field feeds {short_name} vs {version} would go uncaught there.
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "model": { "display_name": "Claude Opus 4.8", "version": "4.8" }
+        }))
+        .unwrap();
+        let out = render_engine_widget("model", &data, None, false).unwrap();
+        assert_eq!(out, "Opus 4.8");
+    }
+
+    #[test]
     fn short_model_name_strips_claude_prefix_and_version() {
         assert_eq!(short_model_name("Claude Opus 4.8"), "Opus");
         assert_eq!(short_model_name("Claude Sonnet 5"), "Sonnet");
@@ -539,6 +552,37 @@ mod tests {
             render_engine_widget("progress_bar", &empty, None, false).unwrap(),
             ""
         );
+    }
+
+    #[test]
+    fn missing_workspace_and_context_window_render_empty() {
+        // Covers the "no data" guard for the 5 engine widgets not exercised
+        // by missing_field_renders_empty_not_panic / missing_branch_and_pr_render_empty.
+        let empty = EngineData::default();
+        for name in ["folder", "context_pct", "duration", "tokens", "budget"] {
+            assert_eq!(
+                render_engine_widget(name, &empty, None, false).unwrap(),
+                "",
+                "widget {name} should render empty on missing data"
+            );
+        }
+    }
+
+    #[test]
+    fn render_budget_empty_when_context_window_size_absent() {
+        // render_budget has two guards: no context_window at all (covered
+        // above), and context_window present but context_window_size unset —
+        // this test isolates the second guard specifically.
+        let data = EngineData {
+            context_window: Some(ContextWindow {
+                remaining_percentage: Some(50.0),
+                context_window_size: None,
+                current_usage: None,
+            }),
+            ..Default::default()
+        };
+        let out = render_engine_widget("budget", &data, None, false).unwrap();
+        assert_eq!(out, "");
     }
 
     #[test]
