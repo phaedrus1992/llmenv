@@ -116,13 +116,6 @@ pub fn doctor_info(use_color: bool) -> String {
 /// UTF-8-boundary-safe: always truncates on a `char` boundary since it
 /// iterates `chars()` rather than slicing bytes.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by statusline widget rendering, wired up in a follow-up task"
-    )
-)]
 pub fn truncate_ellipsis(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         return s.to_string();
@@ -141,13 +134,6 @@ pub fn truncate_ellipsis(s: &str, max_len: usize) -> String {
 /// ignored (never an error — a typo'd style must not crash the render).
 /// `use_color: false` (or an empty `style`) passes `s` through unchanged.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by statusline widget rendering, wired up in a follow-up task"
-    )
-)]
 pub fn apply_style(s: &str, style: &str, use_color: bool) -> String {
     if !use_color || style.trim().is_empty() {
         return s.to_string();

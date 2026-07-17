@@ -3,6 +3,7 @@
 
 mod data;
 mod template;
+mod widget;
 
 #[expect(
     unused_imports,
@@ -14,3 +15,8 @@ pub use data::StatusData;
     reason = "consumed by statusline orchestrator, wired up in a follow-up task"
 )]
 pub use template::{TemplateToken, parse_template};
+#[expect(
+    unused_imports,
+    reason = "consumed by statusline orchestrator, wired up in a follow-up task"
+)]
+pub use widget::{EngineData, render_engine_widget};
