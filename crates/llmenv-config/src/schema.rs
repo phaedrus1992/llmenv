@@ -835,20 +835,10 @@ pub struct StatuslineConfig {
     pub icons: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatuslineStyle {
-    pub separator: String,
     pub icon_set: IconSet,
-}
-
-impl Default for StatuslineStyle {
-    fn default() -> Self {
-        Self {
-            separator: " │ ".to_string(),
-            icon_set: IconSet::Auto,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -2269,7 +2259,6 @@ rows:
   - "{model} │ {context_pct} │ {budget}"
   - "{scopes:t} · {plugins} {config_stale}"
 style:
-  separator: " │ "
   icon_set: auto
 widgets:
   model:
@@ -2285,7 +2274,6 @@ icons:
 "#;
         let cfg: StatuslineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.rows.len(), 2);
-        assert_eq!(cfg.style.separator, " │ ");
         assert_eq!(cfg.style.icon_set, IconSet::Auto);
         let model = cfg.widgets.get("model").unwrap();
         assert_eq!(model.format.as_deref(), Some("{short_name} {version}"));
@@ -2299,7 +2287,6 @@ icons:
     fn statusline_config_defaults_on_empty_yaml() {
         let cfg: StatuslineConfig = serde_yaml::from_str("{}").unwrap();
         assert!(cfg.rows.is_empty());
-        assert_eq!(cfg.style.separator, " │ ");
         assert_eq!(cfg.style.icon_set, IconSet::Auto);
         assert!(cfg.widgets.is_empty());
         assert!(cfg.icons.is_empty());
