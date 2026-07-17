@@ -32,6 +32,17 @@ pub struct StatusDataJson {
     pub data: StatusData,
 }
 
+/// Inputs for config-staleness comparison (Task 10b), already resolved by the
+/// caller — see `collect_config_stale`'s doc comment for why this module
+/// doesn't resolve them itself. `None` when the caller has no staleness
+/// comparison available for this context (degrades `config_stale` to `None`,
+/// not a false negative).
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigStaleInputs<'a> {
+    pub booted_hash: Option<&'a str>,
+    pub current_hash: &'a str,
+}
+
 /// Gather every statusline stat. `cache_root` + `hashing` are needed for the
 /// prunable-bytes dry-run scan; `throttle_configs` is the merged manifest
 /// throttle list (top-level + bundle) for the fresh-resolve path — pass `&[]`
@@ -42,13 +53,18 @@ pub struct StatusDataJson {
 /// `mcp:` key resolve through a separate path (`resolve_bundle_mcps`) from
 /// top-level `config.mcp`, and omitting it would silently undercount
 /// `mcps.total` for any config using bundle-scoped MCP servers. Pass `&[]`
-/// when unavailable.
+/// when unavailable. `config_stale` carries the already-resolved
+/// booted/current manifest-hash pair for the config-staleness comparison
+/// (`None` when the caller has no staleness comparison available for this
+/// context — see `ConfigStaleInputs`'s doc comment for why this module
+/// doesn't resolve the hashes itself).
 #[must_use]
 pub fn collect_status_data(
     config: &Config,
     active: &crate::scope::ActiveScopes,
     throttle_configs: &[Throttle],
     bundle_mcp: &[McpServer],
+    config_stale: Option<ConfigStaleInputs<'_>>,
     cache_root: &Path,
     hashing: HashingMode,
 ) -> StatusDataJson {
@@ -64,7 +80,8 @@ pub fn collect_status_data(
             mcps: collect_mcps(config, bundle_mcp, &active.tags),
             icm: collect_icm(),
             throttle: collect_throttle(throttle_configs, &active.tags),
-            config_stale: collect_config_stale(cache_root),
+            config_stale: config_stale
+                .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
             cache: collect_cache(cache_root, hashing),
             session_log: collect_session_log(),
         },
@@ -198,12 +215,21 @@ fn collect_throttle_with_stored_fallback(
     })
 }
 
-/// Stub — Task 10b (a follow-up task in this same plan) wires this up to the
-/// real `stale_status`/`StaleStatus` mechanism in `src/cli/mod.rs`. Always
-/// `None` until then; this is deliberate scoping, not an oversight.
-fn collect_config_stale(cache_root: &Path) -> Option<bool> {
-    let _ = cache_root;
-    None
+/// Compare the manifest hash the agent booted with against the current one,
+/// reusing `crate::cli::stale_status` (the same mechanism `llmenv check-stale`
+/// uses) so there is exactly one staleness rule in the codebase. `booted` is
+/// the `content_hash` from the booted folder's `.llmenv-manifest.json`
+/// (`None` when there's no booted manifest to compare against — llmenv didn't
+/// boot this agent, or the folder predates the manifest dotfile). `current`
+/// is the freshly-computed manifest hash for what would be materialized now.
+/// Pure function — no I/O; callers resolve both hashes themselves (see Task
+/// 11/12 for how the materialize/export paths obtain them).
+fn collect_config_stale(booted: Option<&str>, current: &str) -> Option<bool> {
+    match crate::cli::stale_status(booted, current) {
+        crate::cli::StaleStatus::Fresh => Some(false),
+        crate::cli::StaleStatus::Stale { .. } => Some(true),
+        crate::cli::StaleStatus::Unknown => None,
+    }
 }
 
 /// Best-effort prunable-bytes estimate: a dry-run `StaleOnly` prune scan, so
@@ -290,6 +316,7 @@ mod tests {
             &active,
             &[],
             &[],
+            None,
             dir.path(),
             HashingMode::default(),
         );
@@ -309,6 +336,7 @@ mod tests {
             &active,
             &[],
             &[],
+            None,
             dir.path(),
             HashingMode::default(),
         );
@@ -343,6 +371,7 @@ mod tests {
             &active,
             &[],
             &[],
+            None,
             dir.path(),
             HashingMode::default(),
         );
@@ -575,12 +604,30 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // --- collect_config_stale (stub for this task; Task 10b implements it) ---
+    // --- collect_config_stale ---
 
     #[test]
-    fn collect_config_stale_always_none_in_this_task() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(collect_config_stale(dir.path()), None);
+    fn collect_config_stale_none_when_no_booted_hash() {
+        // No booted manifest to compare against (llmenv didn't boot this agent,
+        // or the booted folder predates the manifest dotfile) — must be None,
+        // not a false "fresh" or "stale".
+        assert_eq!(collect_config_stale(None, "current-hash"), None);
+    }
+
+    #[test]
+    fn collect_config_stale_false_when_hashes_match() {
+        assert_eq!(
+            collect_config_stale(Some("same-hash"), "same-hash"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn collect_config_stale_true_when_hashes_differ() {
+        assert_eq!(
+            collect_config_stale(Some("old-hash"), "new-hash"),
+            Some(true)
+        );
     }
 
     // --- collect_cache / dir_size ---
