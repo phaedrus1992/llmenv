@@ -1036,15 +1036,24 @@ fn run_export(
 fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-
-    let data_path = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)))
-        .join("llmenv-status.json");
+    let data_path = statusline_data_path_with_env(&config, &|name| std::env::var(name).ok());
 
     let output = statusline::run_statusline(&config, &data_path, &mut std::io::stdin(), use_color)?;
     print!("{output}");
     Ok(())
+}
+
+/// Resolve the `llmenv-status.json` data path per the doc comment on
+/// `run_statusline_cmd`, with an injectable env-var provider so tests can
+/// exercise both branches without mutating real process env vars.
+fn statusline_data_path_with_env(
+    config: &Config,
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> PathBuf {
+    get_env("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)))
+        .join("llmenv-status.json")
 }
 
 fn run_regenerate() -> anyhow::Result<()> {
@@ -3334,6 +3343,34 @@ mod tests {
         );
     }
 
+    // ===== Tests for statusline_data_path_with_env (#836) =====
+
+    #[test]
+    fn statusline_data_path_prefers_claude_config_dir_env_var() {
+        let mut config = Config::default();
+        config.cache.cache_dir = "/should/not/be/used".to_string();
+        let env = |name: &str| -> Option<String> {
+            (name == "CLAUDE_CONFIG_DIR").then(|| "/session/adapter-root".to_string())
+        };
+        let path = statusline_data_path_with_env(&config, &env);
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/session/adapter-root/llmenv-status.json")
+        );
+    }
+
+    #[test]
+    fn statusline_data_path_falls_back_to_configured_cache_dir_when_env_unset() {
+        let mut config = Config::default();
+        config.cache.cache_dir = "/configured/cache".to_string();
+        let no_env = |_name: &str| -> Option<String> { None };
+        let path = statusline_data_path_with_env(&config, &no_env);
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/configured/cache/llmenv-status.json")
+        );
+    }
+
     // ===== Tests for llmenv-status.json during materialize (#836 Task 11) =====
 
     #[test]
@@ -3492,7 +3529,10 @@ mod tests {
         let raw = std::fs::read_to_string(claude_path.join("settings.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(json["statusLine"]["type"], "command");
-        assert_eq!(json["statusLine"]["command"], "llmenv statusline");
+        assert_eq!(
+            json["statusLine"]["command"],
+            "llmenv statusline --color always"
+        );
     }
 
     // ===== Tests for build_and_materialize adapter dispatch (#543) =====

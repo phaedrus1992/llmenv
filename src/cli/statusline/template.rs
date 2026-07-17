@@ -98,6 +98,22 @@ mod tests {
     }
 
     #[test]
+    fn colon_suffix_other_than_t_is_kept_as_part_of_the_widget_name() {
+        // Only an exact ":t" suffix is the truncate shorthand; any other
+        // colon suffix must use the *whole* inner text as the widget name
+        // (which then simply won't match a known widget at render time),
+        // not just the text before the colon.
+        let tokens = parse_template("{name:x}");
+        assert_eq!(
+            tokens,
+            vec![TemplateToken::Widget {
+                name: "name:x".to_string(),
+                truncate: false
+            }]
+        );
+    }
+
+    #[test]
     fn plain_literal_with_no_placeholders() {
         let tokens = parse_template("no widgets here");
         assert_eq!(

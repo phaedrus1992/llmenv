@@ -823,7 +823,7 @@ pub struct ContextMode {
 /// (`statusline:` section of `config.yaml`). See
 /// `docs/superpowers/specs/2026-07-15-statusline-design.md`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StatuslineConfig {
     /// One row template per rendered status line. `{widget_name}`
     /// placeholders are resolved against `widgets` or widget defaults.
@@ -836,7 +836,7 @@ pub struct StatuslineConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StatuslineStyle {
     pub icon_set: IconSet,
 }
@@ -853,7 +853,7 @@ pub enum IconSet {
 
 /// Per-widget override: display format, truncation, and style.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WidgetConfig {
     pub format: Option<String>,
     pub max_len: Option<usize>,
@@ -2290,5 +2290,23 @@ icons:
         assert_eq!(cfg.style.icon_set, IconSet::Auto);
         assert!(cfg.widgets.is_empty());
         assert!(cfg.icons.is_empty());
+    }
+
+    #[test]
+    fn statusline_config_rejects_unknown_top_level_key() {
+        let err = serde_yaml::from_str::<StatuslineConfig>("widgest:\n  model: {}\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn statusline_style_rejects_unknown_key() {
+        let err = serde_yaml::from_str::<StatuslineStyle>("icon_est: nerd\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn widget_config_rejects_unknown_key() {
+        let err = serde_yaml::from_str::<WidgetConfig>("max_length: 10\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
     }
 }

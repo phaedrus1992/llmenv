@@ -1442,7 +1442,11 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
     let mut seeded = serde_json::Map::new();
     seeded.insert(
         "statusLine".to_string(),
-        serde_json::json!({ "type": "command", "command": "llmenv statusline" }),
+        // `--color always`: Claude Code invokes this with stdout captured
+        // (never a TTY), so the default `auto` color resolution would
+        // silently disable every `style:` widget override — the seeded
+        // command must opt in explicitly rather than rely on TTY detection.
+        serde_json::json!({ "type": "command", "command": "llmenv statusline --color always" }),
     );
     apply_seeded_settings(out, &seeded)
 }
@@ -3118,7 +3122,10 @@ mod tests {
         let content = std::fs::read_to_string(&settings).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(json["statusLine"]["type"], "command");
-        assert_eq!(json["statusLine"]["command"], "llmenv statusline");
+        assert_eq!(
+            json["statusLine"]["command"],
+            "llmenv statusline --color always"
+        );
         assert_eq!(json["otherKey"], "value");
     }
 
