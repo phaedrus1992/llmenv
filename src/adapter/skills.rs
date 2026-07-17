@@ -81,8 +81,26 @@ pub(crate) fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow
 /// YAML (an unquoted `: ` mid-scalar reads as a nested mapping key). Auto-quote
 /// those two fields' values before reparsing so real-world descriptions aren't
 /// rejected for using a colon (#568).
+///
+/// C0 control characters other than `\n`/`\r`/`\t` are not valid unescaped
+/// inside a YAML double-quoted scalar, so they're hex-escaped (`\u{XXXX}`)
+/// rather than passed through literally.
 fn quote_yaml_scalar(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn requote_name_and_description(frontmatter: &str) -> String {
@@ -346,4 +364,37 @@ pub(crate) fn arb_yaml_value(
             }),
         ]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// `name`/`description` values come from repo-authored SKILL.md
+        /// frontmatter — still arbitrary text as far as this function is
+        /// concerned. No input should make the escaping panic.
+        #[test]
+        fn quote_yaml_scalar_never_panics(value in ".{0,200}") {
+            let _ = quote_yaml_scalar(&value);
+        }
+
+        /// The escaped output, dropped into a YAML mapping, must parse back
+        /// to exactly the original string — no unescaped quote or backslash
+        /// may leak out of the scalar and corrupt the surrounding YAML (#568).
+        #[test]
+        fn quote_yaml_scalar_round_trips(value in ".{0,200}") {
+            let quoted = quote_yaml_scalar(&value);
+            let yaml = format!("key: {quoted}");
+            let mapping: serde_yaml::Mapping =
+                serde_yaml::from_str(&yaml).expect("quoted scalar must parse as valid YAML");
+            let parsed = mapping
+                .get("key")
+                .and_then(serde_yaml::Value::as_str)
+                .expect("key must be a string scalar");
+            prop_assert_eq!(parsed, value.as_str());
+        }
+    }
 }
