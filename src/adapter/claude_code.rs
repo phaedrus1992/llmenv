@@ -1490,6 +1490,61 @@ pub(crate) fn seed_install_method(out: &std::path::Path) -> anyhow::Result<()> {
     apply_seeded_settings(out, &seeded)
 }
 
+/// Seed the default `statusLine` hook into `out/settings.json` if absent
+/// (#836), pointing Claude Code's statusline at `llmenv statusline`.
+///
+/// Deliberately a **seed**, not an owned/authoritative render key (contrast
+/// `autoMemoryEnabled`): `statusLine` is not in [`LLMENV_OWNED_SETTINGS_KEYS`],
+/// so if this were instead emitted unconditionally into `render_settings`'s
+/// `fresh` map, `reconcile_settings`'s passthrough rule would write it
+/// through on *every* re-render — permanently clobbering a user's own
+/// `/statusline` customization (which writes straight to `settings.json`,
+/// outside llmenv) on the very next shell-hook materialize. Seeding once,
+/// only when absent, matches [`seed_install_method`]'s contract: once any
+/// value exists — llmenv's default, a user customization, or a
+/// `native.claude_code.statusLine` override already written by
+/// `reconcile_settings` before this runs — it is left alone.
+///
+/// No-op if `settings.json` does not exist yet (materialize hasn't run) or if
+/// `statusLine` is already present.
+///
+/// # Errors
+/// Returns an error if the file exists but cannot be read or written.
+pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
+    let settings_path = out.join("settings.json");
+
+    match std::fs::read(&settings_path) {
+        Ok(bytes) => {
+            if let Ok(serde_json::Value::Object(obj)) =
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                && obj.contains_key("statusLine")
+            {
+                return Ok(());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist yet, that's fine.
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "reading {} for seeding statusLine: {e}",
+                settings_path.display()
+            ));
+        }
+    }
+
+    let mut seeded = serde_json::Map::new();
+    seeded.insert(
+        "statusLine".to_string(),
+        // `--color always`: Claude Code invokes this with stdout captured
+        // (never a TTY), so the default `auto` color resolution would
+        // silently disable every `style:` widget override — the seeded
+        // command must opt in explicitly rather than rely on TTY detection.
+        serde_json::json!({ "type": "command", "command": "llmenv statusline --color always" }),
+    );
+    apply_seeded_settings(out, &seeded)
+}
+
 /// Merge llmenv's freshly-rendered settings (`fresh`) onto whatever already
 /// exists at `path`, preserving foreign in-session state (#175, #196).
 ///
@@ -1764,7 +1819,7 @@ mod tests {
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, overlay_native, permission_mode_str, read_owned_servers,
         reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, seed_install_method, strip_json_nulls,
+        render_permission_rule, seed_install_method, seed_status_line, strip_json_nulls,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -3665,6 +3720,58 @@ mod tests {
         // installMethod should remain unchanged from existing
         assert_eq!(json["installMethod"], "homebrew");
         assert_eq!(json["otherKey"], "value");
+    }
+
+    #[test]
+    fn seed_status_line_seeds_default_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::json!({ "otherKey": "value" }).to_string(),
+        )
+        .unwrap();
+
+        seed_status_line(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(&settings).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(json["statusLine"]["type"], "command");
+        assert_eq!(
+            json["statusLine"]["command"],
+            "llmenv statusline --color always"
+        );
+        assert_eq!(json["otherKey"], "value");
+    }
+
+    #[test]
+    fn seed_status_line_skips_when_already_present() {
+        // Proves the no-stomp property: whatever is already on disk — whether a
+        // user's own `/statusline` customization, a native override llmenv wrote
+        // on a prior render, or any other tool's value — must survive untouched.
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("settings.json");
+        let existing = serde_json::json!({
+            "statusLine": { "type": "command", "command": "my-custom-script" },
+            "otherKey": "value"
+        });
+        std::fs::write(&settings, existing.to_string()).unwrap();
+
+        seed_status_line(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(&settings).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(json["statusLine"]["command"], "my-custom-script");
+        assert_eq!(json["otherKey"], "value");
+    }
+
+    #[test]
+    fn seed_status_line_noop_when_settings_file_absent() {
+        // materialize hasn't run yet / adapter isn't Claude Code — must not error
+        // or create a seeded-only file (mirrors seed_install_method's contract).
+        let tmp = tempfile::tempdir().unwrap();
+        seed_status_line(tmp.path()).unwrap();
+        assert!(!tmp.path().join("settings.json").exists());
     }
 
     #[cfg(unix)]

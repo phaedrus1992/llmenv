@@ -76,6 +76,25 @@ config parses. With a subcommand, show a detailed listing for that category:
 - `status plugins` — list configured plugins, marking those selected by the
   active scope and showing their source collection.
 
+## `statusline`
+
+```text
+llmenv statusline
+```
+
+Render an ANSI-styled status line. Reads the engine's session JSON from
+stdin, config from `config.yaml`'s `statusline:` section (see
+[Configuration reference](configuration.md#statusline)), and llmenv's own
+stats from the materialized `llmenv-status.json`, then prints one line per
+configured row to stdout.
+
+Not meant to be invoked manually — it's wired automatically as the engine's
+statusline hook (Claude Code seeds it into `settings.json` on first
+materialization; Crush has no statusline hook to wire it into yet). Never
+fails on missing/malformed input: unknown widgets, a missing data file, or
+unparseable stdin all degrade to an empty render for that widget rather than
+an error.
+
 ## `context`
 
 ```text
