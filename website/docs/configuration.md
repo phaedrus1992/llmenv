@@ -582,21 +582,23 @@ read `llmenv-status.json`. A name that matches neither renders empty.
 
 #### Engine-sourced (from the engine's stdin JSON)
 
-Only `model` honors a `format:` override. The other nine always render their
-fixed default layout — `max_len` and `style` still apply to their output.
+All ten honor `format:` — set on any of them, it replaces the default layout below.
 
 | Widget | Format? | Default output | Example | `format` placeholders |
 |--------|---------|-----------------|---------|------------------------|
 | `model` | yes | `{short_name} {version}` | `Claude Opus 4.8` | `short_name`, `version`, `full_name` |
-| `folder` | no | basename of the working directory | `llmenv` | — |
-| `branch` | no | git branch name | `release/3.x` | — |
-| `pr` | no | `#<number>` | `#834` | — |
-| `progress_bar` | no | `<pct>% ` + 10-cell block bar | `35% ███░░░░░░░` | — |
-| `tokens` | no | total context tokens, `k`-suffixed | `10.0k` | — |
-| `context_pct` | no | used-context percentage | `35%` | — |
-| `budget` | no | `<used>/<max>`, both `k`-suffixed | `35.0k/200.0k` | — |
-| `duration` | no | `<h>h<m>m` | `3h42m` | — |
-| `cache_pct` | no | cache-hit percentage | `44%` | — |
+| `folder` | yes | basename of the working directory | `llmenv` | `basename`, `path` |
+| `branch` | yes | git branch name | `release/3.x` | `name` |
+| `pr` | yes | `#<number>` | `#834` | `number` |
+| `progress_bar` | yes | `<pct>% ` + 10-cell block bar | `35% ███░░░░░░░` | `pct`, `bar` |
+| `tokens` | yes | total context tokens, `k`-suffixed | `10.0k` | `total`, `input`, `cache_read`, `cache_create` |
+| `context_pct` | yes | used-context percentage | `35%` | `pct` |
+| `budget` | yes | `<used>/<max>`, both `k`-suffixed | `35.0k/200.0k` | `used`, `max` |
+| `duration` | yes | `<h>h<m>m` | `3h42m` | `h`, `m`, `s`, `total_ms` |
+| `cache_pct` | yes | cache-hit percentage | `44%` | `pct` |
+
+`pr` and `tokens` only expose the fields above — the engine's stdin contract has no PR title or
+per-output-type token breakdown today, so those aren't invented placeholders.
 
 #### llmenv-sourced (from `llmenv-status.json`)
 
