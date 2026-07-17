@@ -45,13 +45,6 @@ where
 }
 
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by statusline orchestrator, wired up in a follow-up task"
-    )
-)]
 pub fn resolve_icons(
     icon_set: IconSet,
     configured: &BTreeMap<String, String>,

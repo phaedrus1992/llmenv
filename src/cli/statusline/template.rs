@@ -13,13 +13,6 @@ pub enum TemplateToken {
 /// error — the design doc requires the renderer to never fail on template
 /// parsing, only on data/config I/O.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by statusline orchestrator, wired up in a follow-up task"
-    )
-)]
 pub fn parse_template(template: &str) -> Vec<TemplateToken> {
     let mut tokens = Vec::new();
     let mut literal = String::new();

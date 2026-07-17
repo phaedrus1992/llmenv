@@ -146,6 +146,8 @@ enum Command {
     },
     /// Regenerate the materialized config without exporting shell variables
     Regenerate,
+    /// Render the statusline (reads engine session JSON from stdin)
+    Statusline,
     /// Generate shell hook code
     Hook {
         /// Shell type: zsh or bash
@@ -407,6 +409,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Regenerate) => {
             run_regenerate()?;
+        }
+        Some(Command::Statusline) => {
+            run_statusline_cmd(use_color)?;
         }
         Some(Command::Hook { shell }) => {
             run_hook(&shell)?;
@@ -1012,6 +1017,33 @@ fn run_export(
         }
     }
 
+    Ok(())
+}
+
+/// `llmenv statusline`: read the engine's session JSON from stdin, load the
+/// llmenv-sourced stats file, and render the configured statusline rows.
+///
+/// Resolves the materialized data file the same way `run_check_stale` reads
+/// its booted-hash baseline: off `CLAUDE_CONFIG_DIR`, which the shell hook
+/// already exported as the *full* adapter cache folder for this session
+/// (`ClaudeCodeAdapter::env_vars`, see `run_export`/`materialize_from_manifest`).
+/// Reading it directly avoids re-running scope/shape/hash resolution just to
+/// re-derive a path the running session already has in its environment — and
+/// this statusline process is invoked by the agent itself, so it always
+/// inherits that variable. Falls back to the configured cache root when unset
+/// (e.g. manual invocation outside a session); `StatusData::load` degrades to
+/// defaults on a missing/wrong-shape file rather than erroring.
+fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
+    let config_path = paths::config_path()?;
+    let config = Config::load(&config_path)?;
+
+    let data_path = std::env::var("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)))
+        .join("llmenv-status.json");
+
+    let output = statusline::run_statusline(&config, &data_path, &mut std::io::stdin(), use_color)?;
+    print!("{output}");
     Ok(())
 }
 
