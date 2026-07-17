@@ -363,6 +363,32 @@ mod tests {
     }
 
     #[test]
+    fn renders_tokens_default_format() {
+        let out = render_engine_widget("tokens", &engine_data(), None, false).unwrap();
+        // total_tokens = input_tokens(5000) + cache_creation_input_tokens(1000)
+        // + cache_read_input_tokens(4000) = 10000; format_token_count(10000):
+        // 10000 >= 1000, so k-suffix with one decimal = 10000 / 1000.0 = "10.0k".
+        assert_eq!(out, "10.0k");
+    }
+
+    #[test]
+    fn renders_budget_default_format() {
+        let out = render_engine_widget("budget", &engine_data(), None, false).unwrap();
+        // used = total_tokens(same fixture) = 10000 -> "10.0k"; max =
+        // context_window_size(200_000) -> format_token_count(200_000) = "200.0k";
+        // default format is "{used}/{max}".
+        assert_eq!(out, "10.0k/200.0k");
+    }
+
+    #[test]
+    fn renders_cache_pct_default_format() {
+        let out = render_engine_widget("cache_pct", &engine_data(), None, false).unwrap();
+        // cache = cache_read(4000) + cache_creation(1000) = 5000;
+        // total = input(5000) + cache(5000) = 10000; pct = round(5000/10000*100) = 50.
+        assert_eq!(out, "50%");
+    }
+
+    #[test]
     fn unknown_widget_name_renders_none() {
         assert!(render_engine_widget("not_a_widget", &engine_data(), None, false).is_none());
     }
