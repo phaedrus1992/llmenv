@@ -961,5 +961,61 @@ mod tests {
             );
             prop_assert_eq!(out, expected);
         }
+
+        /// Token counts are untrusted `u64`s from the engine's stdin JSON —
+        /// must never panic (saturating arithmetic) and, when a total exists,
+        /// the cache percentage must stay within the documented `0..=100`
+        /// contract, mirroring `render_context_pct`'s guarantee.
+        #[test]
+        fn render_cache_pct_never_panics_and_stays_in_contract(
+            input in any::<u64>(),
+            cache_creation in any::<u64>(),
+            cache_read in any::<u64>(),
+        ) {
+            let data = EngineData {
+                context_window: Some(ContextWindow {
+                    remaining_percentage: None,
+                    context_window_size: None,
+                    current_usage: Some(TokenUsage {
+                        input_tokens: Some(input),
+                        cache_creation_input_tokens: Some(cache_creation),
+                        cache_read_input_tokens: Some(cache_read),
+                    }),
+                }),
+                ..Default::default()
+            };
+            let out = render_engine_widget("cache_pct", &data, None, false).unwrap();
+            let cache = cache_read.saturating_add(cache_creation);
+            let total = input.saturating_add(cache);
+            if total == 0 {
+                prop_assert_eq!(out, "");
+            } else {
+                let pct: i64 = out.trim_end_matches('%').parse().unwrap();
+                prop_assert!((0..=100).contains(&pct));
+            }
+        }
+
+        /// `short_model_name` only ever removes tokens (the "claude" literal
+        /// and any version-shaped token) — every surviving token must be one
+        /// of the original whitespace-split tokens, in original order.
+        #[test]
+        fn short_model_name_only_removes_claude_and_version_tokens(
+            tokens in prop::collection::vec("[a-zA-Z0-9]{1,8}", 0..6),
+        ) {
+            let display_name = tokens.join(" ");
+            let out = short_model_name(&display_name);
+            let kept: Vec<&str> = out.split_whitespace().collect();
+            let mut remaining = tokens.iter().map(String::as_str);
+            for k in &kept {
+                prop_assert!(
+                    !k.eq_ignore_ascii_case("claude") && !k.chars().any(|c| c.is_ascii_digit()),
+                    "kept token {k:?} should have been filtered"
+                );
+                prop_assert!(
+                    remaining.by_ref().any(|t| t == *k),
+                    "kept token {k:?} not found in original order in {tokens:?}"
+                );
+            }
+        }
     }
 }
