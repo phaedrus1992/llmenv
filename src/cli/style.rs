@@ -277,6 +277,39 @@ mod tests {
     }
 
     #[test]
+    fn test_should_use_color_clicolor_force_empty_string_does_not_force() {
+        // Unlike NO_COLOR (presence-not-value), CLICOLOR_FORCE requires a
+        // non-empty value — an empty string must not force color on.
+        let empty_force_env = |name: &str| -> Option<String> {
+            match name {
+                "CLICOLOR_FORCE" => Some(String::new()),
+                _ => None,
+            }
+        };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            false,
+            &empty_force_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_no_color_takes_precedence_over_clicolor_force() {
+        let both_env = |name: &str| -> Option<String> {
+            match name {
+                "NO_COLOR" => Some("1".to_string()),
+                "CLICOLOR_FORCE" => Some("1".to_string()),
+                _ => None,
+            }
+        };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &both_env
+        ));
+    }
+
+    #[test]
     fn test_marker_functions_plain_when_no_color() {
         // Without color, output contains the bare glyph and no escape codes.
         assert_eq!(active_marker(false), "*");

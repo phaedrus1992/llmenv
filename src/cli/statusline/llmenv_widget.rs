@@ -320,6 +320,134 @@ mod tests {
     }
 
     #[test]
+    fn render_scopes_honors_custom_format() {
+        let data = StatusData {
+            scopes: Some(ScopesData {
+                tags: vec!["dev".into()],
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("tags={tags}".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("scopes", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "tags=dev");
+    }
+
+    #[test]
+    fn render_plugins_honors_custom_format() {
+        let data = StatusData {
+            plugins: Some(CountData {
+                total: 3,
+                errors: 1,
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{total}/{errors}".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("plugins", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "3/1");
+    }
+
+    #[test]
+    fn render_mcps_honors_custom_format() {
+        let data = StatusData {
+            mcps: Some(CountData {
+                total: 5,
+                errors: 2,
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{total}/{errors}".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("mcps", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "5/2");
+    }
+
+    #[test]
+    fn render_icm_honors_custom_format() {
+        let data = StatusData {
+            icm: Some(IcmData {
+                memories: 10,
+                concepts: 4,
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{memories}c{concepts}".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("icm", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "10c4");
+    }
+
+    #[test]
+    fn render_cache_honors_custom_format() {
+        let data = StatusData {
+            cache: Some(CacheData {
+                prunable_bytes: 2048,
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{prunable} ({prunable_raw}B)".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("cache", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "2 KB (2048B)");
+    }
+
+    #[test]
+    fn render_config_stale_honors_custom_format() {
+        let data = StatusData {
+            config_stale: Some(true),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("STALE:{stale_icon}".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("config_stale", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "STALE:◌");
+    }
+
+    #[test]
+    fn render_throttle_honors_custom_format() {
+        let data = StatusData {
+            throttle: Some(ThrottleData {
+                backend: "icm".to_string(),
+                cooldown_secs: 45,
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{reason} for {cooldown_secs}s".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("throttle", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "icm for 45s");
+    }
+
+    #[test]
+    fn render_session_log_honors_custom_format() {
+        let data = StatusData {
+            session_log: Some(8),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("entries={entries}".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("session_log", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "entries=8");
+    }
+
+    #[test]
     fn missing_data_renders_empty() {
         let data = StatusData::default();
         for name in [
