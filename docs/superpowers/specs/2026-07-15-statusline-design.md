@@ -54,10 +54,14 @@ status data is correctly scoped to the current session.
 
 1. **Materialization** — final step after writing config files and running hooks.
    llmenv has all the data in memory: scopes, tags, plugins, MCPs, ICM counts.
-2. **`llmenv export`** — refreshes throttle state, cache usage, stale config
-   detection.
-3. **Session start** — written once before the engine launches, ensures the file
-   exists for the first statusline render call.
+2. **`llmenv export`** — a full re-collect, identical to trigger 1. `export`'s
+   per-adapter loop calls the same materialize function trigger 1 uses, so
+   every field is refreshed (not a narrower throttle/cache/stale-only pass) —
+   there's no separate lighter-weight export code path.
+3. **Session start** — not a separate mechanism: the shell precmd hook
+   (`llmenv hook zsh`/`bash`) runs `llmenv export` on every prompt, including
+   the one immediately before the user launches the engine, so trigger 2
+   already guarantees the file exists by the time the engine starts.
 
 ```json
 {
@@ -110,7 +114,6 @@ statusline:
     - "{scopes:t} · {plugins} {config_stale}"
 
   style:
-    separator: " │ "
     icon_set: auto       # auto | nerd | simple | none
 
   # Widget definitions — only needed when overriding defaults
@@ -205,7 +208,7 @@ Controls how icons are selected:
 
 | Widget | Default format | Example output | Available fields |
 |--------|---------------|----------------|-----------------|
-| `model` | `{short_name} {version}` | `Claude Opus 4.8` | `short_name`, `version`, `full_name` |
+| `model` | `{short_name} {version}` | `Opus` | `short_name`, `version`, `full_name` |
 | `folder` | `{basename}` | `llmenv` | `basename`, `path` |
 | `branch` | `{name}` | `release/3.x` | `name` |
 | `pr` | `#{number}` | `#834` | `number`, `title` |
@@ -336,3 +339,11 @@ doesn't show stale/partial ANSI.
 - **Integration test**: missing data file → engine fields only render
 - **Integration test**: empty config → default single-row output
 - **Integration test**: all widgets empty → empty/no-op stdout
+
+## Known limitations
+
+Crush has no statusline concept in its adapter today (`src/adapter/crush.rs`
+only supports `PreToolUse` hooks) — there is no engine-invoked renderer hook
+to wire `llmenv statusline` into. Claude Code wiring (Task 14) ships in this
+PR; Crush support is deferred to a follow-up issue once Crush's own config
+format grows a statusline-equivalent concept.
