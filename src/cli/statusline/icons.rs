@@ -52,6 +52,13 @@ pub fn resolve_icons(
     resolve_icons_with_env(icon_set, configured, &|name| std::env::var(name).ok())
 }
 
+fn to_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect()
+}
+
 fn resolve_icons_with_env<F>(
     icon_set: IconSet,
     configured: &BTreeMap<String, String>,
@@ -62,22 +69,10 @@ where
 {
     let mut icons: BTreeMap<String, String> = match icon_set {
         IconSet::None => BTreeMap::new(),
-        IconSet::Simple => SIMPLE_ICONS
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect(),
-        IconSet::Nerd => NERD_ICONS
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect(),
-        IconSet::Auto if nerd_font_detected_with_env(get_env) => NERD_ICONS
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect(),
-        IconSet::Auto => SIMPLE_ICONS
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect(),
+        IconSet::Simple => to_map(SIMPLE_ICONS),
+        IconSet::Nerd => to_map(NERD_ICONS),
+        IconSet::Auto if nerd_font_detected_with_env(get_env) => to_map(NERD_ICONS),
+        IconSet::Auto => to_map(SIMPLE_ICONS),
     };
     // For `none`, every known key still needs to resolve to "" rather than
     // being absent (widgets call `.get(...).unwrap_or_default()`-style
