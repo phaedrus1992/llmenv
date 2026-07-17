@@ -334,6 +334,7 @@ fn render_progress_bar(data: &EngineData, cfg: Option<&llmenv_config::WidgetConf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn engine_data() -> EngineData {
         serde_json::from_value(serde_json::json!({
@@ -352,7 +353,9 @@ mod tests {
             "rate_limits": {
                 "five_hour": { "used_percentage": 24.5, "resets_at": 1_713_264_000 },
                 "seven_day": { "used_percentage": 41.0, "resets_at": 1_713_700_000 }
-            }
+            },
+            "branch": { "name": "main" },
+            "pr": { "number": 42 }
         }))
         .unwrap()
     }
@@ -819,5 +822,144 @@ mod tests {
         assert!(!tokens.is_empty());
         let cache_pct = render_engine_widget("cache_pct", &data, None, false).unwrap();
         assert_eq!(cache_pct, "100%");
+    }
+
+    /// (name, declared placeholders) for every engine widget that builds its
+    /// output via a chained `format.replace()` call.
+    const ENGINE_WIDGET_PLACEHOLDERS: &[(&str, &[&str])] = &[
+        ("model", &["short_name", "version", "full_name"]),
+        ("folder", &["basename", "path"]),
+        ("context_pct", &["pct"]),
+        ("duration", &["h", "m", "s", "total_ms"]),
+        ("tokens", &["total", "input", "cache_read", "cache_create"]),
+        ("budget", &["used", "max"]),
+        ("cache_pct", &["pct"]),
+        ("branch", &["name"]),
+        ("pr", &["number"]),
+        ("progress_bar", &["pct", "bar"]),
+    ];
+
+    proptest! {
+        /// The format string comes from user config — untrusted-ish. No
+        /// arbitrary text should ever make a `.replace()` chain panic.
+        #[test]
+        fn engine_widget_never_panics_on_arbitrary_format_string(
+            idx in 0..ENGINE_WIDGET_PLACEHOLDERS.len(),
+            format in ".{0,200}",
+        ) {
+            let (name, _) = ENGINE_WIDGET_PLACEHOLDERS[idx];
+            let cfg = llmenv_config::WidgetConfig {
+                format: Some(format),
+                ..Default::default()
+            };
+            let _ = render_engine_widget(name, &engine_data(), Some(&cfg), false);
+        }
+
+        /// Every placeholder a widget declares (present in its default format
+        /// string) must be fully consumed by the `.replace()` chain — none
+        /// should survive into the rendered output.
+        #[test]
+        fn engine_widget_consumes_all_declared_placeholders(junk in "[^{}]{0,10}") {
+            let data = engine_data();
+            for (name, placeholders) in ENGINE_WIDGET_PLACEHOLDERS {
+                let mut format = junk.clone();
+                for p in *placeholders {
+                    format.push('{');
+                    format.push_str(p);
+                    format.push('}');
+                    format.push_str(&junk);
+                }
+                let cfg = llmenv_config::WidgetConfig {
+                    format: Some(format),
+                    ..Default::default()
+                };
+                let out = render_engine_widget(name, &data, Some(&cfg), false).unwrap();
+                for p in *placeholders {
+                    let token = format!("{{{p}}}");
+                    prop_assert!(
+                        !out.contains(&token),
+                        "widget {name} left placeholder {token} unconsumed in {out:?}"
+                    );
+                }
+            }
+        }
+
+        /// `remaining_percentage` is untrusted external input — must never
+        /// panic across the full f64 space (NaN, +/-inf, denormals, extremes)
+        /// and must always stay within the documented output contract.
+        #[test]
+        fn render_context_pct_never_panics_and_stays_in_contract(remaining in any::<f64>()) {
+            let data = EngineData {
+                context_window: Some(ContextWindow {
+                    remaining_percentage: Some(remaining),
+                    context_window_size: None,
+                    current_usage: None,
+                }),
+                ..Default::default()
+            };
+            let out = render_engine_widget("context_pct", &data, None, false).unwrap();
+            if remaining.is_finite() {
+                let pct: i64 = out.trim_end_matches('%').parse().unwrap();
+                prop_assert!((0..=100).contains(&pct));
+            } else {
+                prop_assert_eq!(out, "");
+            }
+        }
+
+        #[test]
+        fn render_progress_bar_never_panics_and_stays_in_contract(remaining in any::<f64>()) {
+            let data = EngineData {
+                context_window: Some(ContextWindow {
+                    remaining_percentage: Some(remaining),
+                    context_window_size: None,
+                    current_usage: None,
+                }),
+                ..Default::default()
+            };
+            let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+            if remaining.is_finite() {
+                let (pct_str, bar) = out.split_once(' ').unwrap();
+                let pct: i64 = pct_str.trim_end_matches('%').parse().unwrap();
+                prop_assert!((0..=100).contains(&pct));
+                prop_assert_eq!(bar.chars().count(), 10);
+                prop_assert!(bar.chars().all(|c| c == '█' || c == '░'));
+            } else {
+                prop_assert_eq!(out, "");
+            }
+        }
+
+        /// Numeric formatting across the full `u64` space: no panics on the
+        /// division/rounding, and the `0..1000` vs `>=1000` threshold holds.
+        #[test]
+        fn format_token_count_respects_threshold(n in any::<u64>()) {
+            let out = format_token_count(n);
+            if n < 1000 {
+                prop_assert_eq!(out, n.to_string());
+            } else {
+                prop_assert!(out.ends_with('k'));
+                prop_assert_eq!(out, format!("{:.1}k", n as f64 / 1000.0));
+            }
+        }
+
+        /// `ms -> h/m` conversion across the full `u64` space: must never
+        /// panic (division/modulo only, no overflow-prone arithmetic) and
+        /// must reproduce the same breakdown via independent u128 math.
+        #[test]
+        fn render_duration_never_panics_and_matches_independent_calc(ms in any::<u64>()) {
+            let data = EngineData {
+                cost: Some(Cost {
+                    total_duration_ms: Some(ms),
+                }),
+                ..Default::default()
+            };
+            let out = render_engine_widget("duration", &data, None, false).unwrap();
+            let total_secs = u128::from(ms) / 1000;
+            let expected = format!(
+                "{}h{}m",
+                total_secs / 3600,
+                (total_secs % 3600) / 60
+            );
+            prop_assert_eq!(out, expected);
+        }
     }
 }
