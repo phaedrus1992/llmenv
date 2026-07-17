@@ -20,9 +20,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 /// Write `config.yaml` into a fresh temp dir and return the dir (kept alive
-/// for the test) plus its path. The dir doubles as `LLMENV_CONFIG_DIR` and,
-/// separately, is reused as `CLAUDE_CONFIG_DIR` so a written
-/// `llmenv-status.json` sits where `run_statusline_cmd` looks for it.
+/// for the test) plus its path. The dir is used as `LLMENV_CONFIG_DIR`; the
+/// separate `CLAUDE_CONFIG_DIR` data-file dir is set up by callers via
+/// `statusline_cmd`'s own `data_dir` parameter, not this helper.
 fn setup_config(content: &str) -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
     let config_path = dir.path().join("config.yaml");
