@@ -1305,6 +1305,14 @@ fn materialize_from_manifest(
     )?;
     let cache_path = rendered.path;
 
+    // Read the pre-existing manifest dotfile (if any) before write_cache_manifest
+    // overwrites it below — its content_hash is the "booted" hash (#836 Task 11),
+    // mirroring how `llmenv check-stale` reads CLAUDE_CONFIG_DIR's manifest.
+    let booted_hash = crate::materialize::manifest::CacheManifest::read(&cache_path)
+        .ok()
+        .flatten()
+        .map(|m| m.content_hash);
+
     // Run the adapter writer — materialize writes each adapter's native config
     // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
     // Returns the paths it owns; we union them with the generic bundle files to
@@ -1314,9 +1322,33 @@ fn materialize_from_manifest(
     let auth_status =
         claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;
 
+    // Write llmenv-status.json (#836 Task 11) before the manifest is written so
+    // the file exists on disk by the time write_cache_manifest's reconciliation
+    // pass runs, and so it can be added to the owned set below.
+    let throttle_configs: &[crate::config::Throttle] = manifest.throttle.as_slice();
+    let config_stale = Some(crate::materialize::ConfigStaleInputs {
+        booted_hash: booted_hash.as_deref(),
+        current_hash: &rendered.hash,
+    });
+    let status_data = crate::materialize::collect_status_data(
+        config,
+        active,
+        throttle_configs,
+        &manifest.capabilities.mcp,
+        config_stale,
+        &adapter_root,
+        config.cache.hashing,
+    );
+    let status_json =
+        serde_json::to_string_pretty(&status_data).context("serializing llmenv-status.json")?;
+    let status_path = cache_path.join("llmenv-status.json");
+    paths::write_owner_only_atomic(&status_path, status_json.as_bytes())
+        .with_context(|| format!("writing {}", status_path.display()))?;
+
     let owned = adapter_owned
         .into_iter()
-        .chain(manifest.files.keys().cloned());
+        .chain(manifest.files.keys().cloned())
+        .chain(std::iter::once(PathBuf::from("llmenv-status.json")));
     let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
         .with_selection(tags.clone(), bundles)
         .with_auth_status(auth_status);
@@ -3290,6 +3322,63 @@ mod tests {
         assert_eq!(
             firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
             vec!["github-issues"]
+        );
+    }
+
+    // ===== Tests for llmenv-status.json during materialize (#836 Task 11) =====
+
+    #[test]
+    fn build_and_materialize_writes_status_json_alongside_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let (claude_path, _) = build_and_materialize(&claude, ctx, false)
+            .unwrap()
+            .expect("claude adapter should materialize with a firing bundle");
+
+        let status_path = claude_path.join("llmenv-status.json");
+        assert!(
+            status_path.exists(),
+            "llmenv-status.json must be written alongside the adapter's own files"
+        );
+
+        let raw = std::fs::read_to_string(&status_path).unwrap();
+        let data = crate::cli::statusline::data::StatusData::load(&status_path);
+        // StatusData::load never panics and degrades to a default on missing/malformed
+        // input (see Task 2) — assert against the raw JSON directly for a real
+        // round-trip check that the file we wrote is actually valid, not just present.
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["$schema"], "llmenv-status-v1");
+        assert!(parsed.get("scopes").is_some());
+        let _ = data; // load() smoke-tested above; keep both checks
+
+        // The file must be tracked in the manifest's owned set so llmenv's own
+        // reconciliation doesn't treat it as a stale ghost file on the next
+        // materialize and delete it (#196).
+        let manifest_dotfile = crate::materialize::manifest::CacheManifest::read(&claude_path)
+            .unwrap()
+            .expect("materialize must write a manifest dotfile");
+        assert!(
+            manifest_dotfile.owned.contains("llmenv-status.json"),
+            "llmenv-status.json must be recorded in the manifest's owned set"
         );
     }
 
