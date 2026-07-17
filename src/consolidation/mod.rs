@@ -363,8 +363,10 @@ pub async fn run(config: &crate::config::Config, client: &McpHttpClient) -> anyh
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::expect_used, reason = "test code")]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -444,5 +446,44 @@ mod tests {
         let records = parse_recall_output(text);
         assert_eq!(records.len(), 1);
         assert!(records[0].summary.is_empty());
+    }
+
+    /// Builds a minimal `Config` carrying only `max_rules_per_session`, the
+    /// one field `build_prompt` reads.
+    fn config_with_max_rules(max_rules_per_session: u32) -> crate::config::Config {
+        let yaml = format!(
+            "features:\n  memory:\n    - server_host: h\n      port: 1\n      \
+             consolidation:\n        max_rules_per_session: {max_rules_per_session}\n"
+        );
+        serde_yaml::from_str(&yaml).expect("valid Config fixture YAML")
+    }
+
+    proptest! {
+        /// Memory summaries recalled from ICM are arbitrary text as far as
+        /// this function is concerned. No input should make the
+        /// `.replace()` chain panic.
+        #[test]
+        fn build_prompt_never_panics(
+            max_rules_per_session in 0u32..1000,
+            summaries in proptest::collection::vec(".{0,50}", 0..5),
+        ) {
+            let config = config_with_max_rules(max_rules_per_session);
+            let _ = build_prompt(&config, &summaries);
+        }
+
+        /// Every placeholder the prompt template declares (`{max_rules}`,
+        /// `{summaries}`) must be fully consumed by the `.replace()` chain —
+        /// none should survive into the built prompt.
+        #[test]
+        fn build_prompt_consumes_all_declared_placeholders(
+            max_rules_per_session in 0u32..1000,
+            junk in "[^{}]{0,10}",
+        ) {
+            let config = config_with_max_rules(max_rules_per_session);
+            let out = build_prompt(&config, &[junk]);
+            for token in ["{max_rules}", "{summaries}"] {
+                prop_assert!(!out.contains(token), "placeholder {token} left unconsumed in {out:?}");
+            }
+        }
     }
 }
