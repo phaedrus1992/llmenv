@@ -263,7 +263,7 @@ fn render_pr(data: &EngineData) -> String {
     }
 }
 
-/// 10-cell block bar. `pct` is the used percentage (100 - remaining).
+/// 10-cell block bar. `used` (100 - remaining) is the displayed percentage.
 ///
 /// `remaining_percentage` comes from an external engine's stdin JSON —
 /// untrusted, same field `render_context_pct` guards. NaN survives
@@ -490,6 +490,26 @@ mod tests {
         };
         let out = render_engine_widget("progress_bar", &inf_data, None, false).unwrap();
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn progress_bar_full_at_zero_remaining() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "context_window": { "remaining_percentage": 0.0 }
+        }))
+        .unwrap();
+        let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+        assert_eq!(out, "100% ██████████");
+    }
+
+    #[test]
+    fn progress_bar_empty_at_full_remaining() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "context_window": { "remaining_percentage": 100.0 }
+        }))
+        .unwrap();
+        let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+        assert_eq!(out, "0% ░░░░░░░░░░");
     }
 
     #[test]
