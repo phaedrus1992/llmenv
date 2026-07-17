@@ -37,8 +37,14 @@ pub fn parse_template(template: &str) -> Vec<TemplateToken> {
                 name: name.to_string(),
                 truncate,
             });
-            // Advance the outer iterator past the consumed `inner}`.
-            for _ in 0..=end {
+            // Advance the outer iterator past the consumed `inner}`. `end` is
+            // a *byte* offset (from `rest.find('}')`), but `chars` advances
+            // by *character* — using `end` directly desyncs whenever `inner`
+            // contains a multibyte char, silently dropping literal text after
+            // the widget (a multibyte char is >1 byte but always 1 char, so
+            // `end` overcounts the number of chars to skip). Skip by `inner`'s
+            // char count plus one (for the closing brace) instead.
+            for _ in 0..=inner.chars().count() {
                 chars.next();
             }
         } else {
@@ -111,12 +117,32 @@ mod tests {
         assert_eq!(parse_template(""), Vec::<TemplateToken>::new());
     }
 
+    #[test]
+    fn multibyte_char_inside_widget_name_does_not_drop_trailing_literal() {
+        // Regression: `end` in the consumption loop is a byte offset, but the
+        // outer iterator advances by char — a multibyte char inside the
+        // braces used to desync the two, silently eating into the literal
+        // text that follows the widget.
+        let tokens = parse_template("{a→b}tail");
+        assert_eq!(
+            tokens,
+            vec![
+                TemplateToken::Widget {
+                    name: "a→b".to_string(),
+                    truncate: false
+                },
+                TemplateToken::Literal("tail".to_string()),
+            ]
+        );
+    }
+
     fn arb_template_char() -> impl Strategy<Value = char> {
         prop_oneof![
             Just('{'),
             Just('}'),
             Just(':'),
             Just('t'),
+            Just('→'),
             "[a-z_]".prop_map(|s| s.chars().next().unwrap()),
         ]
     }
