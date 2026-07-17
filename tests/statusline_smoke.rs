@@ -100,7 +100,7 @@ fn smoke_statusline_default_row_engine_only() {
 
     assert_completes_within(cmd, 10)
         .success()
-        .stdout(predicate::str::contains("Claude Opus 4.8"))
+        .stdout(predicate::str::contains("Opus"))
         .stdout(predicate::str::contains(" │ "));
 }
 
@@ -116,7 +116,7 @@ fn smoke_statusline_custom_row_template() {
 
     assert_completes_within(cmd, 10)
         .success()
-        .stdout(predicate::str::contains("Claude Opus 4.8"))
+        .stdout(predicate::str::contains("Opus"))
         .stdout(predicate::str::contains("release/3.x"))
         .stdout(predicate::str::contains(" | "))
         .stdout(predicate::str::contains(" │ ").not());

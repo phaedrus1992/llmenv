@@ -108,6 +108,20 @@ pub fn render_engine_widget(
     Some(super::finish(raw, cfg, use_color))
 }
 
+/// Derive a short model family name from Claude's `display_name` (e.g.
+/// `"Claude Opus 4.8"` -> `"Opus"`): drops a leading "claude" token
+/// (case-insensitive) and any version-shaped token (containing a digit),
+/// leaving just the family name(s) in between.
+fn short_model_name(display_name: &str) -> String {
+    display_name
+        .split_whitespace()
+        .filter(|tok| {
+            !tok.eq_ignore_ascii_case("claude") && !tok.chars().any(|c| c.is_ascii_digit())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn render_model(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(model) = &data.model else {
         return String::new();
@@ -115,8 +129,13 @@ fn render_model(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) ->
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or("{short_name} {version}");
+    let short_name = model
+        .display_name
+        .as_deref()
+        .map(short_model_name)
+        .unwrap_or_default();
     format
-        .replace("{short_name}", model.display_name.as_deref().unwrap_or(""))
+        .replace("{short_name}", &short_name)
         .replace("{version}", model.version.as_deref().unwrap_or(""))
         .replace("{full_name}", model.full_name.as_deref().unwrap_or(""))
         .trim()
@@ -340,8 +359,19 @@ mod tests {
 
     #[test]
     fn renders_model_default_format() {
+        // engine_data()'s fixture display_name is "Claude Opus 4.8" with no
+        // separate version field — short_name strips the "Claude" prefix and
+        // the version-shaped "4.8" token, leaving just the family name.
         let out = render_engine_widget("model", &engine_data(), None, false).unwrap();
-        assert_eq!(out, "Claude Opus 4.8");
+        assert_eq!(out, "Opus");
+    }
+
+    #[test]
+    fn short_model_name_strips_claude_prefix_and_version() {
+        assert_eq!(short_model_name("Claude Opus 4.8"), "Opus");
+        assert_eq!(short_model_name("Claude Sonnet 5"), "Sonnet");
+        assert_eq!(short_model_name("GPT-Z"), "GPT-Z");
+        assert_eq!(short_model_name(""), "");
     }
 
     #[test]
