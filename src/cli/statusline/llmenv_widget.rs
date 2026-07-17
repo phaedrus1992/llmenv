@@ -155,7 +155,9 @@ fn render_session_log(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::cli::statusline::data::{CacheData, CountData, IcmData, ScopesData, StatusData};
+    use crate::cli::statusline::data::{
+        CacheData, CountData, IcmData, ScopesData, StatusData, ThrottleData,
+    };
     use std::collections::BTreeMap;
 
     fn icons() -> BTreeMap<String, String> {
@@ -223,6 +225,42 @@ mod tests {
         };
         let out = render_llmenv_widget("config_stale", &data, None, &icons(), false).unwrap();
         assert_eq!(out, "◌");
+    }
+
+    #[test]
+    fn renders_mcps_total() {
+        let data = StatusData {
+            mcps: Some(CountData {
+                total: 7,
+                errors: 0,
+            }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("mcps", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "MCP 7");
+    }
+
+    #[test]
+    fn renders_throttle_backend_and_cooldown() {
+        let data = StatusData {
+            throttle: Some(ThrottleData {
+                backend: "icm".to_string(),
+                cooldown_secs: 45,
+            }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("throttle", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "icm: 45s");
+    }
+
+    #[test]
+    fn renders_session_log_entry_count() {
+        let data = StatusData {
+            session_log: Some(8),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("session_log", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "📝 8");
     }
 
     #[test]

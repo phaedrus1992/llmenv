@@ -182,6 +182,51 @@ mod tests {
     }
 
     #[test]
+    fn renders_llmenv_widgets_from_real_data_file() {
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec![
+                    "{scopes} {plugins} {mcps} {icm} {cache} {config_stale} {throttle} {session_log}"
+                        .to_string(),
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        std::fs::write(
+            &data_path,
+            serde_json::json!({
+                "$schema": "llmenv-status-v1",
+                "v": 1,
+                "ts": "2026-07-17T00:00:00Z",
+                "scopes": { "tags": ["dev", "rust"] },
+                "plugins": { "total": 3, "errors": 0 },
+                "mcps": { "total": 2, "errors": 0 },
+                "icm": { "memories": 10, "concepts": 4 },
+                "cache": { "prunable_bytes": 2048 },
+                "config_stale": true,
+                "throttle": { "backend": "icm", "cooldown_secs": 12 },
+                "session_log": 5
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let stdin = b"{}";
+        let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
+
+        assert!(out.contains("dev · rust"), "scopes widget: {out}");
+        assert!(out.contains("◇ 3"), "plugins widget: {out}");
+        assert!(out.contains("MCP 2"), "mcps widget: {out}");
+        assert!(out.contains("M10"), "icm widget: {out}");
+        assert!(out.contains("2 KB"), "cache widget: {out}");
+        assert!(out.contains("icm: 12s"), "throttle widget: {out}");
+        assert!(out.contains('5'), "session_log widget: {out}");
+    }
+
+    #[test]
     fn unknown_widget_name_in_template_renders_empty() {
         let config = llmenv_config::Config {
             statusline: Some(StatuslineConfig {
