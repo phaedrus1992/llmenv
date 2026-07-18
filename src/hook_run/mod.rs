@@ -643,9 +643,11 @@ fn run_inner(
             // #866: skip the Store action (and its dedup-snapshot rewrite,
             // below) when SessionEnd's chunk is unchanged — but still run the
             // rest of this block (session-log capture) unconditionally.
-            let skip_store = event == HookEvent::SessionEnd && session_end_unchanged;
+            // `session_end_unchanged` is only ever `true` for `SessionEnd`
+            // (see its computation above), so it alone is the store-skip
+            // condition; no need to re-check the event here too.
             if let Some(client) = &client
-                && !skip_store
+                && !session_end_unchanged
             {
                 let actions = dispatch(event, &tag_queries, &bundle_queries);
                 out = run_memory_actions(client, actions, &query, &chunk).await?;
@@ -671,7 +673,7 @@ fn run_inner(
             // the store call means a transient MCP failure leaves the snapshot ahead
             // of reality — the next SessionEnd sees the chunk as unchanged and skips
             // the store, permanently losing the memory. (#594 code review)
-            if event == HookEvent::SessionEnd && !skip_store {
+            if event == HookEvent::SessionEnd && !session_end_unchanged {
                 let state_dir = crate::paths::state_dir()?;
                 let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
                 crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
