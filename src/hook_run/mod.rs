@@ -310,6 +310,35 @@ fn json_or_empty(v: &serde_json::Value) -> String {
     }
 }
 
+/// Append `text` (the read_once advisory/deny result) to `out`. `run()`
+/// treats the *entire* returned string as the deny reason once it detects
+/// the `__DENY__:` prefix (see the `starts_with("__DENY__:")` check below),
+/// so a deny always replaces whatever `out` already held rather than being
+/// appended alongside it — mixing in other content would either corrupt the
+/// reason or, if positioned wrong, make the prefix check miss the deny and
+/// silently downgrade it to an allow. This is an always-on guard, not a
+/// `debug_assert!`: a deny defeated in a release build is a silent,
+/// security-relevant regression, not a test-time nicety. Dormant today only
+/// because `dispatch(HookEvent::PreToolUse, ..)` always returns no actions
+/// (#868), so `out` is empty in practice and this never discards anything.
+fn append_read_once_result(out: &mut String, text: &str) {
+    if text.starts_with("__DENY__:") {
+        if !out.is_empty() {
+            tracing::error!(
+                discarded = %out,
+                "hook-run: read_once deny computed alongside other pipeline \
+                 output; discarding the other output to keep the deny intact"
+            );
+        }
+        text.clone_into(out);
+        return;
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(text);
+}
+
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
 /// `Ok(())` even when the backend is unreachable.
 pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
@@ -458,232 +487,282 @@ fn run_inner(
         return Ok(crate::task::stop_hook_reminder(&state_dir));
     }
 
-    // #702: Early-exit for events that dispatch no memory actions AND have
-    // no session-log consumer. The expensive work below (scope evaluation,
-    // bundle merge, memory MCP resolution / HTTP client) is only needed when
-    // dispatch produces actions (SessionStart/TurnStart/SessionEnd),
-    // PostToolUse needs WebFetch auto-store, PostSession runs consolidation,
-    // or session-log capture is active.
-    if !matches!(
-        event,
-        HookEvent::SessionStart
-            | HookEvent::TurnStart
-            | HookEvent::SessionEnd
-            | HookEvent::PostToolUse
-            | HookEvent::PostSession
-    ) && !log_cfg.any_sink_enabled()
-    {
-        return Ok(String::new());
-    }
-
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
-    let active = crate::scope::evaluate(&config, &env);
-    let t_scope = std::time::Instant::now();
-
-    let config_dir = config_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-
-    // Recall query: the sorted active tags. Store content: the llmenv context
-    // chunk (tags/bundles/project).
-    let mut tags = active.tags.iter().cloned().collect::<Vec<_>>();
-    tags.sort();
-    // Bundles: collect from all active scopes, deduplicate, sort.
-    let bundles: Vec<String> = {
-        let mut set = std::collections::BTreeSet::new();
-        for scope in &active.scopes {
-            for b in &scope.enable_bundles {
-                set.insert(b.clone());
-            }
+    // #867: the rest of the pipeline (scope evaluation, tag/bundle recall
+    // query validation, memory URL/MCP resolution, tokio runtime
+    // construction) is fallible, and an error anywhere in it propagates via
+    // `?` out of `run_inner` — which the caller (`run()`) degrades to "warn
+    // on stderr, nothing on stdout". Without this wrapper, that would
+    // silently discard an already-computed `read_once_text` (a deny/advisory
+    // decision already made) whenever such an error fires after read_once
+    // falls through here for Debug-level session logging. Wrapping it lets
+    // the match below recover `read_once_text` on `Err` instead of losing it.
+    let pipeline_result: anyhow::Result<String> = (|| {
+        // #702: Early-exit for events that dispatch no memory actions AND have
+        // no session-log consumer. The expensive work below (scope evaluation,
+        // bundle merge, memory MCP resolution / HTTP client) is only needed when
+        // dispatch produces actions (SessionStart/TurnStart/SessionEnd),
+        // PostToolUse needs WebFetch auto-store, PostSession runs consolidation,
+        // or session-log capture is active.
+        if !matches!(
+            event,
+            HookEvent::SessionStart
+                | HookEvent::TurnStart
+                | HookEvent::SessionEnd
+                | HookEvent::PostToolUse
+                | HookEvent::PostSession
+        ) && !log_cfg.any_sink_enabled()
+        {
+            return Ok(String::new());
         }
-        set.into_iter().collect()
-    };
-    // Build per-tag and per-bundle recall queries. Validation rejects query
-    // injection; these are the single sources of the tag/bundle→keyword encoding.
-    let tag_queries = tag_recall_queries(&tags)?;
-    let bundle_queries = bundle_recall_queries(&bundles)?;
-    let query = tags.join(", ");
-    let mut chunk = crate::icm::generate_context_chunk(&active, &bundles);
 
-    // Apply default type/importance markers from config (R1, R3) when no explicit
-    // marker is present in the generated chunk.
-    chunk = apply_memory_config_defaults(&chunk, &config, &active);
+        let env = crate::scope::matcher::Env::detect_for_config(&config);
+        let active = crate::scope::evaluate(&config, &env);
+        let t_scope = std::time::Instant::now();
 
-    let url = memory_url(&config, config_dir, &active)?;
-    if url.is_none() {
-        // Not fatal: memory actions are simply skipped below, but session
-        // logging (independent of the memory backend) still proceeds.
-        eprintln!("llmenv: memory {event} skipped: no memory backend active for this scope");
-    }
-    // Reuse MCP HTTP client across events: the memory backend URL doesn't
-    // change mid-session, so the reqwest Client (connection pool, TLS state,
-    // DNS cache) is only built once. Cloning the cached McpHttpClient is
-    // cheap — reqwest::Client is internally Arc, and the MCP session_id is
-    // shared via Arc so re-initialization is also avoided.
-    static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-    let client: Option<McpHttpClient> = match url {
-        Some(u) => {
-            let clients = MCP_CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-            let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
-            match clients.entry(u.clone()) {
-                std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    match McpHttpClient::new(u.clone(), HOOK_TIMEOUT) {
-                        Ok(client) => Some(entry.insert(client).clone()),
-                        Err(e) => {
-                            eprintln!(
-                                "llmenv: memory {event} skipped: invalid memory backend URL: {e}"
-                            );
-                            None
+        let config_dir = config_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
+
+        // Recall query: the sorted active tags. Store content: the llmenv context
+        // chunk (tags/bundles/project).
+        let mut tags = active.tags.iter().cloned().collect::<Vec<_>>();
+        tags.sort();
+        // Bundles: collect from all active scopes, deduplicate, sort.
+        let bundles: Vec<String> = {
+            let mut set = std::collections::BTreeSet::new();
+            for scope in &active.scopes {
+                for b in &scope.enable_bundles {
+                    set.insert(b.clone());
+                }
+            }
+            set.into_iter().collect()
+        };
+        // Build per-tag and per-bundle recall queries. Validation rejects query
+        // injection; these are the single sources of the tag/bundle→keyword encoding.
+        let tag_queries = tag_recall_queries(&tags)?;
+        let bundle_queries = bundle_recall_queries(&bundles)?;
+        let query = tags.join(", ");
+        let mut chunk = crate::icm::generate_context_chunk(&active, &bundles);
+
+        // Apply default type/importance markers from config (R1, R3) when no explicit
+        // marker is present in the generated chunk.
+        chunk = apply_memory_config_defaults(&chunk, &config, &active);
+
+        let url = memory_url(&config, config_dir, &active)?;
+        if url.is_none() {
+            // Not fatal: memory actions are simply skipped below, but session
+            // logging (independent of the memory backend) still proceeds.
+            eprintln!("llmenv: memory {event} skipped: no memory backend active for this scope");
+        }
+        // Reuse MCP HTTP client across events: the memory backend URL doesn't
+        // change mid-session, so the reqwest Client (connection pool, TLS state,
+        // DNS cache) is only built once. Cloning the cached McpHttpClient is
+        // cheap — reqwest::Client is internally Arc, and the MCP session_id is
+        // shared via Arc so re-initialization is also avoided.
+        static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
+        let client: Option<McpHttpClient> = match url {
+            Some(u) => {
+                let clients = MCP_CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+                let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
+                match clients.entry(u.clone()) {
+                    std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        match McpHttpClient::new(u.clone(), HOOK_TIMEOUT) {
+                            Ok(client) => Some(entry.insert(client).clone()),
+                            Err(e) => {
+                                eprintln!(
+                                    "llmenv: memory {event} skipped: invalid memory backend URL: {e}"
+                                );
+                                None
+                            }
                         }
                     }
                 }
             }
-        }
-        None => None,
-    };
-    let state_path = Some(state::state_path());
-    let ctx = build_scope_context(
-        &active,
-        &tags,
-        &bundles,
-        &env.cwd,
-        adapter_name,
-        claude_code_version,
-    );
+            None => None,
+        };
+        let state_path = Some(state::state_path());
+        let ctx = build_scope_context(
+            &active,
+            &tags,
+            &bundles,
+            &env.cwd,
+            adapter_name,
+            claude_code_version,
+        );
 
-    // Dedup: skip Store when the context chunk hasn't changed since the last
-    // SessionEnd (R3). Avoids redundant ICM writes when hooks re-run.
-    if event == HookEvent::SessionEnd {
-        let state_dir = crate::paths::state_dir()?;
-        let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
-        let is_unchanged = std::fs::read_to_string(&dedup_path)
-            .inspect_err(|e| {
-                tracing::warn!("failed to read dedup cache {}: {e}", dedup_path.display())
-            })
-            .ok()
-            .is_some_and(|prev| prev == chunk);
-        if is_unchanged {
-            debug!("chunk unchanged since last store, skipping");
-            return Ok(String::new());
-        }
-    }
-
-    // Reusable current-thread runtime: lifecycle hooks run on the agent's hot
-    // path (session start + every prompt turn) and only need to `block_on` a
-    // short sequence of HTTP round-trips. A multi-threaded runtime would spin up
-    // a worker thread pool — pure overhead for this single sequential await. (#186)
-    // Shared via OnceLock so the ~3ms builder overhead is paid once per session.
-    static RUNTIME: OnceLock<std::io::Result<tokio::runtime::Runtime>> = OnceLock::new();
-    let rt = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-    });
-    let rt = match rt {
-        Ok(rt) => rt,
-        Err(e) => return Err(anyhow::anyhow!("failed to build tokio runtime: {e}")),
-    };
-    let session_log = SessionLogCall {
-        log_cfg: &log_cfg,
-        client: client.as_ref(),
-        claude_session_id,
-        ctx: &ctx,
-        state_path: state_path.as_deref(),
-    };
-    let t_chunk = std::time::Instant::now();
-    let out = rt.block_on(async {
-        let mut out = String::new();
-        if let Some(client) = &client {
-            let actions = dispatch(event, &tag_queries, &bundle_queries);
-            out = run_memory_actions(client, actions, &query, &chunk).await?;
-
-            // PostSession: run reflective consolidation (R5) in a detached
-            // child process so the hook returns immediately instead of
-            // blocking on MCP. The result is fire-and-forget — PostSession is
-            // the final event, so no caller needs its output.
-            if event == HookEvent::PostSession {
-                post_session_consolidation();
-            }
-
-            // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
-            // with fast-falloff memory (topic: web-fetch, importance: low) so it
-            // survives session compactions but decays quickly. (#579)
-            if event == HookEvent::PostToolUse {
-                handle_web_fetch_post_tool_use(stdin_payload);
-            }
-        }
-        run_session_log(event, &session_log, stdin_payload).await;
-
-        // Update dedup snapshot *after* the store succeeds (R3). Writing before
-        // the store call means a transient MCP failure leaves the snapshot ahead
-        // of reality — the next SessionEnd sees the chunk as unchanged and skips
-        // the store, permanently losing the memory. (#594 code review)
-        if event == HookEvent::SessionEnd {
+        // Dedup: skip the Store action when the context chunk hasn't changed
+        // since the last SessionEnd (R3). Avoids redundant ICM writes when
+        // hooks re-run. Only takes the early-return fast path when
+        // session-log has no interest in SessionEnd; otherwise falls through
+        // so `run_session_log` still runs below and only the redundant Store
+        // action + dedup-snapshot rewrite are skipped, not the log — mirrors
+        // the #864/#231 fix for the same early-return-drops-logging bug class.
+        let session_end_unchanged = if event == HookEvent::SessionEnd {
             let state_dir = crate::paths::state_dir()?;
             let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
-            crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
-        }
-
-        // #231: append the task-tracker Stop reminder. Only reached here when
-        // session-log also wants Stop (the log_cfg.any_sink_enabled() case
-        // above already short-circuited before this point otherwise) — so
-        // this never displaces run_session_log, it just adds to `out`.
-        if event == HookEvent::Stop && task_tracker_enabled {
-            let state_dir = crate::paths::state_dir()?;
-            let reminder = crate::task::stop_hook_reminder(&state_dir);
-            if !reminder.is_empty() {
-                if !out.is_empty() {
-                    out.push('\n');
+            let is_unchanged = std::fs::read_to_string(&dedup_path)
+                .inspect_err(|e| {
+                    tracing::warn!("failed to read dedup cache {}: {e}", dedup_path.display())
+                })
+                .ok()
+                .is_some_and(|prev| prev == chunk);
+            if is_unchanged {
+                debug!("chunk unchanged since last store, skipping");
+                if !log_cfg.any_sink_enabled() {
+                    return Ok(String::new());
                 }
-                out.push_str(&reminder);
+            }
+            is_unchanged
+        } else {
+            false
+        };
+
+        // Reusable current-thread runtime: lifecycle hooks run on the agent's hot
+        // path (session start + every prompt turn) and only need to `block_on` a
+        // short sequence of HTTP round-trips. A multi-threaded runtime would spin up
+        // a worker thread pool — pure overhead for this single sequential await. (#186)
+        // Shared via OnceLock so the ~3ms builder overhead is paid once per session.
+        static RUNTIME: OnceLock<std::io::Result<tokio::runtime::Runtime>> = OnceLock::new();
+        let rt = RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+        });
+        let rt = match rt {
+            Ok(rt) => rt,
+            Err(e) => return Err(anyhow::anyhow!("failed to build tokio runtime: {e}")),
+        };
+        let session_log = SessionLogCall {
+            log_cfg: &log_cfg,
+            client: client.as_ref(),
+            claude_session_id,
+            ctx: &ctx,
+            state_path: state_path.as_deref(),
+        };
+        let t_chunk = std::time::Instant::now();
+        let out = rt.block_on(async {
+            let mut out = String::new();
+            // #866: skip the Store action (and its dedup-snapshot rewrite,
+            // below) when SessionEnd's chunk is unchanged — but still run the
+            // rest of this block (session-log capture) unconditionally.
+            // `session_end_unchanged` is only ever `true` for `SessionEnd`
+            // (see its computation above), so it alone is the store-skip
+            // condition; no need to re-check the event here too.
+            if let Some(client) = &client
+                && !session_end_unchanged
+            {
+                let actions = dispatch(event, &tag_queries, &bundle_queries);
+                out = run_memory_actions(client, actions, &query, &chunk).await?;
+
+                // PostSession: run reflective consolidation (R5) in a detached
+                // child process so the hook returns immediately instead of
+                // blocking on MCP. The result is fire-and-forget — PostSession is
+                // the final event, so no caller needs its output.
+                if event == HookEvent::PostSession {
+                    post_session_consolidation();
+                }
+
+                // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
+                // with fast-falloff memory (topic: web-fetch, importance: low) so it
+                // survives session compactions but decays quickly. (#579)
+                if event == HookEvent::PostToolUse {
+                    handle_web_fetch_post_tool_use(stdin_payload);
+                }
+            }
+            run_session_log(event, &session_log, stdin_payload).await;
+
+            // Update dedup snapshot *after* the store succeeds (R3). Writing before
+            // the store call means a transient MCP failure leaves the snapshot ahead
+            // of reality — the next SessionEnd sees the chunk as unchanged and skips
+            // the store, permanently losing the memory. (#594 code review)
+            if event == HookEvent::SessionEnd && !session_end_unchanged {
+                let state_dir = crate::paths::state_dir()?;
+                let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
+                crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
+            }
+
+            // #231: append the task-tracker Stop reminder. Only reached here when
+            // session-log also wants Stop (the log_cfg.any_sink_enabled() case
+            // above already short-circuited before this point otherwise) — so
+            // this never displaces run_session_log, it just adds to `out`.
+            if event == HookEvent::Stop && task_tracker_enabled {
+                let state_dir = crate::paths::state_dir()?;
+                let reminder = crate::task::stop_hook_reminder(&state_dir);
+                if !reminder.is_empty() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&reminder);
+                }
+            }
+
+            // #864: append the read_once advisory/deny text. Only reached here
+            // when session-log also wants PreToolUse at Debug level (the
+            // early-return above already short-circuited before this point
+            // otherwise) — so this never displaces run_session_log, it just adds
+            // to `out`.
+            if let Some(text) = &read_once_text
+                && !text.is_empty()
+            {
+                append_read_once_result(&mut out, text);
+            }
+
+            Ok::<String, anyhow::Error>(out)
+        })?;
+        let t_end = std::time::Instant::now();
+
+        // Per-phase timing marker. When `LLMENV_TRACE_TIMING` is set (any value) we
+        // emit exactly ONE line to stderr:
+        //   llmenv-trace {"config_load_us":N,"scope_eval_us":N,"prep_us":N,"mcp_us":N}
+        // `prep_us` spans t_scope→t_chunk: recall-query building, context-chunk
+        // generation, MCP client construction (reqwest/TLS on a cache miss), the
+        // scope-context build, and the one-time ~3ms tokio runtime build — i.e. all
+        // setup before the async MCP round-trips. `mcp_us` is the `block_on` window:
+        // the round-trips plus session logging. The clock always runs (Instant::now
+        // is ~20ns); only emission is gated, so normal runs are unaffected and stdout
+        // is never touched. Events that early-return, and runs that error before this
+        // point (e.g. a failed MCP round-trip), emit nothing.
+        if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
+            // Cap rather than panic on the (unreachable) overflow of an in-process
+            // Instant delta past u64::MAX microseconds (~585,000 years).
+            let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+            eprintln!(
+                "llmenv-trace {}",
+                json!({
+                    "config_load_us": us(t_config.saturating_duration_since(t0)),
+                    "scope_eval_us": us(t_scope.saturating_duration_since(t_config)),
+                    "prep_us": us(t_chunk.saturating_duration_since(t_scope)),
+                    "mcp_us": us(t_end.saturating_duration_since(t_chunk)),
+                })
+            );
+        }
+        Ok(out)
+    })();
+
+    match pipeline_result {
+        Ok(out) => Ok(out),
+        Err(e) => {
+            // #867: an already-computed read_once result must not be lost to
+            // an unrelated pipeline error — recover it instead of letting `?`
+            // propagate the error past the point where it was decided. Still
+            // surfaced via the same `eprintln!` convention `run()`'s Err arm
+            // uses (pre-pr-review finding: a bare `warn!` is invisible with
+            // the default `RUST_LOG`, silently hiding the diagnostic even
+            // though the read_once result itself is preserved).
+            if let Some(text) = read_once_text {
+                eprintln!("llmenv: memory {event} skipped: {e}");
+                warn!(
+                    error = %e,
+                    "hook-run: pipeline failed after read_once already computed a \
+                     result; returning it instead of silently dropping it"
+                );
+                Ok(text)
+            } else {
+                Err(e)
             }
         }
-
-        // #864: append the read_once advisory/deny text. Only reached here
-        // when session-log also wants PreToolUse at Debug level (the
-        // early-return above already short-circuited before this point
-        // otherwise) — so this never displaces run_session_log, it just adds
-        // to `out`.
-        if let Some(text) = read_once_text
-            && !text.is_empty()
-        {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&text);
-        }
-
-        Ok::<String, anyhow::Error>(out)
-    })?;
-    let t_end = std::time::Instant::now();
-
-    // Per-phase timing marker. When `LLMENV_TRACE_TIMING` is set (any value) we
-    // emit exactly ONE line to stderr:
-    //   llmenv-trace {"config_load_us":N,"scope_eval_us":N,"prep_us":N,"mcp_us":N}
-    // `prep_us` spans t_scope→t_chunk: recall-query building, context-chunk
-    // generation, MCP client construction (reqwest/TLS on a cache miss), the
-    // scope-context build, and the one-time ~3ms tokio runtime build — i.e. all
-    // setup before the async MCP round-trips. `mcp_us` is the `block_on` window:
-    // the round-trips plus session logging. The clock always runs (Instant::now
-    // is ~20ns); only emission is gated, so normal runs are unaffected and stdout
-    // is never touched. Events that early-return, and runs that error before this
-    // point (e.g. a failed MCP round-trip), emit nothing.
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
-        // Cap rather than panic on the (unreachable) overflow of an in-process
-        // Instant delta past u64::MAX microseconds (~585,000 years).
-        let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
-        eprintln!(
-            "llmenv-trace {}",
-            json!({
-                "config_load_us": us(t_config.saturating_duration_since(t0)),
-                "scope_eval_us": us(t_scope.saturating_duration_since(t_config)),
-                "prep_us": us(t_chunk.saturating_duration_since(t_scope)),
-                "mcp_us": us(t_end.saturating_duration_since(t_chunk)),
-            })
-        );
     }
-    Ok(out)
 }
 
 /// Run one event's ordered memory actions and concatenate their text output.
@@ -1288,6 +1367,39 @@ fn post_session_consolidation() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_read_once_result_appends_advisory_to_empty_out() {
+        let mut out = String::new();
+        append_read_once_result(&mut out, "advisory text");
+        assert_eq!(out, "advisory text");
+    }
+
+    #[test]
+    fn append_read_once_result_appends_deny_to_empty_out() {
+        let mut out = String::new();
+        append_read_once_result(&mut out, "__DENY__:already read");
+        assert_eq!(out, "__DENY__:already read");
+    }
+
+    #[test]
+    fn append_read_once_result_appends_advisory_to_nonempty_out() {
+        let mut out = String::from("existing content");
+        append_read_once_result(&mut out, "advisory text");
+        assert_eq!(out, "existing content\nadvisory text");
+    }
+
+    // #868: `out` being non-empty before a deny append means dispatch()
+    // started producing PreToolUse actions, which run()'s positional
+    // __DENY__: prefix check can't safely combine with — the deny must
+    // replace `out` entirely (in release builds too) rather than silently
+    // downgrading to an allow.
+    #[test]
+    fn append_read_once_result_deny_replaces_nonempty_out() {
+        let mut out = String::from("existing content");
+        append_read_once_result(&mut out, "__DENY__:already read");
+        assert_eq!(out, "__DENY__:already read");
+    }
 
     #[test]
     fn parses_neutral_event_names() {
