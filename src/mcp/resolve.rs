@@ -219,6 +219,20 @@ fn resolve_memory(
     })
 }
 
+/// Resolve the `(project_root, state_dir)` pair every codebase_memory call
+/// site needs. The project root is always the current working directory —
+/// no repo-root auto-detection; a project scope's own tags already express
+/// which project is active (#365 design decision).
+///
+/// # Errors
+/// Returns an error if the current directory or state directory can't be
+/// resolved.
+pub fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let project_root = std::env::current_dir()?;
+    let state_dir = crate::paths::state_dir()?;
+    Ok((project_root, state_dir))
+}
+
 /// Resolve a `CodebaseMemory` entry to a **local stdio** MCP entry. Unlike
 /// `resolve_memory` (always remote — ICM's daemon/proxy topology),
 /// codebase-memory-mcp has no remote-serve mode: it always runs as a local

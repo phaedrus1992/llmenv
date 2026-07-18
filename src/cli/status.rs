@@ -295,8 +295,8 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         all_resolved.entry(m.name).or_insert(m.kind);
     }
     if !all_codebase_memory_ls.is_empty() {
-        let project_root = std::env::current_dir().context("resolving codebase_memory: cwd")?;
-        let state_dir = paths::state_dir().context("resolving codebase_memory: state dir")?;
+        let (project_root, state_dir) = crate::mcp::resolve::codebase_memory_paths()
+            .context("resolving codebase_memory paths")?;
         for m in crate::mcp::resolve::resolve_codebase_memory_entries(
             &all_codebase_memory_ls,
             &active.tags,

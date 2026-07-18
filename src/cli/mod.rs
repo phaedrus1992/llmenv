@@ -1661,9 +1661,8 @@ fn build_manifest(
         .collect();
     crate::util::dedup(&mut all_codebase_memory);
     if !all_codebase_memory.is_empty() {
-        let project_root = std::env::current_dir().context("resolving codebase_memory: cwd")?;
-        let state_dir =
-            crate::paths::state_dir().context("resolving codebase_memory: state dir")?;
+        let (project_root, state_dir) = crate::mcp::resolve::codebase_memory_paths()
+            .context("resolving codebase_memory paths")?;
         manifest.mcps.extend(
             crate::mcp::resolve::resolve_codebase_memory_entries(
                 &all_codebase_memory,

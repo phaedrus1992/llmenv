@@ -543,8 +543,8 @@ fn run_inner(
             match active_codebase_memory.as_slice() {
                 [] => {}
                 [cm] => {
-                    if let Ok(project_root) = std::env::current_dir()
-                        && let Ok(state_dir) = crate::paths::state_dir()
+                    if let Ok((project_root, state_dir)) =
+                        crate::mcp::resolve::codebase_memory_paths()
                     {
                         trigger_codebase_memory_index(&project_root, cm, &state_dir);
                     }
