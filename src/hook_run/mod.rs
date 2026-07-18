@@ -424,6 +424,17 @@ fn run_inner(
         ));
     }
 
+    // #231: task-tracker Stop hook — runs before the #702 early-exit since it
+    // doesn't need scope/memory resolution, same reasoning as read_once above.
+    if event == HookEvent::Stop
+        && let Some(ref features) = config.features
+        && let Some(ref tt) = features.task_tracker
+        && tt.enabled
+    {
+        let state_dir = crate::paths::state_dir()?;
+        return Ok(crate::task::stop_hook_reminder(&state_dir));
+    }
+
     // #702: Early-exit for events that dispatch no memory actions AND have
     // no session-log consumer. The expensive work below (scope evaluation,
     // bundle merge, memory MCP resolution / HTTP client) is only needed when

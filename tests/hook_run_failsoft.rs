@@ -255,7 +255,13 @@ fn all_events_fail_soft_without_backend() {
     // The fail-soft contract holds for every lifecycle event, not just one.
     let (dir, config_path) = setup_config(&config_no_backend());
 
-    for event in ["session_start", "turn_start", "session_end", "pre_tool_use"] {
+    for event in [
+        "session_start",
+        "turn_start",
+        "session_end",
+        "pre_tool_use",
+        "stop",
+    ] {
         hook_cmd(dir.path(), &config_path, event)
             .timeout(Duration::from_secs(10))
             .assert()
@@ -405,4 +411,53 @@ fn pre_tool_use_read_twice_deny_mode() {
         reason.contains("already read"),
         "deny reason should mention re-read; got: {reason}"
     );
+}
+
+fn config_with_task_tracker() -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: test-bundle
+    when: [test]
+
+features:
+  task_tracker:
+    enabled: true
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+    )
+}
+
+#[test]
+fn stop_with_task_tracker_enabled_exits_zero() {
+    let (dir, config_path) = setup_config(&config_with_task_tracker());
+    let payload = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": "test-stop",
+        "last_assistant_message": "done for now",
+    })
+    .to_string();
+    hook_cmd(dir.path(), &config_path, "stop")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success();
 }
