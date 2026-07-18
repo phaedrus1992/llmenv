@@ -586,8 +586,14 @@ impl Capabilities {
             && self.native_mcp.is_empty()
             && self.native.is_empty()
             && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
+            && self.features.as_ref().is_none_or(|f| f.throttle.is_empty())
             && self.features.as_ref().is_none_or(|f| f.read_once.is_none())
             && self.features.as_ref().is_none_or(|f| f.slippage.is_none())
+            && self
+                .features
+                .as_ref()
+                .is_none_or(|f| f.context_mode.is_none())
+            && self.features.as_ref().is_none_or(|f| f.upgrade.is_none())
             && self
                 .features
                 .as_ref()
@@ -2233,6 +2239,62 @@ mod tests {
         assert!(
             !caps.is_empty(),
             "is_empty must be false when task_tracker is set"
+        );
+    }
+
+    /// Variant of the task_tracker merge-gate bug: `throttle`/`context_mode`/
+    /// `upgrade` are also consumed only via the merged manifest and had the
+    /// same omission — found during #231's pre-pr-review.
+    #[test]
+    fn capabilities_is_empty_false_with_throttle() {
+        let caps = Capabilities {
+            features: Some(Features {
+                throttle: vec![Throttle {
+                    backend: "umans".to_string(),
+                    when: vec![],
+                    cache_ttl: 60,
+                    max_wait: 5,
+                    soft_threshold: 10,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when throttle is set"
+        );
+    }
+
+    #[test]
+    fn capabilities_is_empty_false_with_context_mode() {
+        let caps = Capabilities {
+            features: Some(Features {
+                context_mode: Some(ContextMode { enabled: true }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when context_mode is set"
+        );
+    }
+
+    #[test]
+    fn capabilities_is_empty_false_with_upgrade() {
+        let caps = Capabilities {
+            features: Some(Features {
+                upgrade: Some(UpgradeConfig {
+                    track: UpgradeTrack::default(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when upgrade is set"
         );
     }
 

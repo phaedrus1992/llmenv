@@ -173,9 +173,14 @@ pub fn add_task(state_dir: &Path, title: &str, parent: Option<&str>) -> anyhow::
 /// the exact slug of an existing task.
 ///
 /// # Errors
-/// Returns an error if no task matches, or if the prefix matches more than
-/// one task (the error lists every candidate slug).
+/// Returns an error if `input` isn't a safe single path component (rejects
+/// path traversal / absolute-path attempts before any path is constructed —
+/// a task slug is always a single component), if no task matches, or if the
+/// prefix matches more than one task (the error lists every candidate slug).
 pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<String> {
+    if !crate::paths::is_valid_short_name(input) {
+        anyhow::bail!("'{input}' is not a valid task identifier");
+    }
     if task_path(state_dir, input).exists() {
         return Ok(input.to_string());
     }
@@ -431,6 +436,26 @@ mod tests {
             .to_string();
         assert!(err.contains("fix-login-timeout"));
         assert!(err.contains("fix-logout-crash"));
+    }
+
+    #[test]
+    fn resolve_identifier_rejects_path_traversal() {
+        let dir = TempDir::new().expect("test");
+        let outside = dir.path().parent().expect("test").join("escaped.json");
+        assert!(
+            resolve_identifier(dir.path(), "../escaped").is_err(),
+            "must reject a '..' identifier before touching the filesystem"
+        );
+        assert!(
+            !outside.exists(),
+            "must never create a file outside tasks_dir"
+        );
+    }
+
+    #[test]
+    fn resolve_identifier_rejects_absolute_path() {
+        let dir = TempDir::new().expect("test");
+        assert!(resolve_identifier(dir.path(), "/etc/passwd").is_err());
     }
 
     #[test]
