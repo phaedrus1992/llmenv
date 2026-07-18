@@ -1090,6 +1090,24 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                     "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
                 }));
         }
+    } else if manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .is_some_and(|t| t.enabled)
+    {
+        // #231: the task tracker's Stop reminder needs its own hook
+        // registration — it must not depend on session logging happening to
+        // be on. Only registers `Stop` (not the other session-log events),
+        // and only in the `else` branch above so a session-log-enabled setup
+        // doesn't get two hook-run invocations on the same event.
+        hooks_by_event
+            .entry("Stop".to_string())
+            .or_default()
+            .push(json!({
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} stop") }],
+            }));
     }
 
     let mut hooks_obj = serde_json::Map::new();
