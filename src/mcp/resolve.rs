@@ -74,6 +74,13 @@ pub enum ResolveError {
         .0.join(", ")
     )]
     AmbiguousMemory(Vec<String>),
+    #[error(
+        "codebase_memory: multiple entries active simultaneously — every entry \
+         resolves to the same project (cwd) and the same MCP server name, so \
+         only one may be active per scope; conflicting when: tag sets: {}",
+        .0.join(" | ")
+    )]
+    AmbiguousCodebaseMemory(Vec<String>),
     #[error("bundle mcp '{0}': name is reserved for the memory backend")]
     BundleMcpReservedName(String),
     #[error(
@@ -253,20 +260,39 @@ pub fn resolve_codebase_memory(
 /// into host-level plugin/MCP/throttle decisions), but codebase_memory is
 /// inherently project-scoped and must activate on project tags. Callers pass
 /// whatever tag set fits their context (usually the full `active.tags`, not
-/// the non-project subset). Multiple entries may resolve simultaneously — no
-/// "at most one active" rule like `Memory`, since each is an independent
-/// local process, not a shared network resource.
+/// the non-project subset).
+///
+/// At most one entry may be active per scope, same rule as `Memory`: every
+/// entry resolves to the same [`CODEBASE_MEMORY_MCP_NAME`] and the same
+/// `project_root` (always the current directory), so two simultaneously
+/// active entries can't coexist as distinct MCP servers — they'd collide on
+/// name in the rendered `mcpServers` map.
+///
+/// # Errors
+/// Returns [`ResolveError::AmbiguousCodebaseMemory`] when more than one entry
+/// is active simultaneously.
 pub fn resolve_codebase_memory_entries(
     entries: &[CodebaseMemory],
     active_tags: &BTreeSet<String>,
     project_root: &Path,
     state_dir: &Path,
-) -> Vec<ResolvedMcp> {
-    entries
+) -> Result<Vec<ResolvedMcp>, ResolveError> {
+    let active: Vec<&CodebaseMemory> = entries
         .iter()
         .filter(|c| c.when.iter().any(|t| active_tags.contains(t)))
-        .map(|c| resolve_codebase_memory(c, project_root, state_dir))
-        .collect()
+        .collect();
+    match active.len() {
+        0 => Ok(Vec::new()),
+        1 => Ok(vec![resolve_codebase_memory(
+            active[0],
+            project_root,
+            state_dir,
+        )]),
+        _ => {
+            let tag_sets: Vec<String> = active.iter().map(|c| c.when.join(",")).collect();
+            Err(ResolveError::AmbiguousCodebaseMemory(tag_sets))
+        }
+    }
 }
 
 fn stdio_kind(m: &McpServer) -> Result<ResolvedKind, ResolveError> {
@@ -579,14 +605,17 @@ mod tests {
             &tags(&["proj"]),
             Path::new("/repos/proj"),
             Path::new("/state"),
-        );
+        )
+        .unwrap();
         assert!(resolved.is_empty());
     }
 
     #[test]
-    fn codebase_memory_multiple_entries_all_resolve() {
-        // Unlike Memory, multiple active codebase_memory entries are not an
-        // error — each is an independent local process.
+    fn codebase_memory_multiple_active_entries_error() {
+        // Every entry resolves to the SAME name (CODEBASE_MEMORY_MCP_NAME) and
+        // the SAME project_root (always cwd), so two simultaneously active
+        // entries can't coexist — same "at most one active" rule as Memory,
+        // enforced here rather than left to crash later on a name collision.
         let entries = vec![
             CodebaseMemory {
                 when: vec!["proj-a".to_string()],
@@ -597,13 +626,14 @@ mod tests {
                 index_path: None,
             },
         ];
-        let resolved = resolve_codebase_memory_entries(
+        let err = resolve_codebase_memory_entries(
             &entries,
             &tags(&["proj-a", "proj-b"]),
             Path::new("/repos/multi"),
             Path::new("/state"),
-        );
-        assert_eq!(resolved.len(), 2);
+        )
+        .unwrap_err();
+        assert!(matches!(err, ResolveError::AmbiguousCodebaseMemory(_)));
     }
 
     #[test]

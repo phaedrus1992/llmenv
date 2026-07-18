@@ -1147,7 +1147,10 @@ pub struct CodebaseMemory {
     #[serde(default)]
     pub when: Vec<String>,
     /// Override the index storage directory (`CBM_CACHE_DIR` env var).
-    /// Defaults to `<state_dir>/codebase-memory/<project>` when unset.
+    /// Defaults to `<state_dir>/codebase-memory` when unset — a shared cache
+    /// root, matching upstream's own default (`~/.cache/codebase-memory-mcp/`
+    /// stores every project's index together; the server partitions by
+    /// project internally, the same way `list_projects` enumerates them).
     #[serde(default)]
     pub index_path: Option<String>,
 }

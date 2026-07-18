@@ -1664,14 +1664,15 @@ fn build_manifest(
         let project_root = std::env::current_dir().context("resolving codebase_memory: cwd")?;
         let state_dir =
             crate::paths::state_dir().context("resolving codebase_memory: state dir")?;
-        manifest
-            .mcps
-            .extend(crate::mcp::resolve::resolve_codebase_memory_entries(
+        manifest.mcps.extend(
+            crate::mcp::resolve::resolve_codebase_memory_entries(
                 &all_codebase_memory,
                 &active.tags,
                 &project_root,
                 &state_dir,
-            ));
+            )
+            .context("resolving codebase_memory servers")?,
+        );
     }
     // Detect cross-source name collisions (global vs bundle).
     {
