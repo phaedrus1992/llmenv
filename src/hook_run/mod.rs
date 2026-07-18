@@ -562,9 +562,14 @@ fn run_inner(
             claude_code_version,
         );
 
-        // Dedup: skip Store when the context chunk hasn't changed since the last
-        // SessionEnd (R3). Avoids redundant ICM writes when hooks re-run.
-        if event == HookEvent::SessionEnd {
+        // Dedup: skip the Store action when the context chunk hasn't changed
+        // since the last SessionEnd (R3). Avoids redundant ICM writes when
+        // hooks re-run. Only takes the early-return fast path when
+        // session-log has no interest in SessionEnd; otherwise falls through
+        // so `run_session_log` still runs below and only the redundant Store
+        // action + dedup-snapshot rewrite are skipped, not the log — mirrors
+        // the #864/#231 fix for the same early-return-drops-logging bug class.
+        let session_end_unchanged = if event == HookEvent::SessionEnd {
             let state_dir = crate::paths::state_dir()?;
             let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
             let is_unchanged = std::fs::read_to_string(&dedup_path)
@@ -572,9 +577,14 @@ fn run_inner(
                 .is_some_and(|prev| prev == chunk);
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
-                return Ok(String::new());
+                if !log_cfg.any_sink_enabled() {
+                    return Ok(String::new());
+                }
             }
-        }
+            is_unchanged
+        } else {
+            false
+        };
 
         // Reusable current-thread runtime: lifecycle hooks run on the agent's hot
         // path (session start + every prompt turn) and only need to `block_on` a
@@ -601,7 +611,13 @@ fn run_inner(
         let t_chunk = std::time::Instant::now();
         let out = rt.block_on(async {
             let mut out = String::new();
-            if let Some(client) = &client {
+            // #866: skip the Store action (and its dedup-snapshot rewrite,
+            // below) when SessionEnd's chunk is unchanged — but still run the
+            // rest of this block (session-log capture) unconditionally.
+            let skip_store = event == HookEvent::SessionEnd && session_end_unchanged;
+            if let Some(client) = &client
+                && !skip_store
+            {
                 let actions = dispatch(event, &tag_queries, &bundle_queries);
                 out = run_memory_actions(client, actions, &query, &chunk).await?;
 
@@ -626,7 +642,7 @@ fn run_inner(
             // the store call means a transient MCP failure leaves the snapshot ahead
             // of reality — the next SessionEnd sees the chunk as unchanged and skips
             // the store, permanently losing the memory. (#594 code review)
-            if event == HookEvent::SessionEnd {
+            if event == HookEvent::SessionEnd && !skip_store {
                 let state_dir = crate::paths::state_dir()?;
                 let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
                 crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
