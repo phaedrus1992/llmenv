@@ -191,12 +191,26 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         .max_by_key(|(p, _)| *p)
         .map(|(_, v)| v);
 
+    let task_tracker = contributors
+        .iter()
+        .filter_map(|c| {
+            c.capabilities
+                .features
+                .as_ref()?
+                .task_tracker
+                .as_ref()
+                .map(|v| (c.precedence, v.clone()))
+        })
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v);
+
     let features = if memory.is_empty()
         && throttle.is_empty()
         && slippage.is_none()
         && context_mode.is_none()
         && upgrade.is_none()
         && read_once.is_none()
+        && task_tracker.is_none()
     {
         None
     } else {
@@ -207,7 +221,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             upgrade,
             read_once,
             slippage,
-            task_tracker: None,
+            task_tracker,
         })
     };
 
@@ -1821,5 +1835,40 @@ mod tests {
         );
         let err = merge_capabilities(&[a, b]).unwrap_err();
         assert!(err.to_string().contains("conflicting default_models"));
+    }
+
+    #[test]
+    fn task_tracker_resolves_highest_precedence() {
+        let low = contributor(
+            "low",
+            1,
+            Capabilities {
+                features: Some(Features {
+                    task_tracker: Some(crate::config::TaskTracker { enabled: false }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let high = contributor(
+            "high",
+            2,
+            Capabilities {
+                features: Some(Features {
+                    task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let merged = merge_capabilities(&[low, high]).unwrap();
+        assert!(merged.features.unwrap().task_tracker.unwrap().enabled);
+    }
+
+    #[test]
+    fn task_tracker_absent_when_no_contributor_sets_it() {
+        let only = contributor("only", 1, Capabilities::default());
+        let merged = merge_capabilities(&[only]).unwrap();
+        assert!(merged.features.is_none());
     }
 }
