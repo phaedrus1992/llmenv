@@ -1,4 +1,4 @@
-use crate::config::{Bundle, Config};
+use crate::config::{Bundle, Capabilities, Config};
 use crate::paths;
 use crate::plugins::cache;
 use anyhow::Context;
@@ -124,6 +124,33 @@ pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
         .collect()
 }
 
+/// Returns the `when` tag sets of `codebase_memory` entries (top-level +
+/// bundle-contributed) that no emitted tag covers — these can never activate.
+/// Unlike `memory`, there's no `host:` table reference to check (codebase-
+/// memory-mcp always resolves to a local stdio process, never a network
+/// client).
+pub(super) fn orphan_codebase_memory_entries<'a>(
+    config: &'a Config,
+    bundle_caps: &'a Capabilities,
+    emitted: &HashSet<String>,
+) -> Vec<&'a [String]> {
+    let top = config
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.as_slice())
+        .unwrap_or_default();
+    let bundle = bundle_caps
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.as_slice())
+        .unwrap_or_default();
+    top.iter()
+        .chain(bundle.iter())
+        .filter(|cm| !cm.when.iter().any(|t| emitted.contains(t)))
+        .map(|cm| cm.when.as_slice())
+        .collect()
+}
+
 /// Check whether a host address string is a loopback / local-only address.
 fn is_local_addr(addr: &str) -> bool {
     matches!(addr, "localhost" | "0.0.0.0" | "::" | "::0")
@@ -181,6 +208,23 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
                      (remote memory server_host requires one for TCP proxying)"
                 );
             }
+        }
+    }
+
+    // codebase-memory-mcp — required when features.codebase_memory has entries
+    let has_codebase_memory = config
+        .features
+        .as_ref()
+        .is_some_and(|f| !f.codebase_memory.is_empty());
+    if has_codebase_memory {
+        if crate::adapter::binary_on_path("codebase-memory-mcp") {
+            eprintln!("{pass} codebase-memory-mcp found on PATH");
+        } else {
+            eprintln!(
+                "{fail} codebase-memory-mcp not found on PATH (required when \
+                 features.codebase_memory is configured) — install: \
+                 https://github.com/DeusData/codebase-memory-mcp"
+            );
         }
     }
 
@@ -579,6 +623,12 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             }
         }
 
+        // Check codebase_memory entries (top-level + bundle-contributed).
+        for when in orphan_codebase_memory_entries(&config, &doctor_bundle_caps, &emitted) {
+            eprintln!("{warn} orphan codebase_memory: no scope emits its tags {when:?}");
+            orphan_count += 1;
+        }
+
         // Plugin orphans
         {
             use crate::config::split_plugin_ref;
@@ -860,6 +910,62 @@ mod tests {
         let mut unused = unused_marketplaces(&config);
         unused.sort_unstable();
         assert_eq!(unused, vec!["unused"]);
+    }
+
+    // -- orphan_codebase_memory_entries --
+
+    #[test]
+    fn orphan_codebase_memory_none_when_tag_emitted() {
+        let config = Config {
+            features: Some(crate::config::Features {
+                codebase_memory: vec![crate::config::CodebaseMemory {
+                    when: vec!["proj".to_string()],
+                    index_path: None,
+                }],
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let emitted: HashSet<String> = ["proj".to_string()].into_iter().collect();
+        let bundle_caps = Capabilities::default();
+        let orphans = orphan_codebase_memory_entries(&config, &bundle_caps, &emitted);
+        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    }
+
+    #[test]
+    fn orphan_codebase_memory_reports_unreachable_tag() {
+        let config = Config {
+            features: Some(crate::config::Features {
+                codebase_memory: vec![crate::config::CodebaseMemory {
+                    when: vec!["never-emitted".to_string()],
+                    index_path: None,
+                }],
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let bundle_caps = Capabilities::default();
+        let emitted = HashSet::new();
+        let orphans = orphan_codebase_memory_entries(&config, &bundle_caps, &emitted);
+        assert_eq!(orphans, vec![&["never-emitted".to_string()][..]]);
+    }
+
+    #[test]
+    fn orphan_codebase_memory_checks_bundle_contributed_entries() {
+        let bundle_caps = Capabilities {
+            features: Some(crate::config::Features {
+                codebase_memory: vec![crate::config::CodebaseMemory {
+                    when: vec!["bundle-tag".to_string()],
+                    index_path: None,
+                }],
+                ..Default::default()
+            }),
+            ..Capabilities::default()
+        };
+        let config = Config::default();
+        let emitted = HashSet::new();
+        let orphans = orphan_codebase_memory_entries(&config, &bundle_caps, &emitted);
+        assert_eq!(orphans, vec![&["bundle-tag".to_string()][..]]);
     }
 
     // -- orphan_native_permission_keys --
