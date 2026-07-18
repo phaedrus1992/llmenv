@@ -1640,6 +1640,39 @@ fn build_manifest(
                  (check mcp: entries in active bundle.yaml files)",
         )?,
     );
+    // codebase_memory is inherently project-scoped (each entry indexes one
+    // project) and must activate on project tags, unlike the host_tags-only
+    // resolution above (#696) — resolved with the full active.tags instead.
+    let top_codebase_memory = config
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.as_slice())
+        .unwrap_or_default();
+    let bundle_codebase_memory = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.as_slice())
+        .unwrap_or_default();
+    let mut all_codebase_memory: Vec<crate::config::CodebaseMemory> = top_codebase_memory
+        .iter()
+        .chain(bundle_codebase_memory.iter())
+        .cloned()
+        .collect();
+    crate::util::dedup(&mut all_codebase_memory);
+    if !all_codebase_memory.is_empty() {
+        let (project_root, state_dir) = crate::mcp::resolve::codebase_memory_paths()
+            .context("resolving codebase_memory paths")?;
+        manifest.mcps.extend(
+            crate::mcp::resolve::resolve_codebase_memory_entries(
+                &all_codebase_memory,
+                &active.tags,
+                &project_root,
+                &state_dir,
+            )
+            .context("resolving codebase_memory servers")?,
+        );
+    }
     // Detect cross-source name collisions (global vs bundle).
     {
         let mut seen = std::collections::HashSet::new();
@@ -4311,6 +4344,7 @@ mod tests {
                 read_once: None,
                 slippage: None,
                 task_tracker: None,
+                codebase_memory: vec![],
             }),
             host,
             ..Config::default()

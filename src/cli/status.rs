@@ -264,6 +264,23 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         all_host_ls.insert(k.clone(), v.clone());
     }
 
+    let top_codebase_memory_ls = config
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.as_slice())
+        .unwrap_or_default();
+    let bundle_codebase_memory_ls = bundle_caps
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.as_slice())
+        .unwrap_or_default();
+    let mut all_codebase_memory_ls: Vec<crate::config::CodebaseMemory> = top_codebase_memory_ls
+        .iter()
+        .chain(bundle_codebase_memory_ls.iter())
+        .cloned()
+        .collect();
+    crate::util::dedup(&mut all_codebase_memory_ls);
+
     let mut all_resolved: std::collections::HashMap<String, ResolvedKind> =
         resolve_mcps(&config.mcp, &all_memory_ls, &all_host_ls, &active.tags)
             .context("resolving MCP servers for listing")?
@@ -276,6 +293,20 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         .context("resolving bundle MCP servers for listing")?;
     for m in bundle_resolved {
         all_resolved.entry(m.name).or_insert(m.kind);
+    }
+    if !all_codebase_memory_ls.is_empty() {
+        let (project_root, state_dir) = crate::mcp::resolve::codebase_memory_paths()
+            .context("resolving codebase_memory paths")?;
+        for m in crate::mcp::resolve::resolve_codebase_memory_entries(
+            &all_codebase_memory_ls,
+            &active.tags,
+            &project_root,
+            &state_dir,
+        )
+        .context("resolving codebase_memory servers for listing")?
+        {
+            all_resolved.entry(m.name).or_insert(m.kind);
+        }
     }
 
     let mut rows: Vec<(String, bool, bool, String)> = config
@@ -309,6 +340,21 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         let detail = mcp_kind_detail(MEMORY_MCP_NAME, "memory", &all_resolved);
         let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);
         rows.push((name, is_active, is_orphan, detail));
+    }
+    for cm in &all_codebase_memory_ls {
+        let is_active = cm.when.iter().any(|t| active.tags.contains(t));
+        let is_orphan = !cm.when.iter().any(|t| emitted.contains(t));
+        let detail = mcp_kind_detail(
+            crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME,
+            "codebase-memory",
+            &all_resolved,
+        );
+        rows.push((
+            crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
+            is_active,
+            is_orphan,
+            detail,
+        ));
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     print_detail_rows(&rows, use_color);
