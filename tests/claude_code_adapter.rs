@@ -1832,6 +1832,89 @@ fn compact_survival_fragment_absent_when_disabled() {
     );
 }
 
+// #231: the Stop hook must be registered when task_tracker is enabled, even
+// with session logging fully disabled — otherwise the Stop reminder is dead
+// in the (default-adjacent) case where a user turns off session_log.
+#[test]
+fn task_tracker_registers_stop_hook_when_session_log_disabled() {
+    let m = llmenv::merge::MergedManifest {
+        capabilities: llmenv::config::Capabilities {
+            features: Some(llmenv::config::Features {
+                task_tracker: Some(llmenv::config::TaskTracker { enabled: true }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        session_log: llmenv::config::SessionLog {
+            transcript: Some(llmenv::config::TranscriptSinkConfig {
+                enabled: false,
+                level: llmenv::config::LogLevel::Info,
+                retention_days: None,
+            }),
+            file: None,
+            max_content_bytes: None,
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+    let stop = parsed["hooks"]["Stop"]
+        .as_array()
+        .expect("Stop hook must be registered when task_tracker is enabled");
+    let cmd = stop[0]["hooks"][0]["command"]
+        .as_str()
+        .expect("Stop handler has a command");
+    assert!(
+        cmd.contains("hook-run") && cmd.contains("stop"),
+        "Stop command must invoke `llmenv hook-run ... stop`: {cmd}"
+    );
+    // Only Stop is registered for task_tracker alone — not the other six
+    // session-log events (this repo's Stop registration must not silently
+    // pull in unrelated per-turn hooks).
+    assert!(
+        parsed["hooks"].get("PostToolUse").is_none(),
+        "task_tracker alone must not register PostToolUse"
+    );
+}
+
+// #231: no Stop hook (and no crash) when both task_tracker and session
+// logging are disabled.
+#[test]
+fn no_stop_hook_when_task_tracker_and_session_log_both_disabled() {
+    let m = llmenv::merge::MergedManifest {
+        session_log: llmenv::config::SessionLog {
+            transcript: Some(llmenv::config::TranscriptSinkConfig {
+                enabled: false,
+                level: llmenv::config::LogLevel::Info,
+                retention_days: None,
+            }),
+            file: None,
+            max_content_bytes: None,
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+    assert!(
+        parsed["hooks"].get("Stop").is_none(),
+        "no Stop hook when neither task_tracker nor session_log wants it"
+    );
+}
+
 // #231: task-tracker fragment appended to CLAUDE.md when enabled.
 #[test]
 fn task_tracker_fragment_appended_when_enabled() {

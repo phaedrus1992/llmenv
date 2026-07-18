@@ -446,6 +446,97 @@ adapter:
     )
 }
 
+fn config_with_task_tracker_and_file_session_log() -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: test-bundle
+    when: [test]
+
+features:
+  task_tracker:
+    enabled: true
+
+session_log:
+  file:
+    enabled: true
+    level: info
+  transcript:
+    enabled: false
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+    )
+}
+
+// #231: enabling task_tracker must not silently drop Stop-event session
+// logging when a session-log sink is also enabled — both must fire.
+#[test]
+fn stop_with_task_tracker_and_file_session_log_writes_log_and_reminder() {
+    let (dir, config_path) = setup_config(&config_with_task_tracker_and_file_session_log());
+
+    Command::cargo_bin("llmenv")
+        .unwrap()
+        .env("LLMENV_CONFIG", &config_path)
+        .env("LLMENV_CONFIG_DIR", dir.path())
+        .env("LLMENV_STATE_DIR", dir.path())
+        .args(["task", "add", "Wrap up the release notes"])
+        .assert()
+        .success();
+    Command::cargo_bin("llmenv")
+        .unwrap()
+        .env("LLMENV_CONFIG", &config_path)
+        .env("LLMENV_CONFIG_DIR", dir.path())
+        .env("LLMENV_STATE_DIR", dir.path())
+        .args(["task", "start", "wrap-up-the-release"])
+        .assert()
+        .success();
+
+    let payload = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": "test-stop-with-log",
+        "last_assistant_message": "done for now",
+    })
+    .to_string();
+    let output = hook_cmd(dir.path(), &config_path, "stop")
+        .env("LLMENV_STATE_DIR", dir.path())
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stop hook must exit 0");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Wrap up the release notes"),
+        "stdout must carry the task-tracker reminder; got: {stdout}"
+    );
+
+    let log_path = dir.path().join("session-log.jsonl");
+    let log_content = fs::read_to_string(&log_path).expect("session-log.jsonl must exist");
+    assert!(
+        log_content.contains("\"Stop\"") || log_content.contains("stop"),
+        "session log must still record the Stop event when task_tracker is \
+         also enabled; got: {log_content}"
+    );
+}
+
 #[test]
 fn stop_with_task_tracker_enabled_exits_zero() {
     let (dir, config_path) = setup_config(&config_with_task_tracker());
