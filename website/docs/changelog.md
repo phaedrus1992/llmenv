@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `features.read_once` no longer silently drops Debug-level session-log capture for `PreToolUse` events — enabling it previously short-circuited before session logging ran whenever a Debug-level session-log sink was also configured; both now fire (#864)
 - A computed `read_once` deny/advisory result is no longer silently discarded if an unrelated hook-run pipeline error (e.g. invalid tag/bundle config, memory URL resolution failure) occurs afterward — it's now still returned instead of being lost when the pipeline errors out (#867)
 - `SessionEnd` session-log capture is no longer silently skipped when the redundant-store dedup check fires — previously any configured session-log sink missed `SessionEnd` events whenever the context chunk was unchanged since the last store; only the redundant store is skipped now, not the log (#866)
+- Skill frontmatter `name`/`description` values containing Unicode noncharacters (e.g. U+FFFE) no longer produce invalid YAML when auto-quoted — these are now escaped like control characters, and code points above U+FFFF use the correct 8-digit `\U` escape instead of a truncated 4-digit `\u` one that corrupted the scalar (#873)
 
 ## [3.5.1] - 2026-07-15
 
