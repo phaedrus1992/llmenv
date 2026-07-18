@@ -588,6 +588,10 @@ impl Capabilities {
             && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
             && self.features.as_ref().is_none_or(|f| f.read_once.is_none())
             && self.features.as_ref().is_none_or(|f| f.slippage.is_none())
+            && self
+                .features
+                .as_ref()
+                .is_none_or(|f| f.task_tracker.is_none())
             && self.host.is_empty()
             && self.model_providers.is_empty()
             && self.default_models.is_empty()
@@ -2210,6 +2214,25 @@ mod tests {
         assert!(
             !caps.is_empty(),
             "is_empty must be false when lsp is non-empty"
+        );
+    }
+
+    /// Capabilities::is_empty() returns false when task_tracker is set — a
+    /// merge-gate regression: `merge()` skips adding the top-level contributor
+    /// entirely when `is_empty()` is true, so any field consumed only via the
+    /// merged manifest (not read from raw `Config`) must be listed here.
+    #[test]
+    fn capabilities_is_empty_false_with_task_tracker() {
+        let caps = Capabilities {
+            features: Some(Features {
+                task_tracker: Some(TaskTracker { enabled: true }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when task_tracker is set"
         );
     }
 

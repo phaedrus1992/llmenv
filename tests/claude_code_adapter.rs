@@ -1832,6 +1832,56 @@ fn compact_survival_fragment_absent_when_disabled() {
     );
 }
 
+// #231: task-tracker fragment appended to CLAUDE.md when enabled.
+#[test]
+fn task_tracker_fragment_appended_when_enabled() {
+    let caps = llmenv::config::Capabilities {
+        features: Some(llmenv::config::Features {
+            task_tracker: Some(llmenv::config::TaskTracker { enabled: true }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("read CLAUDE.md");
+    assert!(
+        claude_md.contains("llmenv task"),
+        "CLAUDE.md must contain task-tracker fragment when enabled"
+    );
+    assert!(
+        claude_md.contains("<!-- from task_tracker -->"),
+        "fragment must carry provenance marker"
+    );
+}
+
+// #231: task-tracker fragment NOT appended when disabled/absent.
+#[test]
+fn task_tracker_fragment_absent_when_disabled() {
+    let caps = llmenv::config::Capabilities {
+        features: Some(llmenv::config::Features {
+            task_tracker: Some(llmenv::config::TaskTracker { enabled: false }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let manifest = merge(&caps, &empty_native(), &[]).unwrap();
+    let tmp = tempdir().unwrap();
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("materialize");
+
+    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("read CLAUDE.md");
+    assert!(
+        !claude_md.contains("<!-- from task_tracker -->"),
+        "CLAUDE.md must NOT contain task-tracker fragment when disabled"
+    );
+}
+
 // #317: diagnose_command skill written when slippage enabled + diagnose_command on.
 #[test]
 fn diagnose_skill_written_when_slippage_enabled() {
