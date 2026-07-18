@@ -737,6 +737,7 @@ impl Config {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::CodebaseMemory;
     use crate::HashingMode;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -988,6 +989,23 @@ mod tests {
             )
     }
 
+    fn arb_codebase_memory() -> impl Strategy<Value = CodebaseMemory> {
+        (
+            prop::collection::vec(arb_string(), 1..3),
+            prop::option::of(arb_string()),
+        )
+            .prop_map(|(when, index_path)| CodebaseMemory { when, index_path })
+    }
+
+    proptest! {
+        #[test]
+        fn codebase_memory_yaml_roundtrips(cm in arb_codebase_memory()) {
+            let yaml = serde_yaml::to_string(&cm).unwrap();
+            let parsed: CodebaseMemory = serde_yaml::from_str(&yaml).unwrap();
+            prop_assert_eq!(cm, parsed);
+        }
+    }
+
     fn arb_memory() -> impl Strategy<Value = Memory> {
         (
             arb_string(),
@@ -1096,6 +1114,7 @@ mod tests {
             }),
             prop::collection::vec(arb_memory(), 0..3),
             prop::collection::vec(arb_throttle(), 0..2),
+            prop::collection::vec(arb_codebase_memory(), 0..3),
             prop::collection::btree_map(
                 arb_string(),
                 arb_string().prop_map(|addr| HostEntry { addr }),
@@ -1134,6 +1153,7 @@ mod tests {
                     mcp,
                     memory,
                     throttle,
+                    codebase_memory,
                     host,
                     capabilities,
                     marketplace,
@@ -1153,7 +1173,10 @@ mod tests {
                         native: Default::default(),
                         bundle,
                         mcp,
-                        features: if memory.is_empty() && throttle.is_empty() {
+                        features: if memory.is_empty()
+                            && throttle.is_empty()
+                            && codebase_memory.is_empty()
+                        {
                             None
                         } else {
                             Some(Features {
@@ -1164,7 +1187,7 @@ mod tests {
                                 read_once: None,
                                 slippage: None,
                                 task_tracker: None,
-                                codebase_memory: vec![],
+                                codebase_memory,
                             })
                         },
                         marketplace,
