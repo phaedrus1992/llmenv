@@ -62,6 +62,26 @@ const COMPACT_SURVIVAL_FRAGMENT: &str = concat!(
     "across compactions to catch gaps your restored context might miss.\n",
 );
 
+/// #231: fragment appended to CLAUDE.md when the task tracker is enabled.
+/// Steers the agent to use `llmenv task` for durable cross-session state.
+const TASK_TRACKER_FRAGMENT: &str = concat!(
+    "# Task Tracker\n",
+    "\n",
+    "This project has the llmenv task tracker enabled. Use it to record durable,\n",
+    "cross-session state instead of relying on in-session TODOs:\n",
+    "\n",
+    "- `llmenv task add \"<title>\"` before starting new work.\n",
+    "- `llmenv task start <slug>` to claim a task you're actively working on.\n",
+    "- `llmenv task done <slug>` when it's finished.\n",
+    "- `llmenv task add \"<title>\" --parent <slug>` for a sub-task instead of\n",
+    "  abandoning the current task to start something unrelated.\n",
+    "- `llmenv task note <slug> \"<text>\"` to record progress before a context\n",
+    "  compaction or session end.\n",
+    "\n",
+    "If a session starts with `wip` tasks already recorded, resume or finish\n",
+    "them before starting new top-level work.\n",
+);
+
 /// `(engine-neutral event, native Claude event)` pairs for the always-on
 /// baseline hooks. Registered unconditionally — `hook-run` itself no-ops
 /// cheaply when neither memory nor session logging is configured — so this
@@ -263,6 +283,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
         {
             claude_md_content.push_str("\n\n<!-- from slippage control: compact_survival -->\n");
             claude_md_content.push_str(COMPACT_SURVIVAL_FRAGMENT);
+        }
+
+        // #231: append task-tracker fragment when features.task_tracker.enabled.
+        if let Some(tt) = manifest
+            .capabilities
+            .features
+            .as_ref()
+            .and_then(|f| f.task_tracker.as_ref())
+            && tt.enabled
+        {
+            claude_md_content.push_str("\n\n<!-- from task_tracker -->\n");
+            claude_md_content.push_str(TASK_TRACKER_FRAGMENT);
         }
         crate::paths::write_owner_only(&out.join("CLAUDE.md"), claude_md_content.as_bytes())?;
         owned.push(PathBuf::from("CLAUDE.md"));
