@@ -1834,7 +1834,7 @@ fn run_config_context() {
         }
     };
 
-    let text = format!(
+    let mut text = format!(
         "llmenv source config:\n\
          \u{2022} Config: {config}\n\
          \u{2022} Bundles: {bundles}\n\
@@ -1844,6 +1844,27 @@ fn run_config_context() {
         config = config_path.display(),
         bundles = bundles_dir.display(),
     );
+
+    // #231: append the task-tracker SessionStart reminder, if enabled. This
+    // is the only SessionStart hook whose additionalContext Claude Code
+    // actually surfaces (see emit_hook_context's #558 comment — hook-run's
+    // own SessionStart output is suppressed), so cross-session task pickup
+    // rides this existing channel rather than hook-run.
+    if let Ok(config) = Config::load(&config_path)
+        && let Some(tt) = config
+            .features
+            .as_ref()
+            .and_then(|f| f.task_tracker.as_ref())
+        && tt.enabled
+        && let Ok(state_dir) = paths::state_dir()
+    {
+        let reminder = crate::task::session_start_reminder(&state_dir);
+        if !reminder.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(&reminder);
+        }
+    }
+
     emit(&text);
 }
 
