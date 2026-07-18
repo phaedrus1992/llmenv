@@ -310,6 +310,30 @@ fn json_or_empty(v: &serde_json::Value) -> String {
     }
 }
 
+/// Append `text` (the read_once advisory/deny result) to `out`. Debug-asserts
+/// that `out` is empty whenever `text` carries the `__DENY__:` sentinel —
+/// `run()` treats the *entire* returned string as the deny reason once it
+/// detects that prefix (see the `starts_with("__DENY__:")` check below), so
+/// mixing in other content (memory-action output, session-log text) would
+/// either corrupt the reason or, if positioned wrong, make the prefix check
+/// miss the deny and silently downgrade it to an allow. This is dormant today
+/// only because `dispatch(HookEvent::PreToolUse, ..)` always returns no
+/// actions (#868) — the assertion turns a future violation of that into a
+/// loud test failure instead of a silent, security-relevant regression.
+fn append_read_once_result(out: &mut String, text: &str) {
+    debug_assert!(
+        out.is_empty() || !text.starts_with("__DENY__:"),
+        "read_once deny text must be the only content in `out` — a non-empty \
+         `out` before a deny append means dispatch() started producing \
+         PreToolUse actions, which run()'s positional __DENY__: prefix check \
+         cannot safely combine with"
+    );
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(text);
+}
+
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
 /// `Ok(())` even when the backend is unreachable.
 pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
@@ -671,10 +695,7 @@ fn run_inner(
             if let Some(text) = &read_once_text
                 && !text.is_empty()
             {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(text);
+                append_read_once_result(&mut out, text);
             }
 
             Ok::<String, anyhow::Error>(out)
@@ -1331,6 +1352,40 @@ fn post_session_consolidation() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_read_once_result_appends_advisory_to_empty_out() {
+        let mut out = String::new();
+        append_read_once_result(&mut out, "advisory text");
+        assert_eq!(out, "advisory text");
+    }
+
+    #[test]
+    fn append_read_once_result_appends_deny_to_empty_out() {
+        let mut out = String::new();
+        append_read_once_result(&mut out, "__DENY__:already read");
+        assert_eq!(out, "__DENY__:already read");
+    }
+
+    #[test]
+    fn append_read_once_result_appends_advisory_to_nonempty_out() {
+        let mut out = String::from("existing content");
+        append_read_once_result(&mut out, "advisory text");
+        assert_eq!(out, "existing content\nadvisory text");
+    }
+
+    // #868: `out` being non-empty before a deny append means dispatch()
+    // started producing PreToolUse actions, which run()'s positional
+    // __DENY__: prefix check can't safely combine with — this must fail
+    // loudly (in debug/test builds) rather than silently downgrade a deny to
+    // an allow.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "read_once deny text must be the only content")]
+    fn append_read_once_result_panics_when_out_nonempty_before_deny() {
+        let mut out = String::from("existing content");
+        append_read_once_result(&mut out, "__DENY__:already read");
+    }
 
     #[test]
     fn parses_neutral_event_names() {
