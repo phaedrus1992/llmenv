@@ -615,6 +615,85 @@ fn pre_tool_use_read_twice_warn_survives_pipeline_error_after_decision() {
     );
 }
 
+/// A valid config with a file session-log sink enabled at Info level (the
+/// level `SessionEnd`/`EventKind::LifecycleEnd` events log at), no memory
+/// backend, and no other features.
+fn config_with_file_session_log() -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: test-bundle
+    when: [test]
+
+session_log:
+  file:
+    enabled: true
+    level: info
+  transcript:
+    enabled: false
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+    )
+}
+
+// #866: the SessionEnd dedup early-return (skip the redundant Store when the
+// context chunk is unchanged since the last SessionEnd) must not also skip
+// session-log capture -- same bug class as #864/#231, this time for the
+// dedup fast path.
+#[test]
+fn session_end_dedup_skip_still_writes_session_log() {
+    let (dir, config_path) = setup_config(&config_with_file_session_log());
+
+    let payload = serde_json::json!({
+        "hook_event_name": "SessionEnd",
+        "session_id": "test-session-end-dedup",
+    })
+    .to_string();
+
+    // First SessionEnd -- no prior dedup snapshot, proceeds normally and logs.
+    hook_cmd(dir.path(), &config_path, "session_end")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success();
+
+    // Second SessionEnd with an identical context chunk -- the dedup fast
+    // path fires (skipping the redundant store), but session-log capture
+    // must still happen.
+    hook_cmd(dir.path(), &config_path, "session_end")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success();
+
+    let log_path = dir.path().join("session-log.jsonl");
+    let log_content = fs::read_to_string(&log_path).expect("session-log.jsonl must exist");
+    let lifecycle_end_count = log_content.matches("\"lifecycle_end\"").count();
+    assert_eq!(
+        lifecycle_end_count, 2,
+        "session log must record both SessionEnd events even when the dedup \
+         skip fires on the second one; got: {log_content}"
+    );
+}
+
 fn config_with_task_tracker() -> String {
     format!(
         r#"
