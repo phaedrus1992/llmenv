@@ -16,6 +16,7 @@ pub mod plugins;
 pub mod scope;
 pub mod session_log;
 pub mod sync;
+pub mod task;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 pub mod throttle;

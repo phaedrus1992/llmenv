@@ -351,6 +351,11 @@ enum Command {
         #[arg(long)]
         track: Option<String>,
     },
+    /// Manage the in-engine task tracker (#231).
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
 }
 
 /// `llmenv read-once` subcommands (#318).
@@ -358,6 +363,42 @@ enum Command {
 enum ReadOnceCommand {
     /// Clear all cached read-once entries.
     Clear,
+}
+
+/// `llmenv task` sub-subcommands (#231).
+#[derive(Subcommand)]
+enum TaskCommand {
+    /// Create a new task (open state).
+    Add {
+        title: String,
+        /// Slug of the parent task, if this is a sub-task.
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// Claim a task, transitioning it to `wip`.
+    Start { id: String },
+    /// Mark a task done.
+    Done { id: String },
+    /// List all tasks.
+    Ls {
+        #[arg(long, value_enum)]
+        format: Option<TaskListFormat>,
+    },
+    /// Show full detail for one task.
+    Show { id: String },
+    /// Append a progress note. Reads from stdin if `text` is omitted.
+    Note { id: String, text: Option<String> },
+    /// Record that `id` is blocked on `on`.
+    Block {
+        id: String,
+        #[arg(long)]
+        on: String,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TaskListFormat {
+    Json,
 }
 
 /// `llmenv memory` sub-subcommands (R2).
@@ -530,6 +571,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Upgrade { check, track }) => {
             upgrade::run_upgrade(track, check)?;
         }
+        Some(Command::Task { command }) => run_task_command(command)?,
         Some(Command::Prune {
             all,
             older_than,
@@ -1792,7 +1834,7 @@ fn run_config_context() {
         }
     };
 
-    let text = format!(
+    let mut text = format!(
         "llmenv source config:\n\
          \u{2022} Config: {config}\n\
          \u{2022} Bundles: {bundles}\n\
@@ -1802,6 +1844,39 @@ fn run_config_context() {
         config = config_path.display(),
         bundles = bundles_dir.display(),
     );
+
+    // #231: append the task-tracker SessionStart reminder, if enabled. This
+    // is the only SessionStart hook whose additionalContext Claude Code
+    // actually surfaces (see emit_hook_context's #558 comment — hook-run's
+    // own SessionStart output is suppressed), so cross-session task pickup
+    // rides this existing channel rather than hook-run.
+    match Config::load(&config_path) {
+        Ok(config) => {
+            let task_tracker_enabled = config
+                .features
+                .as_ref()
+                .and_then(|f| f.task_tracker.as_ref())
+                .is_some_and(|tt| tt.enabled);
+            if task_tracker_enabled {
+                match paths::state_dir() {
+                    Ok(state_dir) => {
+                        let reminder = crate::task::session_start_reminder(&state_dir);
+                        if !reminder.is_empty() {
+                            text.push_str("\n\n");
+                            text.push_str(&reminder);
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
+                    ),
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("llmenv config-context: failed to load config for task-tracker reminder: {e}")
+        }
+    }
+
     emit(&text);
 }
 
@@ -2435,6 +2510,90 @@ fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
     paths::write_owner_only_atomic(config_path, yaml.as_bytes())
         .with_context(|| format!("writing config {}", config_path.display()))?;
     eprintln!("✓ {count} setting(s) added to init.seeded_settings in config.yaml");
+    Ok(())
+}
+
+/// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
+/// `crate::task`, which owns the store logic.
+fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
+    let state_dir = crate::paths::state_dir()?;
+    match command {
+        TaskCommand::Add { title, parent } => {
+            // New-project guard: warn before starting an unrelated top-level
+            // task while another is still in progress. CLI-side check beats
+            // a transcript heuristic — this is a plain fact about current
+            // task state, not something to infer.
+            if parent.is_none() {
+                let wip: Vec<String> = crate::task::list_tasks(&state_dir)
+                    .into_iter()
+                    .filter(|t| t.state == crate::task::TaskState::Wip)
+                    .map(|t| t.title)
+                    .collect();
+                if !wip.is_empty() {
+                    println!(
+                        "Note: you have {} task(s) already in progress ({}). \
+                         Consider `--parent <slug>` to make this a sub-task, \
+                         or finish the current work first.",
+                        wip.len(),
+                        wip.join(", ")
+                    );
+                }
+            }
+            let task = crate::task::add_task(&state_dir, &title, parent.as_deref())?;
+            println!("Added task '{}' ({})", task.slug, task.title);
+        }
+        TaskCommand::Start { id } => {
+            let task = crate::task::start_task(&state_dir, &id)?;
+            println!("Started '{}' — now {:?}", task.slug, task.state);
+        }
+        TaskCommand::Done { id } => {
+            let task = crate::task::done_task(&state_dir, &id)?;
+            println!("Completed '{}'", task.slug);
+        }
+        TaskCommand::Ls { format } => {
+            let mut tasks = crate::task::list_tasks(&state_dir);
+            tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            match format {
+                Some(TaskListFormat::Json) => {
+                    println!("{}", serde_json::to_string(&tasks)?);
+                }
+                None => {
+                    if tasks.is_empty() {
+                        println!("No tasks.");
+                    }
+                    for t in &tasks {
+                        println!("{:?}\t{}\t{}", t.state, t.slug, t.title);
+                    }
+                }
+            }
+        }
+        TaskCommand::Show { id } => {
+            let slug = crate::task::resolve_identifier(&state_dir, &id)?;
+            let task = crate::task::load_task(&state_dir, &slug)?;
+            println!("{}", serde_json::to_string_pretty(&task)?);
+        }
+        TaskCommand::Note { id, text } => {
+            let text = match text {
+                Some(t) => t,
+                None => {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)?;
+                    buf.trim().to_string()
+                }
+            };
+            let task = crate::task::note_task(&state_dir, &id, &text)?;
+            println!("Noted on '{}'", task.slug);
+        }
+        TaskCommand::Block { id, on } => {
+            let task = crate::task::block_task(&state_dir, &id, &on)?;
+            println!(
+                "'{}' is now blocked on: {}",
+                task.slug,
+                task.blocked_on.join(", ")
+            );
+        }
+    }
     Ok(())
 }
 
@@ -4151,6 +4310,7 @@ mod tests {
                 upgrade: None,
                 read_once: None,
                 slippage: None,
+                task_tracker: None,
             }),
             host,
             ..Config::default()

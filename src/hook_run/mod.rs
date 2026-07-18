@@ -424,13 +424,30 @@ fn run_inner(
         ));
     }
 
+    // #231: whether the task tracker's Stop reminder is wanted. Computed
+    // before the #702 early-exit (below) so it can both take the cheap fast
+    // path when session-log has no interest in Stop, and be appended to
+    // `out` further down when session-log *does* want Stop — never
+    // unconditionally short-circuiting, or enabling task_tracker would
+    // silently drop Stop-event session logging (that early-return shape was
+    // tried and reverted; see the git history on this block).
+    let task_tracker_enabled = config
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .is_some_and(|t| t.enabled);
+    let log_cfg = config.session_log_resolved();
+    if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
+        let state_dir = crate::paths::state_dir()?;
+        return Ok(crate::task::stop_hook_reminder(&state_dir));
+    }
+
     // #702: Early-exit for events that dispatch no memory actions AND have
     // no session-log consumer. The expensive work below (scope evaluation,
     // bundle merge, memory MCP resolution / HTTP client) is only needed when
     // dispatch produces actions (SessionStart/TurnStart/SessionEnd),
     // PostToolUse needs WebFetch auto-store, PostSession runs consolidation,
     // or session-log capture is active.
-    let log_cfg = config.session_log_resolved();
     if !matches!(
         event,
         HookEvent::SessionStart
@@ -587,6 +604,21 @@ fn run_inner(
             let state_dir = crate::paths::state_dir()?;
             let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
             crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
+        }
+
+        // #231: append the task-tracker Stop reminder. Only reached here when
+        // session-log also wants Stop (the log_cfg.any_sink_enabled() case
+        // above already short-circuited before this point otherwise) — so
+        // this never displaces run_session_log, it just adds to `out`.
+        if event == HookEvent::Stop && task_tracker_enabled {
+            let state_dir = crate::paths::state_dir()?;
+            let reminder = crate::task::stop_hook_reminder(&state_dir);
+            if !reminder.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&reminder);
+            }
         }
 
         Ok::<String, anyhow::Error>(out)
