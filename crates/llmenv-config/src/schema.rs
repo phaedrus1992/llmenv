@@ -47,6 +47,10 @@ pub struct Features {
     /// Slippage control: guardrails against model behavior drift.
     #[serde(default)]
     pub slippage: Option<SlippageControl>,
+    /// In-engine task tracker (#231): durable, agent-native "what am I
+    /// working on" state, off by default.
+    #[serde(default)]
+    pub task_tracker: Option<TaskTracker>,
 }
 
 /// Self-upgrade configuration, nested under `features.upgrade`.
@@ -815,6 +819,18 @@ fn default_listen_host() -> String {
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct ContextMode {
     /// Whether the built-in context-mode plugin is wired up.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// In-engine task tracker (#231): a file-based task store with CLI commands,
+/// injected context, and lifecycle-hook ordering enforcement. Off by default
+/// — disabled means zero materialized-output change and zero hook cost.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct TaskTracker {
+    /// Whether the task tracker's CLAUDE.md fragment and lifecycle hooks are
+    /// active. The `llmenv task` CLI subcommands work regardless of this flag
+    /// — it only gates the injected-context and hook-reminder side effects.
     #[serde(default)]
     pub enabled: bool,
 }
@@ -1927,6 +1943,28 @@ mod tests {
         assert_eq!(sc.effort_level, None);
     }
 
+    // ===== TaskTracker config tests =====
+
+    #[test]
+    fn task_tracker_parses_enabled() {
+        let yaml = "features:\n  task_tracker:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.features.unwrap().task_tracker.unwrap().enabled);
+    }
+
+    #[test]
+    fn task_tracker_absent_is_none() {
+        let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
+        assert!(cfg.features.unwrap().task_tracker.is_none());
+    }
+
+    #[test]
+    fn task_tracker_default_disabled() {
+        let yaml = "features:\n  task_tracker: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.features.unwrap().task_tracker.unwrap().enabled);
+    }
+
     /// The manual `Default` impl for SlippageControl must stay in sync with
     /// serde defaults — if a field is added to the struct with a serde default
     /// but the manual impl isn't updated, they silently diverge.
@@ -1973,6 +2011,17 @@ mod tests {
                 explain_before_act: false,
                 answer_before_act: false,
             }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Features = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn features_roundtrip_task_tracker() {
+        let original = Features {
+            task_tracker: Some(TaskTracker { enabled: true }),
             ..Default::default()
         };
         let json = serde_json::to_string(&original).unwrap();

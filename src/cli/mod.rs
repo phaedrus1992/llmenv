@@ -4151,6 +4151,7 @@ mod tests {
                 upgrade: None,
                 read_once: None,
                 slippage: None,
+                task_tracker: None,
             }),
             host,
             ..Config::default()
