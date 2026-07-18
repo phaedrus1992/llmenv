@@ -141,9 +141,27 @@ fn collect_mcps(
     let top_level =
         crate::mcp::resolve::resolve_mcps(&config.mcp, memory, &config.host, active_tags);
     let bundle = crate::mcp::resolve::resolve_bundle_mcps(bundle_mcp, active_tags);
+    let codebase_memory_count = config
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.as_slice())
+        .and_then(|entries| {
+            let project_root = std::env::current_dir().ok()?;
+            let state_dir = crate::paths::state_dir().ok()?;
+            Some(
+                crate::mcp::resolve::resolve_codebase_memory_entries(
+                    entries,
+                    active_tags,
+                    &project_root,
+                    &state_dir,
+                )
+                .len(),
+            )
+        })
+        .unwrap_or(0);
     match (top_level, bundle) {
         (Ok(top), Ok(bundle)) => Some(CountData {
-            total: (top.len() + bundle.len()) as u64,
+            total: (top.len() + bundle.len() + codebase_memory_count) as u64,
             errors: 0,
         }),
         _ => Some(CountData {
@@ -489,6 +507,28 @@ mod tests {
             result,
             Some(CountData {
                 total: 0,
+                errors: 0
+            })
+        );
+    }
+
+    #[test]
+    fn collect_mcps_counts_active_codebase_memory_entries() {
+        let config = Config {
+            features: Some(crate::config::Features {
+                codebase_memory: vec![crate::config::CodebaseMemory {
+                    when: vec!["proj".to_string()],
+                    index_path: None,
+                }],
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let result = collect_mcps(&config, &[], &tags(&["proj"]));
+        assert_eq!(
+            result,
+            Some(CountData {
+                total: 1,
                 errors: 0
             })
         );
