@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 
 use crate::config::{
-    Capabilities, Features, HostEntry, Memory, NativePermissionRules, PermissionMode, Permissions,
-    Throttle,
+    Capabilities, CodebaseMemory, Features, HostEntry, Memory, NativePermissionRules,
+    PermissionMode, Permissions, Throttle,
 };
 use crate::util::{dedup, merge_yaml, normalize_yaml};
 
@@ -124,18 +124,22 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         .max_by_key(|(p, _)| *p)
         .map(|(_, v)| v);
 
-    // Collect memory and throttle entries from all contributors: concat + dedup
-    // (same list model as hooks, plugins, mcp). Ambiguity at resolve-time, not merge-time.
+    // Collect memory, throttle, and codebase_memory entries from all
+    // contributors: concat + dedup (same list model as hooks, plugins, mcp).
+    // Ambiguity at resolve-time, not merge-time.
     let mut memory: Vec<Memory> = Vec::new();
     let mut throttle: Vec<Throttle> = Vec::new();
+    let mut codebase_memory: Vec<CodebaseMemory> = Vec::new();
     for c in &ordered {
         if let Some(features) = &c.capabilities.features {
             memory.extend(features.memory.iter().cloned());
             throttle.extend(features.throttle.iter().cloned());
+            codebase_memory.extend(features.codebase_memory.iter().cloned());
         }
     }
     dedup(&mut memory);
     dedup(&mut throttle);
+    dedup(&mut codebase_memory);
 
     // #317: resolve feature scalars (slippage, context_mode, upgrade, read_once).
     // Same highest-precedence-wins pattern as auto_memory_enabled.
@@ -206,6 +210,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
 
     let features = if memory.is_empty()
         && throttle.is_empty()
+        && codebase_memory.is_empty()
         && slippage.is_none()
         && context_mode.is_none()
         && upgrade.is_none()
@@ -222,6 +227,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             read_once,
             slippage,
             task_tracker,
+            codebase_memory,
         })
     };
 
@@ -1641,6 +1647,7 @@ mod tests {
                     read_once: None,
                     slippage: None,
                     task_tracker: None,
+                    codebase_memory: vec![],
                 }),
                 ..Default::default()
             }
@@ -1678,6 +1685,7 @@ mod tests {
                     read_once: None,
                     slippage: None,
                     task_tracker: None,
+                    codebase_memory: vec![],
                 }),
                 ..Default::default()
             }

@@ -51,6 +51,11 @@ pub struct Features {
     /// working on" state, off by default.
     #[serde(default)]
     pub task_tracker: Option<TaskTracker>,
+    /// codebase-memory-mcp integration (#365): tag-activated local stdio MCP
+    /// entries. Each resolves independently (no "at most one active" rule
+    /// like `memory` — multiple local per-project servers can coexist).
+    #[serde(default)]
+    pub codebase_memory: Vec<CodebaseMemory>,
 }
 
 /// Self-upgrade configuration, nested under `features.upgrade`.
@@ -1129,6 +1134,24 @@ pub struct Memory {
     pub auto_prune: bool,
 }
 
+/// A local, tag-activated `codebase-memory-mcp` server. Unlike `Memory`
+/// (ICM), this resolves to a **local stdio** MCP entry, not a network
+/// client — codebase-memory-mcp has no remote-serve mode. `CBM_CACHE_DIR`
+/// and `CBM_ALLOWED_ROOT` are always computed by llmenv (state dir +
+/// project root), never user-configurable, so a declared entry can't
+/// accidentally scope the indexer outside the intended project.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CodebaseMemory {
+    /// Tags that activate this server, intersected with active scope tags
+    /// (same selection model as `mcp`/`memory`).
+    #[serde(default)]
+    pub when: Vec<String>,
+    /// Override the index storage directory (`CBM_CACHE_DIR` env var).
+    /// Defaults to `<state_dir>/codebase-memory/<project>` when unset.
+    #[serde(default)]
+    pub index_path: Option<String>,
+}
+
 fn default_throttle_cache_ttl() -> u64 {
     30
 }
@@ -1525,6 +1548,26 @@ mod tests {
             Just(LogLevel::Debug),
             Just(LogLevel::Trace),
         ]
+    }
+
+    #[test]
+    fn codebase_memory_round_trips_through_yaml() {
+        let yaml = r#"
+when: [my-project]
+index_path: /custom/index/path
+"#;
+        let cm: CodebaseMemory = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cm.when, vec!["my-project".to_string()]);
+        assert_eq!(cm.index_path.as_deref(), Some("/custom/index/path"));
+
+        let cm_defaults: CodebaseMemory = serde_yaml::from_str("when: [x]").unwrap();
+        assert_eq!(cm_defaults.index_path, None);
+    }
+
+    #[test]
+    fn features_codebase_memory_defaults_to_empty() {
+        let features: Features = serde_yaml::from_str("{}").unwrap();
+        assert!(features.codebase_memory.is_empty());
     }
 
     #[test]
