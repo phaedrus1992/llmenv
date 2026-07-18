@@ -152,9 +152,16 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
 pub fn add_task(state_dir: &Path, title: &str, parent: Option<&str>) -> anyhow::Result<Task> {
     let dir = tasks_dir(state_dir);
     std::fs::create_dir_all(&dir)?;
-    let base_slug = slugify(title);
-    let slug = unique_slug(&dir, &base_slug);
     let now = now_rfc3339();
+    let mut base_slug = slugify(title);
+    if base_slug.is_empty() {
+        // A title with no ASCII-alphanumeric characters at all (e.g. a
+        // CJK-only title, or pure punctuation) would otherwise collapse to
+        // an empty slug — a hidden `.json` file that's awkward to reference.
+        // Fall back to a timestamp-derived slug instead.
+        base_slug = format!("task-{}", now.replace([':', '-'], ""));
+    }
+    let slug = unique_slug(&dir, &base_slug);
     let task = Task {
         slug,
         title: title.to_string(),
@@ -213,13 +220,22 @@ pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
         anyhow::bail!("task '{slug}' is already done; cannot start it again");
     }
     for blocker_slug in &task.blocked_on {
-        if let Ok(blocker) = load_task(state_dir, blocker_slug)
-            && blocker.state != TaskState::Done
-        {
-            eprintln!(
-                "llmenv: warning: '{slug}' is blocked on '{blocker_slug}' ({:?}, not done) — starting anyway",
-                blocker.state
-            );
+        match load_task(state_dir, blocker_slug) {
+            Ok(blocker) if blocker.state != TaskState::Done => {
+                eprintln!(
+                    "llmenv: warning: '{slug}' is blocked on '{blocker_slug}' ({:?}, not done) — starting anyway",
+                    blocker.state
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // Dangling blocked_on reference (deleted/corrupt blocker file) —
+                // warn and treat the edge as absent, matching the load-time
+                // tolerance documented for parent/blocked_on slugs.
+                eprintln!(
+                    "llmenv: warning: '{slug}' is blocked on '{blocker_slug}', which could not be loaded ({e}) — starting anyway"
+                );
+            }
         }
     }
     task.state = TaskState::Wip;
@@ -257,10 +273,14 @@ pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Ta
 /// Errors if `on` doesn't resolve to an existing task — this is a fresh
 /// write, not a load of possibly-stale state, so it's validated eagerly
 /// (unlike the load-time tolerance for dangling `blocked_on` entries left
-/// behind by a since-deleted task file).
+/// behind by a since-deleted task file). Also errors if `input` and `on`
+/// resolve to the same task — a task cannot block itself.
 pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Task> {
     let slug = resolve_identifier(state_dir, input)?;
     let on_slug = resolve_identifier(state_dir, on)?;
+    if slug == on_slug {
+        anyhow::bail!("task '{slug}' cannot be blocked on itself");
+    }
     let mut task = load_task(state_dir, &slug)?;
     if !task.blocked_on.contains(&on_slug) {
         task.blocked_on.push(on_slug);
@@ -523,6 +543,39 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let task = add_task(dir.path(), "Blocked", None).expect("test");
         assert!(block_task(dir.path(), &task.slug, "no-such-task").is_err());
+    }
+
+    #[test]
+    fn block_task_on_self_errors() {
+        let dir = TempDir::new().expect("test");
+        let task = add_task(dir.path(), "Solo task", None).expect("test");
+        assert!(block_task(dir.path(), &task.slug, &task.slug).is_err());
+    }
+
+    #[test]
+    fn add_task_with_no_alphanumeric_title_falls_back_to_timestamp_slug() {
+        let dir = TempDir::new().expect("test");
+        let task = add_task(dir.path(), "!!!", None).expect("test");
+        assert!(!task.slug.is_empty());
+        assert!(task.slug.starts_with("task-"));
+        let loaded = load_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(loaded, task);
+    }
+
+    #[test]
+    fn start_task_blocked_on_deleted_task_warns_but_allows() {
+        let dir = TempDir::new().expect("test");
+        let blocker = add_task(dir.path(), "Blocker", None).expect("test");
+        let task = add_task(dir.path(), "Blocked", None).expect("test");
+        block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
+        std::fs::remove_file(
+            dir.path()
+                .join("tasks")
+                .join(format!("{}.json", blocker.slug)),
+        )
+        .expect("test");
+        let started = start_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(started.state, TaskState::Wip);
     }
 
     #[test]
