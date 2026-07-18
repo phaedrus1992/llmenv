@@ -207,6 +207,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             upgrade,
             read_once,
             slippage,
+            task_tracker: None,
         })
     };
 
@@ -1625,6 +1626,7 @@ mod tests {
                     upgrade: None,
                     read_once: None,
                     slippage: None,
+                    task_tracker: None,
                 }),
                 ..Default::default()
             }
@@ -1661,6 +1663,7 @@ mod tests {
                     upgrade: None,
                     read_once: None,
                     slippage: None,
+                    task_tracker: None,
                 }),
                 ..Default::default()
             }
