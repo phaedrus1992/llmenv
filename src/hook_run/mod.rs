@@ -428,7 +428,12 @@ fn run_inner(
             claude_session_id,
             read_once,
         );
-        if !log_cfg.any_sink_wants(LogLevel::Debug) {
+        // Derived from the same `event_to_log_kind` mapping `run_session_log`
+        // itself uses, rather than hardcoding `LogLevel::Debug` — a hardcoded
+        // level would silently drift out of sync if `EventKind::ToolUse`'s
+        // level ever changed, reintroducing this exact bug class.
+        let level = event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
+        if !log_cfg.any_sink_wants(level) {
             return Ok(text);
         }
         Some(text)
