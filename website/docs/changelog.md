@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Bundle- and user-declared hooks no longer emit null-valued `tool`/`command` keys into the generated engine config — the Claude Code adapter rendered `"tool": null` for a `command`-type handler (and `"command": null` for an `mcp_tool` handler), and the Crush adapter rendered `"command": null` when a command hook had no command; absent fields are now omitted in both adapters (#720)
 - Skill frontmatter `name`/`description` values containing control characters (e.g. a stray vertical tab) no longer produce invalid YAML when auto-quoted — control characters are now escaped instead of passed through literally (#859)
+- `features.read_once` no longer silently drops Debug-level session-log capture for `PreToolUse` events — enabling it previously short-circuited before session logging ran whenever a Debug-level session-log sink was also configured; both now fire (#864)
 
 ## [3.5.1] - 2026-07-15
 
