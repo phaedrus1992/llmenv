@@ -149,9 +149,8 @@ fn collect_mcps(
     let codebase_memory = if codebase_memory_entries.is_empty() {
         Ok(Vec::new())
     } else {
-        std::env::current_dir()
+        crate::mcp::resolve::codebase_memory_paths()
             .ok()
-            .zip(crate::paths::state_dir().ok())
             .ok_or(())
             .and_then(|(project_root, state_dir)| {
                 crate::mcp::resolve::resolve_codebase_memory_entries(
