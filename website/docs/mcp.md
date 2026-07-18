@@ -134,6 +134,45 @@ With this, `laptop` always emits `home`, so its agents always get the memory
 client URL — even when the network can't be auto-detected. The host that
 matches `server_host` additionally launches the local proxy.
 
+## Codebase memory (`codebase_memory:`)
+
+[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) is a
+local code-intelligence MCP server — a knowledge graph of a codebase's
+functions, classes, and call chains. Unlike the memory backend above, it has
+**no remote-serve mode**: it always runs as a local stdio process per
+project, so `features.codebase_memory:` entries carry no `server_host`/`port`
+— just activation tags and an optional index-path override.
+
+```yaml
+features:
+  codebase_memory:
+    - when: [my-project]
+      index_path: null   # optional; default <state_dir>/codebase-memory
+```
+
+llmenv always computes two environment variables when launching the server,
+never left to the user:
+
+- `CBM_CACHE_DIR` — the index storage directory
+- `CBM_ALLOWED_ROOT` — the current working directory, so `index_repository`
+  can't be steered outside the intended project
+
+Multiple `codebase_memory` entries may be active simultaneously — each is an
+independent local process, not a shared resource like the memory backend, so
+there's no "at most one active" restriction.
+
+On `SessionStart`, llmenv fires a fire-and-forget
+`codebase-memory-mcp cli index_repository` call for the active project. This
+registers it with the server's own background auto-watch (`auto_watch`,
+upstream default `true`), which re-indexes on git changes automatically —
+llmenv doesn't implement its own reindex scheduling on top of that.
+
+`codebase_memory` and `memory` (ICM) are fully independent: both can be
+active at once, and llmenv does not coordinate between them.
+
+See [Configuration → `features.codebase_memory:`](configuration.md#featurescodebase_memory)
+for the full field reference.
+
 ## Security considerations
 
 The memory backend has no transport security and no access control:
