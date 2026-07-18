@@ -4311,6 +4311,7 @@ mod tests {
                 read_once: None,
                 slippage: None,
                 task_tracker: None,
+                codebase_memory: vec![],
             }),
             host,
             ..Config::default()
