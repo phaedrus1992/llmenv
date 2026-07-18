@@ -123,7 +123,7 @@ fn quote_yaml_scalar(value: &str) -> String {
 /// (#873), so `quote_yaml_scalar` hex-escapes them too.
 fn is_yaml_noncharacter(c: char) -> bool {
     let cp = c as u32;
-    matches!(cp, 0xFDD0..=0xFDEF) || cp & 0xFFFE == 0xFFFE
+    matches!(cp, 0xFDD0..=0xFDEF) || (cp & 0xFFFE) == 0xFFFE
 }
 
 fn requote_name_and_description(frontmatter: &str) -> String {
@@ -421,6 +421,23 @@ mod tests {
                 .and_then(serde_yaml::Value::as_str)
                 .expect("key must be a string scalar");
             prop_assert_eq!(parsed, value.as_str());
+        }
+
+        /// `is_yaml_noncharacter`'s bit-trick (`(cp & 0xFFFE) == 0xFFFE`) must
+        /// agree with a naive reference built directly from the Unicode
+        /// noncharacter ranges, for any `char` — not just the finite set the
+        /// exhaustive test below enumerates. Also guards the inline claim
+        /// that noncharacters and `is_control()` are disjoint sets (#873).
+        #[test]
+        fn is_yaml_noncharacter_matches_reference_definition(c in proptest::char::any()) {
+            let cp = c as u32;
+            let naive = (0xFDD0..=0xFDEF).contains(&cp)
+                || (0..=0x10u32).any(|plane| {
+                    let base = plane * 0x1_0000;
+                    cp == base + 0xFFFE || cp == base + 0xFFFF
+                });
+            prop_assert_eq!(is_yaml_noncharacter(c), naive);
+            prop_assert!(!(c.is_control() && is_yaml_noncharacter(c)));
         }
     }
 
