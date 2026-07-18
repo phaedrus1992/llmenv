@@ -1156,6 +1156,7 @@ mod tests {
                                 upgrade: None,
                                 read_once: None,
                                 slippage: None,
+                                task_tracker: None,
                             })
                         },
                         marketplace,
@@ -1503,6 +1504,7 @@ mod tests {
                 upgrade: None,
                 read_once: None,
                 slippage: None,
+                task_tracker: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],
