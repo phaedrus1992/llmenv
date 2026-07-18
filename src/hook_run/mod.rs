@@ -407,22 +407,39 @@ fn run_inner(
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
     let t_config = std::time::Instant::now();
+    let log_cfg = config.session_log_resolved();
 
-    // #318: read-once file dedup hook — runs before scope/memory resolution
-    // since it doesn't need any of that. Gated on features.read_once.enabled
-    // so an empty hook-run output is emitted when the feature is off (the
-    // PreToolUse Read matcher is registered unconditionally).
-    if event == HookEvent::PreToolUse
+    // #318/#864: read-once file dedup hook — computed before scope/memory
+    // resolution since it doesn't need any of that. Only takes the early-
+    // return fast path when session-log has no interest in PreToolUse at
+    // Debug level (EventKind::ToolUse's level); otherwise falls through so
+    // `run_session_log` still runs, and the read_once advisory/deny text is
+    // appended to `out` further down — never unconditionally short-
+    // circuiting, or enabling read_once would silently drop Debug-level
+    // session logging for every PreToolUse event. Mirrors the #231 fix for
+    // the task-tracker Stop hook (same early-return-drops-logging bug class).
+    let read_once_text = if event == HookEvent::PreToolUse
         && let Some(ref features) = config.features
         && let Some(ref read_once) = features.read_once
         && read_once.enabled
     {
-        return Ok(crate::hook_run::read_once::handle_pre_tool_use(
+        let text = crate::hook_run::read_once::handle_pre_tool_use(
             stdin_payload,
             claude_session_id,
             read_once,
-        ));
-    }
+        );
+        // Derived from the same `event_to_log_kind` mapping `run_session_log`
+        // itself uses, rather than hardcoding `LogLevel::Debug` — a hardcoded
+        // level would silently drift out of sync if `EventKind::ToolUse`'s
+        // level ever changed, reintroducing this exact bug class.
+        let level = event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
+        if !log_cfg.any_sink_wants(level) {
+            return Ok(text);
+        }
+        Some(text)
+    } else {
+        None
+    };
 
     // #231: whether the task tracker's Stop reminder is wanted. Computed
     // before the #702 early-exit (below) so it can both take the cheap fast
@@ -436,7 +453,6 @@ fn run_inner(
         .as_ref()
         .and_then(|f| f.task_tracker.as_ref())
         .is_some_and(|t| t.enabled);
-    let log_cfg = config.session_log_resolved();
     if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
         let state_dir = crate::paths::state_dir()?;
         return Ok(crate::task::stop_hook_reminder(&state_dir));
@@ -619,6 +635,20 @@ fn run_inner(
                 }
                 out.push_str(&reminder);
             }
+        }
+
+        // #864: append the read_once advisory/deny text. Only reached here
+        // when session-log also wants PreToolUse at Debug level (the
+        // early-return above already short-circuited before this point
+        // otherwise) — so this never displaces run_session_log, it just adds
+        // to `out`.
+        if let Some(text) = read_once_text
+            && !text.is_empty()
+        {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&text);
         }
 
         Ok::<String, anyhow::Error>(out)
