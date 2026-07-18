@@ -263,6 +263,45 @@ Manage the read-once file dedup cache (#318). `read-once clear` clears all
 cached read-once entries — use after reorganizing bundle content to force
 re-ingestion on the next turn.
 
+## `task`
+
+```text
+llmenv task add <title> [--parent SLUG]
+llmenv task start <id>
+llmenv task done <id>
+llmenv task ls [--format json]
+llmenv task show <id>
+llmenv task note <id> [text]
+llmenv task block <id> --on <other>
+```
+
+In-engine task tracker (#231): durable, cross-session "what am I working on"
+state, backed by one JSON file per task. `<id>` accepts an exact slug or any
+unambiguous prefix of one.
+
+- `task add <title> [--parent SLUG]` — create a task (`open` state); pass
+  `--parent` to record it as a sub-task instead of starting unrelated
+  top-level work.
+- `task start <id>` — claim a task, moving it to `wip`.
+- `task done <id>` — mark a task complete.
+- `task ls [--format json]` — list all tasks; `--format json` for
+  machine-readable output.
+- `task show <id>` — full detail for one task (notes, parent, blockers).
+- `task note <id> [text]` — append a progress note; reads from stdin if
+  `text` is omitted.
+- `task block <id> --on <other>` — record that `id` is blocked on `other`.
+
+The CLI subcommands always work. The injected CLAUDE.md guidance and the
+SessionStart/Stop lifecycle reminders (nudging the agent to resume or close
+`wip` tasks) are gated behind `features.task_tracker.enabled` (default
+`false`):
+
+```yaml
+features:
+  task_tracker:
+    enabled: true
+```
+
 ## `login`
 
 ```text

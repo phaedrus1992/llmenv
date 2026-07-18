@@ -47,6 +47,10 @@ pub struct Features {
     /// Slippage control: guardrails against model behavior drift.
     #[serde(default)]
     pub slippage: Option<SlippageControl>,
+    /// In-engine task tracker (#231): durable, agent-native "what am I
+    /// working on" state, off by default.
+    #[serde(default)]
+    pub task_tracker: Option<TaskTracker>,
 }
 
 /// Self-upgrade configuration, nested under `features.upgrade`.
@@ -582,8 +586,18 @@ impl Capabilities {
             && self.native_mcp.is_empty()
             && self.native.is_empty()
             && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
+            && self.features.as_ref().is_none_or(|f| f.throttle.is_empty())
             && self.features.as_ref().is_none_or(|f| f.read_once.is_none())
             && self.features.as_ref().is_none_or(|f| f.slippage.is_none())
+            && self
+                .features
+                .as_ref()
+                .is_none_or(|f| f.context_mode.is_none())
+            && self.features.as_ref().is_none_or(|f| f.upgrade.is_none())
+            && self
+                .features
+                .as_ref()
+                .is_none_or(|f| f.task_tracker.is_none())
             && self.host.is_empty()
             && self.model_providers.is_empty()
             && self.default_models.is_empty()
@@ -815,6 +829,18 @@ fn default_listen_host() -> String {
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct ContextMode {
     /// Whether the built-in context-mode plugin is wired up.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// In-engine task tracker (#231): a file-based task store with CLI commands,
+/// injected context, and lifecycle-hook ordering enforcement. Off by default
+/// — disabled means zero materialized-output change and zero hook cost.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct TaskTracker {
+    /// Whether the task tracker's CLAUDE.md fragment and lifecycle hooks are
+    /// active. The `llmenv task` CLI subcommands work regardless of this flag
+    /// — it only gates the injected-context and hook-reminder side effects.
     #[serde(default)]
     pub enabled: bool,
 }
@@ -1927,6 +1953,28 @@ mod tests {
         assert_eq!(sc.effort_level, None);
     }
 
+    // ===== TaskTracker config tests =====
+
+    #[test]
+    fn task_tracker_parses_enabled() {
+        let yaml = "features:\n  task_tracker:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.features.unwrap().task_tracker.unwrap().enabled);
+    }
+
+    #[test]
+    fn task_tracker_absent_is_none() {
+        let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
+        assert!(cfg.features.unwrap().task_tracker.is_none());
+    }
+
+    #[test]
+    fn task_tracker_default_disabled() {
+        let yaml = "features:\n  task_tracker: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.features.unwrap().task_tracker.unwrap().enabled);
+    }
+
     /// The manual `Default` impl for SlippageControl must stay in sync with
     /// serde defaults — if a field is added to the struct with a serde default
     /// but the manual impl isn't updated, they silently diverge.
@@ -1973,6 +2021,17 @@ mod tests {
                 explain_before_act: false,
                 answer_before_act: false,
             }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Features = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn features_roundtrip_task_tracker() {
+        let original = Features {
+            task_tracker: Some(TaskTracker { enabled: true }),
             ..Default::default()
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -2161,6 +2220,81 @@ mod tests {
         assert!(
             !caps.is_empty(),
             "is_empty must be false when lsp is non-empty"
+        );
+    }
+
+    /// Capabilities::is_empty() returns false when task_tracker is set — a
+    /// merge-gate regression: `merge()` skips adding the top-level contributor
+    /// entirely when `is_empty()` is true, so any field consumed only via the
+    /// merged manifest (not read from raw `Config`) must be listed here.
+    #[test]
+    fn capabilities_is_empty_false_with_task_tracker() {
+        let caps = Capabilities {
+            features: Some(Features {
+                task_tracker: Some(TaskTracker { enabled: true }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when task_tracker is set"
+        );
+    }
+
+    /// Variant of the task_tracker merge-gate bug: `throttle`/`context_mode`/
+    /// `upgrade` are also consumed only via the merged manifest and had the
+    /// same omission — found during #231's pre-pr-review.
+    #[test]
+    fn capabilities_is_empty_false_with_throttle() {
+        let caps = Capabilities {
+            features: Some(Features {
+                throttle: vec![Throttle {
+                    backend: "umans".to_string(),
+                    when: vec![],
+                    cache_ttl: 60,
+                    max_wait: 5,
+                    soft_threshold: 10,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when throttle is set"
+        );
+    }
+
+    #[test]
+    fn capabilities_is_empty_false_with_context_mode() {
+        let caps = Capabilities {
+            features: Some(Features {
+                context_mode: Some(ContextMode { enabled: true }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when context_mode is set"
+        );
+    }
+
+    #[test]
+    fn capabilities_is_empty_false_with_upgrade() {
+        let caps = Capabilities {
+            features: Some(Features {
+                upgrade: Some(UpgradeConfig {
+                    track: UpgradeTrack::default(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when upgrade is set"
         );
     }
 
