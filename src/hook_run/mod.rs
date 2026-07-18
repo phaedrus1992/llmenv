@@ -535,11 +535,26 @@ fn run_inner(
                 .iter()
                 .filter(|cm| cm.when.iter().any(|t| active.tags.contains(t)))
                 .collect();
-            if let Some(cm) = active_codebase_memory.first()
-                && let Ok(project_root) = std::env::current_dir()
-                && let Ok(state_dir) = crate::paths::state_dir()
-            {
-                trigger_codebase_memory_index(&project_root, cm, &state_dir);
+            // Same "at most one active" rule as
+            // `resolve_codebase_memory_entries` (every entry targets the same
+            // project/cwd and the same MCP server name, so ambiguity can't be
+            // resolved) — fail-soft here (log + skip) rather than propagate,
+            // since this is a best-effort side effect, not manifest building.
+            match active_codebase_memory.as_slice() {
+                [] => {}
+                [cm] => {
+                    if let Ok(project_root) = std::env::current_dir()
+                        && let Ok(state_dir) = crate::paths::state_dir()
+                    {
+                        trigger_codebase_memory_index(&project_root, cm, &state_dir);
+                    }
+                }
+                _ => {
+                    tracing::debug!(
+                        "codebase_memory: multiple entries active simultaneously, \
+                         not triggering SessionStart index"
+                    );
+                }
             }
         }
 
@@ -1375,15 +1390,19 @@ fn build_index_repository_command(
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
 ) -> std::process::Command {
+    // repo_path must become JSON text regardless (the CLI arg is a JSON
+    // string), so this lossy step is unavoidable here — unlike the env vars
+    // below, which can carry the raw OsStr straight through.
     let args_json =
         serde_json::json!({ "repo_path": project_root.display().to_string() }).to_string();
-    let cache_dir = cm
+    let cache_dir: std::ffi::OsString = cm
         .index_path
         .clone()
-        .unwrap_or_else(|| state_dir.join("codebase-memory").display().to_string());
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| state_dir.join("codebase-memory").into_os_string());
     let mut cmd = std::process::Command::new("codebase-memory-mcp");
     cmd.args(["cli", "index_repository", &args_json])
-        .env("CBM_ALLOWED_ROOT", project_root.display().to_string())
+        .env("CBM_ALLOWED_ROOT", project_root.as_os_str())
         .env("CBM_CACHE_DIR", cache_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -1497,6 +1516,37 @@ mod tests {
             envs.get("CBM_CACHE_DIR").map(String::as_str),
             Some("/custom/path")
         );
+    }
+
+    proptest::proptest! {
+        // #365: the repo_path JSON arg must always be valid JSON that
+        // round-trips to the exact project_root string, for any path shape
+        // (quotes, backslashes, unicode, whitespace) — directly validates
+        // that this is safe against injection into the subprocess argv
+        // (pre-pr-review finding).
+        #[test]
+        fn index_repository_command_json_arg_always_valid_and_roundtrips(
+            path_str in "[\\PC]{0,60}"
+        ) {
+            let cm = crate::config::CodebaseMemory {
+                when: vec!["proj".to_string()],
+                index_path: None,
+            };
+            let project_root = std::path::PathBuf::from(&path_str);
+            let cmd = build_index_repository_command(
+                &project_root,
+                &cm,
+                std::path::Path::new("/state"),
+            );
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            let parsed: serde_json::Value = serde_json::from_str(&args[2])
+                .expect("repo_path arg must always be valid JSON");
+            let expected = project_root.display().to_string();
+            proptest::prop_assert_eq!(parsed["repo_path"].as_str(), Some(expected.as_str()));
+        }
     }
 
     #[test]

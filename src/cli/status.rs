@@ -294,16 +294,17 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
     for m in bundle_resolved {
         all_resolved.entry(m.name).or_insert(m.kind);
     }
-    if !all_codebase_memory_ls.is_empty()
-        && let Ok(project_root) = std::env::current_dir()
-        && let Ok(state_dir) = paths::state_dir()
-    {
+    if !all_codebase_memory_ls.is_empty() {
+        let project_root = std::env::current_dir().context("resolving codebase_memory: cwd")?;
+        let state_dir = paths::state_dir().context("resolving codebase_memory: state dir")?;
         for m in crate::mcp::resolve::resolve_codebase_memory_entries(
             &all_codebase_memory_ls,
             &active.tags,
             &project_root,
             &state_dir,
-        ) {
+        )
+        .context("resolving codebase_memory servers for listing")?
+        {
             all_resolved.entry(m.name).or_insert(m.kind);
         }
     }
