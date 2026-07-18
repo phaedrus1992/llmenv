@@ -84,7 +84,8 @@ pub(crate) fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow
 ///
 /// C0 control characters other than `\n`/`\r`/`\t` are not valid unescaped
 /// inside a YAML double-quoted scalar, so they're hex-escaped (`\uXXXX`)
-/// rather than passed through literally.
+/// rather than passed through literally. Unicode noncharacters (see
+/// [`is_yaml_noncharacter`]) get the same treatment.
 fn quote_yaml_scalar(value: &str) -> String {
     use std::fmt::Write as _;
 
@@ -97,14 +98,32 @@ fn quote_yaml_scalar(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
+            c if c.is_control() || is_yaml_noncharacter(c) => {
+                let cp = c as u32;
+                // YAML's `\u` escape is fixed at 4 hex digits; code points
+                // above the BMP (only reachable via noncharacters here, since
+                // `is_control()` never exceeds U+009F) need the 8-digit `\U`
+                // form instead, or the extra digits leak out as literal text.
+                if cp > 0xFFFF {
+                    let _ = write!(out, "\\U{cp:08x}");
+                } else {
+                    let _ = write!(out, "\\u{cp:04x}");
+                }
             }
             c => out.push(c),
         }
     }
     out.push('"');
     out
+}
+
+/// Unicode noncharacters (`U+FDD0..=U+FDEF` and `U+xFFFE`/`U+xFFFF` for every
+/// plane `0..=0x10`, per the Unicode standard). Not `char::is_control()`, but
+/// `serde_yaml`'s parser rejects at least U+FFFE as a bare control character
+/// (#873), so `quote_yaml_scalar` hex-escapes them too.
+fn is_yaml_noncharacter(c: char) -> bool {
+    let cp = c as u32;
+    matches!(cp, 0xFDD0..=0xFDEF) || cp & 0xFFFE == 0xFFFE
 }
 
 fn requote_name_and_description(frontmatter: &str) -> String {
@@ -402,6 +421,44 @@ mod tests {
                 .and_then(serde_yaml::Value::as_str)
                 .expect("key must be a string scalar");
             prop_assert_eq!(parsed, value.as_str());
+        }
+    }
+
+    /// Unicode noncharacters (#873): `U+FDD0..=U+FDEF` plus the last two code
+    /// points of every plane (`U+xFFFE`/`U+xFFFF` for planes 0..=0x10). These
+    /// are not `char::is_control()`, but `serde_yaml`'s parser rejects at
+    /// least U+FFFE as a bare control character, so they must be escaped like
+    /// control characters for the scalar to round-trip.
+    #[test]
+    fn quote_yaml_scalar_escapes_noncharacters() {
+        let noncharacters = (0xFDD0u32..=0xFDEF)
+            .chain((0..=0x10u32).flat_map(|plane| {
+                let base = plane * 0x1_0000;
+                [base + 0xFFFE, base + 0xFFFF]
+            }))
+            .map(|cp| char::from_u32(cp).expect("all noncharacter code points are valid chars"));
+
+        for c in noncharacters {
+            let value = c.to_string();
+            let quoted = quote_yaml_scalar(&value);
+            let yaml = format!("key: {quoted}");
+            let result = serde_yaml::from_str::<serde_yaml::Mapping>(&yaml);
+            assert!(
+                result.is_ok(),
+                "noncharacter U+{:04X} must round-trip: {:?}",
+                c as u32,
+                result.as_ref().err()
+            );
+            let mapping = result.expect("checked by assert! above");
+            let parsed = mapping
+                .get("key")
+                .and_then(serde_yaml::Value::as_str)
+                .expect("key must be a string scalar");
+            assert_eq!(
+                parsed, value,
+                "noncharacter U+{:04X} round-trip mismatch",
+                c as u32
+            );
         }
     }
 }
