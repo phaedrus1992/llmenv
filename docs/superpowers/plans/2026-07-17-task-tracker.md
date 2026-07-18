@@ -1401,6 +1401,26 @@ In `src/hook_run/mod.rs`, wire `Stop` as an early special case right after the e
     }
 ```
 
+**Correction found during implementation:** the plan below (appending to
+hook-run's `SessionStart` output) does not work — `emit_hook_context` in
+`src/adapter/claude_code.rs` explicitly returns an empty string for
+`SessionStart`/`SessionEnd` (see its `#558` comment: Claude Code's hook
+schema rejects `additionalContext` from *that* hook's output). The actual
+mechanism Claude Code honors for `SessionStart` is the separate
+`config-context` hook (`src/cli/mod.rs::run_config_context`), registered as
+its own baseline `SessionStart` entry in `settings.json`
+(`CONFIG_CONTEXT_COMMAND`) — verified working (it's what injects "llmenv
+source config: ..." at the top of every session). The reminder was wired
+into `run_config_context` instead: it loads `Config`, checks
+`features.task_tracker.enabled`, and appends
+`crate::task::session_start_reminder(&state_dir)` to the emitted text when
+non-empty. Tests live in `tests/config_context.rs`
+(`config_context_includes_task_tracker_reminder_for_wip_tasks` /
+`config_context_no_task_tracker_reminder_when_disabled`), not
+`tests/hook_run_failsoft.rs`. The steps below are left as originally
+written for the record; do not follow them for `SessionStart` — follow this
+note instead.
+
 For `SessionStart`, append the reminder to `out` right before the final `Ok::<String, anyhow::Error>(out)` inside the `rt.block_on` async block (`src/hook_run/mod.rs:592`, i.e. immediately before that line, still inside the `async move { ... }` — this is synchronous file I/O but runs alongside the existing synchronous dedup-snapshot write at lines 586-590, so it's consistent with existing practice):
 
 ```rust
