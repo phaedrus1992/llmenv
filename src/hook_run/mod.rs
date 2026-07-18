@@ -519,6 +519,30 @@ fn run_inner(
         let active = crate::scope::evaluate(&config, &env);
         let t_scope = std::time::Instant::now();
 
+        // #365: register the active project with codebase-memory-mcp's own
+        // background auto-watch on SessionStart. Deliberately NOT gated on an
+        // ICM memory client being configured (unlike PostSession/PostToolUse
+        // below) — read_once/codebase_memory are fully orthogonal to ICM.
+        // Fire-and-forget: indexing a large repo can take minutes (the Linux
+        // kernel benchmarks at ~3 per upstream docs), so this must never
+        // block SessionStart.
+        if event == HookEvent::SessionStart {
+            let active_codebase_memory: Vec<&crate::config::CodebaseMemory> = config
+                .features
+                .as_ref()
+                .map(|f| f.codebase_memory.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .filter(|cm| cm.when.iter().any(|t| active.tags.contains(t)))
+                .collect();
+            if let Some(cm) = active_codebase_memory.first()
+                && let Ok(project_root) = std::env::current_dir()
+                && let Ok(state_dir) = crate::paths::state_dir()
+            {
+                trigger_codebase_memory_index(&project_root, cm, &state_dir);
+            }
+        }
+
         let config_dir = config_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
@@ -1343,6 +1367,48 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
 /// Spawn a detached child to run post-session consolidation. Best-effort
 /// fire-and-forget — spawn failures are logged at debug level and the caller
 /// never waits on the child.
+/// Builds the `codebase-memory-mcp cli index_repository` subprocess command
+/// for `project_root`, without spawning it — kept separate so tests can
+/// assert on the command shape without launching a real process (#365).
+fn build_index_repository_command(
+    project_root: &std::path::Path,
+    cm: &crate::config::CodebaseMemory,
+    state_dir: &std::path::Path,
+) -> std::process::Command {
+    let args_json =
+        serde_json::json!({ "repo_path": project_root.display().to_string() }).to_string();
+    let cache_dir = cm
+        .index_path
+        .clone()
+        .unwrap_or_else(|| state_dir.join("codebase-memory").display().to_string());
+    let mut cmd = std::process::Command::new("codebase-memory-mcp");
+    cmd.args(["cli", "index_repository", &args_json])
+        .env("CBM_ALLOWED_ROOT", project_root.display().to_string())
+        .env("CBM_CACHE_DIR", cache_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd
+}
+
+/// Fire-and-forget: registers `project_root` with codebase-memory-mcp's
+/// index + background auto-watch (#365). Mirrors `post_session_consolidation`'s
+/// detached-spawn pattern — indexing a large repo can take minutes (the
+/// Linux kernel takes ~3, per upstream benchmarks), so this must never block
+/// SessionStart. Best-effort: spawn failures (e.g. binary not installed —
+/// `llmenv doctor` already flags that) are logged at debug level only.
+fn trigger_codebase_memory_index(
+    project_root: &std::path::Path,
+    cm: &crate::config::CodebaseMemory,
+    state_dir: &std::path::Path,
+) {
+    let mut cmd = build_index_repository_command(project_root, cm, state_dir);
+    crate::mcp::proxy::detach_process_group(&mut cmd);
+    if let Err(e) = cmd.spawn() {
+        tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
+    }
+}
+
 fn post_session_consolidation() {
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("consolidation-run: cannot resolve current_exe");
@@ -1364,6 +1430,74 @@ fn post_session_consolidation() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn index_repository_command_sets_env_and_args() {
+        let cm = crate::config::CodebaseMemory {
+            when: vec!["proj".to_string()],
+            index_path: None,
+        };
+        let cmd = build_index_repository_command(
+            std::path::Path::new("/repos/proj"),
+            &cm,
+            std::path::Path::new("/state"),
+        );
+        assert_eq!(cmd.get_program().to_string_lossy(), "codebase-memory-mcp");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args[0], "cli");
+        assert_eq!(args[1], "index_repository");
+        assert!(args[2].contains("/repos/proj"));
+        let envs: std::collections::BTreeMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().to_string(),
+                        v.to_string_lossy().to_string(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            envs.get("CBM_ALLOWED_ROOT").map(String::as_str),
+            Some("/repos/proj")
+        );
+        assert_eq!(
+            envs.get("CBM_CACHE_DIR").map(String::as_str),
+            Some("/state/codebase-memory")
+        );
+    }
+
+    #[test]
+    fn index_repository_command_index_path_override_wins() {
+        let cm = crate::config::CodebaseMemory {
+            when: vec!["proj".to_string()],
+            index_path: Some("/custom/path".to_string()),
+        };
+        let cmd = build_index_repository_command(
+            std::path::Path::new("/repos/proj"),
+            &cm,
+            std::path::Path::new("/state"),
+        );
+        let envs: std::collections::BTreeMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().to_string(),
+                        v.to_string_lossy().to_string(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            envs.get("CBM_CACHE_DIR").map(String::as_str),
+            Some("/custom/path")
+        );
+    }
 
     #[test]
     fn append_read_once_result_appends_advisory_to_empty_out() {
