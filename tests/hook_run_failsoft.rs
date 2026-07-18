@@ -515,6 +515,185 @@ fn pre_tool_use_read_twice_warn_with_debug_session_log_writes_log_and_advisory()
     );
 }
 
+/// Like `config_with_read_once_and_debug_session_log`, but the active scope
+/// assigns an invalid tag name (contains a space, rejected by
+/// `validate_tag`). Once `read_once` falls through into the scope/memory
+/// pipeline (because a Debug-level session-log sink is enabled), this forces
+/// `tag_recall_queries` to fail on every call that reaches it.
+fn config_with_read_once_debug_log_and_invalid_tag(mode: &str) -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: ["bad tag"]
+
+tag:
+  "bad tag": ""
+
+bundle:
+  - name: test-bundle
+    when: ["bad tag"]
+
+features:
+  read_once:
+    enabled: true
+    mode: {mode}
+    ttl_seconds: 1200
+
+session_log:
+  file:
+    enabled: true
+    level: debug
+  transcript:
+    enabled: false
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+        mode = mode,
+    )
+}
+
+// #867: a read_once advisory/deny that's already been computed must not be
+// silently discarded if an unrelated pipeline error (e.g. invalid tag
+// config) fires before it's appended to `out` — the caller degrades any
+// `Err` from `run_inner` to "warn on stderr, nothing on stdout", which would
+// otherwise defeat the already-decided read_once result.
+#[test]
+fn pre_tool_use_read_twice_warn_survives_pipeline_error_after_decision() {
+    let (dir, config_path) = setup_config(&config_with_read_once_debug_log_and_invalid_tag("warn"));
+
+    let test_file_dir = TempDir::new().unwrap();
+    let file_path = test_file_dir.path().join("read_twice_pipeline_error.txt");
+    fs::write(&file_path, b"content for pipeline-error test").unwrap();
+
+    let session_id = "test-read-once-pipeline-error";
+    let payload = read_hook_payload(file_path.to_str().unwrap(), session_id);
+
+    // First read — read_once records the file as read regardless of what the
+    // (broken) pipeline does afterward.
+    hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success();
+
+    // Second read — read_once computes a non-empty "already read" advisory,
+    // then the pipeline fails on the invalid tag. The advisory must still
+    // reach stdout instead of being swallowed by the pipeline error.
+    let output = hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "second read must still exit 0 despite the pipeline error"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.is_empty(),
+        "read_once advisory must not be discarded by an unrelated pipeline error"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .expect("read_once advisory should still be valid JSON despite the pipeline error");
+    let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("already read"),
+        "advisory should still mention re-read; got: {ctx}"
+    );
+}
+
+/// A valid config with a file session-log sink enabled at Info level (the
+/// level `SessionEnd`/`EventKind::LifecycleEnd` events log at), no memory
+/// backend, and no other features.
+fn config_with_file_session_log() -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: test-bundle
+    when: [test]
+
+session_log:
+  file:
+    enabled: true
+    level: info
+  transcript:
+    enabled: false
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+    )
+}
+
+// #866: the SessionEnd dedup early-return (skip the redundant Store when the
+// context chunk is unchanged since the last SessionEnd) must not also skip
+// session-log capture -- same bug class as #864/#231, this time for the
+// dedup fast path.
+#[test]
+fn session_end_dedup_skip_still_writes_session_log() {
+    let (dir, config_path) = setup_config(&config_with_file_session_log());
+
+    let payload = serde_json::json!({
+        "hook_event_name": "SessionEnd",
+        "session_id": "test-session-end-dedup",
+    })
+    .to_string();
+
+    // First SessionEnd -- no prior dedup snapshot, proceeds normally and logs.
+    hook_cmd(dir.path(), &config_path, "session_end")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success();
+
+    // Second SessionEnd with an identical context chunk -- the dedup fast
+    // path fires (skipping the redundant store), but session-log capture
+    // must still happen.
+    hook_cmd(dir.path(), &config_path, "session_end")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success();
+
+    let log_path = dir.path().join("session-log.jsonl");
+    let log_content = fs::read_to_string(&log_path).expect("session-log.jsonl must exist");
+    let lifecycle_end_count = log_content.matches("\"lifecycle_end\"").count();
+    assert_eq!(
+        lifecycle_end_count, 2,
+        "session log must record both SessionEnd events even when the dedup \
+         skip fires on the second one; got: {log_content}"
+    );
+}
+
 fn config_with_task_tracker() -> String {
     format!(
         r#"
