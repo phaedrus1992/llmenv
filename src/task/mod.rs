@@ -149,9 +149,19 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
 }
 
 /// Create a new task in `open` state and persist it.
+///
+/// # Errors
+/// Errors if `parent` is provided but doesn't resolve to an existing task —
+/// same eager-validation reasoning as `block_task`'s `on` (a fresh write,
+/// not a load of possibly-stale state, so a typo'd parent is caught
+/// immediately rather than becoming a silent dangling reference).
 pub fn add_task(state_dir: &Path, title: &str, parent: Option<&str>) -> anyhow::Result<Task> {
     let dir = tasks_dir(state_dir);
     std::fs::create_dir_all(&dir)?;
+    let parent_slug = match parent {
+        Some(p) => Some(resolve_identifier(state_dir, p)?),
+        None => None,
+    };
     let now = now_rfc3339();
     let mut base_slug = slugify(title);
     if base_slug.is_empty() {
@@ -166,7 +176,7 @@ pub fn add_task(state_dir: &Path, title: &str, parent: Option<&str>) -> anyhow::
         slug,
         title: title.to_string(),
         state: TaskState::Open,
-        parent: parent.map(str::to_string),
+        parent: parent_slug,
         blocked_on: Vec::new(),
         notes: Vec::new(),
         created_at: now.clone(),
@@ -409,6 +419,77 @@ mod tests {
     }
 
     #[test]
+    fn add_task_with_unknown_parent_errors() {
+        let dir = TempDir::new().expect("test");
+        assert!(add_task(dir.path(), "Orphan", Some("no-such-parent")).is_err());
+    }
+
+    #[test]
+    fn add_task_parent_accepts_unambiguous_prefix() {
+        let dir = TempDir::new().expect("test");
+        let parent = add_task(dir.path(), "Umbrella project", None).expect("test");
+        let child = add_task(dir.path(), "Sub piece", Some("umbrella")).expect("test");
+        assert_eq!(child.parent, Some(parent.slug));
+    }
+
+    #[test]
+    fn nested_chain_of_three_levels_resolves_correctly() {
+        let dir = TempDir::new().expect("test");
+        let grandparent = add_task(dir.path(), "Epic", None).expect("test");
+        let parent = add_task(dir.path(), "Story", Some(&grandparent.slug)).expect("test");
+        let child = add_task(dir.path(), "Subtask", Some(&parent.slug)).expect("test");
+
+        assert_eq!(grandparent.parent, None);
+        assert_eq!(parent.parent, Some(grandparent.slug.clone()));
+        assert_eq!(child.parent, Some(parent.slug.clone()));
+
+        // Walk the chain back up via load_task, as a consumer would.
+        let loaded_parent =
+            load_task(dir.path(), child.parent.as_ref().expect("test")).expect("test");
+        assert_eq!(loaded_parent.slug, parent.slug);
+        let loaded_grandparent =
+            load_task(dir.path(), loaded_parent.parent.as_ref().expect("test")).expect("test");
+        assert_eq!(loaded_grandparent.slug, grandparent.slug);
+        assert_eq!(loaded_grandparent.parent, None);
+    }
+
+    #[test]
+    fn multiple_children_under_one_parent_all_listed() {
+        let dir = TempDir::new().expect("test");
+        let parent = add_task(dir.path(), "Parent with many kids", None).expect("test");
+        let child_a = add_task(dir.path(), "Child A", Some(&parent.slug)).expect("test");
+        let child_b = add_task(dir.path(), "Child B", Some(&parent.slug)).expect("test");
+        let child_c = add_task(dir.path(), "Child C", Some(&parent.slug)).expect("test");
+
+        let children: Vec<Task> = list_tasks(dir.path())
+            .into_iter()
+            .filter(|t| t.parent.as_deref() == Some(parent.slug.as_str()))
+            .collect();
+        assert_eq!(children.len(), 3);
+        let mut slugs: Vec<&str> = children.iter().map(|t| t.slug.as_str()).collect();
+        slugs.sort();
+        let mut expected = [
+            child_a.slug.as_str(),
+            child_b.slug.as_str(),
+            child_c.slug.as_str(),
+        ];
+        expected.sort_unstable();
+        assert_eq!(slugs, expected);
+    }
+
+    #[test]
+    fn starting_and_completing_a_child_does_not_affect_parent_state() {
+        let dir = TempDir::new().expect("test");
+        let parent = add_task(dir.path(), "Parent", None).expect("test");
+        let child = add_task(dir.path(), "Child", Some(&parent.slug)).expect("test");
+        start_task(dir.path(), &child.slug).expect("test");
+        done_task(dir.path(), &child.slug).expect("test");
+
+        let reloaded_parent = load_task(dir.path(), &parent.slug).expect("test");
+        assert_eq!(reloaded_parent.state, TaskState::Open);
+    }
+
+    #[test]
     fn list_tasks_skips_corrupt_files_with_warning() {
         let dir = TempDir::new().expect("test");
         add_task(dir.path(), "Good task", None).expect("test");
@@ -615,5 +696,151 @@ mod tests {
         start_task(dir.path(), &task.slug).expect("test");
         let reminder = stop_hook_reminder(dir.path());
         assert!(reminder.contains(&task.slug));
+    }
+
+    // Task/TaskNote/TaskState derive Serialize/Deserialize and persist as
+    // JSON. A serde roundtrip must be lossless — a drifted derive (renamed
+    // field, wrong rename attr) would silently corrupt a user's task store.
+    // Also covers slugify/resolve_identifier/nesting invariants (#231
+    // pre-pr-review property-test-gap-finder pass).
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_task_state() -> impl Strategy<Value = TaskState> {
+            prop_oneof![
+                Just(TaskState::Open),
+                Just(TaskState::Wip),
+                Just(TaskState::Done),
+            ]
+        }
+
+        fn arb_task_note() -> impl Strategy<Value = TaskNote> {
+            (".{0,40}", ".{0,80}").prop_map(|(at, text)| TaskNote { at, text })
+        }
+
+        fn arb_task() -> impl Strategy<Value = Task> {
+            (
+                ".{1,30}",
+                ".{1,60}",
+                arb_task_state(),
+                proptest::option::of(".{1,30}"),
+                proptest::collection::vec(".{1,30}", 0..4),
+                proptest::collection::vec(arb_task_note(), 0..4),
+                ".{1,30}",
+                ".{1,30}",
+            )
+                .prop_map(
+                    |(slug, title, state, parent, blocked_on, notes, created_at, updated_at)| {
+                        Task {
+                            slug,
+                            title,
+                            state,
+                            parent,
+                            blocked_on,
+                            notes,
+                            created_at,
+                            updated_at,
+                        }
+                    },
+                )
+        }
+
+        proptest! {
+            #[test]
+            fn task_note_json_roundtrips(note in arb_task_note()) {
+                let json = serde_json::to_string(&note).unwrap();
+                let back: TaskNote = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back, note);
+            }
+
+            #[test]
+            fn task_state_json_roundtrips(state in arb_task_state()) {
+                let json = serde_json::to_string(&state).unwrap();
+                let back: TaskState = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back, state);
+            }
+
+            #[test]
+            fn task_json_roundtrips(task in arb_task()) {
+                let json = serde_json::to_string(&task).unwrap();
+                let back: Task = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back, task);
+            }
+
+            #[test]
+            fn slugify_output_is_lowercase_alnum_and_hyphen_only(title in ".{0,80}") {
+                let slug = slugify(&title);
+                prop_assert!(slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+            }
+
+            #[test]
+            fn slugify_never_starts_or_ends_with_hyphen(title in ".{0,80}") {
+                let slug = slugify(&title);
+                prop_assert!(!slug.starts_with('-'));
+                prop_assert!(!slug.ends_with('-'));
+            }
+
+            #[test]
+            fn slugify_is_idempotent(title in ".{0,80}") {
+                let once = slugify(&title);
+                let twice = slugify(&once);
+                prop_assert_eq!(once, twice);
+            }
+
+            #[test]
+            fn slugify_only_derived_from_first_six_whitespace_words(
+                words in proptest::collection::vec("[a-zA-Z0-9]{1,8}", 0..12)
+            ) {
+                let title = words.join(" ");
+                let full = slugify(&title);
+                let truncated_title = words.iter().take(6).cloned().collect::<Vec<_>>().join(" ");
+                let truncated = slugify(&truncated_title);
+                // Appending more whitespace-delimited words beyond the 6th
+                // must never change the slug — slugify only reads the first 6.
+                prop_assert_eq!(full, truncated);
+            }
+
+            #[test]
+            fn resolve_identifier_finds_every_added_tasks_own_slug(
+                titles in proptest::collection::vec("[a-zA-Z]{3,12}", 1..6)
+            ) {
+                let dir = tempfile::TempDir::new().unwrap();
+                let mut slugs = Vec::new();
+                for title in &titles {
+                    let task = add_task(dir.path(), title, None).unwrap();
+                    slugs.push(task.slug);
+                }
+                for slug in &slugs {
+                    prop_assert_eq!(resolve_identifier(dir.path(), slug).unwrap(), slug.clone());
+                }
+            }
+
+            #[test]
+            fn nested_chain_of_arbitrary_depth_links_correctly(
+                titles in proptest::collection::vec("[a-zA-Z]{3,12}", 1..8)
+            ) {
+                let dir = tempfile::TempDir::new().unwrap();
+                let mut prev_slug: Option<String> = None;
+                let mut chain = Vec::new();
+                for title in &titles {
+                    let task = add_task(dir.path(), title, prev_slug.as_deref()).unwrap();
+                    prop_assert_eq!(&task.parent, &prev_slug);
+                    prev_slug = Some(task.slug.clone());
+                    chain.push(task);
+                }
+                // Walk the chain back from the deepest task to the root,
+                // confirming every parent link resolves and matches.
+                for (i, task) in chain.iter().enumerate().rev() {
+                    if i == 0 {
+                        prop_assert_eq!(&task.parent, &None);
+                    } else {
+                        prop_assert_eq!(task.parent.as_deref(), Some(chain[i - 1].slug.as_str()));
+                        let loaded = load_task(dir.path(), task.parent.as_ref().unwrap()).unwrap();
+                        prop_assert_eq!(loaded.slug, chain[i - 1].slug.clone());
+                    }
+                }
+            }
+        }
     }
 }
