@@ -1,11 +1,15 @@
 //! In-engine task tracker (#231): a file-based task store, one JSON file per
 //! task under `state_dir()/tasks/<slug>.json`.
 //!
-//! Single-writer assumption: no file locking. Concurrent `llmenv task`
-//! invocations against the same task can race (last write wins). Fine for
-//! the single-agent-per-session model this targets.
-//! ponytail: add per-task file locking (e.g. `fs4`) if multi-agent
-//! concurrent writers become a real scenario.
+//! Concurrent `llmenv task` invocations (e.g. from multiple Claude Code
+//! sessions on the same project) are serialized via a single advisory lock
+//! file at `<tasks_dir>/.lock`, held for the duration of each mutating
+//! operation's full read-modify-write. Coarse-grained (whole-store, not
+//! per-task) — simplest correct option for this scale; no new dependency,
+//! `std::fs::File::lock()` (stable since Rust 1.89) is the stdlib flock/
+//! LockFileEx wrapper.
+//! ponytail: per-task locking (rather than whole-store) if write throughput
+//! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
 use std::path::{Path, PathBuf};
 
@@ -57,6 +61,25 @@ fn task_path(state_dir: &Path, slug: &str) -> PathBuf {
     tasks_dir(state_dir).join(format!("{slug}.json"))
 }
 
+/// Run `f` while holding an exclusive lock on the whole task store, so
+/// concurrent `llmenv task` invocations (e.g. from multiple Claude Code
+/// sessions on the same project) serialize their read-modify-write cycles
+/// instead of racing on the same file. Blocks until the lock is acquired.
+fn with_store_lock<T>(
+    state_dir: &Path,
+    f: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let dir = tasks_dir(state_dir);
+    std::fs::create_dir_all(&dir)?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))?;
+    lock_file.lock()?;
+    f()
+}
+
 /// Current RFC3339 timestamp (UTC, second precision).
 fn now_rfc3339() -> String {
     humantime::format_rfc3339_seconds(std::time::SystemTime::now()).to_string()
@@ -102,12 +125,13 @@ fn unique_slug(dir: &Path, base_slug: &str) -> String {
     }
 }
 
-/// Write a task to disk atomically.
+/// Write a task to disk atomically. Callers that mutate an existing task
+/// (rather than just persisting one already exclusively held under
+/// [`with_store_lock`]) are expected to call this from within that lock.
 pub fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
     let dir = tasks_dir(state_dir);
     std::fs::create_dir_all(&dir)?;
     let json = serde_json::to_string_pretty(task)?;
-    // ponytail: single-writer assumption, no file lock — see module doc.
     crate::paths::write_owner_only_atomic(&task_path(state_dir, &task.slug), json.as_bytes())?;
     Ok(())
 }
@@ -156,34 +180,35 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
 /// not a load of possibly-stale state, so a typo'd parent is caught
 /// immediately rather than becoming a silent dangling reference).
 pub fn add_task(state_dir: &Path, title: &str, parent: Option<&str>) -> anyhow::Result<Task> {
-    let dir = tasks_dir(state_dir);
-    std::fs::create_dir_all(&dir)?;
-    let parent_slug = match parent {
-        Some(p) => Some(resolve_identifier(state_dir, p)?),
-        None => None,
-    };
-    let now = now_rfc3339();
-    let mut base_slug = slugify(title);
-    if base_slug.is_empty() {
-        // A title with no ASCII-alphanumeric characters at all (e.g. a
-        // CJK-only title, or pure punctuation) would otherwise collapse to
-        // an empty slug — a hidden `.json` file that's awkward to reference.
-        // Fall back to a timestamp-derived slug instead.
-        base_slug = format!("task-{}", now.replace([':', '-'], ""));
-    }
-    let slug = unique_slug(&dir, &base_slug);
-    let task = Task {
-        slug,
-        title: title.to_string(),
-        state: TaskState::Open,
-        parent: parent_slug,
-        blocked_on: Vec::new(),
-        notes: Vec::new(),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    save_task(state_dir, &task)?;
-    Ok(task)
+    with_store_lock(state_dir, || {
+        let dir = tasks_dir(state_dir);
+        let parent_slug = match parent {
+            Some(p) => Some(resolve_identifier(state_dir, p)?),
+            None => None,
+        };
+        let now = now_rfc3339();
+        let mut base_slug = slugify(title);
+        if base_slug.is_empty() {
+            // A title with no ASCII-alphanumeric characters at all (e.g. a
+            // CJK-only title, or pure punctuation) would otherwise collapse
+            // to an empty slug — a hidden `.json` file that's awkward to
+            // reference. Fall back to a timestamp-derived slug instead.
+            base_slug = format!("task-{}", now.replace([':', '-'], ""));
+        }
+        let slug = unique_slug(&dir, &base_slug);
+        let task = Task {
+            slug,
+            title: title.to_string(),
+            state: TaskState::Open,
+            parent: parent_slug,
+            blocked_on: Vec::new(),
+            notes: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        save_task(state_dir, &task)?;
+        Ok(task)
+    })
 }
 
 /// Resolve a user-supplied identifier (exact slug or unambiguous prefix) to
@@ -224,57 +249,64 @@ pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<Strin
 /// task whose `blocked_on` list contains a non-`done` task — the agent may
 /// know better than the ordering hint.
 pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
-    let slug = resolve_identifier(state_dir, input)?;
-    let mut task = load_task(state_dir, &slug)?;
-    if task.state == TaskState::Done {
-        anyhow::bail!("task '{slug}' is already done; cannot start it again");
-    }
-    for blocker_slug in &task.blocked_on {
-        match load_task(state_dir, blocker_slug) {
-            Ok(blocker) if blocker.state != TaskState::Done => {
-                eprintln!(
-                    "llmenv: warning: '{slug}' is blocked on '{blocker_slug}' ({:?}, not done) — starting anyway",
-                    blocker.state
-                );
-            }
-            Ok(_) => {}
-            Err(e) => {
-                // Dangling blocked_on reference (deleted/corrupt blocker file) —
-                // warn and treat the edge as absent, matching the load-time
-                // tolerance documented for parent/blocked_on slugs.
-                eprintln!(
-                    "llmenv: warning: '{slug}' is blocked on '{blocker_slug}', which could not be loaded ({e}) — starting anyway"
-                );
+    with_store_lock(state_dir, || {
+        let slug = resolve_identifier(state_dir, input)?;
+        let mut task = load_task(state_dir, &slug)?;
+        if task.state == TaskState::Done {
+            anyhow::bail!("task '{slug}' is already done; cannot start it again");
+        }
+        for blocker_slug in &task.blocked_on {
+            match load_task(state_dir, blocker_slug) {
+                Ok(blocker) if blocker.state != TaskState::Done => {
+                    eprintln!(
+                        "llmenv: warning: '{slug}' is blocked on '{blocker_slug}' ({:?}, not done) — starting anyway",
+                        blocker.state
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    // Dangling blocked_on reference (deleted/corrupt blocker
+                    // file) — warn and treat the edge as absent, matching the
+                    // load-time tolerance documented for parent/blocked_on
+                    // slugs.
+                    eprintln!(
+                        "llmenv: warning: '{slug}' is blocked on '{blocker_slug}', which could not be loaded ({e}) — starting anyway"
+                    );
+                }
             }
         }
-    }
-    task.state = TaskState::Wip;
-    task.updated_at = now_rfc3339();
-    save_task(state_dir, &task)?;
-    Ok(task)
+        task.state = TaskState::Wip;
+        task.updated_at = now_rfc3339();
+        save_task(state_dir, &task)?;
+        Ok(task)
+    })
 }
 
 /// Mark a task done. Idempotent from any prior state (fast-path completion).
 pub fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
-    let slug = resolve_identifier(state_dir, input)?;
-    let mut task = load_task(state_dir, &slug)?;
-    task.state = TaskState::Done;
-    task.updated_at = now_rfc3339();
-    save_task(state_dir, &task)?;
-    Ok(task)
+    with_store_lock(state_dir, || {
+        let slug = resolve_identifier(state_dir, input)?;
+        let mut task = load_task(state_dir, &slug)?;
+        task.state = TaskState::Done;
+        task.updated_at = now_rfc3339();
+        save_task(state_dir, &task)?;
+        Ok(task)
+    })
 }
 
 /// Append a timestamped progress note to a task.
 pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Task> {
-    let slug = resolve_identifier(state_dir, input)?;
-    let mut task = load_task(state_dir, &slug)?;
-    task.notes.push(TaskNote {
-        at: now_rfc3339(),
-        text: text.to_string(),
-    });
-    task.updated_at = now_rfc3339();
-    save_task(state_dir, &task)?;
-    Ok(task)
+    with_store_lock(state_dir, || {
+        let slug = resolve_identifier(state_dir, input)?;
+        let mut task = load_task(state_dir, &slug)?;
+        task.notes.push(TaskNote {
+            at: now_rfc3339(),
+            text: text.to_string(),
+        });
+        task.updated_at = now_rfc3339();
+        save_task(state_dir, &task)?;
+        Ok(task)
+    })
 }
 
 /// Record an ordering dependency: `input` is blocked on `on`.
@@ -286,18 +318,20 @@ pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Ta
 /// behind by a since-deleted task file). Also errors if `input` and `on`
 /// resolve to the same task — a task cannot block itself.
 pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Task> {
-    let slug = resolve_identifier(state_dir, input)?;
-    let on_slug = resolve_identifier(state_dir, on)?;
-    if slug == on_slug {
-        anyhow::bail!("task '{slug}' cannot be blocked on itself");
-    }
-    let mut task = load_task(state_dir, &slug)?;
-    if !task.blocked_on.contains(&on_slug) {
-        task.blocked_on.push(on_slug);
-    }
-    task.updated_at = now_rfc3339();
-    save_task(state_dir, &task)?;
-    Ok(task)
+    with_store_lock(state_dir, || {
+        let slug = resolve_identifier(state_dir, input)?;
+        let on_slug = resolve_identifier(state_dir, on)?;
+        if slug == on_slug {
+            anyhow::bail!("task '{slug}' cannot be blocked on itself");
+        }
+        let mut task = load_task(state_dir, &slug)?;
+        if !task.blocked_on.contains(&on_slug) {
+            task.blocked_on.push(on_slug);
+        }
+        task.updated_at = now_rfc3339();
+        save_task(state_dir, &task)?;
+        Ok(task)
+    })
 }
 
 /// SessionStart hook: if any `wip` tasks exist, build a reminder nudging the
@@ -408,6 +442,69 @@ mod tests {
         let t2 = add_task(dir.path(), "Fix login timeout", None).expect("test");
         assert_eq!(t1.slug, "fix-login-timeout");
         assert_eq!(t2.slug, "fix-login-timeout-2");
+    }
+
+    /// Concurrency regression: multiple threads racing `add_task` with the
+    /// *same* title (the exact scenario multiple Claude Code sessions on one
+    /// project would hit) must never lose a task — the store lock serializes
+    /// each read-modify-write so `unique_slug` always sees every prior
+    /// writer's file before picking a suffix.
+    #[test]
+    fn concurrent_add_task_same_title_never_loses_a_task() {
+        let dir = TempDir::new().expect("test");
+        let dir_path = dir.path().to_path_buf();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let dir_path = dir_path.clone();
+                std::thread::spawn(move || {
+                    add_task(&dir_path, "Race condition task", None).expect("test")
+                })
+            })
+            .collect();
+        let mut slugs: Vec<String> = threads
+            .into_iter()
+            .map(|h| h.join().expect("thread panicked").slug)
+            .collect();
+        slugs.sort();
+        slugs.dedup();
+        assert_eq!(
+            slugs.len(),
+            8,
+            "every concurrent add_task must produce a distinct task"
+        );
+        assert_eq!(
+            list_tasks(dir.path()).len(),
+            8,
+            "no task file was lost to a lost update"
+        );
+    }
+
+    /// Concurrency regression: two threads racing `start_task` on the *same*
+    /// task must not lose the transition or corrupt the file — the lock
+    /// serializes the whole load-mutate-save cycle per operation.
+    #[test]
+    fn concurrent_start_task_same_task_is_serialized_not_corrupted() {
+        let dir = TempDir::new().expect("test");
+        let task = add_task(dir.path(), "Shared task", None).expect("test");
+        let dir_path = dir.path().to_path_buf();
+        let slug = task.slug.clone();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let dir_path = dir_path.clone();
+                let slug = slug.clone();
+                std::thread::spawn(move || start_task(&dir_path, &slug))
+            })
+            .collect();
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|h| h.join().expect("test"))
+            .collect();
+        assert!(
+            results.iter().all(std::result::Result::is_ok),
+            "start_task on an open task must always succeed, even racing itself"
+        );
+        let reloaded = load_task(dir.path(), &slug).expect("test");
+        assert_eq!(reloaded.state, TaskState::Wip);
     }
 
     #[test]
