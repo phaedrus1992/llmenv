@@ -665,6 +665,104 @@ mod tests {
         }
     }
 
+    mod codebase_memory_props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_path_component() -> impl Strategy<Value = String> {
+            "[\\PC]{0,40}"
+        }
+
+        // #365: resolve_codebase_memory's env vars must round-trip the exact
+        // project_root / index_path text, for arbitrary path content
+        // (unicode, spaces, punctuation) — the pre-pr-review security review
+        // relies on CBM_ALLOWED_ROOT always being exactly project_root.
+        proptest! {
+            #[test]
+            fn resolve_codebase_memory_allowed_root_always_matches_project_root(
+                path_str in arb_path_component()
+            ) {
+                let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None };
+                let project_root = std::path::PathBuf::from(&path_str);
+                let resolved = resolve_codebase_memory(&cm, &project_root, Path::new("/state"));
+                match resolved.kind {
+                    ResolvedKind::Stdio { env, .. } => {
+                        prop_assert_eq!(
+                            env.get("CBM_ALLOWED_ROOT").cloned(),
+                            Some(project_root.display().to_string())
+                        );
+                    }
+                    ResolvedKind::Remote { .. } => prop_assert!(false, "expected Stdio"),
+                }
+            }
+
+            #[test]
+            fn resolve_codebase_memory_index_path_override_always_wins(
+                index_path in arb_path_component()
+            ) {
+                let cm = CodebaseMemory {
+                    when: vec!["proj".to_string()],
+                    index_path: Some(index_path.clone()),
+                };
+                let resolved = resolve_codebase_memory(
+                    &cm,
+                    Path::new("/repos/proj"),
+                    Path::new("/state"),
+                );
+                match resolved.kind {
+                    ResolvedKind::Stdio { env, .. } => {
+                        prop_assert_eq!(env.get("CBM_CACHE_DIR").cloned(), Some(index_path));
+                    }
+                    ResolvedKind::Remote { .. } => prop_assert!(false, "expected Stdio"),
+                }
+            }
+        }
+
+        // #365: tag-intersection filtering in resolve_codebase_memory_entries
+        // — every resolved entry's tags must intersect active_tags, and an
+        // empty active set never resolves anything, for arbitrary tag sets.
+        fn arb_codebase_memory_entry(idx: usize) -> impl Strategy<Value = CodebaseMemory> {
+            prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |when| CodebaseMemory {
+                when: if when.is_empty() {
+                    vec![format!("only-tag-{idx}")]
+                } else {
+                    when
+                },
+                index_path: None,
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn codebase_memory_entries_empty_active_tags_never_resolves(
+                entry in arb_codebase_memory_entry(0)
+            ) {
+                let resolved = resolve_codebase_memory_entries(
+                    std::slice::from_ref(&entry),
+                    &BTreeSet::new(),
+                    Path::new("/repos/proj"),
+                    Path::new("/state"),
+                ).expect("single entry never ambiguous");
+                prop_assert!(resolved.is_empty());
+            }
+
+            #[test]
+            fn codebase_memory_entries_resolves_iff_tag_intersects(
+                entry in arb_codebase_memory_entry(0),
+                active in prop::collection::btree_set("[a-z]{1,4}", 0..4)
+            ) {
+                let resolved = resolve_codebase_memory_entries(
+                    std::slice::from_ref(&entry),
+                    &active,
+                    Path::new("/repos/proj"),
+                    Path::new("/state"),
+                ).expect("single entry never ambiguous");
+                let should_resolve = entry.when.iter().any(|t| active.contains(t));
+                prop_assert_eq!(!resolved.is_empty(), should_resolve);
+            }
+        }
+    }
+
     mod props {
         use super::*;
         use proptest::prelude::*;
