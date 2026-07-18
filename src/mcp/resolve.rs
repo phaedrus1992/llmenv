@@ -13,8 +13,9 @@
 //!   entry is always a remote HTTP client.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-use crate::config::{HostEntry, McpServer, McpTransport, Memory};
+use crate::config::{CodebaseMemory, HostEntry, McpServer, McpTransport, Memory};
 
 use tracing::debug;
 
@@ -54,6 +55,10 @@ pub enum ResolvedKind {
 }
 
 pub use llmenv_config::MEMORY_MCP_NAME;
+
+/// Registration name for the codebase-memory-mcp server in the agent's MCP
+/// config.
+pub const CODEBASE_MEMORY_MCP_NAME: &str = "codebase-memory-mcp";
 
 /// Errors raised while resolving MCP config for the active host.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -205,6 +210,63 @@ fn resolve_memory(
         timeout: None,
         disabled_tools: vec![],
     })
+}
+
+/// Resolve a `CodebaseMemory` entry to a **local stdio** MCP entry. Unlike
+/// `resolve_memory` (always remote — ICM's daemon/proxy topology),
+/// codebase-memory-mcp has no remote-serve mode: it always runs as a local
+/// process per project. `CBM_CACHE_DIR` and `CBM_ALLOWED_ROOT` are always
+/// computed here, never left to the user, so a declared entry can't
+/// accidentally scope the indexer outside the intended project (#365).
+pub fn resolve_codebase_memory(
+    cm: &CodebaseMemory,
+    project_root: &Path,
+    state_dir: &Path,
+) -> ResolvedMcp {
+    let mut env = BTreeMap::new();
+    let cache_dir = cm
+        .index_path
+        .clone()
+        .unwrap_or_else(|| state_dir.join("codebase-memory").display().to_string());
+    env.insert("CBM_CACHE_DIR".to_string(), cache_dir);
+    env.insert(
+        "CBM_ALLOWED_ROOT".to_string(),
+        project_root.display().to_string(),
+    );
+    ResolvedMcp {
+        name: CODEBASE_MEMORY_MCP_NAME.to_string(),
+        kind: ResolvedKind::Stdio {
+            command: "codebase-memory-mcp".to_string(),
+            args: vec![],
+            env,
+        },
+        headers: BTreeMap::new(),
+        timeout: None,
+        disabled_tools: vec![],
+    }
+}
+
+/// Select and resolve `codebase_memory` entries whose `when` tags intersect
+/// `active_tags`. Kept separate from [`resolve_mcps`] rather than folded into
+/// its signature: some callers of `resolve_mcps` deliberately filter with
+/// `active.non_project_tags()` (#696 — project-scoped tags must not leak
+/// into host-level plugin/MCP/throttle decisions), but codebase_memory is
+/// inherently project-scoped and must activate on project tags. Callers pass
+/// whatever tag set fits their context (usually the full `active.tags`, not
+/// the non-project subset). Multiple entries may resolve simultaneously — no
+/// "at most one active" rule like `Memory`, since each is an independent
+/// local process, not a shared network resource.
+pub fn resolve_codebase_memory_entries(
+    entries: &[CodebaseMemory],
+    active_tags: &BTreeSet<String>,
+    project_root: &Path,
+    state_dir: &Path,
+) -> Vec<ResolvedMcp> {
+    entries
+        .iter()
+        .filter(|c| c.when.iter().any(|t| active_tags.contains(t)))
+        .map(|c| resolve_codebase_memory(c, project_root, state_dir))
+        .collect()
 }
 
 fn stdio_kind(m: &McpServer) -> Result<ResolvedKind, ResolveError> {
@@ -459,6 +521,89 @@ mod tests {
             ResolvedKind::Remote { url, .. } => assert!(url.contains("marks.local")),
             other => panic!("expected remote client, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn codebase_memory_resolves_to_local_stdio() {
+        let cm = CodebaseMemory {
+            when: vec!["proj".to_string()],
+            index_path: None,
+        };
+        let resolved = resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state"));
+        assert_eq!(resolved.name, CODEBASE_MEMORY_MCP_NAME);
+        match resolved.kind {
+            ResolvedKind::Stdio { command, args, env } => {
+                assert_eq!(command, "codebase-memory-mcp");
+                assert!(args.is_empty());
+                assert_eq!(
+                    env.get("CBM_ALLOWED_ROOT").map(String::as_str),
+                    Some("/repos/proj")
+                );
+                assert_eq!(
+                    env.get("CBM_CACHE_DIR").map(String::as_str),
+                    Some("/state/codebase-memory")
+                );
+            }
+            ResolvedKind::Remote { .. } => {
+                panic!("codebase_memory must resolve to local stdio, not remote")
+            }
+        }
+    }
+
+    #[test]
+    fn codebase_memory_index_path_override_wins() {
+        let cm = CodebaseMemory {
+            when: vec!["proj".to_string()],
+            index_path: Some("/custom/path".to_string()),
+        };
+        let resolved = resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state"));
+        match resolved.kind {
+            ResolvedKind::Stdio { env, .. } => {
+                assert_eq!(
+                    env.get("CBM_CACHE_DIR").map(String::as_str),
+                    Some("/custom/path")
+                );
+            }
+            ResolvedKind::Remote { .. } => panic!("expected Stdio"),
+        }
+    }
+
+    #[test]
+    fn codebase_memory_not_selected_when_tags_inactive() {
+        let entries = vec![CodebaseMemory {
+            when: vec!["other-tag".to_string()],
+            index_path: None,
+        }];
+        let resolved = resolve_codebase_memory_entries(
+            &entries,
+            &tags(&["proj"]),
+            Path::new("/repos/proj"),
+            Path::new("/state"),
+        );
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn codebase_memory_multiple_entries_all_resolve() {
+        // Unlike Memory, multiple active codebase_memory entries are not an
+        // error — each is an independent local process.
+        let entries = vec![
+            CodebaseMemory {
+                when: vec!["proj-a".to_string()],
+                index_path: None,
+            },
+            CodebaseMemory {
+                when: vec!["proj-b".to_string()],
+                index_path: None,
+            },
+        ];
+        let resolved = resolve_codebase_memory_entries(
+            &entries,
+            &tags(&["proj-a", "proj-b"]),
+            Path::new("/repos/multi"),
+            Path::new("/state"),
+        );
+        assert_eq!(resolved.len(), 2);
     }
 
     #[test]

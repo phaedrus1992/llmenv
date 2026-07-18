@@ -136,6 +136,45 @@ adapter:
     )
 }
 
+/// Config with a `codebase_memory` entry plus a bundle so `build_manifest`
+/// receives non-empty refs (its materialization code path — where
+/// `codebase_memory` resolution is wired — early-returns `None` otherwise,
+/// same as the bundle-gating `config_with_bundle` needs for memory).
+fn config_with_codebase_memory(adapter: &str, bundle_name: &str) -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: {bundle}
+    when: [test]
+
+features:
+  codebase_memory:
+    - when: [test]
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: {adapter}
+"#,
+        user = current_user(),
+        bundle = bundle_name,
+        adapter = adapter,
+    )
+}
+
 /// Build a `Command` for `llmenv <subcommand>` pointed at the temp config.
 fn llmenv_cmd(
     config_dir: &std::path::Path,
@@ -377,5 +416,20 @@ fn smoke_claude_code_regenerate_with_bundle() {
     fs::create_dir_all(&bundle_dir).unwrap();
     fs::write(bundle_dir.join("bundle.yaml"), "{}").unwrap();
     let cmd = llmenv_cmd(dir.path(), &config_path, "regenerate");
+    assert_completes_within(cmd, 10).success();
+}
+
+// #365: features.codebase_memory materializes without error (and without
+// needing the codebase-memory-mcp binary installed — export only writes the
+// resolved stdio command reference into the engine config, it never launches
+// the process).
+#[test]
+fn smoke_claude_code_export_with_codebase_memory() {
+    let (dir, config_path) =
+        setup_config(&config_with_codebase_memory("claude-code", "test-bundle"));
+    let bundle_dir = dir.path().join("bundles").join("test-bundle");
+    fs::create_dir_all(&bundle_dir).unwrap();
+    fs::write(bundle_dir.join("bundle.yaml"), "{}").unwrap();
+    let cmd = llmenv_cmd(dir.path(), &config_path, "export");
     assert_completes_within(cmd, 10).success();
 }
