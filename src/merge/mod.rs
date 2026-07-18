@@ -258,6 +258,14 @@ fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Cap
                 anyhow::bail!("{context}: features.throttle entry has an empty 'backend' field");
             }
         }
+        for cm in &features.codebase_memory {
+            if cm.when.is_empty() {
+                anyhow::bail!(
+                    "{context}: features.codebase_memory entry has no 'when' tags — \
+                     every codebase_memory entry must declare at least one activation tag"
+                );
+            }
+        }
     }
 
     Ok(Some(caps))
@@ -446,6 +454,66 @@ mod tests {
             .expect("features must be present");
         assert_eq!(features.memory.len(), 1);
         assert_eq!(features.memory[0].server_host, "still");
+    }
+
+    // #365: a bundle.yaml with a features.codebase_memory block contributes
+    // entries to merged capabilities, mirroring the features.memory test above.
+    #[test]
+    fn bundle_features_codebase_memory_appears_in_merged_capabilities() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("cbm-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  codebase_memory:\n",
+                "    - when: [my-project]\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "cbm-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+        let features = manifest
+            .capabilities
+            .features
+            .as_ref()
+            .expect("features must be present");
+        assert_eq!(features.codebase_memory.len(), 1);
+        assert_eq!(features.codebase_memory[0].when, vec!["my-project"]);
+    }
+
+    // #365: a bundle-contributed codebase_memory entry with no `when` tags is
+    // rejected at bundle-read time, mirroring the memory/throttle checks above.
+    #[test]
+    fn bundle_codebase_memory_without_tags_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("cbm-bad-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!("features:\n", "  codebase_memory:\n", "    - when: []\n",),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "cbm-bad-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let result = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("codebase_memory"),
+            "error must mention codebase_memory"
+        );
     }
 
     // #335: a bundle.yaml with a host: block contributes host entries to merged capabilities.

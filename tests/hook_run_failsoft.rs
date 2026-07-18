@@ -694,6 +694,51 @@ fn session_end_dedup_skip_still_writes_session_log() {
     );
 }
 
+fn config_with_codebase_memory() -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: test-bundle
+    when: [test]
+
+features:
+  codebase_memory:
+    - when: [test]
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+    )
+}
+
+// #365: SessionStart with an active codebase_memory scope must not block or
+// fail even when the codebase-memory-mcp binary isn't installed (fail-soft
+// contract — the spawn attempt itself must never surface as a hook failure).
+#[test]
+fn session_start_with_codebase_memory_exits_zero_without_binary() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success();
+}
+
 fn config_with_task_tracker() -> String {
     format!(
         r#"

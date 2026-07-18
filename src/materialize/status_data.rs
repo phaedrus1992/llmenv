@@ -141,9 +141,30 @@ fn collect_mcps(
     let top_level =
         crate::mcp::resolve::resolve_mcps(&config.mcp, memory, &config.host, active_tags);
     let bundle = crate::mcp::resolve::resolve_bundle_mcps(bundle_mcp, active_tags);
-    match (top_level, bundle) {
-        (Ok(top), Ok(bundle)) => Some(CountData {
-            total: (top.len() + bundle.len()) as u64,
+    let codebase_memory_entries: &[_] = config
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.as_slice())
+        .unwrap_or_default();
+    let codebase_memory = if codebase_memory_entries.is_empty() {
+        Ok(Vec::new())
+    } else {
+        crate::mcp::resolve::codebase_memory_paths()
+            .ok()
+            .ok_or(())
+            .and_then(|(project_root, state_dir)| {
+                crate::mcp::resolve::resolve_codebase_memory_entries(
+                    codebase_memory_entries,
+                    active_tags,
+                    &project_root,
+                    &state_dir,
+                )
+                .map_err(|_| ())
+            })
+    };
+    match (top_level, bundle, codebase_memory) {
+        (Ok(top), Ok(bundle), Ok(codebase_memory)) => Some(CountData {
+            total: (top.len() + bundle.len() + codebase_memory.len()) as u64,
             errors: 0,
         }),
         _ => Some(CountData {
@@ -489,6 +510,28 @@ mod tests {
             result,
             Some(CountData {
                 total: 0,
+                errors: 0
+            })
+        );
+    }
+
+    #[test]
+    fn collect_mcps_counts_active_codebase_memory_entries() {
+        let config = Config {
+            features: Some(crate::config::Features {
+                codebase_memory: vec![crate::config::CodebaseMemory {
+                    when: vec!["proj".to_string()],
+                    index_path: None,
+                }],
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let result = collect_mcps(&config, &[], &tags(&["proj"]));
+        assert_eq!(
+            result,
+            Some(CountData {
+                total: 1,
                 errors: 0
             })
         );

@@ -315,9 +315,10 @@ requires it and `filetypes` language ids don't reliably convert to file extensio
 
 ## `features:`
 
-Feature flags. Holds `memory:` (llmenv's ICM memory backend), `throttle:`
-(usage throttling), and `upgrade:` (upgrade release track). Additional feature
-flags may be nested here in future versions.
+Feature flags. Holds `memory:` (llmenv's ICM memory backend), `codebase_memory:`
+(codebase-memory-mcp integration), `throttle:` (usage throttling), and
+`upgrade:` (upgrade release track). Additional feature flags may be nested
+here in future versions.
 
 ### `features.memory:`
 
@@ -355,6 +356,48 @@ features:
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
+
+### `features.codebase_memory:`
+
+First-class integration for
+[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp), a
+local code-intelligence MCP server. A list of tag-scoped entries: each
+declares the tag set that activates a local instance for a project. Unlike
+`memory:`, this always resolves to a **local stdio process** — codebase-
+memory-mcp has no remote/network-serve mode — so there's no `server_host` or
+`port` to configure, and multiple entries may be active simultaneously (each
+is an independent local process, not a shared network resource).
+
+```yaml
+features:
+  codebase_memory:
+    - when: [my-project]        # activates the server (same model as bundles)
+      index_path: null          # optional override; default <state_dir>/codebase-memory
+```
+
+| Field | Required | Notes |
+| ------- | ---------- | ------- |
+| `when` | yes | Activation tags; an entry with none is rejected at validate time |
+| `index_path` | no | Override the index storage directory; defaults to `<state_dir>/codebase-memory` |
+
+llmenv always computes two environment variables for the launched process,
+never left to the user:
+
+- `CBM_CACHE_DIR` — the index storage directory (`index_path`, or the default
+  above)
+- `CBM_ALLOWED_ROOT` — the current working directory, restricting
+  `index_repository` to the intended project so a misbehaving agent can't be
+  tricked into indexing/reading arbitrary paths outside it
+
+On `SessionStart`, llmenv fires a fire-and-forget
+`codebase-memory-mcp cli index_repository` call for the active project. This
+both indexes it and registers it with the server's own background
+auto-watch (`auto_watch`, on by default upstream), which keeps the index
+current as files change — llmenv doesn't re-implement reindex scheduling.
+
+`llmenv doctor` checks that the `codebase-memory-mcp` binary is on `PATH`
+whenever this feature is configured, and flags entries whose tags no scope
+emits.
 
 ### `features.throttle:`
 
