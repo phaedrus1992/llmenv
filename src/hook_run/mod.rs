@@ -310,24 +310,29 @@ fn json_or_empty(v: &serde_json::Value) -> String {
     }
 }
 
-/// Append `text` (the read_once advisory/deny result) to `out`. Debug-asserts
-/// that `out` is empty whenever `text` carries the `__DENY__:` sentinel —
-/// `run()` treats the *entire* returned string as the deny reason once it
-/// detects that prefix (see the `starts_with("__DENY__:")` check below), so
-/// mixing in other content (memory-action output, session-log text) would
-/// either corrupt the reason or, if positioned wrong, make the prefix check
-/// miss the deny and silently downgrade it to an allow. This is dormant today
-/// only because `dispatch(HookEvent::PreToolUse, ..)` always returns no
-/// actions (#868) — the assertion turns a future violation of that into a
-/// loud test failure instead of a silent, security-relevant regression.
+/// Append `text` (the read_once advisory/deny result) to `out`. `run()`
+/// treats the *entire* returned string as the deny reason once it detects
+/// the `__DENY__:` prefix (see the `starts_with("__DENY__:")` check below),
+/// so a deny always replaces whatever `out` already held rather than being
+/// appended alongside it — mixing in other content would either corrupt the
+/// reason or, if positioned wrong, make the prefix check miss the deny and
+/// silently downgrade it to an allow. This is an always-on guard, not a
+/// `debug_assert!`: a deny defeated in a release build is a silent,
+/// security-relevant regression, not a test-time nicety. Dormant today only
+/// because `dispatch(HookEvent::PreToolUse, ..)` always returns no actions
+/// (#868), so `out` is empty in practice and this never discards anything.
 fn append_read_once_result(out: &mut String, text: &str) {
-    debug_assert!(
-        out.is_empty() || !text.starts_with("__DENY__:"),
-        "read_once deny text must be the only content in `out` — a non-empty \
-         `out` before a deny append means dispatch() started producing \
-         PreToolUse actions, which run()'s positional __DENY__: prefix check \
-         cannot safely combine with"
-    );
+    if text.starts_with("__DENY__:") {
+        if !out.is_empty() {
+            tracing::error!(
+                discarded = %out,
+                "hook-run: read_once deny computed alongside other pipeline \
+                 output; discarding the other output to keep the deny intact"
+            );
+        }
+        text.clone_into(out);
+        return;
+    }
     if !out.is_empty() {
         out.push('\n');
     }
@@ -735,8 +740,13 @@ fn run_inner(
         Err(e) => {
             // #867: an already-computed read_once result must not be lost to
             // an unrelated pipeline error — recover it instead of letting `?`
-            // propagate the error past the point where it was decided.
+            // propagate the error past the point where it was decided. Still
+            // surfaced via the same `eprintln!` convention `run()`'s Err arm
+            // uses (pre-pr-review finding: a bare `warn!` is invisible with
+            // the default `RUST_LOG`, silently hiding the diagnostic even
+            // though the read_once result itself is preserved).
             if let Some(text) = read_once_text {
+                eprintln!("llmenv: memory {event} skipped: {e}");
                 warn!(
                     error = %e,
                     "hook-run: pipeline failed after read_once already computed a \
@@ -1376,15 +1386,14 @@ mod tests {
 
     // #868: `out` being non-empty before a deny append means dispatch()
     // started producing PreToolUse actions, which run()'s positional
-    // __DENY__: prefix check can't safely combine with — this must fail
-    // loudly (in debug/test builds) rather than silently downgrade a deny to
-    // an allow.
+    // __DENY__: prefix check can't safely combine with — the deny must
+    // replace `out` entirely (in release builds too) rather than silently
+    // downgrading to an allow.
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "read_once deny text must be the only content")]
-    fn append_read_once_result_panics_when_out_nonempty_before_deny() {
+    fn append_read_once_result_deny_replaces_nonempty_out() {
         let mut out = String::from("existing content");
         append_read_once_result(&mut out, "__DENY__:already read");
+        assert_eq!(out, "__DENY__:already read");
     }
 
     #[test]
