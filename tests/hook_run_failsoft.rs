@@ -413,6 +413,108 @@ fn pre_tool_use_read_twice_deny_mode() {
     );
 }
 
+/// Like `config_with_read_once`, but also enables a file session-log sink at
+/// Debug level — the level `PreToolUse`/`EventKind::ToolUse` events log at.
+fn config_with_read_once_and_debug_session_log(mode: &str) -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+bundle:
+  - name: test-bundle
+    when: [test]
+
+features:
+  read_once:
+    enabled: true
+    mode: {mode}
+    ttl_seconds: 1200
+
+session_log:
+  file:
+    enabled: true
+    level: debug
+  transcript:
+    enabled: false
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+        mode = mode,
+    )
+}
+
+// #864: enabling read_once must not silently drop Debug-level session-log
+// capture for PreToolUse events when a Debug-level sink is also enabled —
+// both must fire, mirroring the #231 fix for the task-tracker Stop hook.
+#[test]
+fn pre_tool_use_read_twice_warn_with_debug_session_log_writes_log_and_advisory() {
+    let (dir, config_path) = setup_config(&config_with_read_once_and_debug_session_log("warn"));
+
+    let test_file_dir = TempDir::new().unwrap();
+    let file_path = test_file_dir.path().join("read_twice_with_log.txt");
+    fs::write(&file_path, b"content for session-log test").unwrap();
+
+    let session_id = "test-read-once-session-log";
+    let payload = read_hook_payload(file_path.to_str().unwrap(), session_id);
+
+    // First read — passes through, empty stdout, but still logged at Debug.
+    hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    // Second read — warns, non-empty stdout with advisory JSON, AND still logged.
+    let output = hook_cmd(dir.path(), &config_path, "pre_tool_use")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "warn mode second read should exit 0"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.is_empty(),
+        "warn mode second read should produce output"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("warn mode output should be valid JSON");
+    let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("already read"),
+        "warn mode advisory should mention re-read; got: {ctx}"
+    );
+
+    let log_path = dir.path().join("session-log.jsonl");
+    let log_content = fs::read_to_string(&log_path).expect("session-log.jsonl must exist");
+    let tool_use_count = log_content.matches("\"tool_use\"").count();
+    assert_eq!(
+        tool_use_count, 2,
+        "session log must record both PreToolUse events when read_once is \
+         also enabled; got: {log_content}"
+    );
+}
+
 fn config_with_task_tracker() -> String {
     format!(
         r#"
