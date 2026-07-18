@@ -52,6 +52,8 @@ pub enum ValidateError {
         "memory: listen_host '{0}' is not a valid IP address literal (hostnames not supported)"
     )]
     MemoryInvalidListenHost(String),
+    #[error("features.codebase_memory entry has no `when` tags")]
+    CodebaseMemoryNoTags,
     #[error("throttle entry for '{0}' has no when: tags")]
     ThrottleNoTags(String),
     #[error("throttle entry has an empty 'backend' field")]
@@ -637,6 +639,11 @@ impl Config {
                 }
                 if th.backend.is_empty() {
                     return Err(ValidateError::ThrottleEmptyBackend);
+                }
+            }
+            for cm in &features.codebase_memory {
+                if cm.when.is_empty() {
+                    return Err(ValidateError::CodebaseMemoryNoTags);
                 }
             }
         }
@@ -1550,6 +1557,139 @@ mod tests {
             config.validate(),
             Err(ValidateError::ThrottleEmptyBackend)
         ));
+    }
+
+    fn config_with_memory_and_host(
+        memory: Vec<crate::Memory>,
+        host: std::collections::BTreeMap<String, crate::HostEntry>,
+    ) -> Config {
+        Config {
+            disabled_engines: vec![],
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![],
+            features: Some(crate::Features {
+                memory,
+                throttle: vec![],
+                context_mode: None,
+                upgrade: None,
+                read_once: None,
+                slippage: None,
+                task_tracker: None,
+                codebase_memory: vec![],
+            }),
+            marketplace: vec![],
+            plugin_collection: vec![],
+            state: Default::default(),
+            host,
+            init: Default::default(),
+            session_log: None,
+            statusline: None,
+            lsp: vec![],
+            skills: vec![],
+        }
+    }
+
+    fn arb_memory_entry(server_host: &str, when: Vec<String>) -> crate::Memory {
+        crate::Memory {
+            server_host: server_host.to_string(),
+            port: 9092,
+            listen_host: "127.0.0.1".to_string(),
+            when,
+            default_topics: vec![],
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            consolidation: None,
+            retention: None,
+            auto_prune: false,
+        }
+    }
+
+    // Coverage gap found during #365 research: Memory's own validate errors
+    // had no dedicated unit tests, only proptest round-trip coverage. Filled
+    // here alongside the new CodebaseMemory tests below.
+    #[test]
+    fn memory_without_when_tags_is_rejected() {
+        let mut host = std::collections::BTreeMap::new();
+        host.insert(
+            "h".to_string(),
+            crate::HostEntry {
+                addr: "127.0.0.1".to_string(),
+            },
+        );
+        let config = config_with_memory_and_host(vec![arb_memory_entry("h", vec![])], host);
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::MemoryNoTags)
+        ));
+    }
+
+    #[test]
+    fn memory_unknown_server_host_is_rejected() {
+        let config = config_with_memory_and_host(
+            vec![arb_memory_entry("does-not-exist", vec!["t".to_string()])],
+            std::collections::BTreeMap::new(),
+        );
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::MemoryUnknownServerHost(h)) if h == "does-not-exist"
+        ));
+    }
+
+    fn config_with_codebase_memory(codebase_memory: Vec<crate::CodebaseMemory>) -> Config {
+        Config {
+            disabled_engines: vec![],
+            cache: Cache::default(),
+            capabilities: Default::default(),
+            native: Default::default(),
+            scope: Scopes::default(),
+            bundle: vec![],
+            mcp: vec![],
+            features: Some(crate::Features {
+                memory: vec![],
+                throttle: vec![],
+                context_mode: None,
+                upgrade: None,
+                read_once: None,
+                slippage: None,
+                task_tracker: None,
+                codebase_memory,
+            }),
+            marketplace: vec![],
+            plugin_collection: vec![],
+            state: Default::default(),
+            host: Default::default(),
+            init: Default::default(),
+            session_log: None,
+            statusline: None,
+            lsp: vec![],
+            skills: vec![],
+        }
+    }
+
+    #[test]
+    fn codebase_memory_requires_tags() {
+        let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
+            when: vec![],
+            index_path: None,
+        }]);
+        assert!(matches!(
+            config.validate(),
+            Err(ValidateError::CodebaseMemoryNoTags)
+        ));
+    }
+
+    #[test]
+    fn codebase_memory_with_tags_is_valid() {
+        let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
+            when: vec!["my-project".to_string()],
+            index_path: None,
+        }]);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
