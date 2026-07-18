@@ -82,6 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Bundle- and user-declared hooks no longer emit null-valued `tool`/`command` keys into the generated engine config — the Claude Code adapter rendered `"tool": null` for a `command`-type handler (and `"command": null` for an `mcp_tool` handler), and the Crush adapter rendered `"command": null` when a command hook had no command; absent fields are now omitted in both adapters (#720)
 - Skill frontmatter `name`/`description` values containing control characters (e.g. a stray vertical tab) no longer produce invalid YAML when auto-quoted — control characters are now escaped instead of passed through literally (#859)
 - `features.read_once` no longer silently drops Debug-level session-log capture for `PreToolUse` events — enabling it previously short-circuited before session logging ran whenever a Debug-level session-log sink was also configured; both now fire (#864)
+- A computed `read_once` deny/advisory result is no longer silently discarded if an unrelated hook-run pipeline error (e.g. invalid tag/bundle config, memory URL resolution failure) occurs afterward — it's now still returned instead of being lost when the pipeline errors out (#867)
+- `SessionEnd` session-log capture is no longer silently skipped when the redundant-store dedup check fires — previously any configured session-log sink missed `SessionEnd` events whenever the context chunk was unchanged since the last store; only the redundant store is skipped now, not the log (#866)
 
 ## [3.5.1] - 2026-07-15
 
