@@ -42,12 +42,13 @@ set.
 
 A list of engine IDs whose adapters are skipped during materialization, even
 when the engine's binary is on `PATH` (#562). Uses the underscore form (e.g.
-`claude_code`, `crush`), matching the `native.<engine>` and `--engine` flag
-convention.
+`claude_code`, `crush`, `opencode`), matching the `native.<engine>` and
+`--engine` flag convention.
 
 ```yaml
 disabled_engines:
   - crush            # skip Crush materialization even when `crush` is on PATH
+  - opencode         # skip opencode materialization even when `opencode` is on PATH
 ```
 
 ## `cache:`
