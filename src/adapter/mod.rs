@@ -1,10 +1,66 @@
 pub mod claude_code;
 pub mod crush;
+pub mod opencode;
 pub(crate) mod skills;
 
 use std::path::{Path, PathBuf};
 
 use crate::merge::MergedManifest;
+
+/// Convert a YAML native fragment to JSON and deep-merge it into `dst`.
+///
+/// Used by adapters to overlay engine-specific catch-all config keys
+/// (e.g. `native.crush`, `native_mcp.opencode`) on top of the structured
+/// rendering. `fragment` is `Option` so callers can pass a `.get()` result
+/// directly without an extra guard.
+///
+/// # Errors
+/// Returns an error if the YAML fragment cannot be serialized to JSON
+/// (should not happen in practice with valid `serde_yaml::Value`).
+pub(crate) fn overlay_native_json(
+    dst: &mut serde_json::Value,
+    fragment: Option<&serde_yaml::Value>,
+    label: &str,
+) -> anyhow::Result<()> {
+    if let Some(frag) = fragment {
+        let as_json = serde_json::to_value(frag)
+            .map_err(|e| anyhow::anyhow!("converting {label} fragment to JSON: {e}"))?;
+        llmenv_util::merge_json(dst, as_json);
+    }
+    Ok(())
+}
+
+/// Reject a native catch-all fragment that carries keys already fully modeled
+/// by the adapter's structured rendering paths.
+///
+/// Each adapter defines its own `MODELED_KEYS` constant. Overlaying these keys
+/// last would silently clobber the security-rendered output (permissions, hooks)
+/// or the structured rendering (mcp, lsp).
+///
+/// # Errors
+/// Returns an error if `fragment` contains any key in `modeled_keys`, with a
+/// message naming the key and suggesting the safe merge channel.
+pub(crate) fn reject_modeled_native_keys(
+    fragment: &serde_yaml::Value,
+    modeled_keys: &[&str],
+    engine: &str,
+) -> anyhow::Result<()> {
+    let Some(map) = fragment.as_mapping() else {
+        return Ok(());
+    };
+    for key in modeled_keys {
+        if map.contains_key(serde_yaml::Value::String((*key).into())) {
+            anyhow::bail!(
+                "top-level `native.{engine}` carries the modeled-feature key `{key}`, \
+                 which would silently clobber the rendered `{key}`. \
+                 Use `native_{key}.{engine}` (or `native_permissions.{engine}` / \
+                 `native_hooks.{engine}` / `native_mcp.{engine}`) instead, \
+                 which merges in the safe direction."
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Per-agent rules for translating a [`MergedManifest`] into an on-disk layout
 /// and a set of environment variables that point the agent at it.
@@ -106,6 +162,9 @@ pub fn active_adapter() -> Box<dyn AgentAdapter> {
         .find(|a| match a.name() {
             "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
             "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
+            "opencode" => {
+                std::env::var("OPENCODE_CONFIG_DIR").is_ok() || binary_on_path("opencode")
+            }
             _ => false,
         })
         .unwrap_or_else(|| Box::new(claude_code::ClaudeCodeAdapter))
@@ -122,6 +181,7 @@ pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     vec![
         Box::new(claude_code::ClaudeCodeAdapter),
         Box::new(crush::CrushAdapter),
+        Box::new(opencode::OpencodeAdapter),
     ]
 }
 
@@ -282,6 +342,80 @@ pub(crate) fn resolve_command_paths_against_files(
     if resolved { Some(result) } else { None }
 }
 
+/// Format injected hook context in the adapter-native hook-output shape.
+///
+/// Empty input always returns an empty string. Store-only events
+/// (SessionStart, SessionEnd) also return empty — they have no model turn
+/// to inject context into, and all known adapter schemas reject
+/// `additionalContext` in their `hookSpecificOutput` for these events.
+///
+/// This is the shared implementation behind every adapter's
+/// [`AgentAdapter::emit_hook_context`], replacing the three copies that
+/// previously existed in claude_code.rs, crush.rs, and opencode.rs.
+///
+/// # Arguments
+/// * `hook_event_name` — the event name (e.g. `"SessionStart"`), echoed
+///   back as `hookEventName` inside `hookSpecificOutput`.
+/// * `text` — the injected context, placed as `additionalContext`.
+#[must_use]
+pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    // Store-only events (SessionStart, SessionEnd) have no model turn to inject
+    // context into, and most adapters' hook schemas reject additionalContext in
+    // hookSpecificOutput. Return empty so these events emit no output. (#558)
+    if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
+        return String::new();
+    }
+    let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}");
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": hook_event_name,
+            "additionalContext": wrapped
+        }
+    })
+    .to_string()
+}
+
+/// Resolve the on-disk payload directory for a plugin.
+///
+/// External plugins (`install_path = Some`) use that path directly.
+/// First-party plugins look up their marketplace `install_location`.
+///
+/// Shared across adapters: previously lived in `crush.rs` and was
+/// cross-imported by opencode via `super::crush::resolve_plugin_payload`.
+pub(crate) fn resolve_plugin_payload(
+    plugin: &crate::plugins::resolve::ResolvedPlugin,
+    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
+) -> anyhow::Result<PathBuf> {
+    // P2-5/#534: guard before any path join, regardless of which path is taken.
+    if !crate::paths::is_valid_short_name(&plugin.plugin) {
+        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
+    }
+    if let Some(p) = &plugin.install_path {
+        return Ok(PathBuf::from(p));
+    }
+    let mkt = marketplaces
+        .iter()
+        .find(|m| m.name == plugin.marketplace)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
+                plugin.plugin,
+                plugin.marketplace
+            )
+        })?;
+    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
+            plugin.plugin,
+            plugin.marketplace
+        )
+    })?;
+    Ok(PathBuf::from(install_location).join(&plugin.plugin))
+}
+
 /// Map a resolved remote transport onto the `type` discriminator string shared
 /// by every engine's remote-MCP config shape (`"http"` / `"sse"`).
 ///
@@ -308,15 +442,16 @@ mod tests {
     };
 
     #[test]
-    fn registry_contains_claude_and_crush_adapters() {
+    fn registered_adapters_are_expected() {
         let adapters = registered_adapters();
         assert_eq!(
             adapters.len(),
-            2,
-            "registry should have exactly two adapters"
+            3,
+            "registry should have exactly three adapters"
         );
         assert_eq!(adapters[0].name(), "claude-code");
         assert_eq!(adapters[1].name(), "crush");
+        assert_eq!(adapters[2].name(), "opencode");
     }
 
     #[test]
@@ -373,11 +508,12 @@ mod tests {
         let adapters = registered_adapters();
         assert_eq!(engine_id(adapters[0].as_ref()), "claude_code");
         assert_eq!(engine_id(adapters[1].as_ref()), "crush");
+        assert_eq!(engine_id(adapters[2].as_ref()), "opencode");
     }
 
     #[test]
     fn known_engine_ids_matches_registered_adapters() {
-        assert_eq!(known_engine_ids(), vec!["claude_code", "crush"]);
+        assert_eq!(known_engine_ids(), vec!["claude_code", "crush", "opencode"]);
     }
 
     #[test]
