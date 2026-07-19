@@ -146,6 +146,9 @@ async function runHooks(event, extra) {
           if (event === "PreToolUse") return "__LLMENV_BLOCK__";
           continue;
         }
+        if (result.stderr) {
+          console.error(`llmenv hook ${event} ('${hk.command}') stderr:`, result.stderr);
+        }
         if (result.stdout) {
           try {
             const parsed = JSON.parse(result.stdout);
@@ -224,11 +227,11 @@ struct PluginHookEntry {
 /// [`crate::config::Hook`] structs.
 ///
 /// Resolves `${CLAUDE_PLUGIN_ROOT}` to `payload_path` and only emits
-/// `command`-type hooks (other types are silently skipped).
+/// `command`-type hooks — other types are skipped with an actionable warning.
 fn parse_plugin_hooks(
     hooks_path: &Path,
     payload_path: &Path,
-    _plugin_name: &str,
+    plugin_name: &str,
 ) -> anyhow::Result<Vec<crate::config::Hook>> {
     let source = std::fs::read_to_string(hooks_path)?;
     let manifest: PluginHooksManifest = serde_json::from_str(&source)?;
@@ -239,9 +242,20 @@ fn parse_plugin_hooks(
             for entry in &group.hooks {
                 let kind = entry.kind.as_deref().unwrap_or("command");
                 if kind != "command" {
+                    eprintln!(
+                        "warning: plugin '{plugin_name}' hooks manifest '{}': hook type '{kind}' \
+                         is not supported by the opencode adapter — skipping. Only 'command' \
+                         hooks are supported.",
+                        hooks_path.display()
+                    );
                     continue;
                 }
                 let Some(raw_command) = &entry.command else {
+                    eprintln!(
+                        "warning: plugin '{plugin_name}' hooks manifest '{}': a 'command' hook \
+                         entry for event '{event}' is missing its 'command' field — skipping.",
+                        hooks_path.display()
+                    );
                     continue;
                 };
                 let resolved =
@@ -261,6 +275,56 @@ fn parse_plugin_hooks(
     }
 
     Ok(hooks)
+}
+
+/// Human-readable YAML value kind, for error messages when a config value has
+/// the wrong shape (e.g. a plugin's `LLM_PROVIDER_MCP_JSON` isn't a mapping).
+fn yaml_value_kind_name(value: &serde_yaml::Value) -> &'static str {
+    match value {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "a bool",
+        serde_yaml::Value::Number(_) => "a number",
+        serde_yaml::Value::String(_) => "a string",
+        serde_yaml::Value::Sequence(_) => "a sequence",
+        serde_yaml::Value::Mapping(_) => "a mapping",
+        serde_yaml::Value::Tagged(_) => "a tagged value",
+    }
+}
+
+/// Read and parse a plugin's `LLM_PROVIDER_MCP_JSON` file into MCP server
+/// entries keyed by server name.
+///
+/// Isolated into its own fallible function so one plugin's malformed or
+/// unreadable MCP config only drops that plugin's MCP servers (with a
+/// warning) rather than aborting `materialize` for every other plugin.
+fn parse_plugin_mcp_entries(
+    mcp_json_path: &Path,
+    plugin_name: &str,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let content = std::fs::read_to_string(mcp_json_path).map_err(|e| {
+        anyhow::anyhow!("plugin '{plugin_name}': failed to read {mcp_json_path:?}: {e}")
+    })?;
+    let yaml_value: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| {
+        anyhow::anyhow!("plugin '{plugin_name}': failed to parse LLM_PROVIDER_MCP_JSON: {e}")
+    })?;
+    let obj = yaml_value.as_mapping().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{plugin_name}': LLM_PROVIDER_MCP_JSON must be a mapping of server name to \
+             config, got {}",
+            yaml_value_kind_name(&yaml_value)
+        )
+    })?;
+    // Unreachable in practice: a serde_yaml::Mapping always serializes to a
+    // serde_json::Value::Object (a YAML mapping with a non-string/complex key
+    // fails the `to_value` call above instead, since JSON object keys must be
+    // strings). Kept as an explicit error rather than `.unwrap()` so a future
+    // serde_json behavior change degrades to a message, not a panic.
+    let json_value: serde_json::Value = serde_json::to_value(obj)?;
+    json_value.as_object().cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{plugin_name}': LLM_PROVIDER_MCP_JSON mapping did not convert to a JSON object"
+        )
+    })
 }
 
 impl AgentAdapter for OpencodeAdapter {
@@ -335,10 +399,11 @@ impl AgentAdapter for OpencodeAdapter {
             std::collections::BTreeMap::new();
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
         let mut plugin_hooks: Vec<crate::config::Hook> = Vec::new();
-        // Whether any plugin provides native opencode support (e.g. a
+        // Names of plugins that provide native opencode support (e.g. a
         // TypeScript plugin registered via "plugin" key in opencode.json).
-        // Known: context-mode ships a native opencode plugin.
-        let mut has_native_opencode = false;
+        // Known: context-mode ships a native opencode plugin, but any plugin
+        // can declare the same support — detection isn't limited to that name.
+        let mut native_opencode_plugins: Vec<String> = Vec::new();
 
         // Hoisted: command/ dir needed by plugin and bundle sections below.
         std::fs::create_dir_all(out.join("command"))?;
@@ -355,25 +420,16 @@ impl AgentAdapter for OpencodeAdapter {
             //     opencode plugins — they register their own tools internally
             //     and including MCP entries would duplicate them.
             if is_native_opencode {
-                has_native_opencode = true;
+                native_opencode_plugins.push(plugin.plugin.clone());
             } else {
                 let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
                 if mcp_json_path.exists() {
-                    let content = std::fs::read_to_string(&mcp_json_path)?;
-                    let yaml_value: serde_yaml::Value =
-                        serde_yaml::from_str(&content).map_err(|e| {
-                            anyhow::anyhow!(
-                                "plugin '{}': failed to parse LLM_PROVIDER_MCP_JSON: {e}",
-                                plugin.plugin
-                            )
-                        })?;
-                    if let Some(obj) = yaml_value.as_mapping() {
-                        let json_value: serde_json::Value = serde_json::to_value(obj)?;
-                        if let Some(json_obj) = json_value.as_object() {
-                            for (k, v) in json_obj {
-                                plugin_mcp_entries.insert(k.clone(), v.clone());
-                            }
-                        }
+                    match parse_plugin_mcp_entries(&mcp_json_path, &plugin.plugin) {
+                        Ok(entries) => plugin_mcp_entries.extend(entries),
+                        Err(e) => eprintln!(
+                            "warning: {e} — skipping this plugin's MCP servers, other plugins \
+                             are unaffected."
+                        ),
                     }
                 }
             }
@@ -439,14 +495,19 @@ impl AgentAdapter for OpencodeAdapter {
                     if !hooks_path.exists() {
                         continue;
                     }
-                    let mut parsed = parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "failed to parse '{}' for plugin '{}': {e}",
+                    let mut parsed = match parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
+                    {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            eprintln!(
+                                "warning: failed to parse '{}' for plugin '{}': {e} — \
+                                     skipping this plugin's hooks, other plugins are unaffected.",
                                 hooks_path.display(),
                                 plugin.plugin,
-                            )
-                        })?;
+                            );
+                            break;
+                        }
+                    };
                     // Filter to supported events and command-only kinds at collection
                     // time, same as §11 does for manifest hooks.
                     parsed.retain(|hook| {
@@ -460,6 +521,10 @@ impl AgentAdapter for OpencodeAdapter {
                             );
                             return false;
                         }
+                        // Unreachable in practice: parse_plugin_hooks only ever
+                        // constructs HookHandlerKind::Command hooks (non-"command"
+                        // kinds are filtered out earlier, with their own warning).
+                        // Kept defensively in case that invariant ever changes.
                         if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
                             eprintln!(
                                 "warning: opencode adapter does not support mcp_tool hook \
@@ -485,10 +550,10 @@ impl AgentAdapter for OpencodeAdapter {
         // Register native opencode TypeScript plugins (e.g. context-mode) that
         // ship their own hook/tool implementations independent of the llmenv JS
         // shim. These are resolved by opencode's plugin system at startup.
-        let config_plugin = if has_native_opencode {
-            Some(vec!["context-mode".into()])
-        } else {
+        let config_plugin = if native_opencode_plugins.is_empty() {
             None
+        } else {
+            Some(native_opencode_plugins)
         };
 
         // 7. MCP servers
@@ -920,10 +985,13 @@ fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &str) {
 
     // Find the closing `\n---` (opener + newline + closing delimiter).
     if let Some(end) = after_opener.find("\n---") {
-        // `end` is the position of `\n` before the closing `---`.
-        // YAML content is after the opening `---\n` (position 1 of after_opener)
-        // and before the `\n` at position `end`.
-        let fm_raw = if end > 0 { &after_opener[1..end] } else { "" };
+        // `end` is the position of `\n` before the closing `---`. YAML
+        // content is between the opening `---` and that `\n`; strip_prefix
+        // (rather than a fixed `[1..]` byte slice) drops the newline right
+        // after the opener without risking a non-UTF-8-boundary panic when
+        // there isn't one (e.g. malformed input like "---é\n---").
+        let content = &after_opener[..end];
+        let fm_raw = content.strip_prefix('\n').unwrap_or(content);
         let body = &after_opener[(end + 4)..];
         let fm = match serde_yaml::from_str(fm_raw) {
             Ok(v) => Some(v),
@@ -1585,6 +1653,544 @@ mod tests {
         )));
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn env_vars_rejects_non_utf8_cache_dir() {
+        use std::os::unix::ffi::OsStringExt;
+        let non_utf8 = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
+        let err = OpencodeAdapter
+            .env_vars(&non_utf8, Path::new("/tmp"))
+            .unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn trait_capability_flags() {
+        assert!(OpencodeAdapter.supports_plugins());
+        assert!(OpencodeAdapter.supports_lsp());
+        assert!(OpencodeAdapter.supports_model_providers());
+        assert!(
+            OpencodeAdapter
+                .supported_hook_events()
+                .contains(&"PreToolUse")
+        );
+        assert_eq!(
+            OpencodeAdapter.emit_hook_context("SessionStart", "hi"),
+            super::super::emit_hook_context("SessionStart", "hi")
+        );
+    }
+
+    fn plugin_manifest(
+        plugin_dir: &Path,
+    ) -> (
+        Vec<crate::plugins::resolve::ResolvedPlugin>,
+        Vec<crate::plugins::resolve::ResolvedMarketplace>,
+    ) {
+        (
+            vec![crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "test".into(),
+                plugin: "my-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.to_str().unwrap().into()),
+                git_commit_sha: None,
+            }],
+            vec![crate::plugins::resolve::ResolvedMarketplace {
+                name: "test".into(),
+                source: String::new(),
+                install_location: None,
+                head: None,
+            }],
+        )
+    }
+
+    #[test]
+    fn materialize_rules_path_traversal_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.rules.push(RuleFile {
+            bundle: "test".into(),
+            rel: PathBuf::from("../escape.md"),
+            frontmatter: None,
+            body: "evil".into(),
+            raw: "evil".into(),
+        });
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn parse_plugin_hooks_happy_and_warning_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_path = tmp.path().join("hooks.json");
+        std::fs::write(
+            &hooks_path,
+            serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "hooks": [
+                            {"type": "command", "command": "echo good"},
+                            {"type": "prompt", "command": "echo bad-kind"},
+                            {"type": "command"},
+                        ]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let hooks = parse_plugin_hooks(&hooks_path, tmp.path(), "my-plugin").unwrap();
+        assert_eq!(hooks.len(), 1, "only the valid command hook must survive");
+        assert_eq!(hooks[0].handler.command.as_deref(), Some("echo good"));
+    }
+
+    #[test]
+    fn parse_plugin_mcp_entries_reads_valid_mapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp_path = tmp.path().join("LLM_PROVIDER_MCP_JSON");
+        std::fs::write(&mcp_path, r#"{"srv": {"type": "local", "command": ["x"]}}"#).unwrap();
+        let entries = parse_plugin_mcp_entries(&mcp_path, "my-plugin").unwrap();
+        assert!(entries.contains_key("srv"));
+    }
+
+    #[test]
+    fn parse_plugin_mcp_entries_rejects_non_mapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp_path = tmp.path().join("LLM_PROVIDER_MCP_JSON");
+        std::fs::write(&mcp_path, "- not\n- a\n- mapping\n").unwrap();
+        let err = parse_plugin_mcp_entries(&mcp_path, "my-plugin").unwrap_err();
+        assert!(err.to_string().contains("must be a mapping"));
+    }
+
+    #[test]
+    fn materialize_plugin_mcp_entries_written_and_deduped() {
+        let out = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            plugin_dir.path().join("LLM_PROVIDER_MCP_JSON"),
+            r#"{"shared": {"type": "local", "command": ["from-plugin"]}}"#,
+        )
+        .unwrap();
+        let (plugins, marketplaces) = plugin_manifest(plugin_dir.path());
+        let mut manifest = MergedManifest {
+            plugins,
+            marketplaces,
+            ..Default::default()
+        };
+        manifest.mcps.push(ResolvedMcp {
+            name: "shared".into(),
+            kind: super::ResolvedKind::Remote {
+                url: "http://example.com".into(),
+                transport: crate::config::McpTransport::Http,
+            },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
+        });
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+        let raw = std::fs::read_to_string(out.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // Plugin entry (last-write-wins) must have overridden the manifest MCP.
+        assert_eq!(
+            doc["mcp"]["shared"]["command"],
+            serde_json::json!(["from-plugin"])
+        );
+    }
+
+    #[test]
+    fn materialize_plugin_mcp_bad_shape_skipped_without_aborting() {
+        let out = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            plugin_dir.path().join("LLM_PROVIDER_MCP_JSON"),
+            "- not\n- a\n- mapping\n",
+        )
+        .unwrap();
+        let (plugins, marketplaces) = plugin_manifest(plugin_dir.path());
+        let manifest = MergedManifest {
+            plugins,
+            marketplaces,
+            ..Default::default()
+        };
+        // Must not abort materialize — just skip this plugin's MCP servers.
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+    }
+
+    #[test]
+    fn materialize_plugin_commands_and_agents_translated() {
+        let out = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("commands")).unwrap();
+        std::fs::write(
+            plugin_dir.path().join("commands/greet.md"),
+            "---\ndescription: greet\n---\nhello\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("agents")).unwrap();
+        std::fs::write(
+            plugin_dir.path().join("agents/helper.md"),
+            "---\ndescription: helps\n---\nhelp text\n",
+        )
+        .unwrap();
+        let (plugins, marketplaces) = plugin_manifest(plugin_dir.path());
+        let manifest = MergedManifest {
+            plugins,
+            marketplaces,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+        assert!(out.path().join("command/__plugin_greet.md").exists());
+        assert!(out.path().join("command/__plugin_agent_helper.md").exists());
+    }
+
+    #[test]
+    fn materialize_plugin_hooks_happy_and_warnings() {
+        let out = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("hooks")).unwrap();
+        std::fs::write(
+            plugin_dir.path().join("hooks/hooks.json"),
+            serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{"hooks": [{"type": "command", "command": "echo ok"}]}],
+                    "Notification": [{"hooks": [{"type": "command", "command": "echo n"}]}],
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugins, marketplaces) = plugin_manifest(plugin_dir.path());
+        let manifest = MergedManifest {
+            plugins,
+            marketplaces,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+        let shim_src = std::fs::read_to_string(out.path().join("plugin/llmenv.js")).unwrap();
+        assert!(shim_src.contains("echo ok"));
+        assert!(!shim_src.contains("echo n"), "Notification is unsupported");
+    }
+
+    #[test]
+    fn materialize_plugin_hooks_parse_error_skips_only_that_plugin() {
+        let out = tempfile::tempdir().unwrap();
+        let bad_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(bad_dir.path().join("hooks")).unwrap();
+        std::fs::write(bad_dir.path().join("hooks/hooks.json"), "not json").unwrap();
+
+        let good_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(good_dir.path().join("commands")).unwrap();
+        std::fs::write(
+            good_dir.path().join("commands/still-works.md"),
+            "---\ndescription: still works\n---\nbody\n",
+        )
+        .unwrap();
+
+        let manifest = MergedManifest {
+            plugins: vec![
+                crate::plugins::resolve::ResolvedPlugin {
+                    marketplace: "test".into(),
+                    plugin: "bad-plugin".into(),
+                    collection: String::new(),
+                    install_path: Some(bad_dir.path().to_str().unwrap().into()),
+                    git_commit_sha: None,
+                },
+                crate::plugins::resolve::ResolvedPlugin {
+                    marketplace: "test".into(),
+                    plugin: "good-plugin".into(),
+                    collection: String::new(),
+                    install_path: Some(good_dir.path().to_str().unwrap().into()),
+                    git_commit_sha: None,
+                },
+            ],
+            marketplaces: vec![crate::plugins::resolve::ResolvedMarketplace {
+                name: "test".into(),
+                source: String::new(),
+                install_location: None,
+                head: None,
+            }],
+            ..Default::default()
+        };
+        // Must succeed overall, and the good plugin's content must still land.
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+        assert!(out.path().join("command/__plugin_still-works.md").exists());
+    }
+
+    #[test]
+    fn materialize_manifest_hook_mcp_tool_kind_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.hooks.push(crate::config::Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::McpTool,
+                command: None,
+                tool: Some("some_tool".into()),
+            },
+            bundle_origin: None,
+        });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
+        assert!(!shim_src.contains("some_tool"));
+    }
+
+    #[test]
+    fn materialize_bundle_agent_from_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        let src_dir = tempfile::tempdir().unwrap();
+        let agent_file = src_dir.path().join("test-agent.md");
+        std::fs::write(
+            &agent_file,
+            "---\ndescription: A test agent\n---\n\nDo the thing.",
+        )
+        .unwrap();
+        manifest
+            .files
+            .insert(PathBuf::from("agents/test-agent.md"), agent_file);
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let out_agent = tmp.path().join("command/__bundle_agent_test-agent.md");
+        assert!(out_agent.exists());
+        let content = std::fs::read_to_string(&out_agent).unwrap();
+        assert!(content.contains("mode: subagent"));
+    }
+
+    #[test]
+    fn materialize_bundle_path_traversal_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest
+            .files
+            .insert(PathBuf::from("../escape.md"), PathBuf::from("/dev/null"));
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn materialize_bundle_unreadable_command_file_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.files.insert(
+            PathBuf::from("commands/missing.md"),
+            PathBuf::from("/does/not/exist.md"),
+        );
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("failed to read bundle file"));
+    }
+
+    #[test]
+    fn yaml_value_kind_name_covers_every_variant() {
+        assert_eq!(yaml_value_kind_name(&serde_yaml::Value::Null), "null");
+        assert_eq!(
+            yaml_value_kind_name(&serde_yaml::Value::Bool(true)),
+            "a bool"
+        );
+        assert_eq!(
+            yaml_value_kind_name(&serde_yaml::from_str("1").unwrap()),
+            "a number"
+        );
+        assert_eq!(
+            yaml_value_kind_name(&serde_yaml::Value::String("x".into())),
+            "a string"
+        );
+        assert_eq!(
+            yaml_value_kind_name(&serde_yaml::from_str("[1]").unwrap()),
+            "a sequence"
+        );
+        assert_eq!(
+            yaml_value_kind_name(&serde_yaml::from_str("a: 1").unwrap()),
+            "a mapping"
+        );
+        let tagged = serde_yaml::Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
+            tag: serde_yaml::value::Tag::new("custom"),
+            value: serde_yaml::Value::String("x".into()),
+        }));
+        assert_eq!(yaml_value_kind_name(&tagged), "a tagged value");
+    }
+
+    #[test]
+    fn parse_plugin_mcp_entries_unreadable_file_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            parse_plugin_mcp_entries(&tmp.path().join("does-not-exist"), "my-plugin").unwrap_err();
+        assert!(err.to_string().contains("failed to read"));
+    }
+
+    #[test]
+    fn parse_plugin_mcp_entries_invalid_yaml_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp_path = tmp.path().join("LLM_PROVIDER_MCP_JSON");
+        std::fs::write(&mcp_path, ": invalid yaml :::").unwrap();
+        let err = parse_plugin_mcp_entries(&mcp_path, "my-plugin").unwrap_err();
+        assert!(err.to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn materialize_rules_dest_dir_creation_failure_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Pre-create "rules" as a plain FILE so create_dir_all for the rule's
+        // parent directory fails (can't mkdir where a file already exists).
+        std::fs::write(tmp.path().join("rules"), b"blocking file").unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.rules.push(RuleFile {
+            bundle: "test".into(),
+            rel: PathBuf::from("rules/security.md"),
+            frontmatter: None,
+            body: "content".into(),
+            raw: "content".into(),
+        });
+        assert!(OpencodeAdapter.materialize(&manifest, tmp.path()).is_err());
+    }
+
+    #[test]
+    fn materialize_plugin_resolution_failure_propagates() {
+        let out = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            plugins: vec![crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "missing-marketplace".into(),
+                plugin: "some-plugin".into(),
+                collection: String::new(),
+                install_path: None,
+                git_commit_sha: None,
+            }],
+            marketplaces: vec![],
+            ..Default::default()
+        };
+        let err = OpencodeAdapter
+            .materialize(&manifest, out.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("missing-marketplace"));
+    }
+
+    #[test]
+    fn materialize_native_opencode_plugin_registers_config_plugin() {
+        let out = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            plugins: vec![crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "test".into(),
+                plugin: "context-mode".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_str().unwrap().into()),
+                git_commit_sha: None,
+            }],
+            marketplaces: vec![crate::plugins::resolve::ResolvedMarketplace {
+                name: "test".into(),
+                source: String::new(),
+                install_location: None,
+                head: None,
+            }],
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+        let raw = std::fs::read_to_string(out.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["plugin"], serde_json::json!(["context-mode"]));
+    }
+
+    #[test]
+    fn materialize_lsp_init_options_conversion_failure_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.lsp.push(llmenv_config::LspServer {
+            name: "broken-ls".into(),
+            command: "broken-ls".into(),
+            // A YAML complex mapping key (sequence-as-key) has no JSON
+            // representation ("key must be a string"), so serde_json::to_value
+            // fails — unlike NaN or an integer key, both of which serde_json
+            // silently coerces (to `null` and a stringified key, respectively).
+            init_options: Some(serde_yaml::from_str("? [a, b]\n: foo\n").unwrap()),
+            ..Default::default()
+        });
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("broken-ls"));
+    }
+
+    #[test]
+    fn materialize_mcp_omitted_when_native_overlay_yields_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        // No manifest.mcps entries, but native_mcp.opencode is present (empty
+        // mapping) — the `if` guard trips on the native_mcp key alone, and the
+        // resulting merged object is still empty, so `mcp` must be omitted.
+        manifest.capabilities.native_mcp.insert(
+            "opencode".into(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(doc.get("mcp").is_none());
+    }
+
+    #[test]
+    fn materialize_bundle_unreadable_agent_file_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.files.insert(
+            PathBuf::from("agents/missing.md"),
+            PathBuf::from("/does/not/exist.md"),
+        );
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("failed to read bundle file"));
+    }
+
+    #[test]
+    fn materialize_native_opencode_overlay_merges_extra_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        let frag: serde_yaml::Value = serde_yaml::from_str("theme: dark\n").unwrap();
+        manifest.native.insert("opencode".into(), frag);
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["theme"], serde_json::json!("dark"));
+    }
+
+    #[test]
+    fn generate_shim_js_hook_with_no_command_defaults_empty() {
+        let hooks = vec![crate::config::Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::Command,
+                command: None,
+                tool: None,
+            },
+            bundle_origin: None,
+        }];
+        let js = generate_shim_js(&hooks).unwrap();
+        assert!(js.contains("\"command\":\"\""));
+    }
+
+    #[test]
+    fn generate_shim_js_falls_back_when_bundle_relative_resolution_fails() {
+        let hooks = vec![crate::config::Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::Command,
+                command: Some("echo hello".into()),
+                tool: None,
+            },
+            bundle_origin: Some(PathBuf::from("/bundles/foo")),
+        }];
+        // "echo hello" has no '/' token, so resolve_bundle_relative_paths
+        // returns None and generate_shim_js must fall back to the raw command.
+        let js = generate_shim_js(&hooks).unwrap();
+        assert!(js.contains("echo hello"));
+    }
+
     // -- split_frontmatter --
 
     #[test]
@@ -1637,5 +2243,345 @@ mod tests {
         // (not trimmed) so markdown line-endings are preserved.
         let (_, body) = split_frontmatter("---\nkey: val\n---\nstrong text\n\nmore\n");
         assert_eq!(body, "strong text\n\nmore\n");
+    }
+
+    // -- property-based tests: permission translation (opencode-unique) --
+    //
+    // opencode's per-tool pattern→action permission map went through three
+    // format-fix commits (bare-tool action-string vs `{"*": action}` wrapper,
+    // deny-wins last-write shadowing). These properties assert the render
+    // invariants hold across arbitrary rule sets, exercised through the public
+    // `materialize` API rather than the private helper fns.
+    use proptest::prelude::*;
+
+    /// Strategy for a structured permission rule. Tool names and patterns stay
+    /// paren-free so they never resemble the native `Tool(pattern)` grammar.
+    fn arb_permission_rule() -> impl Strategy<Value = crate::config::PermissionRule> {
+        (
+            "[A-Za-z]{1,6}",
+            proptest::option::of("[^()]{1,8}"),
+            proptest::collection::vec("[^()]{1,8}", 0..3),
+        )
+            .prop_map(|(tool, pattern, paths)| crate::config::PermissionRule {
+                tool,
+                pattern,
+                paths,
+            })
+    }
+
+    /// Materialize a manifest carrying only `caps` and return the emitted
+    /// `permission` value (or `Null` when the key is absent).
+    fn permission_value(caps: crate::config::Capabilities) -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        doc.get("permission")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn is_action(s: &str) -> bool {
+        matches!(s, "allow" | "ask" | "deny")
+    }
+
+    proptest! {
+        /// For any allow/ask/deny rule set the emitted `permission` value is
+        /// well-formed: absent, or an object whose every entry is an action
+        /// string or a non-empty pattern→action map with action-string values.
+        /// Never panics, never errors.
+        #[test]
+        fn permission_map_is_always_well_formed(
+            allow in proptest::collection::vec(arb_permission_rule(), 0..5),
+            ask in proptest::collection::vec(arb_permission_rule(), 0..5),
+            deny in proptest::collection::vec(arb_permission_rule(), 0..5),
+        ) {
+            let mut caps = crate::config::Capabilities::default();
+            caps.permissions.allow = allow;
+            caps.permissions.ask = ask;
+            caps.permissions.deny = deny;
+            match permission_value(caps) {
+                serde_json::Value::Null => {}
+                serde_json::Value::Object(tools) => {
+                    for (_tool, val) in tools {
+                        match val {
+                            serde_json::Value::String(s) => {
+                                prop_assert!(is_action(&s), "bare action must be allow/ask/deny: {s}");
+                            }
+                            serde_json::Value::Object(patterns) => {
+                                prop_assert!(!patterns.is_empty(), "pattern map must not be empty");
+                                for (_pat, act) in patterns {
+                                    let s = act.as_str().unwrap_or_default();
+                                    prop_assert!(is_action(s), "pattern action must be allow/ask/deny: {s}");
+                                }
+                            }
+                            other => prop_assert!(false, "unexpected permission value: {other}"),
+                        }
+                    }
+                }
+                other => prop_assert!(false, "permission must be object or absent: {other}"),
+            }
+        }
+
+        /// A single bare rule (no pattern, no paths) for an otherwise-unused
+        /// tool renders as a plain action string, not a `{"*": action}` object.
+        #[test]
+        fn bare_rule_renders_action_string(tool in "[A-Za-z]{1,8}") {
+            let mut caps = crate::config::Capabilities::default();
+            caps.permissions.allow.push(crate::config::PermissionRule {
+                tool: tool.clone(),
+                pattern: None,
+                paths: vec![],
+            });
+            prop_assert_eq!(
+                &permission_value(caps)[tool.to_ascii_lowercase()],
+                &serde_json::json!("allow")
+            );
+        }
+
+        /// When the same tool+pattern is both allowed and denied, deny wins
+        /// (deny is inserted last — documented last-write-wins semantics).
+        #[test]
+        fn deny_overrides_allow_for_same_tool_pattern(
+            tool in "[A-Za-z]{1,8}",
+            pattern in "[a-z]{2,8}",
+        ) {
+            let rule = |t: &str, p: &str| crate::config::PermissionRule {
+                tool: t.to_string(),
+                pattern: Some(p.to_string()),
+                paths: vec![],
+            };
+            let mut caps = crate::config::Capabilities::default();
+            caps.permissions.allow.push(rule(&tool, &pattern));
+            caps.permissions.deny.push(rule(&tool, &pattern));
+            prop_assert_eq!(
+                &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
+                &serde_json::json!("deny")
+            );
+        }
+
+        /// Rendering is deterministic: identical rule sets produce identical
+        /// permission output.
+        #[test]
+        fn permission_render_is_deterministic(
+            allow in proptest::collection::vec(arb_permission_rule(), 0..5),
+            deny in proptest::collection::vec(arb_permission_rule(), 0..5),
+        ) {
+            let build = || {
+                let mut caps = crate::config::Capabilities::default();
+                caps.permissions.allow = allow.clone();
+                caps.permissions.deny = deny.clone();
+                permission_value(caps)
+            };
+            prop_assert_eq!(build(), build());
+        }
+    }
+
+    // -- property-based tests: remaining serialization/parsing surfaces --
+    //
+    // Closes gaps identified in pre-pr-review of #876: LSP rendering,
+    // split_frontmatter parser robustness, translate_*_md idempotence,
+    // the generated hook shim's embedded JSON, and native permission-rule
+    // parsing (rule_to_patterns / parse_native_rule, exercised indirectly
+    // through `materialize` since those helpers are private to it).
+
+    /// Strategy for a native permission rule string that never contains `(`
+    /// or `*`, so it always takes the bare-tool wildcard path.
+    fn arb_native_rule_tool() -> impl Strategy<Value = String> {
+        "[A-Za-z]{1,8}".prop_map(String::from)
+    }
+
+    fn arb_hook() -> impl Strategy<Value = crate::config::Hook> {
+        ("[A-Za-z]{3,10}", "[a-z ]{1,10}").prop_map(|(event, command)| crate::config::Hook {
+            event,
+            matcher: None,
+            handler: crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::Command,
+                command: Some(command),
+                tool: None,
+            },
+            bundle_origin: None,
+        })
+    }
+
+    proptest! {
+        /// `split_frontmatter` must never panic, regardless of input —
+        /// including inputs with multi-byte UTF-8 characters straddling the
+        /// byte offsets the parser slices at.
+        #[test]
+        fn split_frontmatter_never_panics(input in ".*") {
+            let _ = split_frontmatter(&input);
+        }
+
+        /// When the (whitespace-trimmed) input doesn't open with `---`, the
+        /// body returned is the exact original source — no frontmatter parsed.
+        #[test]
+        fn split_frontmatter_body_equals_source_without_delimiter(rest in ".{0,40}") {
+            // Prefix with a non-dash, non-whitespace char so trim_start() can
+            // never expose a leading "---" hiding after whitespace.
+            let source = format!("x{rest}");
+            let (fm, body) = split_frontmatter(&source);
+            prop_assert!(fm.is_none());
+            prop_assert_eq!(body, source.as_str());
+        }
+
+        /// LSP rendering: `extensions`/`env` are present iff the source
+        /// server config has filetypes/env entries; `command` always starts
+        /// with the configured command and has one entry per arg.
+        #[test]
+        fn lsp_optional_fields_omitted_when_absent(
+            name in "[a-z]{1,8}",
+            command in "[a-z]{1,8}",
+            args in proptest::collection::vec("[a-z]{1,4}", 0..3),
+            filetypes in proptest::collection::vec("[a-z]{1,4}", 0..3),
+            env_value in proptest::option::of("[a-z]{1,4}"),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut manifest = MergedManifest::default();
+            let mut env = std::collections::BTreeMap::new();
+            if let Some(v) = &env_value {
+                env.insert("KEY".to_string(), v.clone());
+            }
+            manifest.capabilities.lsp.push(llmenv_config::LspServer {
+                name: name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+                filetypes: filetypes.clone(),
+                env,
+                ..Default::default()
+            });
+            OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+            let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let srv = &doc["lsp"][&name];
+            let cmd = srv["command"].as_array().unwrap();
+            prop_assert_eq!(cmd.len(), 1 + args.len());
+            prop_assert_eq!(cmd[0].as_str().unwrap(), command.as_str());
+            prop_assert_eq!(srv.get("extensions").is_some(), !filetypes.is_empty());
+            prop_assert_eq!(srv.get("env").is_some(), env_value.is_some());
+            prop_assert!(srv.get("initialization").is_none());
+        }
+
+        /// `translate_agent_md` always inserts `mode: subagent`, regardless
+        /// of whether the source had a `model` field.
+        #[test]
+        fn translate_agent_md_always_sets_mode_subagent(has_model in any::<bool>()) {
+            let source = if has_model {
+                "---\ndescription: d\nmodel: sonnet\n---\nbody\n"
+            } else {
+                "---\ndescription: d\n---\nbody\n"
+            };
+            let out = translate_agent_md(source, "n").unwrap();
+            let (fm, _) = split_frontmatter(&out);
+            let fm = fm.unwrap();
+            prop_assert_eq!(
+                fm.as_mapping().unwrap().get(serde_yaml::Value::String("mode".into())),
+                Some(&serde_yaml::Value::String("subagent".into()))
+            );
+        }
+
+        /// Applying `translate_agent_md` / `translate_command_md` twice is a
+        /// no-op the second time — dropped fields don't get "more dropped".
+        #[test]
+        fn translate_md_transforms_are_idempotent(has_extra in any::<bool>()) {
+            let agent_source = if has_extra {
+                "---\ndescription: d\nmodel: sonnet\n---\nbody\n"
+            } else {
+                "---\ndescription: d\n---\nbody\n"
+            };
+            let agent_once = translate_agent_md(agent_source, "n").unwrap();
+            let agent_twice = translate_agent_md(&agent_once, "n").unwrap();
+            prop_assert_eq!(agent_once, agent_twice);
+
+            let command_source = if has_extra {
+                "---\ndescription: d\nallowed_tools: [Bash]\n---\nbody\n"
+            } else {
+                "no frontmatter here\n"
+            };
+            let command_once = translate_command_md(command_source, "n").unwrap();
+            let command_twice = translate_command_md(&command_once, "n").unwrap();
+            prop_assert_eq!(command_once, command_twice);
+        }
+
+        /// The hook shim's embedded `HOOK_TABLE` is always valid JSON, for any
+        /// hook set (including zero hooks — the auto-hooks alone must parse).
+        #[test]
+        fn generate_shim_js_hook_table_is_valid_json(
+            hooks in proptest::collection::vec(arb_hook(), 0..5)
+        ) {
+            let js = generate_shim_js(&hooks).unwrap();
+            let marker = "const HOOK_TABLE = ";
+            let start = js.find(marker).unwrap() + marker.len();
+            let end = js[start..]
+                .find(";\n")
+                .map(|i| start + i)
+                .unwrap();
+            let table_json = &js[start..end];
+            let _: serde_json::Value = serde_json::from_str(table_json).unwrap();
+        }
+
+        /// `generate_shim_js` is deterministic: the same hook slice always
+        /// renders the same shim.
+        #[test]
+        fn generate_shim_js_is_deterministic(
+            hooks in proptest::collection::vec(arb_hook(), 0..5)
+        ) {
+            let a = generate_shim_js(&hooks).unwrap();
+            let b = generate_shim_js(&hooks).unwrap();
+            prop_assert_eq!(a, b);
+        }
+
+        /// A bare native rule (no parens) wildcard-matches and lowercases the
+        /// tool name — exercised through `native_permissions.opencode` since
+        /// `parse_native_rule` is private to `materialize`.
+        #[test]
+        fn native_rule_bare_tool_wildcards_and_lowercases(tool in arb_native_rule_tool()) {
+            let mut caps = crate::config::Capabilities::default();
+            caps.native_permissions.insert(
+                "opencode".to_string(),
+                crate::config::NativePermissionRules {
+                    allow: vec![tool.clone()],
+                    ..Default::default()
+                },
+            );
+            let val = permission_value(caps);
+            prop_assert_eq!(&val[tool.to_ascii_lowercase()], &serde_json::json!("allow"));
+        }
+
+        /// A native rule with a parenthesized pattern extracts that pattern
+        /// verbatim and lowercases only the tool portion.
+        #[test]
+        fn native_rule_with_parens_extracts_pattern(
+            tool in arb_native_rule_tool(),
+            pattern in "[a-z]{1,6}",
+        ) {
+            let mut caps = crate::config::Capabilities::default();
+            caps.native_permissions.insert(
+                "opencode".to_string(),
+                crate::config::NativePermissionRules {
+                    allow: vec![format!("{tool}({pattern})")],
+                    ..Default::default()
+                },
+            );
+            let val = permission_value(caps);
+            prop_assert_eq!(
+                &val[tool.to_ascii_lowercase()][&pattern],
+                &serde_json::json!("allow")
+            );
+        }
+
+        /// `parse_plugin_hooks` never panics on arbitrary file content, valid
+        /// JSON or not.
+        #[test]
+        fn parse_plugin_hooks_never_panics_on_arbitrary_content(content in ".{0,200}") {
+            let tmp = tempfile::tempdir().unwrap();
+            let hooks_path = tmp.path().join("hooks.json");
+            std::fs::write(&hooks_path, &content).unwrap();
+            let _ = parse_plugin_hooks(&hooks_path, tmp.path(), "test-plugin");
+        }
     }
 }

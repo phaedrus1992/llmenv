@@ -152,6 +152,66 @@ provider config is tracked in #508. The fragment is deep-merged verbatim into
 The `native_permissions.crush`, `native_hooks.crush`, and `native_mcp.crush`
 siblings work the same way for their respective domains.
 
+## The opencode adapter
+
+[opencode](https://opencode.ai) is a third supported engine. Like Crush it is
+**PATH-gated**: `export`, `hook`, and `regenerate` skip opencode silently if
+`opencode` is not on `PATH`. When present, opencode's config is materialized
+into the llmenv cache directory and discovered via `OPENCODE_CONFIG_DIR`.
+
+Unlike Crush, opencode is a full-featured target: it supports plugins, LSP,
+custom agents/commands, and six hook events, so it reaches near-parity with the
+Claude Code adapter.
+
+### Env vars
+
+| Variable              | Points to                                              | Notes                                                                          |
+|-----------------------|--------------------------------------------------------|--------------------------------------------------------------------------------|
+| `OPENCODE_CONFIG_DIR` | `<cache>` (the directory holding `opencode.json`)      | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` shim from here   |
+
+### What the opencode adapter emits
+
+| Output | Contents |
+| ------ | -------- |
+| `opencode.json` | `$schema`, `instructions`, `mcp`, `lsp`, `permission`, `plugin` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
+| `AGENTS.md` | the merged rules document opencode loads as project instructions |
+| `rules/*.md` | rule files copied verbatim and listed in `instructions` |
+| skills (`SKILL.md`) | first-class and plugin-projected skills, in opencode's claude-compatible format |
+| `command/*.md`, `agent/*.md` | plugin commands and agents translated (agents gain `mode: subagent`) |
+| `plugin/llmenv.js` | a generated ES-module shim bridging opencode's JS plugin API to llmenv's `hook-run` subprocess |
+
+### Capability map
+
+| Feature | opencode support | Notes |
+| --------- | ---------------- | ------- |
+| Permissions (`allow`/`ask`/`deny`) | Supported | Rendered as per-tool `pattern → action` maps; a bare tool emits a plain action string. `ask` is native (no fail-closed collapse) |
+| Hooks — `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` | Supported | Bridged through the generated `plugin/llmenv.js` shim |
+| Hooks — other events | **Warned, skipped** | Unsupported events are dropped with an actionable warning rather than a hard error |
+| Hooks — `mcp_tool` kind | **Warned, skipped** | No opencode equivalent; use a `command`-kind handler |
+| MCP servers | Supported | Local (`command`, `${HOME}`-expanded) and remote (`http`/`sse`) transports |
+| LSP servers | Supported | Rendered to `lsp.<name>` entries, with `initialization_options` |
+| Skills (first-class + plugin-projected) | Supported | Native `SKILL.md` format |
+| Plugins / marketplace | Supported | Plugin commands, agents, MCP, skills, and hooks are translated |
+| Custom agents | Supported | Plugin `agent/*.md` are emitted with `mode: subagent` |
+
+### The `native.opencode` escape hatch
+
+Keys that no modeled feature owns go under `native.opencode`, deep-merged into
+`opencode.json` at highest precedence:
+
+```yaml
+native:
+  opencode:
+    theme: opencode
+    model: anthropic/claude-opus-4-5
+```
+
+The modeled keys `instructions`, `mcp`, `lsp`, and `permission` are **rejected**
+in the top-level `native.opencode` block — overlaying them last would clobber the
+security-rendered output. Route those through the `native_permissions.opencode`,
+`native_hooks.opencode`, and `native_mcp.opencode` siblings instead, which merge
+in the safe direction.
+
 ## Other engines
 
 The capability model is engine-neutral by design, so additional adapters (e.g.
