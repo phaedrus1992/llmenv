@@ -1638,4 +1638,140 @@ mod tests {
         let (_, body) = split_frontmatter("---\nkey: val\n---\nstrong text\n\nmore\n");
         assert_eq!(body, "strong text\n\nmore\n");
     }
+
+    // -- property-based tests: permission translation (opencode-unique) --
+    //
+    // opencode's per-tool pattern→action permission map went through three
+    // format-fix commits (bare-tool action-string vs `{"*": action}` wrapper,
+    // deny-wins last-write shadowing). These properties assert the render
+    // invariants hold across arbitrary rule sets, exercised through the public
+    // `materialize` API rather than the private helper fns.
+    use proptest::prelude::*;
+
+    /// Strategy for a structured permission rule. Tool names and patterns stay
+    /// paren-free so they never resemble the native `Tool(pattern)` grammar.
+    fn arb_permission_rule() -> impl Strategy<Value = crate::config::PermissionRule> {
+        (
+            "[A-Za-z]{1,6}",
+            proptest::option::of("[^()]{1,8}"),
+            proptest::collection::vec("[^()]{1,8}", 0..3),
+        )
+            .prop_map(|(tool, pattern, paths)| crate::config::PermissionRule {
+                tool,
+                pattern,
+                paths,
+            })
+    }
+
+    /// Materialize a manifest carrying only `caps` and return the emitted
+    /// `permission` value (or `Null` when the key is absent).
+    fn permission_value(caps: crate::config::Capabilities) -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        doc.get("permission")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn is_action(s: &str) -> bool {
+        matches!(s, "allow" | "ask" | "deny")
+    }
+
+    proptest! {
+        /// For any allow/ask/deny rule set the emitted `permission` value is
+        /// well-formed: absent, or an object whose every entry is an action
+        /// string or a non-empty pattern→action map with action-string values.
+        /// Never panics, never errors.
+        #[test]
+        fn permission_map_is_always_well_formed(
+            allow in proptest::collection::vec(arb_permission_rule(), 0..5),
+            ask in proptest::collection::vec(arb_permission_rule(), 0..5),
+            deny in proptest::collection::vec(arb_permission_rule(), 0..5),
+        ) {
+            let mut caps = crate::config::Capabilities::default();
+            caps.permissions.allow = allow;
+            caps.permissions.ask = ask;
+            caps.permissions.deny = deny;
+            match permission_value(caps) {
+                serde_json::Value::Null => {}
+                serde_json::Value::Object(tools) => {
+                    for (_tool, val) in tools {
+                        match val {
+                            serde_json::Value::String(s) => {
+                                prop_assert!(is_action(&s), "bare action must be allow/ask/deny: {s}");
+                            }
+                            serde_json::Value::Object(patterns) => {
+                                prop_assert!(!patterns.is_empty(), "pattern map must not be empty");
+                                for (_pat, act) in patterns {
+                                    let s = act.as_str().unwrap_or_default();
+                                    prop_assert!(is_action(s), "pattern action must be allow/ask/deny: {s}");
+                                }
+                            }
+                            other => prop_assert!(false, "unexpected permission value: {other}"),
+                        }
+                    }
+                }
+                other => prop_assert!(false, "permission must be object or absent: {other}"),
+            }
+        }
+
+        /// A single bare rule (no pattern, no paths) for an otherwise-unused
+        /// tool renders as a plain action string, not a `{"*": action}` object.
+        #[test]
+        fn bare_rule_renders_action_string(tool in "[A-Za-z]{1,8}") {
+            let mut caps = crate::config::Capabilities::default();
+            caps.permissions.allow.push(crate::config::PermissionRule {
+                tool: tool.clone(),
+                pattern: None,
+                paths: vec![],
+            });
+            prop_assert_eq!(
+                &permission_value(caps)[tool.to_ascii_lowercase()],
+                &serde_json::json!("allow")
+            );
+        }
+
+        /// When the same tool+pattern is both allowed and denied, deny wins
+        /// (deny is inserted last — documented last-write-wins semantics).
+        #[test]
+        fn deny_overrides_allow_for_same_tool_pattern(
+            tool in "[A-Za-z]{1,8}",
+            pattern in "[a-z]{2,8}",
+        ) {
+            let rule = |t: &str, p: &str| crate::config::PermissionRule {
+                tool: t.to_string(),
+                pattern: Some(p.to_string()),
+                paths: vec![],
+            };
+            let mut caps = crate::config::Capabilities::default();
+            caps.permissions.allow.push(rule(&tool, &pattern));
+            caps.permissions.deny.push(rule(&tool, &pattern));
+            prop_assert_eq!(
+                &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
+                &serde_json::json!("deny")
+            );
+        }
+
+        /// Rendering is deterministic: identical rule sets produce identical
+        /// permission output.
+        #[test]
+        fn permission_render_is_deterministic(
+            allow in proptest::collection::vec(arb_permission_rule(), 0..5),
+            deny in proptest::collection::vec(arb_permission_rule(), 0..5),
+        ) {
+            let build = || {
+                let mut caps = crate::config::Capabilities::default();
+                caps.permissions.allow = allow.clone();
+                caps.permissions.deny = deny.clone();
+                permission_value(caps)
+            };
+            prop_assert_eq!(build(), build());
+        }
+    }
 }
