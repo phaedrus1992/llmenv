@@ -380,6 +380,55 @@ fn smoke_crush_status_succeeds() {
 }
 
 // ============================================================================
+// Test Cases: opencode adapter (parity with claude-code / crush, #876)
+//
+// These drive the opencode adapter end-to-end through the CLI: config →
+// export/regenerate materializes opencode.json + AGENTS.md, and doctor/status
+// probe the engine. The engine-agnostic memory-failsoft variants above are
+// not duplicated here — that path lives in the shared memory backend, not the
+// adapter, so claude-code/crush coverage already exercises it.
+// ============================================================================
+
+#[test]
+fn smoke_opencode_basic_export() {
+    let (dir, config_path) = setup_config(&config_base("opencode"));
+    let cmd = llmenv_cmd(dir.path(), &config_path, "export");
+    assert_completes_within(cmd, 10)
+        .success()
+        .stdout(predicate::str::contains("export "));
+}
+
+#[test]
+fn smoke_opencode_basic_regenerate() {
+    let (dir, config_path) = setup_config(&config_base("opencode"));
+    let cmd = llmenv_cmd(dir.path(), &config_path, "regenerate");
+    assert_completes_within(cmd, 10).success();
+}
+
+#[test]
+fn smoke_opencode_hook_session_start() {
+    let (dir, config_path) = setup_config(&config_base("opencode"));
+    let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
+    assert_completes_within(cmd, 5).success();
+}
+
+#[test]
+fn smoke_opencode_doctor_succeeds() {
+    let (dir, config_path) = setup_config(&config_base("opencode"));
+    let cmd = llmenv_cmd(dir.path(), &config_path, "doctor");
+    assert_completes_within(cmd, 10).success();
+}
+
+#[test]
+fn smoke_opencode_status_succeeds() {
+    let (dir, config_path) = setup_config(&config_base("opencode"));
+    let cmd = llmenv_cmd(dir.path(), &config_path, "status");
+    assert_completes_within(cmd, 10)
+        .success()
+        .stderr(predicate::str::contains("Scopes"));
+}
+
+// ============================================================================
 // Test Cases: Bundle Manifest (Shared-Manifest Code Path, #708 / #830)
 // ============================================================================
 //
