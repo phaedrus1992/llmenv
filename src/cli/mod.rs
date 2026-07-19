@@ -3958,7 +3958,11 @@ mod tests {
     fn installed_adapters_case_insensitive_disabled_engines() {
         // #564: disabled_engines entries should match case-insensitively
         let config = Config {
-            disabled_engines: vec!["Claude_Code".to_string(), "CRUSH".to_string()],
+            disabled_engines: vec![
+                "Claude_Code".to_string(),
+                "CRUSH".to_string(),
+                "oPeNcOdE".to_string(),
+            ],
             ..Config::default()
         };
         assert_eq!(
