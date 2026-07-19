@@ -257,7 +257,11 @@ fn engine_handoff_prompt(
 /// Returns adapter IDs of engines found (e.g. "claude_code", "crush").
 fn probe_engines() -> Vec<String> {
     let mut found = Vec::new();
-    let probes: &[(&str, &str)] = &[("claude", "claude_code"), ("crush", "crush")];
+    let probes: &[(&str, &str)] = &[
+        ("claude", "claude_code"),
+        ("crush", "crush"),
+        ("opencode", "opencode"),
+    ];
     for (binary, engine_id) in probes {
         if let Ok(out) = std::process::Command::new("which").arg(binary).output()
             && out.status.success()
@@ -270,7 +274,7 @@ fn probe_engines() -> Vec<String> {
 
 /// Compute which engines should be disabled given which are available.
 fn compute_disabled_engines(available: &[String]) -> Vec<String> {
-    const ALL_SUPPORTED: &[&str] = &["claude_code", "crush"];
+    const ALL_SUPPORTED: &[&str] = &["claude_code", "crush", "opencode"];
     ALL_SUPPORTED
         .iter()
         .filter(|e| !available.contains(&e.to_string()))
@@ -748,22 +752,28 @@ mod tests {
     #[test]
     fn test_compute_disabled_engines_none_available() {
         let disabled = compute_disabled_engines(&[]);
-        assert_eq!(disabled.len(), 2);
+        assert_eq!(disabled.len(), 3);
         assert!(disabled.contains(&"claude_code".to_string()));
         assert!(disabled.contains(&"crush".to_string()));
+        assert!(disabled.contains(&"opencode".to_string()));
     }
 
     #[test]
     fn test_compute_disabled_engines_all_available() {
-        let disabled = compute_disabled_engines(&["claude_code".to_string(), "crush".to_string()]);
+        let disabled = compute_disabled_engines(&[
+            "claude_code".to_string(),
+            "crush".to_string(),
+            "opencode".to_string(),
+        ]);
         assert!(disabled.is_empty());
     }
 
     #[test]
     fn test_compute_disabled_engines_partial() {
         let disabled = compute_disabled_engines(&["claude_code".to_string()]);
-        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled.len(), 2);
         assert_eq!(disabled[0], "crush");
+        assert_eq!(disabled[1], "opencode");
     }
 
     #[test]
@@ -790,7 +800,10 @@ mod tests {
     fn test_probe_engines_does_not_panic() {
         let engines = probe_engines();
         for e in &engines {
-            assert!(e == "claude_code" || e == "crush", "unexpected engine: {e}");
+            assert!(
+                e == "claude_code" || e == "crush" || e == "opencode",
+                "unexpected engine: {e}"
+            );
         }
     }
 
