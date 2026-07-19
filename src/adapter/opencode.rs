@@ -976,10 +976,13 @@ fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &str) {
 
     // Find the closing `\n---` (opener + newline + closing delimiter).
     if let Some(end) = after_opener.find("\n---") {
-        // `end` is the position of `\n` before the closing `---`.
-        // YAML content is after the opening `---\n` (position 1 of after_opener)
-        // and before the `\n` at position `end`.
-        let fm_raw = if end > 0 { &after_opener[1..end] } else { "" };
+        // `end` is the position of `\n` before the closing `---`. YAML
+        // content is between the opening `---` and that `\n`; strip_prefix
+        // (rather than a fixed `[1..]` byte slice) drops the newline right
+        // after the opener without risking a non-UTF-8-boundary panic when
+        // there isn't one (e.g. malformed input like "---é\n---").
+        let content = &after_opener[..end];
+        let fm_raw = content.strip_prefix('\n').unwrap_or(content);
         let body = &after_opener[(end + 4)..];
         let fm = match serde_yaml::from_str(fm_raw) {
             Ok(v) => Some(v),
@@ -1828,6 +1831,211 @@ mod tests {
                 permission_value(caps)
             };
             prop_assert_eq!(build(), build());
+        }
+    }
+
+    // -- property-based tests: remaining serialization/parsing surfaces --
+    //
+    // Closes gaps identified in pre-pr-review of #876: LSP rendering,
+    // split_frontmatter parser robustness, translate_*_md idempotence,
+    // the generated hook shim's embedded JSON, and native permission-rule
+    // parsing (rule_to_patterns / parse_native_rule, exercised indirectly
+    // through `materialize` since those helpers are private to it).
+
+    /// Strategy for a native permission rule string that never contains `(`
+    /// or `*`, so it always takes the bare-tool wildcard path.
+    fn arb_native_rule_tool() -> impl Strategy<Value = String> {
+        "[A-Za-z]{1,8}".prop_map(String::from)
+    }
+
+    fn arb_hook() -> impl Strategy<Value = crate::config::Hook> {
+        ("[A-Za-z]{3,10}", "[a-z ]{1,10}").prop_map(|(event, command)| crate::config::Hook {
+            event,
+            matcher: None,
+            handler: crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::Command,
+                command: Some(command),
+                tool: None,
+            },
+            bundle_origin: None,
+        })
+    }
+
+    proptest! {
+        /// `split_frontmatter` must never panic, regardless of input —
+        /// including inputs with multi-byte UTF-8 characters straddling the
+        /// byte offsets the parser slices at.
+        #[test]
+        fn split_frontmatter_never_panics(input in ".*") {
+            let _ = split_frontmatter(&input);
+        }
+
+        /// When the (whitespace-trimmed) input doesn't open with `---`, the
+        /// body returned is the exact original source — no frontmatter parsed.
+        #[test]
+        fn split_frontmatter_body_equals_source_without_delimiter(rest in ".{0,40}") {
+            // Prefix with a non-dash, non-whitespace char so trim_start() can
+            // never expose a leading "---" hiding after whitespace.
+            let source = format!("x{rest}");
+            let (fm, body) = split_frontmatter(&source);
+            prop_assert!(fm.is_none());
+            prop_assert_eq!(body, source.as_str());
+        }
+
+        /// LSP rendering: `extensions`/`env` are present iff the source
+        /// server config has filetypes/env entries; `command` always starts
+        /// with the configured command and has one entry per arg.
+        #[test]
+        fn lsp_optional_fields_omitted_when_absent(
+            name in "[a-z]{1,8}",
+            command in "[a-z]{1,8}",
+            args in proptest::collection::vec("[a-z]{1,4}", 0..3),
+            filetypes in proptest::collection::vec("[a-z]{1,4}", 0..3),
+            env_value in proptest::option::of("[a-z]{1,4}"),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut manifest = MergedManifest::default();
+            let mut env = std::collections::BTreeMap::new();
+            if let Some(v) = &env_value {
+                env.insert("KEY".to_string(), v.clone());
+            }
+            manifest.capabilities.lsp.push(llmenv_config::LspServer {
+                name: name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+                filetypes: filetypes.clone(),
+                env,
+                ..Default::default()
+            });
+            OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+            let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let srv = &doc["lsp"][&name];
+            let cmd = srv["command"].as_array().unwrap();
+            prop_assert_eq!(cmd.len(), 1 + args.len());
+            prop_assert_eq!(cmd[0].as_str().unwrap(), command.as_str());
+            prop_assert_eq!(srv.get("extensions").is_some(), !filetypes.is_empty());
+            prop_assert_eq!(srv.get("env").is_some(), env_value.is_some());
+            prop_assert!(srv.get("initialization").is_none());
+        }
+
+        /// `translate_agent_md` always inserts `mode: subagent`, regardless
+        /// of whether the source had a `model` field.
+        #[test]
+        fn translate_agent_md_always_sets_mode_subagent(has_model in any::<bool>()) {
+            let source = if has_model {
+                "---\ndescription: d\nmodel: sonnet\n---\nbody\n"
+            } else {
+                "---\ndescription: d\n---\nbody\n"
+            };
+            let out = translate_agent_md(source, "n").unwrap();
+            let (fm, _) = split_frontmatter(&out);
+            let fm = fm.expect("translated agent output must carry frontmatter");
+            prop_assert_eq!(
+                fm.as_mapping().unwrap().get(serde_yaml::Value::String("mode".into())),
+                Some(&serde_yaml::Value::String("subagent".into()))
+            );
+        }
+
+        /// Applying `translate_agent_md` / `translate_command_md` twice is a
+        /// no-op the second time — dropped fields don't get "more dropped".
+        #[test]
+        fn translate_md_transforms_are_idempotent(has_extra in any::<bool>()) {
+            let agent_source = if has_extra {
+                "---\ndescription: d\nmodel: sonnet\n---\nbody\n"
+            } else {
+                "---\ndescription: d\n---\nbody\n"
+            };
+            let agent_once = translate_agent_md(agent_source, "n").unwrap();
+            let agent_twice = translate_agent_md(&agent_once, "n").unwrap();
+            prop_assert_eq!(agent_once, agent_twice);
+
+            let command_source = if has_extra {
+                "---\ndescription: d\nallowed_tools: [Bash]\n---\nbody\n"
+            } else {
+                "no frontmatter here\n"
+            };
+            let command_once = translate_command_md(command_source, "n").unwrap();
+            let command_twice = translate_command_md(&command_once, "n").unwrap();
+            prop_assert_eq!(command_once, command_twice);
+        }
+
+        /// The hook shim's embedded `HOOK_TABLE` is always valid JSON, for any
+        /// hook set (including zero hooks — the auto-hooks alone must parse).
+        #[test]
+        fn generate_shim_js_hook_table_is_valid_json(
+            hooks in proptest::collection::vec(arb_hook(), 0..5)
+        ) {
+            let js = generate_shim_js(&hooks).unwrap();
+            let marker = "const HOOK_TABLE = ";
+            let start = js.find(marker).expect("shim must define HOOK_TABLE") + marker.len();
+            let end = js[start..]
+                .find(";\n")
+                .map(|i| start + i)
+                .expect("HOOK_TABLE assignment must be `;`-terminated");
+            let table_json = &js[start..end];
+            let _: serde_json::Value = serde_json::from_str(table_json)
+                .expect("HOOK_TABLE must be valid JSON");
+        }
+
+        /// `generate_shim_js` is deterministic: the same hook slice always
+        /// renders the same shim.
+        #[test]
+        fn generate_shim_js_is_deterministic(
+            hooks in proptest::collection::vec(arb_hook(), 0..5)
+        ) {
+            let a = generate_shim_js(&hooks).unwrap();
+            let b = generate_shim_js(&hooks).unwrap();
+            prop_assert_eq!(a, b);
+        }
+
+        /// A bare native rule (no parens) wildcard-matches and lowercases the
+        /// tool name — exercised through `native_permissions.opencode` since
+        /// `parse_native_rule` is private to `materialize`.
+        #[test]
+        fn native_rule_bare_tool_wildcards_and_lowercases(tool in arb_native_rule_tool()) {
+            let mut caps = crate::config::Capabilities::default();
+            caps.native_permissions.insert(
+                "opencode".to_string(),
+                crate::config::NativePermissionRules {
+                    allow: vec![tool.clone()],
+                    ..Default::default()
+                },
+            );
+            let val = permission_value(caps);
+            prop_assert_eq!(&val[tool.to_ascii_lowercase()], &serde_json::json!("allow"));
+        }
+
+        /// A native rule with a parenthesized pattern extracts that pattern
+        /// verbatim and lowercases only the tool portion.
+        #[test]
+        fn native_rule_with_parens_extracts_pattern(
+            tool in arb_native_rule_tool(),
+            pattern in "[a-z]{1,6}",
+        ) {
+            let mut caps = crate::config::Capabilities::default();
+            caps.native_permissions.insert(
+                "opencode".to_string(),
+                crate::config::NativePermissionRules {
+                    allow: vec![format!("{tool}({pattern})")],
+                    ..Default::default()
+                },
+            );
+            let val = permission_value(caps);
+            prop_assert_eq!(
+                &val[tool.to_ascii_lowercase()][&pattern],
+                &serde_json::json!("allow")
+            );
+        }
+
+        /// `parse_plugin_hooks` never panics on arbitrary file content, valid
+        /// JSON or not.
+        #[test]
+        fn parse_plugin_hooks_never_panics_on_arbitrary_content(content in ".{0,200}") {
+            let tmp = tempfile::tempdir().unwrap();
+            let hooks_path = tmp.path().join("hooks.json");
+            std::fs::write(&hooks_path, &content).unwrap();
+            let _ = parse_plugin_hooks(&hooks_path, tmp.path(), "test-plugin");
         }
     }
 }
