@@ -146,6 +146,9 @@ async function runHooks(event, extra) {
           if (event === "PreToolUse") return "__LLMENV_BLOCK__";
           continue;
         }
+        if (result.stderr) {
+          console.error(`llmenv hook ${event} ('${hk.command}') stderr:`, result.stderr);
+        }
         if (result.stdout) {
           try {
             const parsed = JSON.parse(result.stdout);
@@ -224,11 +227,11 @@ struct PluginHookEntry {
 /// [`crate::config::Hook`] structs.
 ///
 /// Resolves `${CLAUDE_PLUGIN_ROOT}` to `payload_path` and only emits
-/// `command`-type hooks (other types are silently skipped).
+/// `command`-type hooks — other types are skipped with an actionable warning.
 fn parse_plugin_hooks(
     hooks_path: &Path,
     payload_path: &Path,
-    _plugin_name: &str,
+    plugin_name: &str,
 ) -> anyhow::Result<Vec<crate::config::Hook>> {
     let source = std::fs::read_to_string(hooks_path)?;
     let manifest: PluginHooksManifest = serde_json::from_str(&source)?;
@@ -239,9 +242,20 @@ fn parse_plugin_hooks(
             for entry in &group.hooks {
                 let kind = entry.kind.as_deref().unwrap_or("command");
                 if kind != "command" {
+                    eprintln!(
+                        "warning: plugin '{plugin_name}' hooks manifest '{}': hook type '{kind}' \
+                         is not supported by the opencode adapter — skipping. Only 'command' \
+                         hooks are supported.",
+                        hooks_path.display()
+                    );
                     continue;
                 }
                 let Some(raw_command) = &entry.command else {
+                    eprintln!(
+                        "warning: plugin '{plugin_name}' hooks manifest '{}': a 'command' hook \
+                         entry for event '{event}' is missing its 'command' field — skipping.",
+                        hooks_path.display()
+                    );
                     continue;
                 };
                 let resolved =
@@ -261,6 +275,51 @@ fn parse_plugin_hooks(
     }
 
     Ok(hooks)
+}
+
+/// Human-readable YAML value kind, for error messages when a config value has
+/// the wrong shape (e.g. a plugin's `LLM_PROVIDER_MCP_JSON` isn't a mapping).
+fn yaml_value_kind_name(value: &serde_yaml::Value) -> &'static str {
+    match value {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "a bool",
+        serde_yaml::Value::Number(_) => "a number",
+        serde_yaml::Value::String(_) => "a string",
+        serde_yaml::Value::Sequence(_) => "a sequence",
+        serde_yaml::Value::Mapping(_) => "a mapping",
+        serde_yaml::Value::Tagged(_) => "a tagged value",
+    }
+}
+
+/// Read and parse a plugin's `LLM_PROVIDER_MCP_JSON` file into MCP server
+/// entries keyed by server name.
+///
+/// Isolated into its own fallible function so one plugin's malformed or
+/// unreadable MCP config only drops that plugin's MCP servers (with a
+/// warning) rather than aborting `materialize` for every other plugin.
+fn parse_plugin_mcp_entries(
+    mcp_json_path: &Path,
+    plugin_name: &str,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let content = std::fs::read_to_string(mcp_json_path).map_err(|e| {
+        anyhow::anyhow!("plugin '{plugin_name}': failed to read {mcp_json_path:?}: {e}")
+    })?;
+    let yaml_value: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| {
+        anyhow::anyhow!("plugin '{plugin_name}': failed to parse LLM_PROVIDER_MCP_JSON: {e}")
+    })?;
+    let obj = yaml_value.as_mapping().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{plugin_name}': LLM_PROVIDER_MCP_JSON must be a mapping of server name to \
+             config, got {}",
+            yaml_value_kind_name(&yaml_value)
+        )
+    })?;
+    let json_value: serde_json::Value = serde_json::to_value(obj)?;
+    json_value.as_object().cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "plugin '{plugin_name}': LLM_PROVIDER_MCP_JSON mapping did not convert to a JSON object"
+        )
+    })
 }
 
 impl AgentAdapter for OpencodeAdapter {
@@ -335,10 +394,11 @@ impl AgentAdapter for OpencodeAdapter {
             std::collections::BTreeMap::new();
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
         let mut plugin_hooks: Vec<crate::config::Hook> = Vec::new();
-        // Whether any plugin provides native opencode support (e.g. a
+        // Names of plugins that provide native opencode support (e.g. a
         // TypeScript plugin registered via "plugin" key in opencode.json).
-        // Known: context-mode ships a native opencode plugin.
-        let mut has_native_opencode = false;
+        // Known: context-mode ships a native opencode plugin, but any plugin
+        // can declare the same support — detection isn't limited to that name.
+        let mut native_opencode_plugins: Vec<String> = Vec::new();
 
         // Hoisted: command/ dir needed by plugin and bundle sections below.
         std::fs::create_dir_all(out.join("command"))?;
@@ -355,25 +415,16 @@ impl AgentAdapter for OpencodeAdapter {
             //     opencode plugins — they register their own tools internally
             //     and including MCP entries would duplicate them.
             if is_native_opencode {
-                has_native_opencode = true;
+                native_opencode_plugins.push(plugin.plugin.clone());
             } else {
                 let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
                 if mcp_json_path.exists() {
-                    let content = std::fs::read_to_string(&mcp_json_path)?;
-                    let yaml_value: serde_yaml::Value =
-                        serde_yaml::from_str(&content).map_err(|e| {
-                            anyhow::anyhow!(
-                                "plugin '{}': failed to parse LLM_PROVIDER_MCP_JSON: {e}",
-                                plugin.plugin
-                            )
-                        })?;
-                    if let Some(obj) = yaml_value.as_mapping() {
-                        let json_value: serde_json::Value = serde_json::to_value(obj)?;
-                        if let Some(json_obj) = json_value.as_object() {
-                            for (k, v) in json_obj {
-                                plugin_mcp_entries.insert(k.clone(), v.clone());
-                            }
-                        }
+                    match parse_plugin_mcp_entries(&mcp_json_path, &plugin.plugin) {
+                        Ok(entries) => plugin_mcp_entries.extend(entries),
+                        Err(e) => eprintln!(
+                            "warning: {e} — skipping this plugin's MCP servers, other plugins \
+                             are unaffected."
+                        ),
                     }
                 }
             }
@@ -439,14 +490,19 @@ impl AgentAdapter for OpencodeAdapter {
                     if !hooks_path.exists() {
                         continue;
                     }
-                    let mut parsed = parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "failed to parse '{}' for plugin '{}': {e}",
+                    let mut parsed = match parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
+                    {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            eprintln!(
+                                "warning: failed to parse '{}' for plugin '{}': {e} — \
+                                     skipping this plugin's hooks, other plugins are unaffected.",
                                 hooks_path.display(),
                                 plugin.plugin,
-                            )
-                        })?;
+                            );
+                            break;
+                        }
+                    };
                     // Filter to supported events and command-only kinds at collection
                     // time, same as §11 does for manifest hooks.
                     parsed.retain(|hook| {
@@ -485,10 +541,10 @@ impl AgentAdapter for OpencodeAdapter {
         // Register native opencode TypeScript plugins (e.g. context-mode) that
         // ship their own hook/tool implementations independent of the llmenv JS
         // shim. These are resolved by opencode's plugin system at startup.
-        let config_plugin = if has_native_opencode {
-            Some(vec!["context-mode".into()])
-        } else {
+        let config_plugin = if native_opencode_plugins.is_empty() {
             None
+        } else {
+            Some(native_opencode_plugins)
         };
 
         // 7. MCP servers
