@@ -17,21 +17,33 @@ fn session_log_file_path(configured: Option<&str>) -> PathBuf {
     }
 }
 
+/// `--version`/`-V` alone (clap's built-in version flag) never touches
+/// session-log config or any hook, so loading `config.yaml` for it is pure
+/// overhead on an otherwise config-free path.
+fn wants_version_only() -> bool {
+    let mut args = std::env::args_os().skip(1);
+    matches!(args.next(), Some(a) if a == "--version" || a == "-V") && args.next().is_none()
+}
+
 fn main() {
     // Resolved session-logging config (absent block → transcript on, file off).
     // Log config errors so they're visible even though we fall back to defaults
     // (tracing subscriber isn't initialized yet, so use eprintln!).
-    let config_path = llmenv_paths::config_path();
-    if let Err(ref e) = config_path {
-        eprintln!("llmenv: failed to resolve config path: {e:#}");
-    }
-    let loaded_config = config_path.ok().and_then(|p| {
-        llmenv_config::Config::load(&p)
-            .inspect_err(|e| {
-                eprintln!("llmenv: failed to load config from {}: {e:#}", p.display())
-            })
-            .ok()
-    });
+    let loaded_config = if wants_version_only() {
+        None
+    } else {
+        let config_path = llmenv_paths::config_path();
+        if let Err(ref e) = config_path {
+            eprintln!("llmenv: failed to resolve config path: {e:#}");
+        }
+        config_path.ok().and_then(|p| {
+            llmenv_config::Config::load(&p)
+                .inspect_err(|e| {
+                    eprintln!("llmenv: failed to load config from {}: {e:#}", p.display())
+                })
+                .ok()
+        })
+    };
     let resolved = loaded_config
         .clone()
         .map(|c| c.session_log_resolved())
