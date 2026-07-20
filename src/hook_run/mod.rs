@@ -647,8 +647,8 @@ fn run_inner(
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
             &active,
-            &tags,
-            &bundles,
+            tags,
+            bundles,
             &env.cwd,
             adapter_name,
             claude_code_version,
@@ -930,8 +930,8 @@ async fn run_session_log(
 /// computed; the project name comes from the first project-kind active scope.
 fn build_scope_context(
     active: &crate::scope::ActiveScopes,
-    tags: &[String],
-    bundles: &[String],
+    tags: Vec<String>,
+    bundles: Vec<String>,
     cwd: &str,
     adapter_name: &str,
     claude_code_version: &str,
@@ -942,8 +942,8 @@ fn build_scope_context(
         .find(|s| s.kind == "project")
         .and_then(|s| s.name.clone());
     ScopeContext {
-        tags: tags.to_vec(),
-        bundles: bundles.to_vec(),
+        tags,
+        bundles,
         project,
         cwd: cwd.to_string(),
         adapter: adapter_name.to_string(),
