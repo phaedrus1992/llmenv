@@ -41,7 +41,7 @@ fn render_scopes(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -
         .map(|t| super::sanitize(t))
         .collect::<Vec<_>>()
         .join(" · ");
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("║ {tags}");
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{tags}");
     format.replace("{tags}", &tags)
 }
 
@@ -190,7 +190,7 @@ mod tests {
             ..Default::default()
         };
         let out = render_llmenv_widget("scopes", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "║ dev · rust");
+        assert_eq!(out, "dev · rust");
     }
 
     #[test]

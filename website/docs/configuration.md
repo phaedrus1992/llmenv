@@ -703,7 +703,7 @@ All eight honor `format:`.
 
 | Widget | Default `format` | Example | Placeholders |
 | -------- | ------------------- | --------- | -------------- |
-| `scopes` | `║ {tags}` | `║ dev · rust` | `tags` (tag list, joined with ` · `) |
+| `scopes` | `{tags}` | `dev · rust` | `tags` (tag list, joined with ` · `) |
 | `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
 | `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
