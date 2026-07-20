@@ -747,7 +747,7 @@ fn run_export(
     compress: bool,
 ) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
+    let config = crate::hook_run::load_cached_config(&config_path)?;
     let config_dir = paths::config_dir()?;
 
     let env = crate::scope::matcher::Env::detect();
@@ -1077,7 +1077,7 @@ fn run_export(
 /// defaults on a missing/wrong-shape file rather than erroring.
 fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
+    let config = crate::hook_run::load_cached_config(&config_path)?;
     let data_path = statusline_data_path_with_env(&config, &|name| std::env::var(name).ok());
 
     let output = statusline::run_statusline(&config, &data_path, &mut std::io::stdin(), use_color)?;
@@ -1100,7 +1100,7 @@ fn statusline_data_path_with_env(
 
 fn run_regenerate() -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
+    let config = crate::hook_run::load_cached_config(&config_path)?;
     let config_dir = paths::config_dir()?;
 
     let env = crate::scope::matcher::Env::detect();
