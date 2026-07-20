@@ -171,13 +171,13 @@ adapter:
 
 statusline:
   rows:
-    - "{context_pct} {config_stale}"
+    - "{context} {config_stale}"
   style:
     icon_set: simple
   icons:
     config_stale: "STALE"
   widgets:
-    context_pct:
+    context:
       format: "ctx={pct}"
 "#,
     );
