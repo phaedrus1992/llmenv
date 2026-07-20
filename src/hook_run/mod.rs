@@ -627,10 +627,10 @@ fn run_inner(
             Some(u) => {
                 let clients = MCP_CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
                 let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
-                match clients.entry(u.clone()) {
+                match clients.entry(u) {
                     std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
                     std::collections::hash_map::Entry::Vacant(entry) => {
-                        match McpHttpClient::new(u.clone(), HOOK_TIMEOUT) {
+                        match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
                             Ok(client) => Some(entry.insert(client).clone()),
                             Err(e) => {
                                 eprintln!(
