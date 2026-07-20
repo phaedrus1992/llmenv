@@ -21,7 +21,13 @@ fn session_log_file_path(configured: Option<&str>) -> PathBuf {
 /// session-log config or any hook, so loading `config.yaml` for it is pure
 /// overhead on an otherwise config-free path.
 fn wants_version_only() -> bool {
-    let mut args = std::env::args_os().skip(1);
+    is_version_only_args(std::env::args_os().skip(1))
+}
+
+/// Testable core of [`wants_version_only`]: true iff the arg list (excluding
+/// the binary name) is exactly one of `--version` or `-V`.
+fn is_version_only_args(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    let mut args = args;
     matches!(args.next(), Some(a) if a == "--version" || a == "-V") && args.next().is_none()
 }
 
@@ -69,5 +75,43 @@ fn main() {
     if let Err(e) = llmenv::cli::run() {
         eprintln!("llmenv: {e:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(raw: &[&str]) -> Vec<std::ffi::OsString> {
+        raw.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn version_only_true_for_long_flag_alone() {
+        assert!(is_version_only_args(args(&["--version"]).into_iter()));
+    }
+
+    #[test]
+    fn version_only_true_for_short_flag_alone() {
+        assert!(is_version_only_args(args(&["-V"]).into_iter()));
+    }
+
+    #[test]
+    fn version_only_false_with_trailing_args() {
+        assert!(!is_version_only_args(
+            args(&["--version", "extra"]).into_iter()
+        ));
+        assert!(!is_version_only_args(args(&["-V", "extra"]).into_iter()));
+    }
+
+    #[test]
+    fn version_only_false_for_no_args() {
+        assert!(!is_version_only_args(args(&[]).into_iter()));
+    }
+
+    #[test]
+    fn version_only_false_for_other_args() {
+        assert!(!is_version_only_args(args(&["setup"]).into_iter()));
+        assert!(!is_version_only_args(args(&["--help"]).into_iter()));
     }
 }

@@ -1542,6 +1542,23 @@ mod tests {
         );
     }
 
+    // Only exercises load_cached_config's fallback-to-disk branch. PRELOADED_CONFIG
+    // is a process-global OnceLock with no reset, so a test that populates it via
+    // set_preloaded_config would leak into every other test in this binary that
+    // calls load_cached_config — deliberately not tested here.
+    #[test]
+    fn load_cached_config_falls_back_to_disk_when_nothing_preloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            serde_yaml::to_string(&crate::config::Config::default()).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_cached_config(&path).unwrap();
+        assert_eq!(loaded, crate::config::Config::default());
+    }
+
     proptest::proptest! {
         // #365: the repo_path JSON arg must always be valid JSON that
         // round-trips to the exact project_root string, for any path shape
