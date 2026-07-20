@@ -766,7 +766,7 @@ fn run_export(
         .map(|f| f.memory.as_slice())
         .unwrap_or_default();
     if let Some(mem) = find_local_memory_entry(top_memory, &active) {
-        let bind = format!("{}:{}", mem.listen_host, mem.port);
+        let bind = memory_bind_address(mem);
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
                 match crate::mcp::proxy::ensure_running(
@@ -3040,6 +3040,11 @@ fn find_local_memory_entry<'a>(
     })
 }
 
+/// The `listen_host:port` address a local memory server binds to.
+fn memory_bind_address(mem: &crate::config::Memory) -> String {
+    format!("{}:{}", mem.listen_host, mem.port)
+}
+
 /// Annotation suffix for a listing row, colored when `use_color` is set.
 fn annotate(active: bool, orphan: bool, use_color: bool) -> String {
     if active {
@@ -4424,14 +4429,15 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Mirrors the bind-address derivation `run_export` inlines at its
-    /// `find_local_memory_entry` call site (no longer a standalone
-    /// production function — the lookup happens once there, not twice).
+    /// Test-only combination of the two production calls `run_export` makes
+    /// at its `find_local_memory_entry` call site (looked up once there, not
+    /// twice) — both `find_local_memory_entry` and `memory_bind_address` are
+    /// the real production functions.
     fn local_memory_server_bind(
         memory: &[crate::config::Memory],
         active: &ActiveScopes,
     ) -> Option<String> {
-        find_local_memory_entry(memory, active).map(|m| format!("{}:{}", m.listen_host, m.port))
+        find_local_memory_entry(memory, active).map(memory_bind_address)
     }
 
     #[test]
