@@ -34,7 +34,13 @@ fn render_scopes(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -
     if scopes.tags.is_empty() {
         return String::new();
     }
-    let tags = scopes.tags.join(" · ");
+    // Tags come from config / the status file — sanitize before display.
+    let tags = scopes
+        .tags
+        .iter()
+        .map(|t| super::sanitize(t))
+        .collect::<Vec<_>>()
+        .join(" · ");
     let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("║ {tags}");
     format.replace("{tags}", &tags)
 }
@@ -125,12 +131,13 @@ fn render_throttle(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>)
     let Some(throttle) = &data.throttle else {
         return String::new();
     };
-    let raw = format!("{}: {}s", throttle.backend, throttle.cooldown_secs);
+    let backend = super::sanitize(&throttle.backend); // untrusted (config)
+    let raw = format!("{}: {}s", backend, throttle.cooldown_secs);
     let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{raw}");
     format
         .replace("{raw}", &raw)
         .replace("{cooldown_secs}", &throttle.cooldown_secs.to_string())
-        .replace("{reason}", &throttle.backend)
+        .replace("{reason}", &backend)
 }
 
 fn render_session_log(
