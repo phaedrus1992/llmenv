@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A computed `read_once` deny/advisory result is no longer silently discarded if an unrelated hook-run pipeline error (e.g. invalid tag/bundle config, memory URL resolution failure) occurs afterward — it's now still returned instead of being lost when the pipeline errors out (#867)
 - `SessionEnd` session-log capture is no longer silently skipped when the redundant-store dedup check fires — previously any configured session-log sink missed `SessionEnd` events whenever the context chunk was unchanged since the last store; only the redundant store is skipped now, not the log (#866)
 - Skill frontmatter `name`/`description` values containing Unicode noncharacters (e.g. U+FFFE) no longer produce invalid YAML when auto-quoted — these are now escaped like control characters, and code points above U+FFFF use the correct 8-digit `\U` escape instead of a truncated 4-digit `\u` one that corrupted the scalar (#873)
+- opencode adapter: a `native_permissions.opencode` `allow` rule no longer silently overrides a structured `permissions.deny` rule for the same tool+pattern — permission-map insertion is now interleaved by action tier (all `allow`, then all `ask`, then all `deny`, structured before native within each tier) so `deny` always wins regardless of source, instead of native rules always being inserted last (#877)
 
 ## [3.5.1] - 2026-07-15
 
