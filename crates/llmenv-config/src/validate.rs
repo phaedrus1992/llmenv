@@ -663,14 +663,15 @@ impl Config {
     fn validate_hooks(&self) -> Result<(), ValidateError> {
         use super::HookHandlerKind;
 
+        let is_missing = |field: &Option<String>| field.as_deref().unwrap_or("").is_empty();
         for hook in &self.capabilities.hooks {
             match hook.handler.kind {
-                HookHandlerKind::Command if hook.handler.command.is_none() => {
+                HookHandlerKind::Command if is_missing(&hook.handler.command) => {
                     return Err(ValidateError::HookCommandMissingCommand {
                         event: hook.event.clone(),
                     });
                 }
-                HookHandlerKind::McpTool if hook.handler.tool.is_none() => {
+                HookHandlerKind::McpTool if is_missing(&hook.handler.tool) => {
                     return Err(ValidateError::HookMcpToolMissingTool {
                         event: hook.event.clone(),
                     });
@@ -3741,6 +3742,46 @@ mod tests {
                 kind: HookHandlerKind::McpTool,
                 command: None,
                 tool: None,
+            },
+            bundle_origin: None,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ValidateError::HookMcpToolMissingTool { ref event, .. } if event == "PreToolUse"
+        ));
+    }
+
+    #[test]
+    fn hook_command_empty_string_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: Some(String::new()),
+                tool: None,
+            },
+            bundle_origin: None,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ValidateError::HookCommandMissingCommand { ref event, .. } if event == "PreToolUse"
+        ));
+    }
+
+    #[test]
+    fn hook_mcp_tool_empty_string_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::McpTool,
+                command: None,
+                tool: Some(String::new()),
             },
             bundle_origin: None,
         });
