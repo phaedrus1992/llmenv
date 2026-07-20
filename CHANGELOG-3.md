@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix opencode/crush plugin materialization failing with `marketplace '<name>' has no install_location (not yet synced?)` when `cache.remote_sync: false`. Disabling remote sync means "don't touch the network", but it was wrongly skipping marketplace resolution entirely, leaving `install_location` unset. Claude Code tolerated this (reserved marketplaces render as a github source), but opencode and crush materialize plugin files from the local clone and had no path to copy from. llmenv now always resolves `install_location` from clones already on disk regardless of `remote_sync`, only suppressing the network refresh — matching how external plugin payloads already behave. As a result, marketplace resolution under `remote_sync: false` now follows the same rules as a normal `export`: a git marketplace that has never been cloned locally is excluded with an actionable warning (run `llmenv plugin-sync`) instead of emitted with an empty location, and a marketplace whose configured path no longer exists (or whose clone is corrupt) fails the export with a clear error rather than silently emitting a half-broken config
+
+## [3.6.0] - 2026-07-20
+
 3.6.0 includes three new engine-facing pieces — an in-engine task tracker, a first-class `llmenv statusline` subcommand, and reinstated a third supported engine (opencode, alongside Claude Code and Crush) — plus a `codebase-memory-mcp` integration.
 
 A string of hook-run perf work landed too: single-walk `scope.content` matching instead of one walk per matcher, `uname(2)` instead of shelling out to `hostname`, memory-recall dedup, and cutting redundant `config.yaml` re-parses and per-invocation clones/reads/stats across hook-run, export, and regenerate.
@@ -449,7 +455,7 @@ the rc.1 and rc.2 sections below.
   bundle-authored relative script path broken under Crush. (#551)
 - Fix `CrushAdapter` rendering MCP servers, LSP `init_options`, and permissions in
   Claude Code's shapes instead of Crush's actual schema
-  (<https://charm.land/crush.json>), found by auditing the adapter against it: every
+  ([crush.json schema](https://charm.land/crush.json)), found by auditing the adapter against it: every
   MCP server previously failed to initialize because Crush's required `type` field
   (`stdio`/`sse`/`http`) was either missing (stdio entries) or set to the
   nonexistent value `"remote"` (remote entries) — Crush's MCP client hits an
@@ -574,7 +580,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.5.1...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.6.0...HEAD
+[3.6.0]: https://github.com/phaedrus1992/llmenv/compare/v3.5.1...v3.6.0
 [3.5.1]: https://github.com/phaedrus1992/llmenv/compare/v3.5.0...v3.5.1
 [3.5.0]: https://github.com/phaedrus1992/llmenv/compare/v3.4.0...v3.5.0
 [3.4.0]: https://github.com/phaedrus1992/llmenv/compare/v3.3.0...v3.4.0

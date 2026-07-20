@@ -1,6 +1,6 @@
 [package]
 name = "llmenv-util"
-version = "3.5.1"
+version = "3.6.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
