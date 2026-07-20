@@ -95,8 +95,11 @@ fn default_style(name: &str) -> &'static str {
         "plugins" | "mcps" => "green",
         "peak" => "bold yellow",
         "throttle" => "bold red",
+        // Subdued-but-legible widgets. A readable light gray (256-color)
+        // rather than SGR-2 `dim`, which renders too faint to read on many
+        // terminals.
         "budget" | "tokens" | "duration" | "cache_pct" | "cache" | "scopes" | "session_log" => {
-            "dim"
+            "color-248"
         }
         _ => "",
     }
