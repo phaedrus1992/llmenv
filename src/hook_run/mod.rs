@@ -587,9 +587,9 @@ fn run_inner(
             .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
 
         // Recall query: the sorted active tags. Store content: the llmenv context
-        // chunk (tags/bundles/project).
-        let mut tags = active.tags.iter().cloned().collect::<Vec<_>>();
-        tags.sort();
+        // chunk (tags/bundles/project). `active.tags` is a BTreeSet, so this
+        // iteration order is already sorted ascending — no separate sort needed.
+        let tags = active.tags.iter().cloned().collect::<Vec<_>>();
         // Bundles: collect from all active scopes, deduplicate, sort.
         let bundles: Vec<String> = {
             let mut set = std::collections::BTreeSet::new();
