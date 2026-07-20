@@ -431,8 +431,12 @@ pub fn set_preloaded_config(config: crate::config::Config) {
     let _ = PRELOADED_CONFIG.set(config);
 }
 
-/// Load config from `path`, reusing `main()`'s preload when available.
-fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
+/// Load config from `path`, reusing `main()`'s preload when available. Also
+/// used by non-hook-run CLI commands (`export`, `regenerate`, `statusline`)
+/// that would otherwise re-parse the same `config.yaml` main() already loaded.
+pub(crate) fn load_cached_config(
+    path: &std::path::Path,
+) -> anyhow::Result<crate::config::Config> {
     if let Some(config) = PRELOADED_CONFIG.get() {
         return Ok(config.clone());
     }
