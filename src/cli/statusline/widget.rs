@@ -106,7 +106,7 @@ pub fn render_engine_widget(
         "cache_pct" => render_cache_pct(data, cfg),
         "branch" => render_branch(data, cfg, use_color),
         "pr" => render_pr(data, cfg, use_color),
-        "progress_bar" => render_progress_bar(data, cfg),
+        "progress_bar" => render_progress_bar(data, cfg, use_color),
         "usage_5h" => render_usage(
             data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
             now_unix(),
@@ -128,7 +128,6 @@ pub fn render_engine_widget(
     // unless the user set an explicit per-widget `style`.
     let user_thresholds = cfg.and_then(|c| c.thresholds);
     let dyn_style = match name {
-        "progress_bar" => progress_bar_threshold_style(data, cfg),
         "pr" => pr_review_style(data),
         "usage_5h" => usage_threshold_style(
             data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
@@ -141,27 +140,6 @@ pub fn render_engine_widget(
         _ => None,
     };
     Some(super::finish(name, raw, cfg, dyn_style, use_color))
-}
-
-/// Green/yellow/red for the `progress_bar` by used-context percentage against
-/// `thresholds` (`[warn, crit]`, default `[50, 80]`). `None` when there's no
-/// percentage to color (widget renders empty anyway).
-fn progress_bar_threshold_style(
-    data: &EngineData,
-    cfg: Option<&llmenv_config::WidgetConfig>,
-) -> Option<&'static str> {
-    let remaining = data
-        .context_window
-        .as_ref()
-        .and_then(|c| c.remaining_percentage)?;
-    if !remaining.is_finite() {
-        return None;
-    }
-    let used = (100.0 - remaining).clamp(0.0, 100.0);
-    Some(threshold_style(
-        used,
-        cfg.and_then(|c| c.thresholds).unwrap_or([50, 80]),
-    ))
 }
 
 /// Map a value to a `green` / `yellow` / `red` style name by two ascending
@@ -567,7 +545,11 @@ fn pr_review_style(data: &EngineData) -> Option<&'static str> {
 /// `f64::clamp` unchanged (NaN comparisons are always false), so it must be
 /// rejected explicitly before the round/cast rather than relying on clamp
 /// alone; infinite values are rejected for the same reason.
-fn render_progress_bar(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+fn render_progress_bar(
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
     let Some(remaining) = data
         .context_window
         .as_ref()
@@ -580,14 +562,17 @@ fn render_progress_bar(data: &EngineData, cfg: Option<&llmenv_config::WidgetConf
     }
     let used = (100.0 - remaining).clamp(0.0, 100.0);
     let width = cfg.and_then(|c| c.width).unwrap_or(DEFAULT_BAR_WIDTH);
-    let bar = block_bar(used, width as usize);
+    // Self-colored per cell (filled=threshold color, empty=dim) — so this
+    // widget opts out of the `finish` style wrap (default_style is empty and
+    // it's not in the dyn_style map).
+    let style = threshold_style(used, cfg.and_then(|c| c.thresholds).unwrap_or([50, 80]));
+    let bar = colored_bar(used, width as usize, style, use_color);
     let pct = used.round() as i64;
+    let pct_str = crate::cli::style::apply_style(&pct.to_string(), style, use_color);
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or("{pct}% {bar}");
-    format
-        .replace("{pct}", &pct.to_string())
-        .replace("{bar}", &bar)
+    format.replace("{pct}", &pct_str).replace("{bar}", &bar)
 }
 
 /// A `width`-cell block bar (filled `▓`, empty `░`) for a `0..=100`
@@ -601,6 +586,26 @@ fn block_bar(pct: f64, width: usize) -> String {
 
 /// Default `progress_bar` / usage-bar width in cells.
 const DEFAULT_BAR_WIDTH: u8 = 10;
+
+/// A `width`-cell bar with each cell independently colored: filled cells in
+/// `filled_style`, empty cells dim. Each cell carries its own SGR reset so the
+/// two colors don't bleed (matching the reference tool). With `use_color`
+/// off, degrades to the plain [`block_bar`] glyphs.
+fn colored_bar(pct: f64, width: usize, filled_style: &str, use_color: bool) -> String {
+    if !use_color {
+        return block_bar(pct, width);
+    }
+    let filled = ((pct / 100.0 * width as f64) as usize).min(width);
+    (0..width)
+        .map(|i| {
+            if i < filled {
+                crate::cli::style::apply_style("\u{2593}", filled_style, true)
+            } else {
+                crate::cli::style::apply_style("\u{2591}", "dim", true)
+            }
+        })
+        .collect()
+}
 
 /// Current wall-clock time as Unix epoch seconds, for computing time-until a
 /// rate-limit window resets. Falls back to 0 on a pre-epoch clock (which just
@@ -1179,6 +1184,21 @@ mod tests {
     }
 
     #[test]
+    fn progress_bar_dims_empty_cells_per_cell_under_color() {
+        // 35% used → 3 filled ▓ + 7 dim ░, each cell independently colored.
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "context_window": { "remaining_percentage": 65.0 }
+        }))
+        .unwrap();
+        let out = render_engine_widget("progress_bar", &data, None, true).unwrap();
+        assert!(
+            out.contains("\x1b[2m░\x1b[0m"),
+            "empty cells should be dim: {out:?}"
+        );
+        assert!(out.contains('▓'), "filled cells present: {out:?}");
+    }
+
+    #[test]
     fn progress_bar_width_configurable() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 50.0 }
@@ -1189,7 +1209,7 @@ mod tests {
             ..Default::default()
         };
         // 50% of 4 cells = 2 filled.
-        assert_eq!(render_progress_bar(&data, Some(&cfg)), "50% ▓▓░░");
+        assert_eq!(render_progress_bar(&data, Some(&cfg), false), "50% ▓▓░░");
     }
 
     #[test]
@@ -1501,7 +1521,10 @@ mod tests {
             format: Some("{pct}|{bar}".to_string()),
             ..Default::default()
         };
-        assert_eq!(render_progress_bar(&data, Some(&cfg)), "35|▓▓▓░░░░░░░");
+        assert_eq!(
+            render_progress_bar(&data, Some(&cfg), false),
+            "35|▓▓▓░░░░░░░"
+        );
     }
 
     #[test]
