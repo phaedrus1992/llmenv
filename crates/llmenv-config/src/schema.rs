@@ -2468,8 +2468,8 @@ small:
     fn statusline_config_parses_full_example() {
         let yaml = r#"
 rows:
-  - "{model} │ {context_pct} │ {budget}"
-  - "{scopes:t} · {plugins} {config_stale}"
+  - "{model} │ {context} │ {budget}"
+  - "⎿ {scopes:t} · {plugins} {config_stale}"
 style:
   icon_set: auto
 widgets:
@@ -2477,7 +2477,7 @@ widgets:
     format: "{short_name} {version}"
     style: "bold cyan"
   scopes:
-    format: "║ {tags}"
+    format: "{tags}"
     max_len: 40
     style: "dim"
 icons:
