@@ -616,10 +616,14 @@ Each entry under `widgets:` accepts:
 
 A row template can also write `{widget_name:t}` — accepted syntax, but it is a
 no-op beyond what `max_len` already does; truncation is driven entirely by
-`max_len`, not by this shorthand. An unknown widget name in a template, or a
-widget with no data to render, renders as an empty string (not an error). If
-every widget in a row renders empty, that row's line in the output is empty
-too — never a line of bare separator literals.
+`max_len`, not by this shorthand. A recognized widget with no data to render
+(e.g. `pr` with no open PR) renders as an empty string (not an error). An
+**unknown** widget name — a typo, or a config still referencing a widget
+that's since been renamed or removed — renders `⚠️` instead, so a
+misconfigured row is visibly flagged rather than silently vanishing. If every
+widget in a row renders empty, that row's line in the output is empty too —
+never a line of bare separator literals; a row with an unknown-widget warning
+is not empty, so it still prints.
 
 ### Widget reference
 
