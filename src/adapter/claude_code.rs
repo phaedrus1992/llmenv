@@ -1126,13 +1126,31 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 
     // #34: Render neutral permission rules into Claude's string grammar
     // (`Tool(pattern)` / `Tool(path)` / bare `Tool`), then append the per-engine
-    // `native.claude_code` rule strings verbatim into the same allow/ask/deny
-    // arrays. Native rules are not a separate object — Claude Code reads one flat
-    // array per action (see docs/reference/claude-code/permissions.md). They
-    // share the array because both are just permission rule strings; the only
-    // difference is neutral rules are generated and native ones are authored.
+    // `native.claude_code` rule strings verbatim (aside from the #888 `Write` ->
+    // `Edit` rewrite below) into the same allow/ask/deny arrays. Native rules are
+    // not a separate object — Claude Code reads one flat array per action (see
+    // docs/reference/claude-code/permissions.md). They share the array because
+    // both are just permission rule strings; the only difference is neutral
+    // rules are generated and native ones are authored.
     let perms = &manifest.capabilities.permissions;
     let native = manifest.capabilities.native_permissions.get("claude_code");
+
+    // #888: normalize native rule strings up front so a user (or bundle)
+    // authoring the deprecated `Write(...)` form directly — following stale
+    // docs/examples rather than the neutral schema — gets the same rewrite as
+    // neutral rules, before suppression comparisons and before landing in
+    // settings.json.
+    let normalize_native = |select: fn(&crate::config::NativePermissionRules) -> &[String]| {
+        native.map_or_else(Vec::new, |n| {
+            select(n)
+                .iter()
+                .map(|s| normalize_deprecated_tool(s))
+                .collect()
+        })
+    };
+    let native_allow: Vec<String> = normalize_native(|n| &n.allow);
+    let native_ask_rules: Vec<String> = normalize_native(|n| &n.ask);
+    let native_deny_rules: Vec<String> = normalize_native(|n| &n.deny);
 
     // Native rules win over neutral ones, but only in the safe direction: deny is
     // authoritative. Authority runs deny > ask > allow (most restrictive wins). A
@@ -1144,12 +1162,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // simply dedupe (the native list is appended below).
     // Only deny and ask can outrank a neutral rule (deny > ask > allow), so a
     // native allow set is never a suppressor and isn't collected.
-    let native_ask: std::collections::BTreeSet<&str> = native.map_or_else(Default::default, |n| {
-        n.ask.iter().map(String::as_str).collect()
-    });
-    let native_deny: std::collections::BTreeSet<&str> = native.map_or_else(Default::default, |n| {
-        n.deny.iter().map(String::as_str).collect()
-    });
+    let native_ask: std::collections::BTreeSet<&str> =
+        native_ask_rules.iter().map(String::as_str).collect();
+    let native_deny: std::collections::BTreeSet<&str> =
+        native_deny_rules.iter().map(String::as_str).collect();
 
     // For a neutral rule in `action`, the set of native strings that outrank it.
     let suppressors = |action: PermissionAction| -> Vec<&std::collections::BTreeSet<&str>> {
@@ -1182,21 +1198,9 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         out
     };
 
-    let mut allow = render_action(
-        &perms.allow,
-        native.map_or(&[], |n| &n.allow),
-        PermissionAction::Allow,
-    );
-    let ask = render_action(
-        &perms.ask,
-        native.map_or(&[], |n| &n.ask),
-        PermissionAction::Ask,
-    );
-    let deny = render_action(
-        &perms.deny,
-        native.map_or(&[], |n| &n.deny),
-        PermissionAction::Deny,
-    );
+    let mut allow = render_action(&perms.allow, &native_allow, PermissionAction::Allow);
+    let ask = render_action(&perms.ask, &native_ask_rules, PermissionAction::Ask);
+    let deny = render_action(&perms.deny, &native_deny_rules, PermissionAction::Deny);
 
     // #490: Grant wildcard MCP permission for the context-mode built-in plugin.
     if manifest.plugins.iter().any(|p| {
@@ -1671,17 +1675,35 @@ fn render_plugins(
 /// intent; if both are somehow set, `pattern` wins and `paths` is ignored — the
 /// neutral form documents pattern as the scalar case.
 fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
+    let tool = normalize_deprecated_tool(&rule.tool);
     if let Some(pattern) = &rule.pattern {
-        return vec![format!("{}({})", rule.tool, pattern)];
+        return vec![format!("{tool}({pattern})")];
     }
     if !rule.paths.is_empty() {
-        return rule
-            .paths
-            .iter()
-            .map(|p| format!("{}({})", rule.tool, p))
-            .collect();
+        return rule.paths.iter().map(|p| format!("{tool}({p})")).collect();
     }
-    vec![rule.tool.clone()]
+    vec![tool]
+}
+
+/// Claude Code deprecated the `Write` permission tool name in favor of `Edit`
+/// (anthropics/claude-code#78817): a `Write`/`Write(pattern)` rule string only
+/// produces a "Fix:" warning now instead of matching anything. Rewrite it
+/// before it lands in settings.json so llmenv doesn't hand users the exact
+/// warning it exists to spare them from. Only an exact `Write` tool name (bare
+/// or immediately followed by `(`) matches — `WriteFile` or a `Write` mention
+/// inside another tool's pattern must pass through untouched.
+///
+/// Applying this to a `deny` rule is safe by construction, not just by luck:
+/// a deterministic many-to-one rewrite applied uniformly can only merge
+/// distinct strings into new matches, never split an existing match apart, so
+/// no prior deny/suppression relationship is lost — the sole precondition is
+/// the upstream deprecation claim itself (Write no longer needs its own gate
+/// because Edit's rules now cover it).
+fn normalize_deprecated_tool(rule: &str) -> String {
+    match rule.strip_prefix("Write") {
+        Some(rest) if rest.is_empty() || rest.starts_with('(') => format!("Edit{rest}"),
+        _ => rule.to_string(),
+    }
 }
 
 /// Map the neutral `PermissionMode` onto Claude Code's `defaultMode` string.
@@ -1718,9 +1740,10 @@ mod tests {
         CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter, HOOK_RUN_COMMAND, ICM_DESTRUCTIVE,
         ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS, MODELED_SETTINGS_KEYS,
         STALE_CHECK_COMMAND, classify_claude_path, generate_installed_plugins_json,
-        generate_settings_json, is_hook_json, merge_mcp_into_claude_json, overlay_native,
-        permission_mode_str, reconcile_settings, reject_modeled_keys_in_catch_all,
-        render_marketplace_source, render_permission_rule, seed_install_method, seed_status_line,
+        generate_settings_json, is_hook_json, merge_mcp_into_claude_json,
+        normalize_deprecated_tool, overlay_native, permission_mode_str, reconcile_settings,
+        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
+        seed_install_method, seed_status_line,
     };
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
@@ -1831,7 +1854,7 @@ mod tests {
         // string, regardless of any `paths` (pattern wins per the neutral schema).
         #[test]
         fn pattern_renders_single_tool_pattern_string(
-            tool in "[A-Za-z]{1,12}",
+            tool in "[A-Za-z]{1,12}".prop_filter("not the deprecated Write tool name", |t| t != "Write"),
             pattern in "[^()]{0,20}",
             paths in proptest::collection::vec("[^()]{0,10}", 0..3),
         ) {
@@ -1843,7 +1866,7 @@ mod tests {
         // With no pattern, each path yields one `Tool(path)` string, in order.
         #[test]
         fn paths_render_one_string_each_in_order(
-            tool in "[A-Za-z]{1,12}",
+            tool in "[A-Za-z]{1,12}".prop_filter("not the deprecated Write tool name", |t| t != "Write"),
             paths in proptest::collection::vec("[^()]{1,10}", 1..5),
         ) {
             let rule = PermissionRule { tool: tool.clone(), pattern: None, paths: paths.clone() };
@@ -1854,7 +1877,9 @@ mod tests {
 
         // No pattern and no paths → a bare tool-wide rule.
         #[test]
-        fn bare_tool_renders_tool_name(tool in "[A-Za-z]{1,12}") {
+        fn bare_tool_renders_tool_name(
+            tool in "[A-Za-z]{1,12}".prop_filter("not the deprecated Write tool name", |t| t != "Write"),
+        ) {
             let rule = PermissionRule { tool: tool.clone(), pattern: None, paths: Vec::new() };
             prop_assert_eq!(render_permission_rule(&rule), vec![tool]);
         }
@@ -2416,6 +2441,121 @@ mod tests {
                 .any(|v| v.as_str().is_some_and(|s| s.starts_with("Bash("))),
             "no Bash deny rules expected from empty manifest; got {deny:?}"
         );
+    }
+
+    // ---- #888: deprecated `Write` permission tool -> `Edit` ----
+    // Claude Code deprecated the `Write(<path>)` rule string in favor of
+    // `Edit(<path>)` (anthropics/claude-code#78817); a stale `Write` entry only
+    // warns instead of matching. llmenv must rewrite it before it lands in
+    // settings.json rather than handing the user that exact warning.
+
+    #[test]
+    fn neutral_write_rule_renders_as_edit() {
+        let manifest = crate::merge::MergedManifest {
+            capabilities: crate::config::Capabilities {
+                permissions: crate::config::Permissions {
+                    allow: vec![PermissionRule {
+                        tool: "Write".into(),
+                        pattern: Some("/foo/*".into()),
+                        paths: Vec::new(),
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            allow.iter().any(|v| v == "Edit(/foo/*)"),
+            "expected Edit(/foo/*) in allow, got {allow:?}"
+        );
+        assert!(
+            !allow
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s.starts_with("Write("))),
+            "deprecated Write(...) rule must not reach settings.json; got {allow:?}"
+        );
+    }
+
+    #[test]
+    fn native_write_rule_string_normalizes_to_edit() {
+        // Native rules are authored verbatim strings (not neutral PermissionRule),
+        // so a user following stale docs/examples could still type "Write(...)".
+        let mut native_permissions = std::collections::BTreeMap::new();
+        native_permissions.insert(
+            "claude_code".to_string(),
+            crate::config::NativePermissionRules {
+                allow: vec!["Write(/bar)".into()],
+                ask: Vec::new(),
+                deny: Vec::new(),
+            },
+        );
+        let manifest = crate::merge::MergedManifest {
+            capabilities: crate::config::Capabilities {
+                native_permissions,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            allow.iter().any(|v| v == "Edit(/bar)"),
+            "expected Edit(/bar) in allow, got {allow:?}"
+        );
+        assert!(
+            !allow
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s.starts_with("Write("))),
+            "deprecated native Write(...) rule must not reach settings.json; got {allow:?}"
+        );
+    }
+
+    #[test]
+    fn normalized_write_rule_dedupes_against_existing_edit_rule() {
+        // A bundle could plausibly carry both the old Write(...) form and the
+        // already-migrated Edit(...) form for the same path; after normalization
+        // they must collapse to one entry, not appear twice.
+        let mut native_permissions = std::collections::BTreeMap::new();
+        native_permissions.insert(
+            "claude_code".to_string(),
+            crate::config::NativePermissionRules {
+                allow: vec!["Write(/baz)".into(), "Edit(/baz)".into()],
+                ask: Vec::new(),
+                deny: Vec::new(),
+            },
+        );
+        let manifest = crate::merge::MergedManifest {
+            capabilities: crate::config::Capabilities {
+                native_permissions,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let edit_count = allow.iter().filter(|v| *v == "Edit(/baz)").count();
+        assert_eq!(
+            edit_count, 1,
+            "expected exactly one deduped Edit(/baz); got {allow:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_deprecated_tool_only_matches_write_tool_name() {
+        // Bare tool name and pattern form both migrate.
+        assert_eq!(normalize_deprecated_tool("Write"), "Edit");
+        assert_eq!(normalize_deprecated_tool("Write(/x)"), "Edit(/x)");
+        // Already-current and unrelated tools/strings pass through unchanged.
+        assert_eq!(normalize_deprecated_tool("Edit(/x)"), "Edit(/x)");
+        assert_eq!(
+            normalize_deprecated_tool("Bash(Write foo)"),
+            "Bash(Write foo)"
+        );
+        // A tool name that merely starts with "Write" is not the deprecated tool.
+        assert_eq!(normalize_deprecated_tool("WriteFile(/x)"), "WriteFile(/x)");
     }
 
     // ---- reconcile_settings (#196 / #175): settings.json is shared, not owned ----
