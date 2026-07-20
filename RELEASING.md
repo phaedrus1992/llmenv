@@ -126,6 +126,15 @@ When in doubt, ask: *would someone running the released binary notice or care?*
 If not, leave it out. This applies retroactively to `[Unreleased]` — strip such
 entries before cutting a release rather than freezing them under a version.
 
+### Keep entries short
+
+A sentence or two — what changed and why it matters to a user, not an
+exhaustive description of the implementation. Full detail belongs in
+`website/docs/`; link a feature-sized entry to its docs page
+(`https://phaedrus1992.github.io/llmenv/docs/<page>[#anchor]`) instead of
+restating that detail inline. See AGENTS.md's "Versioning, Changelog &
+Releases" section.
+
 ### Creating a release branch
 
 After tagging the first release of a new major (e.g. `v2.0.0`), branch
