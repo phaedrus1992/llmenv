@@ -699,7 +699,7 @@ per-output-type token breakdown today, so those aren't invented placeholders.
 
 #### llmenv-sourced (from `llmenv-status.json`)
 
-All eight honor `format:`.
+All nine honor `format:`.
 
 | Widget | Default `format` | Example | Placeholders |
 | -------- | ------------------- | --------- | -------------- |
@@ -711,6 +711,7 @@ All eight honor `format:`.
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
+| `tasks` | `☑ {done}/{total}` while a task session (`llmenv task session start`, #905) is active, else `☑ {open}` | `☑ 2/5` or `☑ 3` | `done`, `total` (session-scoped; `0`/`0` when no session is active), `open` (open + `wip` count, store-wide, regardless of session), `current` (title of the task currently `wip` — scoped to the active session if one exists, else store-wide; empty when nothing is `wip`). Neither default shows `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
 
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`
 on `pr`, or `{count}` on `scopes`) is left in the output literally rather than

@@ -394,6 +394,39 @@ enum TaskCommand {
         #[arg(long)]
         on: String,
     },
+    /// Delete task(s) outright — for a batch of work that's being
+    /// deliberately abandoned, not just reshuffled. Provide explicit ids, or
+    /// `--session <id>` to clear every task tagged to a session in one shot.
+    Clear {
+        ids: Vec<String>,
+        #[arg(long, conflicts_with = "ids")]
+        session: Option<String>,
+    },
+    /// Manage task sessions (#905): a named span of work whose tasks are
+    /// tracked as a group, so progress can be reported as done/total.
+    Session {
+        #[command(subcommand)]
+        command: TaskSessionCommand,
+    },
+}
+
+/// `llmenv task session` sub-subcommands (#905).
+#[derive(Subcommand)]
+enum TaskSessionCommand {
+    /// Start a new session and make it active. Errors if one is already
+    /// active, unless `--force` abandons it first.
+    Start {
+        name: Option<String>,
+        /// Abandon the currently active session (if any) instead of
+        /// erroring: its still-incomplete tasks are untagged and noted as
+        /// orphaned, then the new session starts normally.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Finish the active session.
+    Finish,
+    /// Show the active session and its progress, if any.
+    Show,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2643,6 +2676,77 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
                 task.blocked_on.join(", ")
             );
         }
+        TaskCommand::Clear { ids, session } => {
+            if let Some(session_id) = session {
+                let cleared =
+                    crate::task::session::delete_tasks_in_session(&state_dir, &session_id)?;
+                println!(
+                    "Cleared {} task(s) from session '{session_id}'",
+                    cleared.len()
+                );
+            } else if ids.is_empty() {
+                anyhow::bail!("specify one or more task ids, or --session <id>");
+            } else {
+                for id in &ids {
+                    let task = crate::task::delete_task(&state_dir, id)?;
+                    println!("Cleared task '{}' ({})", task.slug, task.title);
+                }
+            }
+        }
+        TaskCommand::Session { command } => run_task_session_command(&state_dir, command)?,
+    }
+    Ok(())
+}
+
+/// Handle `llmenv task session <subcommand>` (#905). Thin formatting layer
+/// over `crate::task::session`, which owns the session store logic.
+fn run_task_session_command(
+    state_dir: &std::path::Path,
+    command: TaskSessionCommand,
+) -> anyhow::Result<()> {
+    match command {
+        TaskSessionCommand::Start { name, force } => {
+            let previous = force
+                .then(|| crate::task::session::active_session(state_dir))
+                .flatten();
+            let session = crate::task::session::start_session(state_dir, name.as_deref(), force)?;
+            if let Some(prev) = previous {
+                println!(
+                    "Abandoned session '{}' — its incomplete tasks were untagged and noted as orphaned.",
+                    prev.id
+                );
+            }
+            println!(
+                "Started session '{}'{}",
+                session.id,
+                session
+                    .name
+                    .as_deref()
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default()
+            );
+        }
+        TaskSessionCommand::Finish => {
+            let session = crate::task::session::finish_session(state_dir)?;
+            let (done, total) = crate::task::session::session_progress(state_dir, &session.id);
+            println!("Finished session '{}' ({done}/{total} done)", session.id);
+        }
+        TaskSessionCommand::Show => match crate::task::session::active_session(state_dir) {
+            Some(session) => {
+                let (done, total) = crate::task::session::session_progress(state_dir, &session.id);
+                println!(
+                    "Active session '{}'{}: {done}/{total} done (started {})",
+                    session.id,
+                    session
+                        .name
+                        .as_deref()
+                        .map(|n| format!(" ({n})"))
+                        .unwrap_or_default(),
+                    session.started_at
+                );
+            }
+            None => println!("No active session."),
+        },
     }
     Ok(())
 }
