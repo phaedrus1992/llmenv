@@ -472,8 +472,8 @@ impl Config {
     }
 
     fn validate_plugins(&self) -> Result<(), ValidateError> {
-        let mut seen_marketplace_names = std::collections::HashSet::new();
-        let mut marketplace_names = std::collections::HashSet::new();
+        let mut seen_marketplace_names: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
         for m in &self.marketplace {
             // The name is used both as a single path component for the cache
             // clone (`<cache>/marketplaces/<name>`) and as a JSON key in the
@@ -503,10 +503,9 @@ impl Config {
                     });
                 }
             }
-            if !seen_marketplace_names.insert(&m.name) {
+            if !seen_marketplace_names.insert(m.name.as_str()) {
                 return Err(ValidateError::DuplicateMarketplaceName(m.name.clone()));
             }
-            marketplace_names.insert(m.name.as_str());
         }
 
         let mut seen_collection_names = std::collections::HashSet::new();
@@ -524,7 +523,7 @@ impl Config {
                         plugin: plugin.clone(),
                     });
                 };
-                if !marketplace_names.contains(marketplace) {
+                if !seen_marketplace_names.contains(marketplace) {
                     return Err(ValidateError::UnknownPluginMarketplace {
                         collection: c.name.clone(),
                         plugin: plugin.clone(),
