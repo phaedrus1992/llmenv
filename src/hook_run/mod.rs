@@ -351,13 +351,12 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     let stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf)
         .inspect_err(|e| tracing::warn!("hook-run: failed to parse stdin JSON: {e}"))
         .ok();
-    let hook_event_name = stdin_json
+    let hook_event_name: &str = stdin_json
         .as_ref()
-        .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
+        .and_then(|v| v["hook_event_name"].as_str())
         .unwrap_or_default();
-    let claude_session_id = stdin_json
-        .as_ref()
-        .and_then(|v| v["session_id"].as_str().map(str::to_owned));
+    let claude_session_id: Option<&str> =
+        stdin_json.as_ref().and_then(|v| v["session_id"].as_str());
     let claude_code_version = std::env::var("CLAUDE_CODE_VERSION")
         .ok()
         .unwrap_or_default();
@@ -374,7 +373,7 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     let adapter = crate::adapter::adapter_for_engine(engine);
     match run_inner(
         parsed,
-        claude_session_id.as_deref(),
+        claude_session_id,
         payload,
         adapter.name(),
         &claude_code_version,
@@ -397,7 +396,7 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
             } else {
-                let out = adapter.emit_hook_context(&hook_event_name, &text);
+                let out = adapter.emit_hook_context(hook_event_name, &text);
                 if !out.is_empty()
                     && let Err(e) = writeln!(std::io::stdout(), "{out}")
                     && e.kind() != std::io::ErrorKind::BrokenPipe
