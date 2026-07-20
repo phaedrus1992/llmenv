@@ -111,8 +111,12 @@ fn default_style(name: &str) -> &'static str {
 /// Full render pipeline: stdin (engine JSON) + data file (llmenv stats) +
 /// config (`statusline:` section) → ANSI rows, one `\n`-terminated line per
 /// configured row. Never returns `Err` for "no data" conditions (missing data
-/// file, malformed stdin, unknown widget names) — only for a genuine I/O
-/// failure reading stdin itself. See the design doc's "Renderer contract".
+/// file, malformed stdin) — only for a genuine I/O failure reading stdin
+/// itself. See the design doc's "Renderer contract". An unrecognized widget
+/// name in a row template renders `⚠️` (a typo, or a config still referencing
+/// a widget that's since been renamed/removed) rather than vanishing
+/// silently — unlike a *recognized* widget with nothing to show (e.g. `pr`
+/// with no open PR), which still renders empty.
 ///
 /// # Errors
 ///
@@ -155,11 +159,19 @@ pub fn run_statusline(
                 // regardless of this flag.
                 TemplateToken::Widget { name, truncate: _ } => {
                     let widget_cfg = cfg.widgets.get(&name);
-                    let value = render_engine_widget(&name, &engine_data, widget_cfg, use_color)
+                    let resolved = render_engine_widget(&name, &engine_data, widget_cfg, use_color)
                         .or_else(|| {
                             render_llmenv_widget(&name, &status_data, widget_cfg, &icons, use_color)
-                        })
-                        .unwrap_or_default();
+                        });
+                    // `None` from both renderers means `name` isn't a
+                    // recognized widget at all (typo, or a renamed/removed
+                    // widget still referenced from an old config) — visibly
+                    // flag that instead of silently vanishing like a
+                    // recognized-but-dataless widget legitimately does
+                    // (`Some(String::new())`, e.g. `pr` with no open PR).
+                    let value = resolved.unwrap_or_else(|| {
+                        crate::cli::style::apply_style("\u{26a0}\u{fe0f}", "yellow", use_color)
+                    }); // ⚠️
                     if !value.is_empty() {
                         rendered_any = true;
                     }
@@ -301,10 +313,32 @@ mod tests {
     }
 
     #[test]
-    fn unknown_widget_name_in_template_renders_empty() {
+    fn unknown_widget_name_in_template_renders_warning_glyph() {
         let config = llmenv_config::Config {
             statusline: Some(StatuslineConfig {
                 rows: vec!["{bogus_widget}".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let out = run_statusline(
+            &config,
+            std::path::Path::new("/nonexistent"),
+            &mut &b""[..],
+            false,
+        )
+        .unwrap();
+        assert_eq!(out, "\u{26a0}\u{fe0f}\n"); // ⚠️
+    }
+
+    #[test]
+    fn recognized_widget_with_no_data_still_renders_empty_not_warning() {
+        // A recognized widget (e.g. `pr` with no open PR) legitimately
+        // renders nothing — only a genuinely *unrecognized* name should
+        // trigger the warning glyph.
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{pr}".to_string()],
                 ..Default::default()
             }),
             ..Default::default()
