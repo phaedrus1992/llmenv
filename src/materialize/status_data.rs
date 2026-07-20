@@ -15,7 +15,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::cli::statusline::data::{
-    CacheData, CountData, IcmData, ScopesData, StatusData, ThrottleData,
+    CacheData, CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData, ThrottleData,
 };
 use crate::config::{Config, HashingMode, McpServer, Throttle};
 
@@ -199,17 +199,70 @@ fn collect_icm() -> Option<IcmData> {
     parse_icm_stats(&raw)
 }
 
-/// Pure JSON-extraction half of `collect_icm`, split out so it's testable
+/// Pure text-extraction half of `collect_icm`, split out so it's testable
 /// without a live ICM MCP backend.
+///
+/// The `icm_memory_stats` MCP tool has no structured-output mode — it always
+/// returns a human-formatted text block (`"Memories: 2880\nTopics: 155\n..."`),
+/// never JSON. `memories` is required; `concepts` (sourced from the tool's
+/// "Topics" line — its closest analogous count) defaults to 0 when the line
+/// is absent, so an older/trimmed stats response still yields a usable count.
 fn parse_icm_stats(raw: &str) -> Option<IcmData> {
-    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
     Some(IcmData {
-        memories: parsed.get("memories")?.as_u64()?,
-        concepts: parsed
-            .get("concepts")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        memories: extract_stat_line(raw, "Memories")?,
+        concepts: extract_stat_line(raw, "Topics").unwrap_or(0),
     })
+}
+
+/// Extract the `u64` value from a `"<label>: <n>"` line, e.g. `"Memories:
+/// 2880"` for `label = "Memories"`. Whitespace-tolerant around the colon;
+/// `None` if no line matches or the value doesn't parse.
+fn extract_stat_line(raw: &str, label: &str) -> Option<u64> {
+    raw.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(label)?
+            .trim_start()
+            .strip_prefix(':')?
+            .trim()
+            .parse()
+            .ok()
+    })
+}
+
+/// Best-effort task-tracker progress (#905): `session` is `Some` when a task
+/// session is active (`done`/`total` scoped to that session's tasks);
+/// `open` is always the store-wide open+`wip` count, for the "no active
+/// session" fallback the statusline renderer uses. `None` only when the
+/// state dir itself can't be resolved — an empty/missing task store still
+/// yields `Some(TasksData { open: 0, session: None })`, matching how an
+/// empty `llmenv-status.json` degrades other collectors to `0`, not absent.
+fn collect_tasks() -> Option<TasksData> {
+    let state_dir = match crate::paths::state_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::debug!("task stat collection unavailable (non-fatal): {e}");
+            return None;
+        }
+    };
+    Some(collect_tasks_from_state_dir(&state_dir))
+}
+
+/// Internal helper taking an injectable state dir so tests can exercise this
+/// without touching the real, ambient state dir.
+fn collect_tasks_from_state_dir(state_dir: &Path) -> TasksData {
+    let open = crate::task::open_task_count(state_dir);
+    let active_session = crate::task::session::active_session(state_dir);
+    let session = active_session.as_ref().map(|s| {
+        let (done, total) = crate::task::session::session_progress(state_dir, &s.id);
+        SessionProgress { done, total }
+    });
+    let current =
+        crate::task::current_wip_title(state_dir, active_session.as_ref().map(|s| s.id.as_str()));
+    TasksData {
+        open,
+        session,
+        current,
+    }
 }
 
 /// Prefer resolving fresh against current config (reflects a same-render
@@ -384,8 +437,12 @@ mod tests {
         let config = Config::default();
         let active = active_scopes(&[]);
         let dir = tempfile::tempdir().unwrap();
-        // Must not panic even though: no plugins configured, no memory
-        // backend active (icm stays None), no cache dir exists yet.
+        // Must not panic even though: no plugins configured, no cache dir
+        // exists yet. `icm` isn't asserted here — `collect_icm` resolves the
+        // *host's* real config/backend (no DI seam), so its value depends on
+        // whatever ICM setup happens to be active on the machine running the
+        // test; `parse_icm_stats`'s own tests below cover its logic
+        // hermetically.
         let data = collect_status_data(
             &config,
             &active,
@@ -394,10 +451,6 @@ mod tests {
             None,
             dir.path(),
             HashingMode::default(),
-        );
-        assert!(
-            data.data.icm.is_none(),
-            "no ICM backend active — must degrade to None, not error"
         );
         // Empty config resolves cleanly (no error), not "resolve failed".
         assert_eq!(
@@ -595,15 +648,19 @@ mod tests {
     // --- collect_icm / parse_icm_stats ---
 
     #[test]
-    fn collect_icm_returns_none_when_no_backend_active() {
-        // No memory backend configured for this scope anywhere in the test
-        // process — connect() fails, so this must degrade cleanly.
-        assert!(collect_icm().is_none());
+    fn collect_icm_never_panics() {
+        // `collect_icm` resolves the *host's* real config/backend (no DI
+        // seam) — its return value depends on whatever ICM setup is active
+        // on the machine running the test, so this only asserts the
+        // documented degrade-cleanly contract, not a specific outcome.
+        // `parse_icm_stats`'s tests below cover the parsing logic hermetically.
+        let _ = collect_icm();
     }
 
     #[test]
     fn parse_icm_stats_extracts_memories_and_concepts() {
-        let result = parse_icm_stats(r#"{"memories": 142, "concepts": 47}"#);
+        let result =
+            parse_icm_stats("Memories: 142\nTopics: 47\nAvg weight: 0.3\nOldest: x\nNewest: y\n");
         assert_eq!(
             result,
             Some(IcmData {
@@ -615,7 +672,7 @@ mod tests {
 
     #[test]
     fn parse_icm_stats_defaults_concepts_to_zero_when_absent() {
-        let result = parse_icm_stats(r#"{"memories": 10}"#);
+        let result = parse_icm_stats("Memories: 10\n");
         assert_eq!(
             result,
             Some(IcmData {
@@ -626,29 +683,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_icm_stats_returns_none_on_malformed_json() {
-        assert!(parse_icm_stats("{ not valid json").is_none());
+    fn parse_icm_stats_returns_none_on_unrecognized_text() {
+        assert!(parse_icm_stats("not a stats response at all").is_none());
     }
 
     #[test]
     fn parse_icm_stats_returns_none_when_memories_missing() {
-        assert!(parse_icm_stats(r#"{"concepts": 5}"#).is_none());
+        assert!(parse_icm_stats("Topics: 5\n").is_none());
     }
 
     proptest! {
-        /// Roundtrip: any `memories`/`concepts` pair serialized to JSON must
-        /// parse back to the same `IcmData`, with `concepts` defaulting to 0
-        /// when omitted.
+        /// Roundtrip: any `memories`/`concepts` pair formatted as the real
+        /// `icm_memory_stats` text response must parse back to the same
+        /// `IcmData`, with `concepts` defaulting to 0 when its "Topics" line
+        /// is omitted.
         #[test]
         fn parse_icm_stats_roundtrips_arbitrary_values(
             memories in any::<u64>(),
             concepts in proptest::option::of(any::<u64>()),
         ) {
-            let json = match concepts {
-                Some(c) => serde_json::json!({ "memories": memories, "concepts": c }),
-                None => serde_json::json!({ "memories": memories }),
+            let raw = match concepts {
+                Some(c) => format!("Memories: {memories}\nTopics: {c}\n"),
+                None => format!("Memories: {memories}\n"),
             };
-            let result = parse_icm_stats(&json.to_string());
+            let result = parse_icm_stats(&raw);
             prop_assert_eq!(
                 result,
                 Some(IcmData {
