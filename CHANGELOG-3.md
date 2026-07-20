@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- Fix opencode/crush plugin materialization failing with `marketplace '<name>' has no install_location (not yet synced?)` when `cache.remote_sync: false`. Disabling remote sync means "don't touch the network", but it was wrongly skipping marketplace resolution entirely, leaving `install_location` unset. Claude Code tolerated this (reserved marketplaces render as a github source), but opencode and crush materialize plugin files from the local clone and had no path to copy from. llmenv now always resolves `install_location` from clones already on disk regardless of `remote_sync`, only suppressing the network refresh — matching how external plugin payloads already behave
+
 ## [3.6.0] - 2026-07-20
 
 3.6.0 includes three new engine-facing pieces — an in-engine task tracker, a first-class `llmenv statusline` subcommand, and reinstated a third supported engine (opencode, alongside Claude Code and Crush) — plus a `codebase-memory-mcp` integration.
