@@ -117,17 +117,19 @@ fn render_config_stale(
     if !stale {
         return String::new();
     }
-    // `{stale_icon}` resolves from the icon set for custom formats; the
-    // default uses a literal gear emoji + "stale" label (matching the 🧠/🔌
-    // widget defaults) so the indicator is legible rather than a cryptic `~`.
-    // It means the loaded config is out of date — relaunch to pick up changes.
+    // `{stale_icon}` resolves from the icon set (mirrors `render_session_log`'s
+    // `{icon}`) so a custom `statusline.icons.config_stale` override applies
+    // to the default format, not only a custom `format:` string. Defaults to
+    // a gear emoji + "stale" label (matching the 🧠/🔌 widget defaults) so the
+    // indicator is legible rather than a cryptic `~`. It means the loaded
+    // config is out of date — relaunch to pick up changes.
     let icon = icons
         .get("config_stale")
         .cloned()
-        .unwrap_or_else(|| "◌".to_string());
+        .unwrap_or_else(|| "\u{2699}\u{fe0f}".to_string()); // ⚙️
     let format = cfg
         .and_then(|c| c.format.as_deref())
-        .unwrap_or("\u{2699}\u{fe0f} stale"); // ⚙️
+        .unwrap_or("{stale_icon} stale");
     format.replace("{stale_icon}", &icon)
 }
 
@@ -233,11 +235,15 @@ mod tests {
 
     #[test]
     fn renders_config_stale_icon() {
+        // No icon-set override for `config_stale` here (unlike the shared
+        // `icons()` fixture) — this tests the true hardcoded fallback, not a
+        // configured glyph.
         let data = StatusData {
             config_stale: Some(true),
             ..Default::default()
         };
-        let out = render_llmenv_widget("config_stale", &data, None, &icons(), false).unwrap();
+        let out =
+            render_llmenv_widget("config_stale", &data, None, &BTreeMap::new(), false).unwrap();
         assert_eq!(out, "\u{2699}\u{fe0f} stale"); // ⚙️ stale (default)
     }
 
@@ -324,8 +330,8 @@ mod tests {
 
     #[test]
     fn config_stale_stale_icon_placeholder_falls_back_when_icon_missing() {
-        // The default format uses a literal gear, but a custom `{stale_icon}`
-        // still resolves from the icon set, falling back to `◌` when absent.
+        // A custom `{stale_icon}` format resolves from the icon set, falling
+        // back to the default gear glyph when the icon map has no entry.
         let data = StatusData {
             config_stale: Some(true),
             ..Default::default()
@@ -337,7 +343,7 @@ mod tests {
         let empty_icons = BTreeMap::new();
         let out =
             render_llmenv_widget("config_stale", &data, Some(&cfg), &empty_icons, false).unwrap();
-        assert_eq!(out, "◌");
+        assert_eq!(out, "\u{2699}\u{fe0f}"); // ⚙️
     }
 
     #[test]
