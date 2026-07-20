@@ -183,6 +183,10 @@ pub enum ValidateError {
     DefaultModelEmptyRole,
     #[error("default_models role '{0}' has an empty provider or model")]
     DefaultModelEmptyRef(String),
+    #[error("hook '{event}' has type: command but no command")]
+    HookCommandMissingCommand { event: String },
+    #[error("hook '{event}' has type: mcp_tool but no tool")]
+    HookMcpToolMissingTool { event: String },
 }
 
 /// A state-tool subdir must be a single safe path component: non-empty, not
@@ -435,6 +439,7 @@ impl Config {
             validate_capabilities_env_key("config.yaml: capabilities", key)?;
         }
         self.validate_mcps()?;
+        self.validate_hooks()?;
         self.validate_lsp()?;
         self.validate_skills()?;
         self.validate_model_providers()?;
@@ -645,6 +650,33 @@ impl Config {
                 if cm.when.is_empty() {
                     return Err(ValidateError::CodebaseMemoryNoTags);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// A hook whose `kind` doesn't match its `command`/`tool` field is
+    /// schema-valid but produces a silent no-op in the generated engine
+    /// config (Claude Code emits `{"type":"command"}` with no command key
+    /// and runs nothing; Crush rejects it at load time). Fail fast here
+    /// instead, mirroring `validate_mcps`'s `McpStdioMissingCommand`.
+    fn validate_hooks(&self) -> Result<(), ValidateError> {
+        use super::HookHandlerKind;
+
+        let is_missing = |field: &Option<String>| field.as_deref().unwrap_or("").is_empty();
+        for hook in &self.capabilities.hooks {
+            match hook.handler.kind {
+                HookHandlerKind::Command if is_missing(&hook.handler.command) => {
+                    return Err(ValidateError::HookCommandMissingCommand {
+                        event: hook.event.clone(),
+                    });
+                }
+                HookHandlerKind::McpTool if is_missing(&hook.handler.tool) => {
+                    return Err(ValidateError::HookMcpToolMissingTool {
+                        event: hook.event.clone(),
+                    });
+                }
+                HookHandlerKind::Command | HookHandlerKind::McpTool => {}
             }
         }
         Ok(())
@@ -3677,6 +3709,118 @@ mod tests {
                 model: "claude-opus-4-7".into(),
             },
         );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn hook_command_missing_command_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: None,
+                tool: None,
+            },
+            bundle_origin: None,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ValidateError::HookCommandMissingCommand { ref event, .. } if event == "PreToolUse"
+        ));
+    }
+
+    #[test]
+    fn hook_mcp_tool_missing_tool_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::McpTool,
+                command: None,
+                tool: None,
+            },
+            bundle_origin: None,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ValidateError::HookMcpToolMissingTool { ref event, .. } if event == "PreToolUse"
+        ));
+    }
+
+    #[test]
+    fn hook_command_empty_string_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: Some(String::new()),
+                tool: None,
+            },
+            bundle_origin: None,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ValidateError::HookCommandMissingCommand { ref event, .. } if event == "PreToolUse"
+        ));
+    }
+
+    #[test]
+    fn hook_mcp_tool_empty_string_rejected() {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::McpTool,
+                command: None,
+                tool: Some(String::new()),
+            },
+            bundle_origin: None,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ValidateError::HookMcpToolMissingTool { ref event, .. } if event == "PreToolUse"
+        ));
+    }
+
+    #[test]
+    fn hook_command_with_command_is_accepted() {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::Command,
+                command: Some("echo hi".into()),
+                tool: None,
+            },
+            bundle_origin: None,
+        });
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn hook_mcp_tool_with_tool_is_accepted() {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: HookHandlerKind::McpTool,
+                command: None,
+                tool: Some("some_tool".into()),
+            },
+            bundle_origin: None,
+        });
         assert!(cfg.validate().is_ok());
     }
 }
