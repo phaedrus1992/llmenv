@@ -700,7 +700,7 @@ All eight honor `format:`.
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
 | `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
 | `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes) |
-| `config_stale` | `{stale_icon}` | `◌` | `stale_icon`. Renders empty when the config isn't stale — there's no "fresh" variant |
+| `config_stale` | `⚙️ stale` | `⚙️ stale` | `stale_icon`. Default is a literal gear + label (config out of date — relaunch to reload); `{stale_icon}` resolves from the icon set for custom formats. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
 
