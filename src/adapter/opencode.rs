@@ -701,16 +701,35 @@ impl AgentAdapter for OpencodeAdapter {
 
         // Parse a native string like "Bash(otool *)" or bare "Bash" back into
         // (tool_lowercase, pattern). A bare tool name wildcard-matches everything.
-        fn parse_native_rule(s: &str) -> (String, String) {
-            if let Some(start) = s.find('(')
-                && let Some(end) = s.rfind(')')
-            {
-                return (
-                    s[..start].to_ascii_lowercase(),
-                    s[start + 1..end].to_string(),
-                );
+        // Anything else missing a balanced, non-empty `(pattern)` is a malformed
+        // rule and must error rather than silently fall back to a wildcard —
+        // a typo like "Bash(" would otherwise wildcard-allow all Bash commands.
+        fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<(String, String)> {
+            match (s.find('('), s.rfind(')')) {
+                (None, None) => {
+                    anyhow::ensure!(
+                        !s.trim().is_empty(),
+                        "native_permissions.opencode.{action}: empty rule string"
+                    );
+                    Ok((s.to_ascii_lowercase(), "*".to_string()))
+                }
+                (Some(start), Some(end)) if start < end => {
+                    let tool = s[..start].to_ascii_lowercase();
+                    let pattern = &s[start + 1..end];
+                    anyhow::ensure!(
+                        !tool.is_empty(),
+                        "native_permissions.opencode.{action}: rule {s:?} has no tool name before '('"
+                    );
+                    anyhow::ensure!(
+                        !pattern.is_empty(),
+                        "native_permissions.opencode.{action}: rule {s:?} has an empty pattern '()'"
+                    );
+                    Ok((tool, pattern.to_string()))
+                }
+                _ => anyhow::bail!(
+                    "native_permissions.opencode.{action}: rule {s:?} has unbalanced parentheses"
+                ),
             }
-            (s.to_ascii_lowercase(), "*".to_string())
         }
 
         // Insert (tool, pattern) pairs into the per-tool map.
@@ -750,11 +769,11 @@ impl AgentAdapter for OpencodeAdapter {
                 action,
             );
             if let Some(n) = native {
-                insert_patterns(
-                    &mut permission_map,
-                    n.iter().map(|s| parse_native_rule(s)),
-                    action,
-                );
+                let native_patterns: Vec<(String, String)> = n
+                    .iter()
+                    .map(|s| parse_native_rule(s, action))
+                    .collect::<anyhow::Result<_>>()?;
+                insert_patterns(&mut permission_map, native_patterns.into_iter(), action);
             }
         }
 
@@ -1496,6 +1515,63 @@ mod tests {
             serde_json::json!("deny"),
             "structured deny must win over native allow for the same tool+pattern"
         );
+    }
+
+    /// Materialize a manifest whose `native_permissions.opencode` carries a
+    /// single rule string in the given tier ("allow"/"ask"/"deny"), and
+    /// return the resulting error message.
+    fn native_rule_error(tier: &str, rule: &str) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        let mut native = crate::config::NativePermissionRules::default();
+        if tier == "ask" {
+            native.ask.push(rule.to_string());
+        } else if tier == "deny" {
+            native.deny.push(rule.to_string());
+        } else {
+            native.allow.push(rule.to_string());
+        }
+        caps.native_permissions.insert("opencode".into(), native);
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn materialize_rejects_malformed_native_rules() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "allow",
+                "Bash(",
+                &["Bash(", "native_permissions.opencode.allow"],
+            ),
+            (
+                "ask",
+                "Bash)",
+                &["Bash)", "native_permissions.opencode.ask"],
+            ),
+            ("allow", "(rm *)", &["(rm *)"]),
+            (
+                "deny",
+                "Bash()",
+                &["Bash()", "native_permissions.opencode.deny"],
+            ),
+            ("allow", "", &["native_permissions.opencode.allow"]),
+        ];
+        for (tier, rule, needles) in cases {
+            let msg = native_rule_error(tier, rule);
+            for needle in *needles {
+                assert!(
+                    msg.contains(needle),
+                    "rule {rule:?} in {tier}: expected {needle:?} in error: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2649,6 +2725,56 @@ mod tests {
                 &val[tool.to_ascii_lowercase()][&pattern],
                 &serde_json::json!("allow")
             );
+        }
+
+        /// `materialize` never panics on an arbitrary native permission rule
+        /// string, no matter how malformed — it always returns `Ok` or `Err`.
+        #[test]
+        fn native_rule_arbitrary_string_never_panics(rule in ".{0,20}") {
+            let mut caps = crate::config::Capabilities::default();
+            caps.native_permissions.insert(
+                "opencode".to_string(),
+                crate::config::NativePermissionRules {
+                    allow: vec![rule],
+                    ..Default::default()
+                },
+            );
+            let manifest = MergedManifest {
+                capabilities: caps,
+                ..Default::default()
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            let _ = OpencodeAdapter.materialize(&manifest, tmp.path());
+        }
+
+        /// A rule string with only one of the two parens present (never
+        /// both) is always rejected, regardless of the tool/pattern content
+        /// around it.
+        #[test]
+        fn native_rule_single_paren_is_always_error(
+            tool in "[A-Za-z]{1,8}",
+            pattern in "[a-z]{1,8}",
+            keep_open in any::<bool>(),
+        ) {
+            let rule = if keep_open {
+                format!("{tool}({pattern}")
+            } else {
+                format!("{tool}{pattern})")
+            };
+            let mut caps = crate::config::Capabilities::default();
+            caps.native_permissions.insert(
+                "opencode".to_string(),
+                crate::config::NativePermissionRules {
+                    allow: vec![rule],
+                    ..Default::default()
+                },
+            );
+            let manifest = MergedManifest {
+                capabilities: caps,
+                ..Default::default()
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            prop_assert!(OpencodeAdapter.materialize(&manifest, tmp.path()).is_err());
         }
 
         /// `parse_plugin_hooks` never panics on arbitrary file content, valid
