@@ -46,12 +46,14 @@ worth a dependency).
 ### Task 1: Config schema — `StatuslineConfig`
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/schema.rs` (add near `ContextMode`,
   `schema.rs:813-817`)
 - Modify: `crates/llmenv-config/src/lib.rs:26-37` (re-export)
 - Test: same file, inline `#[cfg(test)] mod tests`
 
 **Interfaces:**
+
 - Consumes: nothing (leaf config struct).
 - Produces: `pub struct StatuslineConfig` with fields `rows: Vec<String>`,
   `style: StatuslineStyle`, `widgets: BTreeMap<String, WidgetConfig>`,
@@ -211,11 +213,13 @@ Fixes #836"
 ### Task 2: Data file schema — `StatusData`
 
 **Files:**
+
 - Create: `src/cli/statusline/data.rs`
 - Modify: `src/cli/statusline/mod.rs` (create, `mod data;`)
 - Test: inline in `data.rs`
 
 **Interfaces:**
+
 - Consumes: nothing (pure deserialization type).
 - Produces: `pub struct StatusData` with all-optional fields matching the
   design doc's JSON shape exactly:
@@ -403,10 +407,12 @@ Fixes #836"
 ### Task 3: Row template parser
 
 **Files:**
+
 - Create: `src/cli/statusline/template.rs`
 - Modify: `src/cli/statusline/mod.rs` (`mod template; pub use template::{parse_template, TemplateToken};`)
 
 **Interfaces:**
+
 - Consumes: a `&str` row template (e.g. `"{model} │ {context_pct}"`).
 - Produces: `pub enum TemplateToken { Literal(String), Widget { name: String, truncate: bool } }`
   and `pub fn parse_template(template: &str) -> Vec<TemplateToken>`. Consumed
@@ -576,11 +582,13 @@ Fixes #836"
 ### Task 4: Truncation + ANSI style helpers
 
 **Files:**
+
 - Modify: `src/cli/style.rs` (extend — this is the existing ANSI convention
   to reuse, not a new module; add functions at the bottom)
 - Test: inline in `src/cli/style.rs`
 
 **Interfaces:**
+
 - Consumes: nothing new.
 - Produces: `pub fn truncate_ellipsis(s: &str, max_len: usize) -> String`
   (UTF-8-boundary-safe, appends `…` when truncated) and
@@ -762,11 +770,13 @@ Fixes #836"
 ### Task 5: Engine-sourced widgets
 
 **Files:**
+
 - Create: `src/cli/statusline/widget.rs`
 - Modify: `src/cli/statusline/mod.rs` (`mod widget; pub use widget::*` — no,
   per "no glob re-exports": `pub use widget::{EngineData, render_widget};`)
 
 **Interfaces:**
+
 - Consumes: `crate::cli::style::{truncate_ellipsis, apply_style}` (Task 4),
   `WidgetConfig`/`IconSet` (Task 1, via `llmenv_config`).
 - Produces: `pub struct EngineData` (deserialized stdin JSON, see Task 8 for
@@ -1107,9 +1117,11 @@ Fixes #836"
 ### Task 5b: Remaining engine widgets (`branch`, `pr`, `progress_bar`)
 
 **Files:**
+
 - Modify: `src/cli/statusline/widget.rs`
 
 **Interfaces:**
+
 - Consumes: same `EngineData` as Task 5 — add `branch: Option<BranchInfo>`
   and `pr: Option<PrInfo>` fields (the design doc's stdin example doesn't
   show these two, but the widget table requires them, so extend
@@ -1252,10 +1264,12 @@ Fixes #836"
 ### Task 6: llmenv-sourced widgets
 
 **Files:**
+
 - Create: `src/cli/statusline/llmenv_widget.rs`
 - Modify: `src/cli/statusline/mod.rs` (`mod llmenv_widget; pub use llmenv_widget::render_llmenv_widget;`)
 
 **Interfaces:**
+
 - Consumes: `StatusData` (Task 2), `apply_style`/`truncate_ellipsis` (Task
   4), `llmenv_config::{WidgetConfig, StatuslineConfig}` (Task 1, for the
   `icons:` map).
@@ -1536,6 +1550,7 @@ Fixes #836"
 ### Task 7: Icon-set resolution
 
 **Files:**
+
 - Modify: `src/cli/statusline/llmenv_widget.rs` (icon lookup already takes
   a resolved `icons` map — this task adds the `icon_set` → glyph choice
   layer that produces that map)
@@ -1543,6 +1558,7 @@ Fixes #836"
 - Modify: `src/cli/statusline/mod.rs`
 
 **Interfaces:**
+
 - Consumes: `llmenv_config::IconSet`, the user's `icons:` config map (Task 1).
 - Produces: `pub fn resolve_icons(icon_set: llmenv_config::IconSet, configured: &std::collections::BTreeMap<String, String>) -> std::collections::BTreeMap<String, String>`
   — merges built-in defaults for `simple`/`nerd`/`none` with user overrides
@@ -1717,6 +1733,7 @@ Fixes #836"
 ### Task 8: Renderer orchestration + CLI wiring
 
 **Files:**
+
 - Create: `src/cli/statusline.rs` (the orchestrator — sibling to the
   `statusline/` submodule dir, following the same `foo.rs` + `foo/` split
   pattern as `src/cli/status.rs` if it has one, or simply put the
@@ -1728,6 +1745,7 @@ Fixes #836"
 - Modify: `src/cli/mod.rs` (register `Command::Statusline`, dispatch arm)
 
 **Interfaces:**
+
 - Consumes: `EngineData` (Task 5), `StatusData` (Task 2),
   `llmenv_config::StatuslineConfig` (Task 1), `parse_template`/`TemplateToken`
   (Task 3), `render_engine_widget`/`render_llmenv_widget` (Tasks 5/6),
@@ -1974,9 +1992,11 @@ Fixes #836"
 ### Task 9: Throttle state reader
 
 **Files:**
+
 - Modify: `src/throttle/mod.rs`
 
 **Interfaces:**
+
 - Consumes: `throttle_state_path` (already private in this file — this task
   makes the read path public alongside the existing write path).
 - Produces: `pub fn read_active_throttle() -> anyhow::Result<Option<Throttle>>`.
@@ -2066,12 +2086,14 @@ Fixes #836"
 ### Task 10: `collect_status_data` — gather all fields for the data file
 
 **Files:**
+
 - Create: `src/materialize/status_data.rs`
 - Modify: `src/materialize/mod.rs` (`mod status_data; pub use status_data::{collect_status_data, StatusDataInput};`
   — or `pub(crate) use` if `src/cli/mod.rs` is in the same crate root, which
   it is: this whole plan lives in the single `llmenv` binary crate)
 
 **Interfaces:**
+
 - Consumes: `crate::scope::evaluate` (returns `ActiveScopes` with `.tags`),
   `crate::plugins::resolve::resolve_plugins`, `crate::mcp::resolve::resolve_mcps`,
   `crate::materialize::cache::{prune, PruneMode}`, `crate::cli::{stale_status}`
@@ -2381,9 +2403,11 @@ Fixes #836"
 ### Task 10b: Wire up `config_stale` detection
 
 **Files:**
+
 - Modify: `src/materialize/status_data.rs`
 
 **Interfaces:**
+
 - Consumes: whatever `run_check_stale` (`src/cli/mod.rs:1585`) uses to get
   its "booted" and "current" hash strings.
 - Produces: `collect_config_stale` returns `Some(bool)` instead of always
@@ -2442,10 +2466,12 @@ Fixes #836"
 ### Task 11: Write `llmenv-status.json` during materialization
 
 **Files:**
+
 - Modify: `src/cli/mod.rs` (around the materialize orchestration found
   during planning, `src/cli/mod.rs:1267-1290`)
 
 **Interfaces:**
+
 - Consumes: `collect_status_data` (Task 10), `crate::paths::write_owner_only_atomic`
   (already used by `manifest.rs:171-172` — same call shape here).
 - Produces: `llmenv-status.json` written into `cache_path` (the materialized
@@ -2532,10 +2558,12 @@ Fixes #836"
 ### Task 12: Refresh data file on `llmenv export`
 
 **Files:**
+
 - Modify: `src/cli/mod.rs` (wherever `run_export`/`Command::Export`'s handler
   lives — same file, different function than Task 11's materialize path)
 
 **Interfaces:**
+
 - Consumes: `collect_status_data` (Task 10), same write helper as Task 11.
 - Produces: `llmenv export` refreshes `llmenv-status.json` in the current
   materialized folder (throttle/cache/config-staleness fields are the ones
@@ -2590,6 +2618,7 @@ Fixes #836"
 ### Task 13: Write data file once at session start
 
 **Files:**
+
 - Modify: wherever "session start" is currently handled — **find this
   first**: `rg -n "SessionStart|session_start" src/cli/mod.rs src/hook_run/`
   (the design doc says "written once before the engine launches" — this is
@@ -2599,6 +2628,7 @@ Fixes #836"
   session lifecycle, making this task a no-op check rather than new code).
 
 **Interfaces:**
+
 - Consumes: `write_status_json` helper (Task 12).
 - Produces: confirms (or adds, if a genuine gap exists) that the data file
   exists before the first `llmenv statusline` invocation of a session.
@@ -2638,11 +2668,13 @@ Fixes #836"
 ### Task 14: Claude Code adapter — default statusLine hook
 
 **Files:**
+
 - Modify: `src/adapter/claude_code.rs` (near the `autoMemoryEnabled` pattern,
   `claude_code.rs:1180-1184`, and before the `overlay_native` calls at line
   1204/1223)
 
 **Interfaces:**
+
 - Consumes: nothing new — this is a settings-map insertion, same shape as
   the existing `autoMemoryEnabled` default.
 - Produces: `settings.json`'s `statusLine` key defaults to
@@ -2725,6 +2757,7 @@ Fixes #836"
 ### Task 15: Document the Crush adapter gap (no code change)
 
 **Files:**
+
 - Modify: `docs/superpowers/specs/2026-07-15-statusline-design.md` (add a
   short "Known limitations" note, since the issue's acceptance criteria
   mentions Crush wiring but Crush has no statusline concept today)
@@ -2777,6 +2810,7 @@ Fixes #836"
 ### Task 16: User-facing docs
 
 **Files:**
+
 - Modify: `website/docs/` — find the right page via
   `rg -l -i "adapter|hooks|config.yaml" website/docs/*.md | head` and add a
   new page or section for the `statusline:` config, following whichever
@@ -2814,6 +2848,7 @@ Fixes #836"
 ### Task 17: CHANGELOG entry
 
 **Files:**
+
 - Modify: `CHANGELOG.md`
 
 **Interfaces:** none.
@@ -2856,6 +2891,7 @@ fallback (Tasks 2, 8).
 
 **Known deviations from the design doc's illustrative examples,
 documented inline at point of deviation rather than silently diverging:**
+
 - `throttle` widget source data uses `backend`/`cooldown_secs` (from the
   real `Throttle` config struct) instead of the design doc's illustrative
   `raw`/`reason`/`icon` fields, which have no backing source today (Task 6,

@@ -170,9 +170,9 @@ Claude Code adapter.
 
 ### Env vars
 
-| Variable              | Points to                                              | Notes                                                                          |
-|-----------------------|--------------------------------------------------------|--------------------------------------------------------------------------------|
-| `OPENCODE_CONFIG_DIR` | `<cache>` (the directory holding `opencode.json`)      | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` shim from here   |
+| Variable              | Points to                                         | Notes                                                                         |
+|-----------------------|---------------------------------------------------|-------------------------------------------------------------------------------|
+| `OPENCODE_CONFIG_DIR` | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` shim from here |
 
 ### What the opencode adapter emits
 

@@ -23,11 +23,13 @@
 ### Task 1: Config schema — `TaskTracker` feature toggle
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/schema.rs` (add struct + `Features` field + tests)
 - Modify: `crates/llmenv-config/src/lib.rs:28-34` (re-export `TaskTracker`)
 - Modify: `src/config/mod.rs:5-11` (re-export `TaskTracker`)
 
 **Interfaces:**
+
 - Produces: `llmenv_config::schema::TaskTracker { pub enabled: bool }` (also `Default`, `Debug`, `Clone`, `Deserialize`, `Serialize`, `PartialEq`, `Eq`), re-exported as `crate::config::TaskTracker`. `Features.task_tracker: Option<TaskTracker>`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -137,10 +139,12 @@ refs #231"
 ### Task 2: Task store — types, slug generation, atomic CRUD
 
 **Files:**
+
 - Create: `src/task/mod.rs`
 - Modify: `src/lib.rs:18-19` (add `pub mod task;` between `sync` and the `#[cfg(test)]` block, alphabetically before `test_fixtures`/`throttle`)
 
 **Interfaces:**
+
 - Consumes: `crate::paths::state_dir() -> anyhow::Result<PathBuf>`, `crate::paths::write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<()>` (both already exist, re-exported from `llmenv_paths`).
 - Produces:
   - `pub enum TaskState { Open, Wip, Done }` (`Serialize`/`Deserialize` with `#[serde(rename_all = "snake_case")]`, `Default` = `Open`)
@@ -518,9 +522,11 @@ refs #231"
 ### Task 3: Task store — state transitions and identifier resolution
 
 **Files:**
+
 - Modify: `src/task/mod.rs` (add transition functions + identifier resolution)
 
 **Interfaces:**
+
 - Consumes: `Task`, `TaskState`, `load_task`, `save_task`, `list_tasks`, `tasks_dir` from Task 2.
 - Produces:
   - `pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<String>` — exact slug or unambiguous prefix; returns the resolved exact slug or an error listing candidates.
@@ -756,9 +762,11 @@ refs #231"
 ### Task 4: CLI wiring — `llmenv task ...`
 
 **Files:**
+
 - Modify: `src/cli/mod.rs` (add `Task` command variant, `TaskCommand` enum, dispatch, print helpers)
 
 **Interfaces:**
+
 - Consumes: `crate::task::{add_task, start_task, done_task, note_task, block_task, list_tasks, load_task, resolve_identifier, tasks_dir, Task, TaskState}` from Tasks 2-3; `crate::paths::state_dir()`.
 - Produces: `llmenv task add|start|done|ls|show|note|block` CLI surface.
 
@@ -937,9 +945,11 @@ refs #231"
 ### Task 5: Merge resolution — `task_tracker` scalar
 
 **Files:**
+
 - Modify: `src/merge/capabilities.rs` (resolve `task_tracker` like `read_once`/`slippage`/`context_mode`)
 
 **Interfaces:**
+
 - Consumes: `crate::config::{Features, TaskTracker}`.
 - Produces: `Features.task_tracker` correctly populated in the merged manifest (highest-precedence contributor wins).
 
@@ -1059,10 +1069,12 @@ refs #231"
 ### Task 6: CLAUDE.md fragment injection
 
 **Files:**
+
 - Modify: `src/adapter/claude_code.rs` (fragment constant + injection in `materialize()`)
 - Modify: `tests/claude_code_adapter.rs` (present/absent test pair)
 
 **Interfaces:**
+
 - Consumes: `manifest.capabilities.features.task_tracker` (via the same `Option` chain pattern as `slippage`).
 - Produces: a `<!-- from task_tracker -->` marked fragment appended to `CLAUDE.md` when `features.task_tracker.enabled == true`.
 
@@ -1193,11 +1205,13 @@ refs #231"
 ### Task 7: Lifecycle hooks — SessionStart reminder + Stop skip-detection
 
 **Files:**
+
 - Modify: `src/task/mod.rs` (add `session_start_reminder` and `stop_hook_reminder`)
 - Modify: `src/hook_run/mod.rs` (wire both into `run_inner`)
 - Modify: `tests/hook_run_failsoft.rs` (add `"stop"` to the fail-soft loop; add task-tracker-specific tests)
 
 **Interfaces:**
+
 - Consumes: `crate::task::list_tasks`, `TaskState`, `crate::config::TaskTracker`, `crate::paths::state_dir()`.
 - Produces:
   - `pub fn session_start_reminder(state_dir: &Path) -> String` — infallible, empty string when no `wip` tasks or on any internal error (logged to stderr).
@@ -1446,11 +1460,13 @@ For `SessionStart`, append the reminder to `out` right before the final `Ok::<St
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run:
+
 ```bash
 cargo test -p llmenv task::tests
 cargo test --test hook_run_failsoft
 cargo test --test hook_run_failsoft -- --include-ignored stop
 ```
+
 Expected: PASS across the board, including the full `all_events_fail_soft_without_backend` loop with `"stop"` added.
 
 - [ ] **Step 5: Commit**
@@ -1468,6 +1484,7 @@ refs #231"
 ### Task 8: Docs + CHANGELOG
 
 **Files:**
+
 - Modify: `website/docs/commands.md` (new `## \`task\`` section, after the existing `## \`read-once\`` section at line 256-264)
 - Modify: `CHANGELOG-3.md` (via the `keepachangelog` skill — do not hand-edit; invoke the skill)
 
@@ -1516,7 +1533,6 @@ close `wip` tasks) are gated behind `features.task_tracker.enabled` (default
 features:
   task_tracker:
     enabled: true
-```
 ```
 
 - [ ] **Step 2: Add the CHANGELOG entry**

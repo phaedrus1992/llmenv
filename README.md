@@ -108,7 +108,7 @@ and plugins activate automatically.
 | ------- | ------- |
 | `llmenv init [PATH] [--repo URL]` | Write a template config |
 | `llmenv setup` | Interactive setup wizard (auth + settings import) |
-| `llmenv export [--scope ID] [--tag TAG] [--compress]` | Print `export` lines for the current scope (used by the hook) |
+| `llmenv export [--scope ID] [--tag TAG] [--compress]` | Print `export` lines for the current scope (used by hook) |
 | `llmenv regenerate` | Re-materialize config without emitting shell variables |
 | `llmenv hook <zsh\|bash>` | Print shell integration code |
 | `llmenv status [scopes\|tags\|bundles\|mcps\|plugins\|marketplaces]` | Show active scopes, tags, and config status |

@@ -7,7 +7,7 @@ sidebar_label: Changelog
 
 {/* GENERATED FILE — do not edit by hand. Regenerate with `scripts/sync-changelog-doc.sh`. */}
 
-<!-- markdownlint-disable MD024 -->
+<!-- markdownlint-disable MD013 -- entries are one dense bullet per change, not wrapped prose -->
 
 # Changelog
 
@@ -20,7 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+3.6.0 includes three new engine-facing pieces — an in-engine task tracker, a first-class `llmenv statusline` subcommand, and reinstated a third supported engine (opencode, alongside Claude Code and Crush) — plus a `codebase-memory-mcp` integration.
+
+A string of hook-run perf work landed too: single-walk `scope.content` matching instead of one walk per matcher, `uname(2)` instead of shelling out to `hostname`, memory-recall dedup, and cutting redundant `config.yaml` re-parses and per-invocation clones/reads/stats across hook-run, export, and regenerate.
+
+On the fix side: opencode permission precedence and malformed-rule handling, skill-frontmatter YAML escaping for control chars and Unicode noncharacters, several `read_once`/session-log ordering bugs, and null-valued hook keys leaking into generated engine configs.
+
 ### Added
+
 - Add an in-engine task tracker: `llmenv task add|start|done|ls|show|note|block` manages a durable, file-based task store so agents can track "what am I working on" across `/clear`, `/compact`, and new sessions instead of relying on ephemeral in-session TODOs. Off by default (`features.task_tracker.enabled: true` to opt in) — when enabled, a CLAUDE.md fragment steers the agent to use it, and SessionStart/Stop hook reminders nudge the agent to resume or close `wip` tasks (#231)
 - First-class `llmenv statusline` subcommand: reads engine session JSON from stdin, config from the new `statusline:` section of `config.yaml`, and llmenv's own stats (active scopes, plugin/MCP counts, ICM memory stats, throttle state, cache health, config staleness, session log activity) from a materialized `llmenv-status.json` data file. Supports 18 widget types — 10 engine-sourced (`model`, `folder`, `branch`, `pr`, `progress_bar`, `tokens`, `context_pct`, `budget`, `duration`, `cache_pct`) and 8 llmenv-sourced (`scopes`, `plugins`, `mcps`, `icm`, `cache`, `config_stale`, `throttle`, `session_log`) — with per-widget `format`/`style`/`max_len` overrides, configurable row templates, and a configurable icon set (`auto`/`nerd`/`simple`/`none`). The Claude Code adapter seeds `llmenv statusline` as the default `statusLine` hook in `settings.json` automatically, without overwriting an existing user customization. Crush has no statusline hook concept yet (#855 tracks adding it) (#836)
 - Opt-in per-phase hook-run timing via `LLMENV_TRACE_TIMING` env var — emits a single `llmenv-trace {json}` stderr line with config-load/scope-eval/prep/mcp phase durations in microseconds; off by default, stdout unaffected
@@ -29,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Backport the opencode adapter: `opencode` is now a third supported engine alongside `claude_code` and `crush`. PATH-gated like Crush (skipped silently when `opencode` is not on `PATH`), it materializes `opencode.json`, `AGENTS.md`, rule files, skills (`SKILL.md`), plugin-translated `command/` + `agent/` files, and a generated `plugin/llmenv.js` hook-bridge shim into the llmenv cache dir — discovered via the exported `OPENCODE_CONFIG_DIR`. It reaches near-parity with the Claude Code adapter: permissions rendered as per-tool `pattern → action` maps with native `allow`/`ask`/`deny` (a bare tool emits a plain action string), six hook events (`SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) bridged through the JS shim, MCP servers (local with `${HOME}` expansion plus remote `http`/`sse`), LSP servers, first-class and plugin-projected skills, and custom agents/commands. Unsupported hook events and `mcp_tool`-kind handlers are dropped with an actionable warning rather than a hard error. A `native.opencode` escape hatch deep-merges catch-all keys into `opencode.json` while rejecting the modeled keys (`instructions`, `mcp`, `lsp`, `permission`) that must go through the `native_permissions`/`native_hooks`/`native_mcp.opencode` siblings. `llmenv setup` and `llmenv doctor` probe for `opencode`, and `disabled_engines` accepts `opencode` (#876)
 
 ### Changed
+
 - Evaluate all `scope.content` matchers in a single directory walk instead of one walk per matcher — N active content scopes previously meant N full tree walks on every hook fire and every export (#703)
 - Resolve the hostname via the `uname(2)` syscall instead of spawning the `hostname` binary on every hook-run — the fork/exec dominated hook-run scope evaluation (~15ms/event, ~35% of hook-run CPU); each hook is a fresh process so the process-static env cache never helped this path
 - Deduplicate byte-identical memory blocks across a TurnStart's recalls before injecting them into agent context — a memory stored under several tag/bundle keywords came back from multiple recalls and was injected 2–3× (~60% of the TurnStart context payload in the common case); only exact-duplicate blocks are dropped, order preserved, so no unique recall is lost
@@ -39,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Trim redundant per-invocation work across `hook-run`, `export`, and `regenerate`: fewer clones building scope/memory-action arguments, one read (not two) of each bundle's `AGENTS.md`/`bundle.yaml` and of the cache manifest dotfile, one stat (not two) when reaping expired session logs, and no more re-deriving the same memory-URL/tags/bundle-name values a second time in the same call — small, consistent wins on every hook event and materialize pass
 
 ### Fixed
+
 - Bundle- and user-declared hooks no longer emit null-valued `tool`/`command` keys into the generated engine config — the Claude Code adapter rendered `"tool": null` for a `command`-type handler (and `"command": null` for an `mcp_tool` handler), and the Crush adapter rendered `"command": null` when a command hook had no command; absent fields are now omitted in both adapters (#720)
 - Skill frontmatter `name`/`description` values containing control characters (e.g. a stray vertical tab) no longer produce invalid YAML when auto-quoted — control characters are now escaped instead of passed through literally (#859)
 - `features.read_once` no longer silently drops Debug-level session-log capture for `PreToolUse` events — enabling it previously short-circuited before session logging ran whenever a Debug-level session-log sink was also configured; both now fire (#864)
@@ -55,19 +64,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [3.5.1] - 2026-07-15
 
 ### Fixed
+
 - `remote_sync` no longer blocks manual `llmenv sync` and `llmenv plugin-sync` commands — it only gates the non-interactive throttled pull during `llmenv export` (#835)
 
 ## [3.5.0] - 2026-07-15
 
 ### Added
+
 - Configurable session-log retention: `session_log.transcript.retention_days` — best-effort deletion of stale session-log files before each SessionStart; validated >= 1 (#812)
 - Add `cache.remote_sync` config option (default `true`) to disable remote git operations — prevents shell freezes when 1Password's SSH agent is locked and an SSH askpass prompt hangs terminal-based git ops (#833)
 
 ### Changed
+
 - Build manifest once per export/regenerate instead of once per adapter, reducing repeated work in multi-engine setups (#708)
 - Hot-path optimizations for hook-run pipeline: cache Env::detect() results (30s TTL), cache bundle merge by config mtime, reuse Tokio runtime and MCP HTTP client via OnceLock (#813)
 
 ### Fixed
+
 - Remove dead process-static CONFIG_CACHE from hook_run that never saved a parse (each hook event is a fresh process); poisoned-cache log no longer fires on cold-start misses (#706)
 - Add eprintln! diagnostic when fs::canonicalize() fails in read-once, so operators can detect non-canonicalized cache keys (#728)
 - Add eprintln! diagnostic when deprecated PascalCase 'filePath' key is used in read-once, surfacing format drift (#729)
@@ -82,6 +95,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 This release tightens error diagnostic coverage across two dozen silent-fallthrough
 sites, adds PermissionMode variants for granular permission control, hardens cache
 GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
+
+### Added
+
+- Add `auto`, `dontAsk`, and `manual` PermissionMode variants alongside
+  existing boolean/string forms — `auto` is only honored from user-scope
+  settings, `dontAsk` skips the permission prompt, and `manual` matches
+  the default deny-mode behavior (#748)
+- Migrate ephemeral state (`projects/`) across hash changes in Strict
+  mode materialization (#746, #797)
 
 ### Fixed
 
@@ -136,18 +158,6 @@ GC edge cases, and normalizes JSON/YAML merge null-strip behavior.
   `<url>` is interpreted as JSX by Docusaurus, breaking the `docs.yml`
   CI build against `website/docs/changelog.md` and `website/docs/release.md`
   (#811)
-
-### Added
-
-- Add `auto`, `dontAsk`, and `manual` PermissionMode variants alongside
-  existing boolean/string forms — `auto` is only honored from user-scope
-  settings, `dontAsk` skips the permission prompt, and `manual` matches
-  the default deny-mode behavior (#748)
-- Migrate ephemeral state (`projects/`) across hash changes in Strict
-  mode materialization (#746, #797)
-
-### Fixed
-
 - GC in Normal mode now age-checks each shape individually instead of
   treating the entire version generation as one unit (#738, #797)
 - Clock-skew handling in GC — entries with future mtimes are now
@@ -448,7 +458,7 @@ the rc.1 and rc.2 sections below.
   bundle-authored relative script path broken under Crush. (#551)
 - Fix `CrushAdapter` rendering MCP servers, LSP `init_options`, and permissions in
   Claude Code's shapes instead of Crush's actual schema
-  (https://charm.land/crush.json), found by auditing the adapter against it: every
+  (<https://charm.land/crush.json>), found by auditing the adapter against it: every
   MCP server previously failed to initialize because Crush's required `type` field
   (`stdio`/`sse`/`http`) was either missing (stdio entries) or set to the
   nonexistent value `"remote"` (remote entries) — Crush's MCP client hits an

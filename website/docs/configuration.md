@@ -462,8 +462,8 @@ features:
     enabled: true
 ```
 
-| Field     | Required | Notes                                                        |
-|-----------|----------|--------------------------------------------------------------|
+| Field     | Required | Notes                                                           |
+|-----------|----------|-----------------------------------------------------------------|
 | `enabled` | no       | Default `false`. Set to `true` to activate the built-in plugin. |
 
 ## `session_log:`
@@ -628,12 +628,12 @@ read `llmenv-status.json`. A name that matches neither renders empty.
 All ten honor `format:` — set on any of them, it replaces the default layout below.
 
 | Widget | Format? | Default output | Example | `format` placeholders |
-|--------|---------|-----------------|---------|------------------------|
+| -------- | --------- | ----------------- | --------- | ------------------------ |
 | `model` | yes | `{short_name} {version}` | `Opus` | `short_name`, `version`, `full_name` |
 | `folder` | yes | basename of the working directory | `llmenv` | `basename`, `path` |
 | `branch` | yes | git branch name | `release/3.x` | `name` |
 | `pr` | yes | `#<number>` | `#834` | `number` |
-| `progress_bar` | yes | `<pct>% ` + 10-cell block bar | `35% ███░░░░░░░` | `pct`, `bar` |
+| `progress_bar` | yes | `<pct>%` + 10-cell block bar | `35% ███░░░░░░░` | `pct`, `bar` |
 | `tokens` | yes | total context tokens, `k`-suffixed | `10.0k` | `total`, `input`, `cache_read`, `cache_create` |
 | `context_pct` | yes | used-context percentage | `35%` | `pct` |
 | `budget` | yes | `<used>/<max>`, both `k`-suffixed | `35.0k/200.0k` | `used`, `max` |
@@ -648,7 +648,7 @@ per-output-type token breakdown today, so those aren't invented placeholders.
 All eight honor `format:`.
 
 | Widget | Default `format` | Example | Placeholders |
-|--------|-------------------|---------|--------------|
+| -------- | ------------------- | --------- | -------------- |
 | `scopes` | `║ {tags}` | `║ dev · rust` | `tags` (tag list, joined with ` · `) |
 | `plugins` | `◇ {total}` | `◇ 12` | `total`, `errors` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
@@ -798,10 +798,10 @@ skills:
     source: "./path/to/skill/dir"    # local path or marketplace-relative
 ```
 
-| Field    | Required | Notes |
-|----------|----------|-------|
-| `name`   | yes      | Registration name; deduplicated first-bundle-wins |
-| `when`   | no       | Activation tags (empty = always active) |
+| Field    | Required | Notes                                                                         |
+|----------|----------|-------------------------------------------------------------------------------|
+| `name`   | yes      | Registration name; deduplicated first-bundle-wins                             |
+| `when`   | no       | Activation tags (empty = always active)                                       |
 | `source` | yes      | Path to skill directory — absolute, `~/`-relative, or bundle-content-relative |
 
 Skills declared here are merged with per-bundle skills from `bundle.yaml`; the
