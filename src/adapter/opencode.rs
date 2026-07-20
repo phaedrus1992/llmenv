@@ -706,7 +706,13 @@ impl AgentAdapter for OpencodeAdapter {
         // a typo like "Bash(" would otherwise wildcard-allow all Bash commands.
         fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<(String, String)> {
             match (s.find('('), s.rfind(')')) {
-                (None, None) => Ok((s.to_ascii_lowercase(), "*".to_string())),
+                (None, None) => {
+                    anyhow::ensure!(
+                        !s.trim().is_empty(),
+                        "native_permissions.opencode.{action}: empty rule string"
+                    );
+                    Ok((s.to_ascii_lowercase(), "*".to_string()))
+                }
                 (Some(start), Some(end)) if start < end => {
                     let tool = s[..start].to_ascii_lowercase();
                     let pattern = &s[start + 1..end];
@@ -1606,6 +1612,31 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Bash()"), "must name offending rule: {msg}");
         assert!(msg.contains("native_permissions.opencode.deny"));
+    }
+
+    #[test]
+    fn materialize_native_rule_empty_string_is_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec!["".into()],
+                ask: vec![],
+                deny: vec![],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("native_permissions.opencode.allow")
+        );
     }
 
     #[test]
