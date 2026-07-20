@@ -424,26 +424,54 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
 /// can reuse it instead of re-parsing `config.yaml` a second time in the same
 /// process. Direct callers that never went through `main()` (tests, other
 /// entrypoints) fall back to loading from `path` normally.
-static PRELOADED_CONFIG: OnceLock<crate::config::Config> = OnceLock::new();
+///
+/// `Mutex<Option<_>>` rather than `OnceLock` (#881): a `OnceLock` can never be
+/// cleared once set, which would make the preload permanent for the rest of
+/// any process that embeds llmenv as a library and calls an entrypoint more
+/// than once — and it can't be reset between test runs either. The mutex costs
+/// nothing measurable here (this is read at most a few times per process,
+/// nowhere near a hot loop) and buys `reset_preloaded_config_for_test` below.
+static PRELOADED_CONFIG: Mutex<Option<crate::config::Config>> = Mutex::new(None);
 
 /// Stash a config already loaded by `main()` for reuse by `load_cached_config`.
 ///
-/// Must only be called once per process: a second call is silently dropped by
-/// `OnceLock::set`. `main()` is the only caller today and calls it at most once.
+/// Must only be called once per process: a second call is a no-op if a config
+/// is already stashed. `main()` is the only caller today and calls it at most
+/// once.
 pub fn set_preloaded_config(config: crate::config::Config) {
-    let _ = PRELOADED_CONFIG.set(config);
+    let mut slot = PRELOADED_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(config);
+    }
+}
+
+/// Clear the preloaded config so a test doesn't observe another test's
+/// `set_preloaded_config` call. Test-only: production code always runs in a
+/// fresh process, so there is nothing to reset outside `cargo test`'s shared
+/// binary.
+#[cfg(test)]
+pub(crate) fn reset_preloaded_config_for_test() {
+    *PRELOADED_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Load config from `path`, reusing `main()`'s preload when available. Also
 /// used by non-hook-run CLI commands (`export`, `regenerate`, `statusline`)
 /// that would otherwise re-parse the same `config.yaml` main() already loaded.
+/// Every other CLI command intentionally calls `Config::load` directly instead
+/// (#880): each is a one-shot command in its own process, so there's no second
+/// in-process parse to skip, and routing it through this cache would add
+/// indirection with no measurable benefit.
 ///
 /// Once a preload exists, `path` is ignored — every current caller resolves
 /// the same canonical `paths::config_path()` that `main()` preloaded from, so
 /// this is safe today, but a caller passing a *different* path would silently
 /// get main()'s config instead of loading its own.
 pub(crate) fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
-    if let Some(config) = PRELOADED_CONFIG.get() {
+    if let Some(config) = PRELOADED_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         return Ok(config.clone());
     }
     crate::config::Config::load(path)
@@ -1545,12 +1573,19 @@ mod tests {
         );
     }
 
-    // Only exercises load_cached_config's fallback-to-disk branch. PRELOADED_CONFIG
-    // is a process-global OnceLock with no reset, so a test that populates it via
-    // set_preloaded_config would leak into every other test in this binary that
-    // calls load_cached_config — deliberately not tested here.
+    // PRELOADED_CONFIG is a process-global cache; these two tests populate and
+    // clear it via `reset_preloaded_config_for_test`, so they must not run
+    // concurrently with each other (cargo test runs test fns in parallel by
+    // default) or they'd race on the shared state. This lock — test-only,
+    // unrelated to PRELOADED_CONFIG's own storage — serializes just these two.
+    static PRELOADED_CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn load_cached_config_falls_back_to_disk_when_nothing_preloaded() {
+        let _guard = PRELOADED_CONFIG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_preloaded_config_for_test();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(
@@ -1560,6 +1595,33 @@ mod tests {
         .unwrap();
         let loaded = load_cached_config(&path).unwrap();
         assert_eq!(loaded, crate::config::Config::default());
+    }
+
+    #[test]
+    fn load_cached_config_returns_preloaded_config_when_set() {
+        let _guard = PRELOADED_CONFIG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_preloaded_config_for_test();
+
+        let mut preloaded = crate::config::Config::default();
+        preloaded.disabled_engines.push("preload-marker".into());
+        set_preloaded_config(preloaded.clone());
+
+        // The path on disk holds a *different* config, so a correct result
+        // proves load_cached_config took the preload, not a fresh disk read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            serde_yaml::to_string(&crate::config::Config::default()).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_cached_config(&path).unwrap();
+        assert_eq!(loaded, preloaded);
+
+        reset_preloaded_config_for_test();
     }
 
     proptest::proptest! {
