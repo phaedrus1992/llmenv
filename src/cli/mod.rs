@@ -765,7 +765,8 @@ fn run_export(
         .as_ref()
         .map(|f| f.memory.as_slice())
         .unwrap_or_default();
-    if let Some(bind) = local_memory_server_bind(top_memory, &active) {
+    if let Some(mem) = find_local_memory_entry(top_memory, &active) {
+        let bind = format!("{}:{}", mem.listen_host, mem.port);
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
                 match crate::mcp::proxy::ensure_running(
@@ -777,7 +778,6 @@ fn run_export(
                         // Warn when binding to all interfaces only on startup — the ICM
                         // daemon is unauthenticated.
                         if outcome == crate::mcp::proxy::EnsureOutcome::Spawned
-                            && let Some(mem) = find_local_memory_entry(top_memory, &active)
                             && let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
                             && addr.is_unspecified()
                         {
@@ -3040,27 +3040,6 @@ fn find_local_memory_entry<'a>(
     })
 }
 
-/// If the memory backend is selected and designates *this* host as its server,
-/// return the bind address (`<listen_host>:<port>`) the `mcp-proxy` should
-/// listen on. `None` when this host is a memory client (or memory is
-/// unconfigured).
-///
-/// The host portion comes from `memory.listen_host` (default `"127.0.0.1"`).
-/// Set `listen_host: "0.0.0.0"` to accept connections on all interfaces.
-///
-/// This host is the server when its `server_host` matches a matched host-scope
-/// id. Host scopes can match on hostname (auto-detected) but a host can also be
-/// placed into the topology manually by emitting the relevant tag from any
-/// scope — so a host whose network can't be auto-detected can still be made the
-/// server by tagging it explicitly.
-fn local_memory_server_bind(
-    memory: &[crate::config::Memory],
-    active: &ActiveScopes,
-) -> Option<String> {
-    let mem = find_local_memory_entry(memory, active)?;
-    Some(format!("{}:{}", mem.listen_host, mem.port))
-}
-
 /// Annotation suffix for a listing row, colored when `use_color` is set.
 fn annotate(active: bool, orphan: bool, use_color: bool) -> String {
     if active {
@@ -4443,6 +4422,16 @@ mod tests {
             .as_ref()
             .map(|f| f.memory.as_slice())
             .unwrap_or_default()
+    }
+
+    /// Mirrors the bind-address derivation `run_export` inlines at its
+    /// `find_local_memory_entry` call site (no longer a standalone
+    /// production function — the lookup happens once there, not twice).
+    fn local_memory_server_bind(
+        memory: &[crate::config::Memory],
+        active: &ActiveScopes,
+    ) -> Option<String> {
+        find_local_memory_entry(memory, active).map(|m| format!("{}:{}", m.listen_host, m.port))
     }
 
     #[test]
