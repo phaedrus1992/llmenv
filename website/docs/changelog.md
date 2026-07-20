@@ -20,10 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
-### Fixed
-
-- Fix opencode/crush plugin materialization failing with `marketplace '<name>' has no install_location (not yet synced?)` when `cache.remote_sync: false`. Disabling remote sync means "don't touch the network", but it was wrongly skipping marketplace resolution entirely, leaving `install_location` unset. Claude Code tolerated this (reserved marketplaces render as a github source), but opencode and crush materialize plugin files from the local clone and had no path to copy from. llmenv now always resolves `install_location` from clones already on disk regardless of `remote_sync`, only suppressing the network refresh — matching how external plugin payloads already behave. As a result, marketplace resolution under `remote_sync: false` now follows the same rules as a normal `export`: a git marketplace that has never been cloned locally is excluded with an actionable warning (run `llmenv plugin-sync`) instead of emitted with an empty location, and a marketplace whose configured path no longer exists (or whose clone is corrupt) fails the export with a clear error rather than silently emitting a half-broken config
-
 ## [3.6.0] - 2026-07-20
 
 3.6.0 includes three new engine-facing pieces — an in-engine task tracker, a first-class `llmenv statusline` subcommand, and reinstated a third supported engine (opencode, alongside Claude Code and Crush) — plus a `codebase-memory-mcp` integration.
@@ -66,6 +62,7 @@ On the fix side: opencode permission precedence and malformed-rule handling, ski
 - A computed `read_once` deny result could be silently overridden by other hook output — the invariant guarding it was only enforced via `debug_assert!`, which compiles to nothing outside debug builds, leaving the sentinel unenforced in release builds; it's now an always-on guard, so a deny always wins regardless of build profile (#868)
 - `config.yaml` now rejects a duplicate `scope.content` id, matching the existing check for `network`/`host`/`user` scopes — previously two content scopes sharing an id could both silently activate even when only one's glob matched (#843)
 - Claude Code adapter: a `Write` permission rule (neutral `{tool: Write, ...}` or a verbatim `native_permissions.claude_code` string) is now rewritten to `Edit` before it reaches `settings.json` — Claude Code deprecated `Write(<path>)` in favor of `Edit(<path>)`, so the stale form previously only produced a "Fix:" warning on every session instead of matching anything (#888)
+- Fix opencode/crush plugin materialization failing with `marketplace '<name>' has no install_location (not yet synced?)` when `cache.remote_sync: false`. Disabling remote sync means "don't touch the network", but it was wrongly skipping marketplace resolution entirely, leaving `install_location` unset. Claude Code tolerated this (reserved marketplaces render as a github source), but opencode and crush materialize plugin files from the local clone and had no path to copy from. llmenv now always resolves `install_location` from clones already on disk regardless of `remote_sync`, only suppressing the network refresh — matching how external plugin payloads already behave. As a result, marketplace resolution under `remote_sync: false` now follows the same rules as a normal `export`: a git marketplace that has never been cloned locally is excluded with an actionable warning (run `llmenv plugin-sync`) instead of emitted with an empty location, and a marketplace whose configured path no longer exists (or whose clone is corrupt) fails the export with a clear error rather than silently emitting a half-broken config
 
 ## [3.5.1] - 2026-07-15
 
