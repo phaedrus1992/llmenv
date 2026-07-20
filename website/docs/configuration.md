@@ -672,7 +672,14 @@ Notes:
   stdin. `{countdown}` counts down to the window boundary (peak ending, or the
   next peak starting).
 - `pr` is colored by `{review_state}` when the engine sends one: `approved`
-  green, `changes_requested` red, `pending`/`review_required` yellow.
+  green, `changes_requested` red, `pending`/`review_required` yellow. When a PR
+  URL is present and color is on, `pr` (and the `branch` widget) render as an
+  OSC 8 terminal hyperlink to the PR — the URL is validated (`http`/`https`
+  only, no control chars) before it's embedded.
+- Untrusted free-text (model/folder/branch names, PR URL, tags, throttle
+  backend) is stripped of control characters at the point each widget
+  interpolates it, so a hostile directory or branch name can't inject terminal
+  escapes. Widgets emit only their own trusted escapes (colors, hyperlinks).
 
 `pr` and `tokens` only expose the fields above — the engine's stdin contract has no PR title or
 per-output-type token breakdown today, so those aren't invented placeholders.

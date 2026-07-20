@@ -104,8 +104,8 @@ pub fn render_engine_widget(
         "tokens" => render_tokens(data, cfg),
         "budget" => render_budget(data, cfg),
         "cache_pct" => render_cache_pct(data, cfg),
-        "branch" => render_branch(data, cfg),
-        "pr" => render_pr(data, cfg),
+        "branch" => render_branch(data, cfg, use_color),
+        "pr" => render_pr(data, cfg, use_color),
         "progress_bar" => render_progress_bar(data, cfg),
         "usage_5h" => render_usage(
             data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
@@ -222,26 +222,35 @@ fn render_model(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) ->
     let Some(model) = &data.model else {
         return String::new();
     };
-    let display_name = model.display_name.as_deref().unwrap_or_default();
-    let short_name = short_model_name(display_name);
-    let version = model
-        .version
-        .clone()
-        .or_else(|| version_from_display_name(display_name))
+    // All three are untrusted engine strings — sanitize before interpolation.
+    let display_name = model
+        .display_name
+        .as_deref()
+        .map(super::sanitize)
         .unwrap_or_default();
+    let short_name = short_model_name(&display_name);
+    let version = match model.version.as_deref() {
+        Some(v) => super::sanitize(v),
+        None => version_from_display_name(&display_name).unwrap_or_default(),
+    };
     // Precedence: an explicit `format` wins; else a named `display` mode
     // (`short`/`version`/`full`); else the default `{short_name} {version}`.
     if let Some(format) = cfg.and_then(|c| c.format.as_deref()) {
+        let full_name = model
+            .full_name
+            .as_deref()
+            .map(super::sanitize)
+            .unwrap_or_default();
         return format
             .replace("{short_name}", &short_name)
             .replace("{version}", &version)
-            .replace("{full_name}", model.full_name.as_deref().unwrap_or(""))
+            .replace("{full_name}", &full_name)
             .trim()
             .to_string();
     }
     match cfg.and_then(|c| c.display.as_deref()) {
         Some("short") => short_name,
-        Some("full") => display_name.to_string(),
+        Some("full") => display_name,
         // "version" and the unset default both show family + version.
         _ => format!("{short_name} {version}").trim().to_string(),
     }
@@ -255,16 +264,21 @@ fn render_folder(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -
     else {
         return String::new();
     };
-    let basename = std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // `path` (and its basename) are untrusted — a directory name can carry an
+    // escape sequence. Sanitize both before interpolation.
+    let basename = super::sanitize(
+        &std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let path = super::sanitize(path);
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or("\u{1f4c1} {basename}"); // 📁
     format
         .replace("{basename}", &basename)
-        .replace("{path}", path)
+        .replace("{path}", &path)
 }
 
 /// Renders the used-context percentage. `remaining_percentage` comes from an
@@ -423,7 +437,11 @@ fn render_cache_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>
 /// 3. Git, derived from `workspace.current_dir` — Claude Code sends **no
 ///    branch** for a regular repo (confirmed against the statusline docs), so
 ///    llmenv reads it from `.git/HEAD` rather than leaving the widget blank.
-fn render_branch(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+fn render_branch(
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
     // Precedence: stdin `branch.name` (forward-compat) → `worktree.branch`
     // (Claude Code worktree sessions) → git from `workspace.current_dir`.
     let name = data
@@ -440,10 +458,23 @@ fn render_branch(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -
     let Some(name) = name else {
         return String::new();
     };
+    let name = super::sanitize(&name); // untrusted (stdin / git ref)
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or("\u{1f33f} {name}"); // 🌿
-    format.replace("{name}", &name)
+    let label = format.replace("{name}", &name);
+    // Link the branch to its PR when the session carries one (OSC 8).
+    let pr_url = data
+        .pr
+        .as_ref()
+        .and_then(|p| p.url.as_deref())
+        .map(super::sanitize)
+        .unwrap_or_default();
+    if use_color && super::valid_url(&pr_url) {
+        super::hyperlink(&label, &pr_url)
+    } else {
+        label
+    }
 }
 
 /// Current branch by reading `.git/HEAD` directly (no `git` subprocess — the
@@ -478,15 +509,23 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
-fn render_pr(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+fn render_pr(
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
     let Some(pr) = &data.pr else {
         return String::new();
     };
     let Some(number) = pr.number else {
         return String::new();
     };
-    let url = pr.url.as_deref().unwrap_or_default();
-    let review_state = pr.review_state.as_deref().unwrap_or_default();
+    let url = pr.url.as_deref().map(super::sanitize).unwrap_or_default();
+    let review_state = pr
+        .review_state
+        .as_deref()
+        .map(super::sanitize)
+        .unwrap_or_default();
     // `display: url` shows the full URL (falling back to `#<number>` when the
     // engine didn't send one); default/`number` shows `#<number>`. An explicit
     // `format` overrides both.
@@ -497,10 +536,17 @@ fn render_pr(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> St
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or(default_format);
-    format
+    let label = format
         .replace("{number}", &number.to_string())
-        .replace("{url}", url)
-        .replace("{review_state}", review_state)
+        .replace("{url}", &url)
+        .replace("{review_state}", &review_state);
+    // Link the label to the PR when we have a safe URL (OSC 8), gated on color
+    // so piped / non-TTY output stays plain.
+    if use_color && super::valid_url(&url) {
+        super::hyperlink(&label, &url)
+    } else {
+        label
+    }
 }
 
 /// Color the `pr` widget by review state: approved green, changes-requested
@@ -1026,7 +1072,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_pr(&data, Some(&url_mode)),
+            render_pr(&data, Some(&url_mode), false),
             "https://github.com/o/r/pull/834"
         );
         // url mode but no url → falls back to #number.
@@ -1034,7 +1080,7 @@ mod tests {
             "pr": { "number": 834 }
         }))
         .unwrap();
-        assert_eq!(render_pr(&no_url, Some(&url_mode)), "#834");
+        assert_eq!(render_pr(&no_url, Some(&url_mode), false), "#834");
     }
 
     #[test]
@@ -1048,6 +1094,64 @@ mod tests {
             out.starts_with("\x1b[32m"),
             "expected green (approved): {out:?}"
         );
+    }
+
+    #[test]
+    fn pr_url_becomes_osc8_hyperlink_under_color() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "pr": { "number": 5, "url": "https://github.com/o/r/pull/5" }
+        }))
+        .unwrap();
+        let out = render_pr(&data, None, true);
+        assert!(
+            out.contains("\x1b]8;;https://github.com/o/r/pull/5\x1b\\"),
+            "expected OSC 8 link: {out:?}"
+        );
+        assert!(out.contains("#5"));
+        // A non-http(s) URL must NOT be linked (injection guard).
+        let bad: EngineData = serde_json::from_value(serde_json::json!({
+            "pr": { "number": 5, "url": "javascript:alert(1)" }
+        }))
+        .unwrap();
+        assert!(!render_pr(&bad, None, true).contains("\x1b]8"));
+        // No hyperlink when color is off.
+        assert!(!render_pr(&data, None, false).contains("\x1b]8"));
+    }
+
+    #[test]
+    fn branch_links_to_pr_url_under_color() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "branch": { "name": "feat/x" },
+            "pr": { "number": 5, "url": "https://github.com/o/r/pull/5" }
+        }))
+        .unwrap();
+        let out = render_branch(&data, None, true);
+        assert!(
+            out.contains("\x1b]8;;https://github.com/o/r/pull/5"),
+            "expected branch→PR link: {out:?}"
+        );
+    }
+
+    #[test]
+    fn untrusted_fields_are_sanitized_end_to_end() {
+        // A directory name carrying an escape sequence must not leak into the
+        // terminal now that finish() no longer strips.
+        let folder: EngineData = serde_json::from_value(serde_json::json!({
+            "workspace": { "current_dir": "/tmp/ev\u{1b}[31mil" }
+        }))
+        .unwrap();
+        let out = render_engine_widget("folder", &folder, None, false).unwrap();
+        assert!(
+            !out.contains('\u{1b}'),
+            "escape leaked from folder: {out:?}"
+        );
+
+        let model: EngineData = serde_json::from_value(serde_json::json!({
+            "model": { "display_name": "Op\u{1b}[31mus 4.8" }
+        }))
+        .unwrap();
+        let out = render_engine_widget("model", &model, None, false).unwrap();
+        assert!(!out.contains('\u{1b}'), "escape leaked from model: {out:?}");
     }
 
     #[test]
@@ -1371,7 +1475,7 @@ mod tests {
             format: Some("on {name}".to_string()),
             ..Default::default()
         };
-        assert_eq!(render_branch(&data, Some(&cfg)), "on release/3.x");
+        assert_eq!(render_branch(&data, Some(&cfg), false), "on release/3.x");
     }
 
     #[test]
@@ -1384,7 +1488,7 @@ mod tests {
             format: Some("PR#{number}".to_string()),
             ..Default::default()
         };
-        assert_eq!(render_pr(&data, Some(&cfg)), "PR#834");
+        assert_eq!(render_pr(&data, Some(&cfg), false), "PR#834");
     }
 
     #[test]

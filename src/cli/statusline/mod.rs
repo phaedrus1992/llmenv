@@ -20,22 +20,45 @@ pub use widget::{EngineData, render_engine_widget};
 const DEFAULT_ROW: &str = "{model} │ {folder} │ {branch} │ {context_pct} │ {budget}";
 
 /// Strip C0 (`\x00`-`\x1F`, `\x7F`) and C1 (`\u{80}`-`\u{9F}`) control
-/// characters from free-text sourced from outside our own rendering (engine
-/// JSON fields, filesystem paths/basenames). None of these widgets are
-/// expected to contain control characters, but the data isn't validated at
-/// its source, and a stray escape sequence (e.g. from a directory name
-/// extracted from an untrusted archive) would otherwise be emitted verbatim
-/// into the user's terminal.
-fn strip_control_chars(s: &str) -> String {
+/// characters from **untrusted free-text** (engine JSON fields, filesystem
+/// paths/basenames, git branch names, PR URLs, tag/backend names). A stray
+/// escape sequence (e.g. from a directory or branch name) would otherwise be
+/// emitted verbatim into the user's terminal — an ANSI-injection vector.
+///
+/// This is applied by each widget at the point it interpolates untrusted data,
+/// **not** by [`finish`], so that widgets can still emit their own *trusted*
+/// escapes (OSC 8 hyperlinks, per-cell bar colors). Every widget that renders
+/// external string data must route it through here.
+pub(super) fn sanitize(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
         .collect()
+}
+
+/// Wrap `text` in an OSC 8 terminal hyperlink to `url`. Callers must pass a
+/// URL that already passed [`valid_url`] (scheme-checked, control-char-free) —
+/// the OSC 8 payload is otherwise an escape-injection vector.
+pub(super) fn hyperlink(text: &str, url: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
+/// Whether `url` is safe to embed in an OSC 8 hyperlink: `http`/`https` only,
+/// and no control characters (which would break out of the escape sequence).
+pub(super) fn valid_url(url: &str) -> bool {
+    (url.starts_with("http://") || url.starts_with("https://"))
+        && !url.chars().any(char::is_control)
 }
 
 /// Apply per-widget truncation + style. Shared by every widget render path
 /// (engine-sourced in `widget.rs`, llmenv-sourced in `llmenv_widget.rs`) —
 /// hoisted here so the two modules don't each carry a byte-for-byte-identical
 /// private copy.
+///
+/// `raw` must already have untrusted free-text sanitized by the widget (see
+/// [`sanitize`]); `finish` deliberately does **not** strip control chars, so a
+/// widget can emit trusted escapes (OSC 8 links, colored bars). `max_len`
+/// truncation counts characters including any such escapes — set it only on
+/// plain-text widgets.
 pub(super) fn finish(
     name: &str,
     raw: String,
@@ -43,10 +66,9 @@ pub(super) fn finish(
     dyn_style: Option<&str>,
     use_color: bool,
 ) -> String {
-    let sanitized = strip_control_chars(&raw);
     let truncated = match cfg.and_then(|c| c.max_len) {
-        Some(max) => truncate_ellipsis(&sanitized, max),
-        None => sanitized,
+        Some(max) => truncate_ellipsis(&raw, max),
+        None => raw,
     };
     // Style precedence: an explicit per-widget `style` wins — including
     // `""`/`"none"`, which `apply_style` renders as plain, so it's the
@@ -292,15 +314,18 @@ mod tests {
     }
 
     #[test]
-    fn strip_control_chars_removes_c0_and_c1_but_keeps_printable_and_newline_tab() {
+    fn sanitize_removes_c0_and_c1_but_keeps_printable_and_newline_tab() {
         let input = "a\x1bb\u{9b}c\nd\te";
-        assert_eq!(super::strip_control_chars(input), "abc\nd\te");
+        assert_eq!(super::sanitize(input), "abc\nd\te");
     }
 
     #[test]
-    fn finish_strips_control_chars_before_truncating_and_styling() {
+    fn finish_does_not_strip_control_chars_widgets_sanitize_their_own_data() {
+        // finish no longer strips — it trusts the widget to have sanitized
+        // untrusted data (so widgets can emit their own escapes). A widget's
+        // own trusted content passes through unchanged.
         let out = finish("model", "Op\x1bus".to_string(), None, None, false);
-        assert_eq!(out, "Opus");
+        assert_eq!(out, "Op\x1bus");
     }
 
     #[test]
