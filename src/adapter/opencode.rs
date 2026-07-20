@@ -1517,126 +1517,61 @@ mod tests {
         );
     }
 
-    #[test]
-    fn materialize_native_rule_missing_closing_paren_is_error() {
+    /// Materialize a manifest whose `native_permissions.opencode` carries a
+    /// single rule string in the given tier ("allow"/"ask"/"deny"), and
+    /// return the resulting error message.
+    fn native_rule_error(tier: &str, rule: &str) -> String {
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = crate::config::Capabilities::default();
-        caps.native_permissions.insert(
-            "opencode".into(),
-            crate::config::NativePermissionRules {
-                allow: vec!["Bash(".into()],
-                ask: vec![],
-                deny: vec![],
-            },
-        );
+        let mut native = crate::config::NativePermissionRules::default();
+        if tier == "ask" {
+            native.ask.push(rule.to_string());
+        } else if tier == "deny" {
+            native.deny.push(rule.to_string());
+        } else {
+            native.allow.push(rule.to_string());
+        }
+        caps.native_permissions.insert("opencode".into(), native);
         let manifest = MergedManifest {
             capabilities: caps,
             ..Default::default()
         };
-        let err = OpencodeAdapter
+        OpencodeAdapter
             .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Bash("), "must name offending rule: {msg}");
-        assert!(
-            msg.contains("native_permissions.opencode.allow"),
-            "must name the action list it came from: {msg}"
-        );
+            .unwrap_err()
+            .to_string()
     }
 
     #[test]
-    fn materialize_native_rule_missing_opening_paren_is_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = crate::config::Capabilities::default();
-        caps.native_permissions.insert(
-            "opencode".into(),
-            crate::config::NativePermissionRules {
-                allow: vec![],
-                ask: vec!["Bash)".into()],
-                deny: vec![],
-            },
-        );
-        let manifest = MergedManifest {
-            capabilities: caps,
-            ..Default::default()
-        };
-        let err = OpencodeAdapter
-            .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Bash)"), "must name offending rule: {msg}");
-        assert!(msg.contains("native_permissions.opencode.ask"));
-    }
-
-    #[test]
-    fn materialize_native_rule_empty_tool_name_is_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = crate::config::Capabilities::default();
-        caps.native_permissions.insert(
-            "opencode".into(),
-            crate::config::NativePermissionRules {
-                allow: vec!["(rm *)".into()],
-                ask: vec![],
-                deny: vec![],
-            },
-        );
-        let manifest = MergedManifest {
-            capabilities: caps,
-            ..Default::default()
-        };
-        let err = OpencodeAdapter
-            .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        assert!(err.to_string().contains("(rm *)"));
-    }
-
-    #[test]
-    fn materialize_native_rule_empty_pattern_is_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = crate::config::Capabilities::default();
-        caps.native_permissions.insert(
-            "opencode".into(),
-            crate::config::NativePermissionRules {
-                allow: vec![],
-                ask: vec![],
-                deny: vec!["Bash()".into()],
-            },
-        );
-        let manifest = MergedManifest {
-            capabilities: caps,
-            ..Default::default()
-        };
-        let err = OpencodeAdapter
-            .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Bash()"), "must name offending rule: {msg}");
-        assert!(msg.contains("native_permissions.opencode.deny"));
-    }
-
-    #[test]
-    fn materialize_native_rule_empty_string_is_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = crate::config::Capabilities::default();
-        caps.native_permissions.insert(
-            "opencode".into(),
-            crate::config::NativePermissionRules {
-                allow: vec!["".into()],
-                ask: vec![],
-                deny: vec![],
-            },
-        );
-        let manifest = MergedManifest {
-            capabilities: caps,
-            ..Default::default()
-        };
-        let err = OpencodeAdapter
-            .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("native_permissions.opencode.allow")
-        );
+    fn materialize_rejects_malformed_native_rules() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "allow",
+                "Bash(",
+                &["Bash(", "native_permissions.opencode.allow"],
+            ),
+            (
+                "ask",
+                "Bash)",
+                &["Bash)", "native_permissions.opencode.ask"],
+            ),
+            ("allow", "(rm *)", &["(rm *)"]),
+            (
+                "deny",
+                "Bash()",
+                &["Bash()", "native_permissions.opencode.deny"],
+            ),
+            ("allow", "", &["native_permissions.opencode.allow"]),
+        ];
+        for (tier, rule, needles) in cases {
+            let msg = native_rule_error(tier, rule);
+            for needle in *needles {
+                assert!(
+                    msg.contains(needle),
+                    "rule {rule:?} in {tier}: expected {needle:?} in error: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2790,6 +2725,56 @@ mod tests {
                 &val[tool.to_ascii_lowercase()][&pattern],
                 &serde_json::json!("allow")
             );
+        }
+
+        /// `materialize` never panics on an arbitrary native permission rule
+        /// string, no matter how malformed — it always returns `Ok` or `Err`.
+        #[test]
+        fn native_rule_arbitrary_string_never_panics(rule in ".{0,20}") {
+            let mut caps = crate::config::Capabilities::default();
+            caps.native_permissions.insert(
+                "opencode".to_string(),
+                crate::config::NativePermissionRules {
+                    allow: vec![rule],
+                    ..Default::default()
+                },
+            );
+            let manifest = MergedManifest {
+                capabilities: caps,
+                ..Default::default()
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            let _ = OpencodeAdapter.materialize(&manifest, tmp.path());
+        }
+
+        /// A rule string with only one of the two parens present (never
+        /// both) is always rejected, regardless of the tool/pattern content
+        /// around it.
+        #[test]
+        fn native_rule_single_paren_is_always_error(
+            tool in "[A-Za-z]{1,8}",
+            pattern in "[a-z]{1,8}",
+            keep_open in any::<bool>(),
+        ) {
+            let rule = if keep_open {
+                format!("{tool}({pattern}")
+            } else {
+                format!("{tool}{pattern})")
+            };
+            let mut caps = crate::config::Capabilities::default();
+            caps.native_permissions.insert(
+                "opencode".to_string(),
+                crate::config::NativePermissionRules {
+                    allow: vec![rule],
+                    ..Default::default()
+                },
+            );
+            let manifest = MergedManifest {
+                capabilities: caps,
+                ..Default::default()
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            prop_assert!(OpencodeAdapter.materialize(&manifest, tmp.path()).is_err());
         }
 
         /// `parse_plugin_hooks` never panics on arbitrary file content, valid
