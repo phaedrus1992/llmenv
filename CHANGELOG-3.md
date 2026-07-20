@@ -455,7 +455,7 @@ the rc.1 and rc.2 sections below.
   bundle-authored relative script path broken under Crush. (#551)
 - Fix `CrushAdapter` rendering MCP servers, LSP `init_options`, and permissions in
   Claude Code's shapes instead of Crush's actual schema
-  (<https://charm.land/crush.json>), found by auditing the adapter against it: every
+  ([crush.json schema](https://charm.land/crush.json)), found by auditing the adapter against it: every
   MCP server previously failed to initialize because Crush's required `type` field
   (`stdio`/`sse`/`http`) was either missing (stdio entries) or set to the
   nonexistent value `"remote"` (remote entries) — Crush's MCP client hits an
