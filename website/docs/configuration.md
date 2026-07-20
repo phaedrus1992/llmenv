@@ -643,8 +643,8 @@ All thirteen honor `format:` — set on any of them, it replaces the default lay
 | `budget` | yes | `<used>/<max>`, `k`/`m`-suffixed | `35k/200k` | `used`, `max` |
 | `duration` | yes | ⏱ + elapsed (h+m past an hour, else m+s, else s) | `⏱ 3h 42m` | `h`, `m`, `s`, `total_ms` |
 | `cache_pct` | yes | ↻ + cache-hit percentage | `↻44%` | `pct` |
-| `usage_5h` | yes | Claude.ai 5-hour usage window | `5h 8% ⇡3% ➡23m` | `pct`, `bar`, `reset`, `pace` |
-| `usage_7d` | yes | Claude.ai 7-day usage window | `7d 41% ➡3d4h` | `pct`, `bar`, `reset`, `pace` |
+| `usage_5h` | yes | Claude.ai 5-hour usage window | `5h 8% (+4.5) ⇡3% ➡23m` | `pct`, `bar`, `reset`, `pace`, `delta` |
+| `usage_7d` | yes | Claude.ai 7-day usage window | `7d 41% ➡3d4h` | `pct`, `bar`, `reset`, `pace`, `delta` |
 | `peak` | yes | peak / off-peak billing window (local clock) | `△ peak 3h03m` | `symbol`, `label`, `countdown` |
 
 Notes:
@@ -664,8 +664,13 @@ Notes:
   that (or on API/enterprise plans) they render empty. `{reset}` is the time
   until the window resets; `{pace}` is an over/under-pace indicator (`⇡N%`
   when usage is ahead of the time elapsed in the window, `⇣N%` when behind,
-  empty within ±0.5%). Both windows are threshold-colored by used percentage
-  (`usage_5h` default `[70, 90]`, `usage_7d` `[60, 80]`; override with
+  empty within ±0.5%). `{delta}` is the change in used percentage since the
+  last render (`(+4.5)`), tracked in a small state file under
+  `$CLAUDE_CONFIG_DIR/statusline-state/` and rewritten at most once a minute so
+  it reflects real movement, not per-render noise (empty when `CLAUDE_CONFIG_DIR`
+  is unset). The bar is per-cell (filled in the threshold color, empty dim) with
+  a bright pace-target marker (`│`); both windows are threshold-colored by used
+  percentage (`usage_5h` default `[70, 90]`, `usage_7d` `[60, 80]`; override with
   `thresholds`).
 - `peak` is computed entirely from the local clock (Anthropic's peak window is
   weekdays 05:00–11:00 America/Los_Angeles) — Claude Code sends no peak data on
