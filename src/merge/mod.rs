@@ -90,8 +90,10 @@ pub fn merge(
 
     for b in bundles {
         let am = b.path.join("AGENTS.md");
-        if am.exists() {
-            agents_parts.push((b.name.clone(), std::fs::read_to_string(&am)?));
+        match std::fs::read_to_string(&am) {
+            Ok(content) => agents_parts.push((b.name.clone(), content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
         for sub in COPIED_SUBDIRS {
             let dir = b.path.join(sub);
@@ -177,11 +179,16 @@ const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
 /// they choose to.
 fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Capabilities>> {
     let path = bundle_root.join("bundle.yaml");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let s = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("bundle '{name}': reading {}: {e}", path.display()))?;
+    let s = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "bundle '{name}': reading {}: {e}",
+                path.display()
+            ));
+        }
+    };
     let raw: serde_yaml::Value = serde_yaml::from_str(&s)
         .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
     if let Some(mapping) = raw.as_mapping() {

@@ -351,13 +351,12 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     let stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf)
         .inspect_err(|e| tracing::warn!("hook-run: failed to parse stdin JSON: {e}"))
         .ok();
-    let hook_event_name = stdin_json
+    let hook_event_name: &str = stdin_json
         .as_ref()
-        .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
+        .and_then(|v| v["hook_event_name"].as_str())
         .unwrap_or_default();
-    let claude_session_id = stdin_json
-        .as_ref()
-        .and_then(|v| v["session_id"].as_str().map(str::to_owned));
+    let claude_session_id: Option<&str> =
+        stdin_json.as_ref().and_then(|v| v["session_id"].as_str());
     let claude_code_version = std::env::var("CLAUDE_CODE_VERSION")
         .ok()
         .unwrap_or_default();
@@ -374,7 +373,7 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     let adapter = crate::adapter::adapter_for_engine(engine);
     match run_inner(
         parsed,
-        claude_session_id.as_deref(),
+        claude_session_id,
         payload,
         adapter.name(),
         &claude_code_version,
@@ -397,7 +396,7 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
             } else {
-                let out = adapter.emit_hook_context(&hook_event_name, &text);
+                let out = adapter.emit_hook_context(hook_event_name, &text);
                 if !out.is_empty()
                     && let Err(e) = writeln!(std::io::stdout(), "{out}")
                     && e.kind() != std::io::ErrorKind::BrokenPipe
@@ -615,9 +614,9 @@ fn run_inner(
             .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
 
         // Recall query: the sorted active tags. Store content: the llmenv context
-        // chunk (tags/bundles/project).
-        let mut tags = active.tags.iter().cloned().collect::<Vec<_>>();
-        tags.sort();
+        // chunk (tags/bundles/project). `active.tags` is a BTreeSet, so this
+        // iteration order is already sorted ascending — no separate sort needed.
+        let tags = active.tags.iter().cloned().collect::<Vec<_>>();
         // Bundles: collect from all active scopes, deduplicate, sort.
         let bundles: Vec<String> = {
             let mut set = std::collections::BTreeSet::new();
@@ -637,7 +636,7 @@ fn run_inner(
 
         // Apply default type/importance markers from config (R1, R3) when no explicit
         // marker is present in the generated chunk.
-        chunk = apply_memory_config_defaults(&chunk, &config, &active);
+        chunk = apply_memory_config_defaults(chunk, &config, &active);
 
         let url = memory_url(&config, config_dir, &active)?;
         if url.is_none() {
@@ -655,10 +654,10 @@ fn run_inner(
             Some(u) => {
                 let clients = MCP_CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
                 let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
-                match clients.entry(u.clone()) {
+                match clients.entry(u) {
                     std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
                     std::collections::hash_map::Entry::Vacant(entry) => {
-                        match McpHttpClient::new(u.clone(), HOOK_TIMEOUT) {
+                        match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
                             Ok(client) => Some(entry.insert(client).clone()),
                             Err(e) => {
                                 eprintln!(
@@ -675,8 +674,8 @@ fn run_inner(
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
             &active,
-            &tags,
-            &bundles,
+            tags,
+            bundles,
             &env.cwd,
             adapter_name,
             claude_code_version,
@@ -689,10 +688,15 @@ fn run_inner(
         // so `run_session_log` still runs below and only the redundant Store
         // action + dedup-snapshot rewrite are skipped, not the log — mirrors
         // the #864/#231 fix for the same early-return-drops-logging bug class.
-        let session_end_unchanged = if event == HookEvent::SessionEnd {
-            let state_dir = crate::paths::state_dir()?;
-            let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
-            let is_unchanged = std::fs::read_to_string(&dedup_path)
+        // Resolved once here (rather than again at the write-back below) since
+        // it's the same target path for both the read-check and the rewrite.
+        let session_end_dedup_path = if event == HookEvent::SessionEnd {
+            Some(crate::paths::state_dir()?.join(crate::paths::HOOK_STORE_CHUNK))
+        } else {
+            None
+        };
+        let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
+            let is_unchanged = std::fs::read_to_string(dedup_path)
                 .ok()
                 .is_some_and(|prev| prev == chunk);
             if is_unchanged {
@@ -764,10 +768,10 @@ fn run_inner(
             // the store call means a transient MCP failure leaves the snapshot ahead
             // of reality — the next SessionEnd sees the chunk as unchanged and skips
             // the store, permanently losing the memory. (#594 code review)
-            if event == HookEvent::SessionEnd && !session_end_unchanged {
-                let state_dir = crate::paths::state_dir()?;
-                let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
-                crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
+            if let Some(dedup_path) = &session_end_dedup_path
+                && !session_end_unchanged
+            {
+                crate::paths::write_owner_only_atomic(dedup_path, chunk.as_bytes())?;
             }
 
             // #231: append the task-tracker Stop reminder. Only reached here when
@@ -953,8 +957,8 @@ async fn run_session_log(
 /// computed; the project name comes from the first project-kind active scope.
 fn build_scope_context(
     active: &crate::scope::ActiveScopes,
-    tags: &[String],
-    bundles: &[String],
+    tags: Vec<String>,
+    bundles: Vec<String>,
     cwd: &str,
     adapter_name: &str,
     claude_code_version: &str,
@@ -965,8 +969,8 @@ fn build_scope_context(
         .find(|s| s.kind == "project")
         .and_then(|s| s.name.clone());
     ScopeContext {
-        tags: tags.to_vec(),
-        bundles: bundles.to_vec(),
+        tags,
+        bundles,
         project,
         cwd: cwd.to_string(),
         adapter: adapter_name.to_string(),
@@ -1284,7 +1288,7 @@ fn build_hook_bundle_refs(
 /// ponytail: `type_importance` per-type overrides are not yet applied here —
 /// they will be resolved when the Store action runs against the ICM backend.
 fn apply_memory_config_defaults(
-    chunk: &str,
+    mut chunk: String,
     config: &crate::config::Config,
     active: &crate::scope::ActiveScopes,
 ) -> String {
@@ -1293,27 +1297,25 @@ fn apply_memory_config_defaults(
             .iter()
             .find(|m| m.when.iter().any(|t| active.tags.contains(t)))
     }) else {
-        return chunk.to_string();
+        return chunk;
     };
-
-    let mut out = chunk.to_string();
 
     if !chunk.contains("<!-- llmenv-type:")
         && let Some(ty) = &mem.default_type
     {
-        out.push_str(&format!("\n<!-- llmenv-type: {} -->", ty.as_marker_str()));
+        chunk.push_str(&format!("\n<!-- llmenv-type: {} -->", ty.as_marker_str()));
     }
 
     if !chunk.contains("<!-- llmenv-importance:")
         && let Some(imp) = &mem.default_importance
     {
-        out.push_str(&format!(
+        chunk.push_str(&format!(
             "\n<!-- llmenv-importance: {} -->",
             imp.as_marker_str()
         ));
     }
 
-    out
+    chunk
 }
 
 /// Validate a tag to prevent query injection. Tags must be alphanumeric with
@@ -2157,9 +2159,9 @@ mod tests {
     fn apply_memory_defaults_idempotent_no_type() {
         let config = memory_config(None);
         let active = active_with_tag("test");
-        let input = "## context\nno markers";
+        let input = "## context\nno markers".to_string();
         let once = apply_memory_config_defaults(input, &config, &active);
-        let twice = apply_memory_config_defaults(&once, &config, &active);
+        let twice = apply_memory_config_defaults(once.clone(), &config, &active);
         assert_eq!(once, twice, "applying defaults twice must be idempotent");
     }
 
@@ -2167,7 +2169,7 @@ mod tests {
     fn apply_memory_defaults_adds_type_marker_when_present() {
         let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
         let active = active_with_tag("test");
-        let input = "## context";
+        let input = "## context".to_string();
         let out = apply_memory_config_defaults(input, &config, &active);
         assert!(
             out.contains("<!-- llmenv-type: semantic -->"),
@@ -2179,7 +2181,7 @@ mod tests {
     fn apply_memory_defaults_skips_existing_marker() {
         let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
         let active = active_with_tag("test");
-        let input = "## context\n<!-- llmenv-type: episodic -->";
+        let input = "## context\n<!-- llmenv-type: episodic -->".to_string();
         let out = apply_memory_config_defaults(input, &config, &active);
         assert!(
             !out.contains("semantic"),

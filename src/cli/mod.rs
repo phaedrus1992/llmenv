@@ -765,7 +765,8 @@ fn run_export(
         .as_ref()
         .map(|f| f.memory.as_slice())
         .unwrap_or_default();
-    if let Some(bind) = local_memory_server_bind(top_memory, &active) {
+    if let Some(mem) = find_local_memory_entry(top_memory, &active) {
+        let bind = memory_bind_address(mem);
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
                 match crate::mcp::proxy::ensure_running(
@@ -777,7 +778,6 @@ fn run_export(
                         // Warn when binding to all interfaces only on startup — the ICM
                         // daemon is unauthenticated.
                         if outcome == crate::mcp::proxy::EnsureOutcome::Spawned
-                            && let Some(mem) = find_local_memory_entry(top_memory, &active)
                             && let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
                             && addr.is_unspecified()
                         {
@@ -1362,8 +1362,11 @@ fn materialize_from_manifest(
     // Read the pre-existing manifest dotfile (if any) before write_cache_manifest
     // overwrites it below — its content_hash is the "booted" hash (#836 Task 11),
     // mirroring how `llmenv check-stale` reads CLAUDE_CONFIG_DIR's manifest.
-    let booted_hash = match crate::materialize::manifest::CacheManifest::read(&cache_path) {
-        Ok(manifest) => manifest.map(|m| m.content_hash),
+    // Threaded into write_cache_manifest below instead of read a second time
+    // there — nothing writes this dotfile in between.
+    let previous_manifest = crate::materialize::manifest::CacheManifest::read(&cache_path);
+    let booted_hash = match &previous_manifest {
+        Ok(manifest) => manifest.as_ref().map(|m| m.content_hash.clone()),
         Err(e) => {
             tracing::warn!(
                 "could not read cache manifest at {}: {e}",
@@ -1412,7 +1415,12 @@ fn materialize_from_manifest(
     let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
         .with_selection(tags.clone(), bundles)
         .with_auth_status(auth_status);
-    write_cache_manifest(&cache_path, &current, config.cache.hashing)?;
+    write_cache_manifest(
+        &cache_path,
+        &current,
+        config.cache.hashing,
+        previous_manifest,
+    )?;
 
     // Compute the state dir (stable sibling of the hashed config dir) and pass
     // both to the adapter so it can set per-hash temp vars (#630) and durable
@@ -1540,18 +1548,21 @@ fn inject_cached_auth_if_available(
 /// The dotfile is written last so an interrupted render leaves the *previous*
 /// manifest intact. Taking the pre-built `current` keeps this within the
 /// ≤5-positional-param limit even with the selection set added.
+///
+/// `previous` is the caller's already-read `CacheManifest::read(cache_path)`
+/// result — nothing writes the dotfile between that read and this call, so
+/// re-reading it here would just repeat the same read for the same bytes.
 fn write_cache_manifest(
     cache_path: &Path,
     current: &crate::materialize::manifest::CacheManifest,
     mode: crate::config::HashingMode,
+    previous: anyhow::Result<Option<crate::materialize::manifest::CacheManifest>>,
 ) -> anyhow::Result<()> {
-    use crate::materialize::manifest::CacheManifest;
-
     // Strict folders are content-addressed and never reused, so there are no
     // ghost files to reconcile — the dotfile is pure metadata there. Loose and
     // normal both reuse a folder across renders and need reconciliation.
     if !matches!(mode, crate::config::HashingMode::Strict)
-        && let Some(previous) = CacheManifest::read(cache_path)?
+        && let Some(previous) = previous?
     {
         for ghost in previous.stale_against(current) {
             // The previous manifest is deserialized raw, bypassing
@@ -3029,25 +3040,9 @@ fn find_local_memory_entry<'a>(
     })
 }
 
-/// If the memory backend is selected and designates *this* host as its server,
-/// return the bind address (`<listen_host>:<port>`) the `mcp-proxy` should
-/// listen on. `None` when this host is a memory client (or memory is
-/// unconfigured).
-///
-/// The host portion comes from `memory.listen_host` (default `"127.0.0.1"`).
-/// Set `listen_host: "0.0.0.0"` to accept connections on all interfaces.
-///
-/// This host is the server when its `server_host` matches a matched host-scope
-/// id. Host scopes can match on hostname (auto-detected) but a host can also be
-/// placed into the topology manually by emitting the relevant tag from any
-/// scope — so a host whose network can't be auto-detected can still be made the
-/// server by tagging it explicitly.
-fn local_memory_server_bind(
-    memory: &[crate::config::Memory],
-    active: &ActiveScopes,
-) -> Option<String> {
-    let mem = find_local_memory_entry(memory, active)?;
-    Some(format!("{}:{}", mem.listen_host, mem.port))
+/// The `listen_host:port` address a local memory server binds to.
+fn memory_bind_address(mem: &crate::config::Memory) -> String {
+    format!("{}:{}", mem.listen_host, mem.port)
 }
 
 /// Annotation suffix for a listing row, colored when `use_color` is set.
@@ -4037,7 +4032,7 @@ mod tests {
             let cache = tmp.path().join("folder");
             std::fs::create_dir_all(&cache).unwrap();
             let current = built("hash1", &["CLAUDE.md", "a.md"]);
-            write_cache_manifest(&cache, &current, mode).unwrap();
+            write_cache_manifest(&cache, &current, mode, CacheManifest::read(&cache)).unwrap();
             let read = CacheManifest::read(&cache).unwrap().unwrap();
             assert_eq!(read.content_hash, "hash1");
             assert!(read.owned.contains("CLAUDE.md"), "adapter-owned recorded");
@@ -4062,14 +4057,26 @@ mod tests {
             // Render N: owns ghost.md + keep.md.
             let ghost = cache.join("ghost.md");
             std::fs::write(&ghost, b"old").unwrap();
-            write_cache_manifest(&cache, &built("h1", &["ghost.md", "keep.md"]), mode).unwrap();
+            write_cache_manifest(
+                &cache,
+                &built("h1", &["ghost.md", "keep.md"]),
+                mode,
+                CacheManifest::read(&cache),
+            )
+            .unwrap();
 
             // A foreign file Claude/a plugin wrote — never in any owned set.
             let foreign = cache.join("foreign-state.json");
             std::fs::write(&foreign, b"plugin state").unwrap();
 
             // Render N+1: drops ghost.md from the owned set.
-            write_cache_manifest(&cache, &built("h2", &["keep.md"]), mode).unwrap();
+            write_cache_manifest(
+                &cache,
+                &built("h2", &["keep.md"]),
+                mode,
+                CacheManifest::read(&cache),
+            )
+            .unwrap();
 
             assert!(
                 !ghost.exists(),
@@ -4106,7 +4113,13 @@ mod tests {
         std::fs::write(cache.join(MANIFEST_FILE), tampered).unwrap();
 
         // Re-render dropping the traversal path from the owned set.
-        write_cache_manifest(&cache, &built("new", &[]), HashingMode::Normal).unwrap();
+        write_cache_manifest(
+            &cache,
+            &built("new", &[]),
+            HashingMode::Normal,
+            CacheManifest::read(&cache),
+        )
+        .unwrap();
 
         assert!(
             victim.exists(),
@@ -4129,7 +4142,13 @@ mod tests {
         let bystander = cache.join("ghost.md");
         std::fs::write(&bystander, b"x").unwrap();
 
-        write_cache_manifest(&cache, &built("new", &[]), HashingMode::Strict).unwrap();
+        write_cache_manifest(
+            &cache,
+            &built("new", &[]),
+            HashingMode::Strict,
+            CacheManifest::read(&cache),
+        )
+        .unwrap();
         assert!(
             bystander.exists(),
             "strict mode performs no ghost reconciliation"
@@ -4408,6 +4427,17 @@ mod tests {
             .as_ref()
             .map(|f| f.memory.as_slice())
             .unwrap_or_default()
+    }
+
+    /// Test-only combination of the two production calls `run_export` makes
+    /// at its `find_local_memory_entry` call site (looked up once there, not
+    /// twice) — both `find_local_memory_entry` and `memory_bind_address` are
+    /// the real production functions.
+    fn local_memory_server_bind(
+        memory: &[crate::config::Memory],
+        active: &ActiveScopes,
+    ) -> Option<String> {
+        find_local_memory_entry(memory, active).map(memory_bind_address)
     }
 
     #[test]

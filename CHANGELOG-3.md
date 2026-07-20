@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skip a redundant second `config.yaml` parse on the hook-run path — `main()` already loads it once to resolve session-log settings before the tracing subscriber is set up; the loaded config is now cached and reused instead of parsing the file again inside `hook_run::run`
 - Skip loading `config.yaml` entirely for `--version`/`-V` — the version flag never touches config or any hook, so the load was pure overhead on an otherwise config-free startup path
 - Reuse the config `main()` already loaded in `llmenv export`, `llmenv regenerate`, and `llmenv statusline` instead of re-parsing `config.yaml` a second time in the same process
+- Trim redundant per-invocation work across `hook-run`, `export`, and `regenerate`: fewer clones building scope/memory-action arguments, one read (not two) of each bundle's `AGENTS.md`/`bundle.yaml` and of the cache manifest dotfile, one stat (not two) when reaping expired session logs, and no more re-deriving the same memory-URL/tags/bundle-name values a second time in the same call — small, consistent wins on every hook event and materialize pass
 
 ### Fixed
 - Bundle- and user-declared hooks no longer emit null-valued `tool`/`command` keys into the generated engine config — the Claude Code adapter rendered `"tool": null` for a `command`-type handler (and `"command": null` for an `mcp_tool` handler), and the Crush adapter rendered `"command": null` when a command hook had no command; absent fields are now omitted in both adapters (#720)
