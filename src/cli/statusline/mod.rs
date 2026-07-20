@@ -39,6 +39,7 @@ pub(super) fn finish(
     name: &str,
     raw: String,
     cfg: Option<&llmenv_config::WidgetConfig>,
+    dyn_style: Option<&str>,
     use_color: bool,
 ) -> String {
     let sanitized = strip_control_chars(&raw);
@@ -46,11 +47,13 @@ pub(super) fn finish(
         Some(max) => truncate_ellipsis(&sanitized, max),
         None => sanitized,
     };
-    // An explicit per-widget `style` wins — including `""`/`"none"`, which
-    // `apply_style` renders as plain, so it's the per-widget colour opt-out.
-    // Absent falls back to the widget's default colour for readability.
+    // Style precedence: an explicit per-widget `style` wins — including
+    // `""`/`"none"`, which `apply_style` renders as plain, so it's the
+    // per-widget colour opt-out. Else a widget-supplied dynamic style (e.g.
+    // threshold coloring). Else the widget's static default colour.
     let style = cfg
         .and_then(|c| c.style.as_deref())
+        .or(dyn_style)
         .unwrap_or_else(|| default_style(name));
     apply_style(&truncated, style, use_color)
 }
@@ -294,14 +297,14 @@ mod tests {
 
     #[test]
     fn finish_strips_control_chars_before_truncating_and_styling() {
-        let out = finish("model", "Op\x1bus".to_string(), None, false);
+        let out = finish("model", "Op\x1bus".to_string(), None, None, false);
         assert_eq!(out, "Opus");
     }
 
     #[test]
     fn finish_applies_default_color_when_no_style_configured() {
         // model's default style is "bold cyan" -> SGR codes 1;36.
-        let out = finish("model", "Opus".to_string(), None, true);
+        let out = finish("model", "Opus".to_string(), None, None, true);
         assert_eq!(out, "\x1b[1;36mOpus\x1b[0m");
     }
 
@@ -311,7 +314,7 @@ mod tests {
             style: Some("none".to_string()),
             ..Default::default()
         };
-        let out = finish("model", "Opus".to_string(), Some(&cfg), true);
+        let out = finish("model", "Opus".to_string(), Some(&cfg), None, true);
         assert_eq!(
             out, "Opus",
             "explicit style:none must suppress the default colour"
@@ -362,6 +365,6 @@ mod tests {
             !out.contains('\u{1b}'),
             "escape char leaked into output: {out:?}"
         );
-        assert_eq!(out.trim_end(), "feature[31mBAD");
+        assert_eq!(out.trim_end(), "\u{1f33f} feature[31mBAD");
     }
 }

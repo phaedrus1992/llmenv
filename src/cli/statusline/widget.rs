@@ -119,7 +119,47 @@ pub fn render_engine_widget(
         ),
         _ => return None,
     };
-    Some(super::finish(name, raw, cfg, use_color))
+    // Threshold-colored widgets supply a dynamic style; `finish` applies it
+    // unless the user set an explicit per-widget `style`.
+    let dyn_style = if name == "progress_bar" {
+        progress_bar_threshold_style(data, cfg)
+    } else {
+        None
+    };
+    Some(super::finish(name, raw, cfg, dyn_style, use_color))
+}
+
+/// Green/yellow/red for the `progress_bar` by used-context percentage against
+/// `thresholds` (`[warn, crit]`, default `[50, 80]`). `None` when there's no
+/// percentage to color (widget renders empty anyway).
+fn progress_bar_threshold_style(
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+) -> Option<&'static str> {
+    let remaining = data
+        .context_window
+        .as_ref()
+        .and_then(|c| c.remaining_percentage)?;
+    if !remaining.is_finite() {
+        return None;
+    }
+    let used = (100.0 - remaining).clamp(0.0, 100.0);
+    Some(threshold_style(
+        used,
+        cfg.and_then(|c| c.thresholds).unwrap_or([50, 80]),
+    ))
+}
+
+/// Map a value to a `green` / `yellow` / `red` style name by two ascending
+/// thresholds: `>= crit` red, `>= warn` yellow, else green.
+fn threshold_style(value: f64, thresholds: [u8; 2]) -> &'static str {
+    if value >= f64::from(thresholds[1]) {
+        "red"
+    } else if value >= f64::from(thresholds[0]) {
+        "yellow"
+    } else {
+        "green"
+    }
 }
 
 /// Strip the parts of a model `display_name` that are neither family nor
@@ -168,30 +208,29 @@ fn render_model(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) ->
     let Some(model) = &data.model else {
         return String::new();
     };
-    let format = cfg
-        .and_then(|c| c.format.as_deref())
-        .unwrap_or("{short_name} {version}");
-    let short_name = model
-        .display_name
-        .as_deref()
-        .map(short_model_name)
-        .unwrap_or_default();
+    let display_name = model.display_name.as_deref().unwrap_or_default();
+    let short_name = short_model_name(display_name);
     let version = model
         .version
         .clone()
-        .or_else(|| {
-            model
-                .display_name
-                .as_deref()
-                .and_then(version_from_display_name)
-        })
+        .or_else(|| version_from_display_name(display_name))
         .unwrap_or_default();
-    format
-        .replace("{short_name}", &short_name)
-        .replace("{version}", &version)
-        .replace("{full_name}", model.full_name.as_deref().unwrap_or(""))
-        .trim()
-        .to_string()
+    // Precedence: an explicit `format` wins; else a named `display` mode
+    // (`short`/`version`/`full`); else the default `{short_name} {version}`.
+    if let Some(format) = cfg.and_then(|c| c.format.as_deref()) {
+        return format
+            .replace("{short_name}", &short_name)
+            .replace("{version}", &version)
+            .replace("{full_name}", model.full_name.as_deref().unwrap_or(""))
+            .trim()
+            .to_string();
+    }
+    match cfg.and_then(|c| c.display.as_deref()) {
+        Some("short") => short_name,
+        Some("full") => display_name.to_string(),
+        // "version" and the unset default both show family + version.
+        _ => format!("{short_name} {version}").trim().to_string(),
+    }
 }
 
 fn render_folder(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
@@ -208,7 +247,7 @@ fn render_folder(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -
         .unwrap_or_default();
     let format = cfg
         .and_then(|c| c.format.as_deref())
-        .unwrap_or("{basename}");
+        .unwrap_or("\u{1f4c1} {basename}"); // 📁
     format
         .replace("{basename}", &basename)
         .replace("{path}", path)
@@ -242,12 +281,26 @@ fn render_duration(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>)
     let total_secs = ms / 1000;
     let h = total_secs / 3600;
     let m = (total_secs % 3600) / 60;
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{h}h{m}m");
-    format
-        .replace("{h}", &h.to_string())
-        .replace("{m}", &m.to_string())
-        .replace("{s}", &total_secs.to_string())
-        .replace("{total_ms}", &ms.to_string())
+    let s = total_secs % 60;
+    // A custom `format` uses placeholders (`{s}` = total seconds, for
+    // backward compatibility). The default mirrors the reference tool: show
+    // hours+minutes past an hour, minutes+seconds under, seconds only under a
+    // minute — so a short session reads `45s`, not `0h0m`.
+    if let Some(format) = cfg.and_then(|c| c.format.as_deref()) {
+        return format
+            .replace("{h}", &h.to_string())
+            .replace("{m}", &m.to_string())
+            .replace("{s}", &total_secs.to_string())
+            .replace("{total_ms}", &ms.to_string());
+    }
+    let body = if h > 0 {
+        format!("{h}h {m}m")
+    } else if m > 0 {
+        format!("{m}m {s}s")
+    } else {
+        format!("{s}s")
+    };
+    format!("\u{23f1} {body}") // ⏱
 }
 
 /// Sum of the three token-count fields, saturating on overflow. Each field
@@ -342,7 +395,9 @@ fn render_cache_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>
         return String::new();
     }
     let pct = (cache as f64 / total as f64 * 100.0).round() as i64;
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{pct}%");
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or("\u{21bb}{pct}%"); // ↻
     format.replace("{pct}", &pct.to_string())
 }
 
@@ -355,6 +410,8 @@ fn render_cache_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>
 ///    branch** for a regular repo (confirmed against the statusline docs), so
 ///    llmenv reads it from `.git/HEAD` rather than leaving the widget blank.
 fn render_branch(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+    // Precedence: stdin `branch.name` (forward-compat) → `worktree.branch`
+    // (Claude Code worktree sessions) → git from `workspace.current_dir`.
     let name = data
         .branch
         .as_ref()
@@ -369,7 +426,9 @@ fn render_branch(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -
     let Some(name) = name else {
         return String::new();
     };
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{name}");
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or("\u{1f33f} {name}"); // 🌿
     format.replace("{name}", &name)
 }
 
@@ -432,7 +491,8 @@ fn render_progress_bar(data: &EngineData, cfg: Option<&llmenv_config::WidgetConf
         return String::new();
     }
     let used = (100.0 - remaining).clamp(0.0, 100.0);
-    let bar = block_bar(used);
+    let width = cfg.and_then(|c| c.width).unwrap_or(DEFAULT_BAR_WIDTH);
+    let bar = block_bar(used, width as usize);
     let pct = used.round() as i64;
     let format = cfg
         .and_then(|c| c.format.as_deref())
@@ -442,13 +502,17 @@ fn render_progress_bar(data: &EngineData, cfg: Option<&llmenv_config::WidgetConf
         .replace("{bar}", &bar)
 }
 
-/// A 10-cell block bar for a `0..=100` percentage. Truncates (not rounds) to
-/// the filled cell count: rounding would bump a borderline value like 35.0 up
-/// to 4 filled cells, one more than the 3-cell floor a "35%" label implies.
-fn block_bar(pct: f64) -> String {
-    let filled = ((pct / 10.0) as usize).min(10);
-    "█".repeat(filled) + &"░".repeat(10 - filled)
+/// A `width`-cell block bar (filled `▓`, empty `░`) for a `0..=100`
+/// percentage. Truncates (not rounds) the filled cell count: rounding would
+/// bump a borderline value like 35.0 up to one more filled cell than the
+/// displayed "35%" label implies.
+fn block_bar(pct: f64, width: usize) -> String {
+    let filled = ((pct / 100.0 * width as f64) as usize).min(width);
+    "\u{2593}".repeat(filled) + &"\u{2591}".repeat(width - filled)
 }
+
+/// Default `progress_bar` / usage-bar width in cells.
+const DEFAULT_BAR_WIDTH: u8 = 10;
 
 /// Current wall-clock time as Unix epoch seconds, for computing time-until a
 /// rate-limit window resets. Falls back to 0 on a pre-epoch clock (which just
@@ -506,7 +570,7 @@ fn render_usage(
         .unwrap_or(default_format);
     format
         .replace("{pct}", &(pct.round() as i64).to_string())
-        .replace("{bar}", &block_bar(pct))
+        .replace("{bar}", &block_bar(pct, DEFAULT_BAR_WIDTH as usize))
         .replace("{reset}", &reset)
 }
 
@@ -596,7 +660,7 @@ mod tests {
     #[test]
     fn renders_folder_from_workspace_basename() {
         let out = render_engine_widget("folder", &engine_data(), None, false).unwrap();
-        assert_eq!(out, "llmenv");
+        assert_eq!(out, "\u{1f4c1} llmenv");
     }
 
     #[test]
@@ -608,7 +672,58 @@ mod tests {
     #[test]
     fn renders_duration_hms() {
         let out = render_engine_widget("duration", &engine_data(), None, false).unwrap();
-        assert_eq!(out, "3h42m"); // 13_320_000 ms = 3h42m
+        assert_eq!(out, "\u{23f1} 3h 42m"); // ⏱ 3h42m (13_320_000 ms)
+    }
+
+    #[test]
+    fn renders_duration_minutes_and_seconds_under_an_hour() {
+        let data = EngineData {
+            cost: Some(Cost {
+                total_duration_ms: Some(150_000), // 2m30s
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_engine_widget("duration", &data, None, false).unwrap(),
+            "\u{23f1} 2m 30s"
+        );
+    }
+
+    #[test]
+    fn renders_duration_seconds_only_under_a_minute() {
+        let data = EngineData {
+            cost: Some(Cost {
+                total_duration_ms: Some(45_000), // 45s
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_engine_widget("duration", &data, None, false).unwrap(),
+            "\u{23f1} 45s"
+        );
+    }
+
+    #[test]
+    fn model_display_mode_short_and_full() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "model": { "display_name": "Claude Opus 4.8 (1M context)" }
+        }))
+        .unwrap();
+        let short = llmenv_config::WidgetConfig {
+            display: Some("short".to_string()),
+            ..Default::default()
+        };
+        let full = llmenv_config::WidgetConfig {
+            display: Some("full".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(render_model(&data, Some(&short)), "Opus");
+        assert_eq!(
+            render_model(&data, Some(&full)),
+            "Claude Opus 4.8 (1M context)"
+        );
+        // Unset display → default family + version.
+        assert_eq!(render_model(&data, None), "Opus 4.8");
     }
 
     #[test]
@@ -648,7 +763,7 @@ mod tests {
         let out = render_engine_widget("cache_pct", &engine_data(), None, false).unwrap();
         // cache = cache_read(4000) + cache_creation(1000) = 5000;
         // total = input(5000) + cache(5000) = 10000; pct = round(5000/10000*100) = 50.
-        assert_eq!(out, "50%");
+        assert_eq!(out, "\u{21bb}50%");
     }
 
     #[test]
@@ -734,7 +849,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             render_engine_widget("branch", &data, None, false).unwrap(),
-            "release/3.x"
+            "\u{1f33f} release/3.x"
         );
     }
 
@@ -748,7 +863,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             render_engine_widget("branch", &data, None, false).unwrap(),
-            "feat/thing"
+            "\u{1f33f} feat/thing"
         );
     }
 
@@ -769,7 +884,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             render_engine_widget("branch", &data, None, false).unwrap(),
-            "release/3.x"
+            "\u{1f33f} release/3.x"
         );
     }
 
@@ -821,7 +936,35 @@ mod tests {
         }))
         .unwrap();
         let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
-        assert_eq!(out, "35% ███░░░░░░░");
+        assert_eq!(out, "35% ▓▓▓░░░░░░░");
+    }
+
+    #[test]
+    fn progress_bar_threshold_colors_by_usage() {
+        assert_eq!(threshold_style(30.0, [50, 80]), "green");
+        assert_eq!(threshold_style(60.0, [50, 80]), "yellow");
+        assert_eq!(threshold_style(90.0, [50, 80]), "red");
+        // End-to-end: 90% used (remaining 10) → red SGR wrap under color.
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "context_window": { "remaining_percentage": 10.0 }
+        }))
+        .unwrap();
+        let out = render_engine_widget("progress_bar", &data, None, true).unwrap();
+        assert!(out.starts_with("\x1b[31m"), "expected red wrap: {out:?}");
+    }
+
+    #[test]
+    fn progress_bar_width_configurable() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "context_window": { "remaining_percentage": 50.0 }
+        }))
+        .unwrap();
+        let cfg = llmenv_config::WidgetConfig {
+            width: Some(4),
+            ..Default::default()
+        };
+        // 50% of 4 cells = 2 filled.
+        assert_eq!(render_progress_bar(&data, Some(&cfg)), "50% ▓▓░░");
     }
 
     #[test]
@@ -859,7 +1002,7 @@ mod tests {
         };
         assert_eq!(
             render_usage(Some(&window), 0, None, "{bar} {pct}% ➡{reset}"),
-            "██████████ 100% ➡3h03m"
+            "▓▓▓▓▓▓▓▓▓▓ 100% ➡3h03m"
         );
     }
 
@@ -957,7 +1100,7 @@ mod tests {
         }))
         .unwrap();
         let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
-        assert_eq!(out, "100% ██████████");
+        assert_eq!(out, "100% ▓▓▓▓▓▓▓▓▓▓");
     }
 
     #[test]
@@ -1076,7 +1219,7 @@ mod tests {
             format: Some("{pct}|{bar}".to_string()),
             ..Default::default()
         };
-        assert_eq!(render_progress_bar(&data, Some(&cfg)), "35|███░░░░░░░");
+        assert_eq!(render_progress_bar(&data, Some(&cfg)), "35|▓▓▓░░░░░░░");
     }
 
     #[test]
@@ -1120,7 +1263,7 @@ mod tests {
         // cells (35.5 / 10.0 = 3.55 -> 3), matching the doc comment's stated
         // "truncate, not round" bar-fill behavior.
         let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
-        assert_eq!(out, "36% ███░░░░░░░");
+        assert_eq!(out, "36% ▓▓▓░░░░░░░");
     }
 
     #[test]
@@ -1160,7 +1303,7 @@ mod tests {
         let tokens = render_engine_widget("tokens", &data, None, false).unwrap();
         assert!(!tokens.is_empty());
         let cache_pct = render_engine_widget("cache_pct", &data, None, false).unwrap();
-        assert_eq!(cache_pct, "100%");
+        assert_eq!(cache_pct, "\u{21bb}100%");
     }
 
     fn data_with_remaining(remaining: f64) -> EngineData {
@@ -1260,7 +1403,7 @@ mod tests {
                 let pct: i64 = pct_str.trim_end_matches('%').parse().unwrap();
                 prop_assert!((0..=100).contains(&pct));
                 prop_assert_eq!(bar.chars().count(), 10);
-                prop_assert!(bar.chars().all(|c| c == '█' || c == '░'));
+                prop_assert!(bar.chars().all(|c| c == '▓' || c == '░'));
             } else {
                 prop_assert_eq!(out, "");
             }
@@ -1295,13 +1438,18 @@ mod tests {
                 ..Default::default()
             };
             let out = render_engine_widget("duration", &data, None, false).unwrap();
-            let total_secs = u128::from(ms) / 1000;
-            let expected = format!(
-                "{}h{}m",
-                total_secs / 3600,
-                (total_secs % 3600) / 60
-            );
-            prop_assert_eq!(out, expected);
+            let total_secs = ms / 1000;
+            let h = total_secs / 3600;
+            let m = (total_secs % 3600) / 60;
+            let s = total_secs % 60;
+            let body = if h > 0 {
+                format!("{h}h {m}m")
+            } else if m > 0 {
+                format!("{m}m {s}s")
+            } else {
+                format!("{s}s")
+            };
+            prop_assert_eq!(out, format!("\u{23f1} {body}"));
         }
 
         /// Token counts are untrusted `u64`s from the engine's stdin JSON —
@@ -1332,7 +1480,11 @@ mod tests {
             if total == 0 {
                 prop_assert_eq!(out, "");
             } else {
-                let pct: i64 = out.trim_end_matches('%').parse().unwrap();
+                let pct: i64 = out
+                    .trim_start_matches('↻')
+                    .trim_end_matches('%')
+                    .parse()
+                    .unwrap();
                 prop_assert!((0..=100).contains(&pct));
             }
         }

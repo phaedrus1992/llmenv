@@ -610,6 +610,9 @@ Each entry under `widgets:` accepts:
 | `format` | Custom display template for the widget's own placeholders (see the table below). Only honored by widgets marked "yes" in the **Format?** column — set on a widget that doesn't support it, it's silently ignored |
 | `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
 | `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below. Every widget has a sensible **default colour** when this is unset; set it to `none` (or `""`) to render that one widget in plain text |
+| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`). Overridden by `format` when both are set; ignored by widgets without a display mode |
+| `width` | `progress_bar` cell width (default `10`). Ignored by other widgets |
+| `thresholds` | Two ascending percentages `[warn, crit]` for value-based coloring. Ignored by widgets without threshold coloring |
 
 A row template can also write `{widget_name:t}` — accepted syntax, but it is a
 no-op beyond what `max_len` already does; truncation is driven entirely by
@@ -631,15 +634,15 @@ All twelve honor `format:` — set on any of them, it replaces the default layou
 | Widget | Format? | Default output | Example | `format` placeholders |
 | -------- | --------- | ----------------- | --------- | ------------------------ |
 | `model` | yes | `{short_name} {version}` | `Opus 4.8` | `short_name`, `version`, `full_name` |
-| `folder` | yes | basename of the working directory | `llmenv` | `basename`, `path` |
-| `branch` | yes | git branch name | `release/3.x` | `name` |
+| `folder` | yes | 📁 + basename of the working directory | `📁 llmenv` | `basename`, `path` |
+| `branch` | yes | 🌿 + git branch name | `🌿 release/3.x` | `name` |
 | `pr` | yes | `#<number>` | `#834` | `number` |
-| `progress_bar` | yes | `<pct>%` + 10-cell block bar | `35% ███░░░░░░░` | `pct`, `bar` |
+| `progress_bar` | yes | `<pct>%` + block bar (`width` cells, default 10) | `35% ▓▓▓░░░░░░░` | `pct`, `bar` |
 | `tokens` | yes | total context tokens, `k`/`m`-suffixed | `10k` | `total`, `input`, `cache_read`, `cache_create` |
 | `context_pct` | yes | used-context percentage | `35%` | `pct` |
 | `budget` | yes | `<used>/<max>`, `k`/`m`-suffixed | `35k/200k` | `used`, `max` |
-| `duration` | yes | `<h>h<m>m` | `3h42m` | `h`, `m`, `s`, `total_ms` |
-| `cache_pct` | yes | cache-hit percentage | `44%` | `pct` |
+| `duration` | yes | ⏱ + elapsed (h+m past an hour, else m+s, else s) | `⏱ 3h 42m` | `h`, `m`, `s`, `total_ms` |
+| `cache_pct` | yes | ↻ + cache-hit percentage | `↻44%` | `pct` |
 | `usage_5h` | yes | Claude.ai 5-hour usage window | `5h 8% ➡23m` | `pct`, `bar`, `reset` |
 | `usage_7d` | yes | Claude.ai 7-day usage window | `7d 41% ➡3d4h` | `pct`, `bar`, `reset` |
 
