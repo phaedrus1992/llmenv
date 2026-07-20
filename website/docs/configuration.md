@@ -579,8 +579,8 @@ it's wired into an engine.
 ```yaml
 statusline:
   rows:
-    - "{model} │ {context_pct} │ {budget}"
-    - "{scopes} · {plugins} {config_stale}"
+    - "{model} │ {context} │ {budget}"
+    - "⎿ {scopes} · {plugins} {config_stale}"
   style:
     icon_set: auto            # auto | nerd | simple | none
   widgets:
@@ -588,7 +588,7 @@ statusline:
       format: "{short_name} {version}"
       style: "bold cyan"
     scopes:
-      format: "║ {tags}"
+      format: "{tags}"
       max_len: 40
       style: "dim"
   icons:
@@ -597,7 +597,7 @@ statusline:
 
 | Field | Required | Notes |
 | ------- | ---------- | ------- |
-| `rows` | no | One row template per rendered status line, each a string with `{widget_name}` placeholders. Default (when `statusline:` is omitted entirely): a single row, `"{model} │ {folder} │ {branch} │ {context_pct} │ {budget}"` |
+| `rows` | no | One row template per rendered status line, each a string with `{widget_name}` placeholders. Default (when `statusline:` is omitted entirely): a single row, `"{model} │ {folder} │ {branch} │ {context} │ {budget}"` |
 | `style.icon_set` | no | `auto`, `nerd`, `simple`, or `none` — see [`icon_set`](#icon_set) below. Default `auto` |
 | `style.color` | no | Master colour switch. `true` (default) lets each widget render its default (or configured) colour; `false` forces the whole statusline to plain text, on top of the runtime `--color`/`NO_COLOR` gate |
 | `widgets` | no | Map of widget name (`model`, `scopes`, ...) to a `format` / `max_len` / `style` override — see the reference table below for each widget's default format and placeholders |
@@ -611,7 +611,7 @@ Each entry under `widgets:` accepts:
 | `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
 | `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below. Every widget has a sensible **default colour** when this is unset; set it to `none` (or `""`) to render that one widget in plain text |
 | `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). Overridden by `format` when both are set; ignored by widgets without a display mode |
-| `width` | `progress_bar` cell width (default `10`). Ignored by other widgets |
+| `width` | Bar cell width for `context`/`cache_usage`/`usage_5h`/`usage_7d` (default `10`). Ignored by other widgets |
 | `thresholds` | Two ascending percentages `[warn, crit]` for value-based coloring. Ignored by widgets without threshold coloring |
 
 A row template can also write `{widget_name:t}` — accepted syntax, but it is a
@@ -629,7 +629,7 @@ read `llmenv-status.json`. A name that matches neither renders empty.
 
 #### Engine-sourced (from the engine's stdin JSON)
 
-All thirteen honor `format:` — set on any of them, it replaces the default layout below.
+All twelve honor `format:` — set on any of them, it replaces the default layout below.
 
 | Widget | Format? | Default output | Example | `format` placeholders |
 | -------- | --------- | ----------------- | --------- | ------------------------ |
@@ -637,15 +637,23 @@ All thirteen honor `format:` — set on any of them, it replaces the default lay
 | `folder` | yes | 📁 + basename of the working directory | `📁 llmenv` | `basename`, `path` |
 | `branch` | yes | 🌿 + git branch name | `🌿 release/3.x` | `name` |
 | `pr` | yes | `#<number>` (or the URL in `display: url`) | `#834` | `number`, `url`, `review_state` |
-| `progress_bar` | yes | `<pct>%` + block bar (`width` cells, default 10) | `35% ▓▓▓░░░░░░░` | `pct`, `bar` |
+| `context` | yes | used-context `<pct>%` + block bar (`width` cells, default 10), threshold-colored (default `[50, 80]`) | `35% ▓▓▓░░░░░░░` | `pct`, `bar` — use either alone, or both, in a custom `format` |
 | `tokens` | yes | total context tokens, `k`/`m`-suffixed | `10k` | `total`, `input`, `cache_read`, `cache_create` |
-| `context_pct` | yes | used-context percentage | `35%` | `pct` |
 | `budget` | yes | `<used>/<max>`, `k`/`m`-suffixed | `35k/200k` | `used`, `max` |
 | `duration` | yes | ⏱ + elapsed (h+m past an hour, else m+s, else s) | `⏱ 3h 42m` | `h`, `m`, `s`, `total_ms` |
-| `cache_pct` | yes | ↻ + cache-hit percentage | `↻44%` | `pct` |
+| `cache_usage` | yes | ↻ + cache-hit `<pct>%` (no bar by default — unlike `context`, a *high* cache percentage is good, so this doesn't threshold-color) | `↻44%` | `pct`, `bar` (opt-in — e.g. `format: "↻{pct}% {bar}"`) |
 | `usage_5h` | yes | Claude.ai 5-hour usage window | `5h 8% (+4.5) ⇡3% ➡23m` | `pct`, `bar`, `reset`, `pace`, `delta` |
 | `usage_7d` | yes | Claude.ai 7-day usage window | `7d 41% ➡3d4h` | `pct`, `bar`, `reset`, `pace`, `delta` |
 | `peak` | yes | peak / off-peak billing window (local clock) | `△ peak 3h03m` | `symbol`, `label`, `countdown` |
+
+`context` merges what used to be two separate widgets (`context_pct` and
+`progress_bar`) into one — the percentage and the bar are just two
+placeholders of the same widget now, so a custom `format` can show either
+alone or both together, instead of needing two widget entries in a row
+template to combine them. Every percentage-based widget (`context`,
+`cache_usage`, `usage_5h`, `usage_7d`) shares this same percent/bar
+rendering backend, so `width` and the `pct`/`bar` placeholders behave
+identically across all four.
 
 Notes:
 

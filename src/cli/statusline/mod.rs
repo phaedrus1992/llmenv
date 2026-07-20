@@ -17,7 +17,7 @@ pub use llmenv_widget::render_llmenv_widget;
 pub use template::{TemplateToken, parse_template};
 pub use widget::{EngineData, render_engine_widget};
 
-const DEFAULT_ROW: &str = "{model} │ {folder} │ {branch} │ {context_pct} │ {budget}";
+const DEFAULT_ROW: &str = "{model} │ {folder} │ {branch} │ {context} │ {budget}";
 
 /// Strip C0 (`\x00`-`\x1F`, `\x7F`) and C1 (`\u{80}`-`\u{9F}`) control
 /// characters from **untrusted free-text** (engine JSON fields, filesystem
@@ -91,16 +91,19 @@ fn default_style(name: &str) -> &'static str {
         "folder" => "blue",
         "branch" | "icm" => "magenta",
         "pr" => "bold magenta",
-        "context_pct" | "config_stale" | "usage_5h" | "usage_7d" => "yellow",
+        "config_stale" | "usage_5h" | "usage_7d" => "yellow",
         "plugins" | "mcps" => "green",
         "peak" => "bold yellow",
         "throttle" => "bold red",
         // Subdued-but-legible widgets. A readable light gray (256-color)
         // rather than SGR-2 `dim`, which renders too faint to read on many
         // terminals.
-        "budget" | "tokens" | "duration" | "cache_pct" | "cache" | "scopes" | "session_log" => {
+        "budget" | "tokens" | "duration" | "cache_usage" | "cache" | "scopes" | "session_log" => {
             "color-248"
         }
+        // `context` self-colors per cell (filled=threshold color, empty=dim)
+        // — excluded here so `finish` doesn't wrap it in a second, static
+        // color on top of its own threshold coloring.
         _ => "",
     }
 }
