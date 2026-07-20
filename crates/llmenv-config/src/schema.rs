@@ -868,10 +868,28 @@ pub struct StatuslineConfig {
     pub icons: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StatuslineStyle {
     pub icon_set: IconSet,
+    /// Master colour switch for the whole statusline. `true` (default) lets
+    /// each widget render its default (or configured) colour; `false` forces
+    /// every widget to plain text regardless of per-widget `style`, on top of
+    /// the `--color`/`NO_COLOR` runtime gate. The opt-out for users who want
+    /// the layout without any ANSI.
+    pub color: bool,
+}
+
+impl Default for StatuslineStyle {
+    fn default() -> Self {
+        Self {
+            icon_set: IconSet::default(),
+            // Colour on by default — a bare `statusline:` block should look
+            // readable, not monochrome. `serde(default)` fills a missing
+            // `color:` field from here, so omitting it keeps colour on.
+            color: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -599,6 +599,7 @@ statusline:
 | ------- | ---------- | ------- |
 | `rows` | no | One row template per rendered status line, each a string with `{widget_name}` placeholders. Default (when `statusline:` is omitted entirely): a single row, `"{model} │ {folder} │ {branch} │ {context_pct} │ {budget}"` |
 | `style.icon_set` | no | `auto`, `nerd`, `simple`, or `none` — see [`icon_set`](#icon_set) below. Default `auto` |
+| `style.color` | no | Master colour switch. `true` (default) lets each widget render its default (or configured) colour; `false` forces the whole statusline to plain text, on top of the runtime `--color`/`NO_COLOR` gate |
 | `widgets` | no | Map of widget name (`model`, `scopes`, ...) to a `format` / `max_len` / `style` override — see the reference table below for each widget's default format and placeholders |
 | `icons` | no | Named icon overrides, merged over the resolved `icon_set` defaults (a name set here always wins) |
 
@@ -608,7 +609,7 @@ Each entry under `widgets:` accepts:
 | --------- | ----- |
 | `format` | Custom display template for the widget's own placeholders (see the table below). Only honored by widgets marked "yes" in the **Format?** column — set on a widget that doesn't support it, it's silently ignored |
 | `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
-| `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below |
+| `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below. Every widget has a sensible **default colour** when this is unset; set it to `none` (or `""`) to render that one widget in plain text |
 
 A row template can also write `{widget_name:t}` — accepted syntax, but it is a
 no-op beyond what `max_len` already does; truncation is driven entirely by
@@ -625,20 +626,39 @@ read `llmenv-status.json`. A name that matches neither renders empty.
 
 #### Engine-sourced (from the engine's stdin JSON)
 
-All ten honor `format:` — set on any of them, it replaces the default layout below.
+All twelve honor `format:` — set on any of them, it replaces the default layout below.
 
 | Widget | Format? | Default output | Example | `format` placeholders |
 | -------- | --------- | ----------------- | --------- | ------------------------ |
-| `model` | yes | `{short_name} {version}` | `Opus` | `short_name`, `version`, `full_name` |
+| `model` | yes | `{short_name} {version}` | `Opus 4.8` | `short_name`, `version`, `full_name` |
 | `folder` | yes | basename of the working directory | `llmenv` | `basename`, `path` |
 | `branch` | yes | git branch name | `release/3.x` | `name` |
 | `pr` | yes | `#<number>` | `#834` | `number` |
 | `progress_bar` | yes | `<pct>%` + 10-cell block bar | `35% ███░░░░░░░` | `pct`, `bar` |
-| `tokens` | yes | total context tokens, `k`-suffixed | `10.0k` | `total`, `input`, `cache_read`, `cache_create` |
+| `tokens` | yes | total context tokens, `k`/`m`-suffixed | `10k` | `total`, `input`, `cache_read`, `cache_create` |
 | `context_pct` | yes | used-context percentage | `35%` | `pct` |
-| `budget` | yes | `<used>/<max>`, both `k`-suffixed | `35.0k/200.0k` | `used`, `max` |
+| `budget` | yes | `<used>/<max>`, `k`/`m`-suffixed | `35k/200k` | `used`, `max` |
 | `duration` | yes | `<h>h<m>m` | `3h42m` | `h`, `m`, `s`, `total_ms` |
 | `cache_pct` | yes | cache-hit percentage | `44%` | `pct` |
+| `usage_5h` | yes | Claude.ai 5-hour usage window | `5h 8% ➡23m` | `pct`, `bar`, `reset` |
+| `usage_7d` | yes | Claude.ai 7-day usage window | `7d 41% ➡3d4h` | `pct`, `bar`, `reset` |
+
+Notes:
+
+- `branch` reads the branch from git (`.git/HEAD`, following a worktree
+  `.git`-file pointer) resolved from the working directory — Claude Code does
+  **not** send a branch on stdin for a regular repo. A `worktree.branch` in the
+  stdin JSON (worktree sessions) takes precedence. Detached HEAD renders empty.
+- `model` strips a trailing `(…)` qualifier (e.g. `Opus 4.8 (1M context)` →
+  `Opus 4.8`) and, when the engine sends no separate `version`, derives it from
+  `display_name`.
+- Numeric counts (`tokens`, `budget`) use `k` at a thousand and `m` at a
+  million, dropping a redundant trailing `.0` (`1000000` → `1m`, `200000` →
+  `200k`, `109200` → `109.2k`).
+- `usage_5h`/`usage_7d` require the Claude.ai subscription `rate_limits` block,
+  which the engine sends only after the first API response in a session; before
+  that (or on API/enterprise plans) they render empty. `{reset}` is the time
+  until the window resets.
 
 `pr` and `tokens` only expose the fields above — the engine's stdin contract has no PR title or
 per-output-type token breakdown today, so those aren't invented placeholders.
@@ -650,9 +670,9 @@ All eight honor `format:`.
 | Widget | Default `format` | Example | Placeholders |
 | -------- | ------------------- | --------- | -------------- |
 | `scopes` | `║ {tags}` | `║ dev · rust` | `tags` (tag list, joined with ` · `) |
-| `plugins` | `◇ {total}` | `◇ 12` | `total`, `errors` |
+| `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
-| `icm` | `M{memories}` | `M142` | `memories`, `concepts` |
+| `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
 | `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes) |
 | `config_stale` | `{stale_icon}` | `◌` | `stale_icon`. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
