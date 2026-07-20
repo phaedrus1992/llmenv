@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A hook whose handler `type` didn't match its populated field — a `command`-type handler with no (or an empty) `command`, or an `mcp_tool`-type handler with no (or an empty) `tool` — no longer silently loads as a no-op hook; `config.yaml` now fails to load with an error naming the offending hook's event (#851)
 - A computed `read_once` deny result could be silently overridden by other hook output — the invariant guarding it was only enforced via `debug_assert!`, which compiles to nothing outside debug builds, leaving the sentinel unenforced in release builds; it's now an always-on guard, so a deny always wins regardless of build profile (#868)
 - `config.yaml` now rejects a duplicate `scope.content` id, matching the existing check for `network`/`host`/`user` scopes — previously two content scopes sharing an id could both silently activate even when only one's glob matched (#843)
+- Claude Code adapter: a `Write` permission rule (neutral `{tool: Write, ...}` or a verbatim `native_permissions.claude_code` string) is now rewritten to `Edit` before it reaches `settings.json` — Claude Code deprecated `Write(<path>)` in favor of `Edit(<path>)`, so the stale form previously only produced a "Fix:" warning on every session instead of matching anything (#888)
 
 ## [3.5.1] - 2026-07-15
 

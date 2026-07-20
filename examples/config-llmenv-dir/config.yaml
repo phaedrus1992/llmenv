@@ -136,7 +136,7 @@ capabilities:
       # Reading/writing under ./.tmp is allowed so plans and temporary artifacts
       # can live next to the project without escaping into arbitrary paths.
       - { tool: Read, pattern: "./.tmp/**" }
-      - { tool: Write, pattern: "./.tmp/**" }
+      - { tool: Edit, pattern: "./.tmp/**" }
 
       # --- web search (no domain restriction at top level) --------------------
       - { tool: WebSearch }
