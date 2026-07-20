@@ -2386,6 +2386,61 @@ mod tests {
             );
         }
 
+        /// Generalizes the #877 regression: for a given tool+pattern, the
+        /// highest-precedence tier present (deny > ask > allow) wins the
+        /// final action, regardless of whether that tier's rule came from
+        /// the structured `permissions:` block or the `native_permissions`
+        /// override, and regardless of which other tiers/sources are also
+        /// present.
+        #[test]
+        fn highest_tier_wins_regardless_of_source(
+            tool in "[A-Za-z]{1,8}",
+            pattern in "[a-z]{2,8}",
+            allow_present in any::<bool>(),
+            allow_native in any::<bool>(),
+            ask_present in any::<bool>(),
+            ask_native in any::<bool>(),
+            deny_present in any::<bool>(),
+            deny_native in any::<bool>(),
+        ) {
+            prop_assume!(allow_present || ask_present || deny_present);
+
+            let rule = |t: &str, p: &str| crate::config::PermissionRule {
+                tool: t.to_string(),
+                pattern: Some(p.to_string()),
+                paths: vec![],
+            };
+            let mut caps = crate::config::Capabilities::default();
+            let mut native = crate::config::NativePermissionRules::default();
+            for (present, is_native, structured_tier, native_tier) in [
+                (allow_present, allow_native, &mut caps.permissions.allow, &mut native.allow),
+                (ask_present, ask_native, &mut caps.permissions.ask, &mut native.ask),
+                (deny_present, deny_native, &mut caps.permissions.deny, &mut native.deny),
+            ] {
+                if !present {
+                    continue;
+                }
+                if is_native {
+                    native_tier.push(format!("{tool}({pattern})"));
+                } else {
+                    structured_tier.push(rule(&tool, &pattern));
+                }
+            }
+            caps.native_permissions.insert("opencode".into(), native);
+
+            let expected = if deny_present {
+                "deny"
+            } else if ask_present {
+                "ask"
+            } else {
+                "allow"
+            };
+            prop_assert_eq!(
+                &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
+                &serde_json::json!(expected)
+            );
+        }
+
         /// Rendering is deterministic: identical rule sets produce identical
         /// permission output.
         #[test]
