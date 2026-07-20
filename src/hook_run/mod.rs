@@ -419,9 +419,23 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
 /// The memory backend (recall/store) and session logging are independent: a
 /// missing/unreachable memory MCP skips memory actions but must not prevent
 /// the file-sink session log from being written (see `handle_session_log`).
-/// Load config from `path`. Each hook-run is a fresh process that loads
-/// config exactly once, so no cache is needed.
+/// `main()` loads config once (before the tracing subscriber is set up, to
+/// resolve session-log settings) and stashes it here so `load_cached_config`
+/// can reuse it instead of re-parsing `config.yaml` a second time in the same
+/// process. Direct callers that never went through `main()` (tests, other
+/// entrypoints) fall back to loading from `path` normally.
+static PRELOADED_CONFIG: OnceLock<crate::config::Config> = OnceLock::new();
+
+/// Stash a config already loaded by `main()` for reuse by `load_cached_config`.
+pub fn set_preloaded_config(config: crate::config::Config) {
+    let _ = PRELOADED_CONFIG.set(config);
+}
+
+/// Load config from `path`, reusing `main()`'s preload when available.
 fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
+    if let Some(config) = PRELOADED_CONFIG.get() {
+        return Ok(config.clone());
+    }
     crate::config::Config::load(path)
 }
 

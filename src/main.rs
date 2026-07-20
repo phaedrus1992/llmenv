@@ -25,17 +25,20 @@ fn main() {
     if let Err(ref e) = config_path {
         eprintln!("llmenv: failed to resolve config path: {e:#}");
     }
-    let resolved = config_path
-        .ok()
-        .and_then(|p| {
-            llmenv_config::Config::load(&p)
-                .inspect_err(|e| {
-                    eprintln!("llmenv: failed to load config from {}: {e:#}", p.display())
-                })
-                .ok()
-        })
+    let loaded_config = config_path.ok().and_then(|p| {
+        llmenv_config::Config::load(&p)
+            .inspect_err(|e| {
+                eprintln!("llmenv: failed to load config from {}: {e:#}", p.display())
+            })
+            .ok()
+    });
+    let resolved = loaded_config
+        .clone()
         .map(|c| c.session_log_resolved())
         .unwrap_or_default();
+    if let Some(config) = loaded_config {
+        llmenv::hook_run::set_preloaded_config(config);
+    }
 
     let file_layer = resolved.file.as_ref().is_some_and(|f| f.enabled).then(|| {
         let path = session_log_file_path(resolved.file_path());
