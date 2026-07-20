@@ -661,10 +661,15 @@ fn run_inner(
         // so `run_session_log` still runs below and only the redundant Store
         // action + dedup-snapshot rewrite are skipped, not the log — mirrors
         // the #864/#231 fix for the same early-return-drops-logging bug class.
-        let session_end_unchanged = if event == HookEvent::SessionEnd {
-            let state_dir = crate::paths::state_dir()?;
-            let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
-            let is_unchanged = std::fs::read_to_string(&dedup_path)
+        // Resolved once here (rather than again at the write-back below) since
+        // it's the same target path for both the read-check and the rewrite.
+        let session_end_dedup_path = if event == HookEvent::SessionEnd {
+            Some(crate::paths::state_dir()?.join(crate::paths::HOOK_STORE_CHUNK))
+        } else {
+            None
+        };
+        let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
+            let is_unchanged = std::fs::read_to_string(dedup_path)
                 .ok()
                 .is_some_and(|prev| prev == chunk);
             if is_unchanged {
@@ -736,10 +741,10 @@ fn run_inner(
             // the store call means a transient MCP failure leaves the snapshot ahead
             // of reality — the next SessionEnd sees the chunk as unchanged and skips
             // the store, permanently losing the memory. (#594 code review)
-            if event == HookEvent::SessionEnd && !session_end_unchanged {
-                let state_dir = crate::paths::state_dir()?;
-                let dedup_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
-                crate::paths::write_owner_only_atomic(&dedup_path, chunk.as_bytes())?;
+            if let Some(dedup_path) = &session_end_dedup_path
+                && !session_end_unchanged
+            {
+                crate::paths::write_owner_only_atomic(dedup_path, chunk.as_bytes())?;
             }
 
             // #231: append the task-tracker Stop reminder. Only reached here when
