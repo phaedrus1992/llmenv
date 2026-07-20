@@ -149,7 +149,7 @@ fn smoke_statusline_renders_llmenv_widgets_from_data_file() {
     assert_completes_within(cmd, 10)
         .success()
         .stdout(predicate::str::contains("dev · rust"))
-        .stdout(predicate::str::contains("◇ 3"))
+        .stdout(predicate::str::contains("🔌 3"))
         .stdout(predicate::str::contains("MCP 2"))
         .stdout(predicate::str::contains("~"));
 }
