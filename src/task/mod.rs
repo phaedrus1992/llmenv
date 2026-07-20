@@ -11,6 +11,8 @@
 //! ponytail: per-task locking (rather than whole-store) if write throughput
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
+pub mod session;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,14 @@ pub struct Task {
     pub blocked_on: Vec<String>,
     #[serde(default)]
     pub notes: Vec<TaskNote>,
+    /// Id of the session active when this task was created (`None` for a
+    /// task added outside any session, or created before sessions existed —
+    /// `#[serde(default)]` keeps old task files loadable). Set once at
+    /// creation and never changed afterward, so a task's session membership
+    /// reflects when it was started, not whatever session happens to be
+    /// active later.
+    #[serde(default)]
+    pub session: Option<String>,
     /// RFC3339 timestamp.
     pub created_at: String,
     /// RFC3339 timestamp.
@@ -172,6 +182,31 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
     tasks
 }
 
+/// Count of tasks currently `open` or `wip`, store-wide (not scoped to any
+/// session) — the statusline's "no active session" fallback (#905).
+#[must_use]
+pub fn open_task_count(state_dir: &Path) -> u64 {
+    list_tasks(state_dir)
+        .into_iter()
+        .filter(|t| t.state != TaskState::Done)
+        .count() as u64
+}
+
+/// Title of the most recently updated `wip` task — the statusline's "what's
+/// in progress right now" fill-in (#905). Pass `session_id` to scope the
+/// search to one session's tasks (matching how `open`/`session_progress`
+/// are scoped for the same widget); `None` searches store-wide. `None` when
+/// nothing matching is currently `wip`.
+#[must_use]
+pub fn current_wip_title(state_dir: &Path, session_id: Option<&str>) -> Option<String> {
+    list_tasks(state_dir)
+        .into_iter()
+        .filter(|t| t.state == TaskState::Wip)
+        .filter(|t| session_id.is_none_or(|sid| t.session.as_deref() == Some(sid)))
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+        .map(|t| t.title)
+}
+
 /// Create a new task in `open` state and persist it.
 ///
 /// # Errors
@@ -203,6 +238,7 @@ pub fn add_task(state_dir: &Path, title: &str, parent: Option<&str>) -> anyhow::
             parent: parent_slug,
             blocked_on: Vec::new(),
             notes: Vec::new(),
+            session: session::active_session(state_dir).map(|s| s.id),
             created_at: now.clone(),
             updated_at: now,
         };
@@ -282,6 +318,20 @@ pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     })
 }
 
+/// Delete a task outright (#905) — for a task that's being deliberately
+/// abandoned, not just reshuffled. Returns the deleted task. Doesn't touch
+/// other tasks' `parent`/`blocked_on` references to it, which already
+/// tolerate a dangling target the same way a deleted blocker does (see
+/// `start_task`'s warning path).
+pub fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+    with_store_lock(state_dir, || {
+        let slug = resolve_identifier(state_dir, input)?;
+        let task = load_task(state_dir, &slug)?;
+        std::fs::remove_file(task_path(state_dir, &slug))?;
+        Ok(task)
+    })
+}
+
 /// Mark a task done. Idempotent from any prior state (fast-path completion).
 pub fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     with_store_lock(state_dir, || {
@@ -339,11 +389,14 @@ pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Tas
 /// there are none, or on any internal error (logged to stderr, never
 /// propagated — hooks must never block the agent).
 pub fn session_start_reminder(state_dir: &Path) -> String {
-    wip_reminder(
-        state_dir,
-        "In-progress tasks from a previous session",
-        "Resume one of these or run `llmenv task done <slug>` before starting new work.",
-    )
+    combine_reminders([
+        wip_reminder(
+            state_dir,
+            "In-progress tasks from a previous session",
+            "Resume one of these or run `llmenv task done <slug>` before starting new work.",
+        ),
+        session_finish_reminder(state_dir),
+    ])
 }
 
 /// Stop hook (end-of-turn skip detection): if `wip` tasks remain at the end
@@ -360,12 +413,46 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 /// ponytail: add session-scoped mtime filtering if the blanket reminder
 /// proves too chatty in practice.
 pub fn stop_hook_reminder(state_dir: &Path) -> String {
-    wip_reminder(
-        state_dir,
-        "You still have task(s) in progress",
-        "Run `llmenv task done <slug>` when finished, or `llmenv task note <slug> \"...\"` \
-         to record progress before this session ends.",
+    combine_reminders([
+        wip_reminder(
+            state_dir,
+            "You still have task(s) in progress",
+            "Run `llmenv task done <slug>` when finished, or `llmenv task note <slug> \"...\"` \
+             to record progress before this session ends.",
+        ),
+        session_finish_reminder(state_dir),
+    ])
+}
+
+/// If a task session (`llmenv task session start`) is active and every task
+/// tagged to it is done, build a reminder nudging the agent to close the
+/// session out — or add more work to it instead, if the session isn't
+/// actually finished. Empty string when no session is active, it has no
+/// tasks yet, or it still has open/in-progress tasks.
+fn session_finish_reminder(state_dir: &Path) -> String {
+    let Some(active) = session::active_session(state_dir) else {
+        return String::new();
+    };
+    let (done, total) = session::session_progress(state_dir, &active.id);
+    if total == 0 || done < total {
+        return String::new();
+    }
+    let label = active.name.as_deref().unwrap_or(active.id.as_str());
+    format!(
+        "All {total} task(s) in session '{label}' are done — run \
+         `llmenv task session finish` to close it out, or `llmenv task add <title>` \
+         to add more work to it."
     )
+}
+
+/// Join non-empty reminder strings with a blank line between them; empty
+/// parts are dropped rather than leaving stray blank lines.
+fn combine_reminders(parts: [String; 2]) -> String {
+    parts
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn wip_reminder(state_dir: &Path, header: &str, footer: &str) -> String {
@@ -824,11 +911,22 @@ mod tests {
                 proptest::option::of(".{1,30}"),
                 proptest::collection::vec(".{1,30}", 0..4),
                 proptest::collection::vec(arb_task_note(), 0..4),
+                proptest::option::of(".{1,30}"),
                 ".{1,30}",
                 ".{1,30}",
             )
                 .prop_map(
-                    |(slug, title, state, parent, blocked_on, notes, created_at, updated_at)| {
+                    |(
+                        slug,
+                        title,
+                        state,
+                        parent,
+                        blocked_on,
+                        notes,
+                        session,
+                        created_at,
+                        updated_at,
+                    )| {
                         Task {
                             slug,
                             title,
@@ -836,6 +934,7 @@ mod tests {
                             parent,
                             blocked_on,
                             notes,
+                            session,
                             created_at,
                             updated_at,
                         }

@@ -20,6 +20,7 @@ pub struct StatusData {
     pub config_stale: Option<bool>,
     pub cache: Option<CacheData>,
     pub session_log: Option<u64>,
+    pub tasks: Option<TasksData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -48,6 +49,24 @@ pub struct ThrottleData {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct CacheData {
     pub prunable_bytes: u64,
+}
+
+/// Task-tracker progress (#905). `session` is `Some((done, total))` when a
+/// task session is active — a bare `open` count (open + `wip` tasks,
+/// store-wide) otherwise. `current` is the title of the most recently
+/// updated `wip` task (scoped to the active session if one exists, else
+/// store-wide) — `None` when nothing is currently in progress.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TasksData {
+    pub open: u64,
+    pub session: Option<SessionProgress>,
+    pub current: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+pub struct SessionProgress {
+    pub done: u64,
+    pub total: u64,
 }
 
 impl StatusData {
@@ -142,6 +161,7 @@ mod tests {
                 config_stale,
                 cache: None,
                 session_log,
+                tasks: None,
             })
     }
 

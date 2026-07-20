@@ -84,6 +84,7 @@ pub fn collect_status_data(
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
             cache: collect_cache(cache_root, hashing),
             session_log: collect_session_log(),
+            tasks: collect_tasks(),
         },
     }
 }
@@ -894,5 +895,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.jsonl");
         assert_eq!(collect_session_log_from_path(&missing), None);
+    }
+
+    // --- collect_tasks (#905) ---
+
+    #[test]
+    fn collect_tasks_empty_store_is_zero_open_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert_eq!(
+            data,
+            TasksData {
+                open: 0,
+                session: None,
+                current: None,
+            }
+        );
+    }
+
+    #[test]
+    fn collect_tasks_no_session_counts_open_and_wip_globally() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::task::add_task(dir.path(), "Open task", None).unwrap();
+        let wip = crate::task::add_task(dir.path(), "In progress task", None).unwrap();
+        crate::task::start_task(dir.path(), &wip.slug).unwrap();
+        let done = crate::task::add_task(dir.path(), "Done task", None).unwrap();
+        crate::task::done_task(dir.path(), &done.slug).unwrap();
+
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert_eq!(data.open, 2, "open + wip, not done");
+        assert!(data.session.is_none());
+        assert_eq!(data.current.as_deref(), Some("In progress task"));
+    }
+
+    #[test]
+    fn collect_tasks_with_active_session_reports_done_over_total() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::task::session::start_session(dir.path(), Some("sprint 1"), false).unwrap();
+        let t1 = crate::task::add_task(dir.path(), "Task one", None).unwrap();
+        crate::task::add_task(dir.path(), "Task two", None).unwrap();
+        crate::task::done_task(dir.path(), &t1.slug).unwrap();
+
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert_eq!(
+            data.session,
+            Some(crate::cli::statusline::data::SessionProgress { done: 1, total: 2 })
+        );
+    }
+
+    #[test]
+    fn collect_tasks_current_is_none_when_nothing_wip() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::task::add_task(dir.path(), "Just sitting there open", None).unwrap();
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert!(data.current.is_none());
+    }
+
+    #[test]
+    fn collect_tasks_current_scoped_to_active_session_when_one_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        // wip task outside any session — must not leak into the session-scoped `current`.
+        let outside = crate::task::add_task(dir.path(), "Outside session work", None).unwrap();
+        crate::task::start_task(dir.path(), &outside.slug).unwrap();
+
+        crate::task::session::start_session(dir.path(), Some("sprint 1"), false).unwrap();
+        let inside = crate::task::add_task(dir.path(), "Inside session work", None).unwrap();
+        crate::task::start_task(dir.path(), &inside.slug).unwrap();
+
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert_eq!(data.current.as_deref(), Some("Inside session work"));
     }
 }
