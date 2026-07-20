@@ -609,7 +609,7 @@ fn run_inner(
 
         // Apply default type/importance markers from config (R1, R3) when no explicit
         // marker is present in the generated chunk.
-        chunk = apply_memory_config_defaults(&chunk, &config, &active);
+        chunk = apply_memory_config_defaults(chunk, &config, &active);
 
         let url = memory_url(&config, config_dir, &active)?;
         if url.is_none() {
@@ -1261,7 +1261,7 @@ fn build_hook_bundle_refs(
 /// ponytail: `type_importance` per-type overrides are not yet applied here —
 /// they will be resolved when the Store action runs against the ICM backend.
 fn apply_memory_config_defaults(
-    chunk: &str,
+    mut chunk: String,
     config: &crate::config::Config,
     active: &crate::scope::ActiveScopes,
 ) -> String {
@@ -1270,27 +1270,25 @@ fn apply_memory_config_defaults(
             .iter()
             .find(|m| m.when.iter().any(|t| active.tags.contains(t)))
     }) else {
-        return chunk.to_string();
+        return chunk;
     };
-
-    let mut out = chunk.to_string();
 
     if !chunk.contains("<!-- llmenv-type:")
         && let Some(ty) = &mem.default_type
     {
-        out.push_str(&format!("\n<!-- llmenv-type: {} -->", ty.as_marker_str()));
+        chunk.push_str(&format!("\n<!-- llmenv-type: {} -->", ty.as_marker_str()));
     }
 
     if !chunk.contains("<!-- llmenv-importance:")
         && let Some(imp) = &mem.default_importance
     {
-        out.push_str(&format!(
+        chunk.push_str(&format!(
             "\n<!-- llmenv-importance: {} -->",
             imp.as_marker_str()
         ));
     }
 
-    out
+    chunk
 }
 
 /// Validate a tag to prevent query injection. Tags must be alphanumeric with
@@ -2100,9 +2098,9 @@ mod tests {
     fn apply_memory_defaults_idempotent_no_type() {
         let config = memory_config(None);
         let active = active_with_tag("test");
-        let input = "## context\nno markers";
+        let input = "## context\nno markers".to_string();
         let once = apply_memory_config_defaults(input, &config, &active);
-        let twice = apply_memory_config_defaults(&once, &config, &active);
+        let twice = apply_memory_config_defaults(once.clone(), &config, &active);
         assert_eq!(once, twice, "applying defaults twice must be idempotent");
     }
 
@@ -2110,7 +2108,7 @@ mod tests {
     fn apply_memory_defaults_adds_type_marker_when_present() {
         let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
         let active = active_with_tag("test");
-        let input = "## context";
+        let input = "## context".to_string();
         let out = apply_memory_config_defaults(input, &config, &active);
         assert!(
             out.contains("<!-- llmenv-type: semantic -->"),
@@ -2122,7 +2120,7 @@ mod tests {
     fn apply_memory_defaults_skips_existing_marker() {
         let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
         let active = active_with_tag("test");
-        let input = "## context\n<!-- llmenv-type: episodic -->";
+        let input = "## context\n<!-- llmenv-type: episodic -->".to_string();
         let out = apply_memory_config_defaults(input, &config, &active);
         assert!(
             !out.contains("semantic"),
