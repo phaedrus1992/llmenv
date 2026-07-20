@@ -52,6 +52,11 @@ The neutral `{tool, pattern}` / `{tool, paths}` form covers the common case; the
 adapter *generates* Claude's `Bash(...)` / `Read(...)` string grammar — you never
 author it. `native_permissions` appends raw rule strings for the long tail.
 
+For a given tool+pattern, `deny` always wins over `ask`/`allow` regardless of
+whether it came from the structured `permissions:` block or the engine's
+`native_permissions` override — a native `allow` can never silently unset a
+structured `deny` for the same rule.
+
 ## The catch-all `native:` block
 
 Separately, the top-level `native:` block is a per-engine catch-all for keys that

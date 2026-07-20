@@ -731,44 +731,31 @@ impl AgentAdapter for OpencodeAdapter {
             }
         }
 
-        // Insertion order: structured rules first, then native rules. Native rules
-        // use last-write-wins at the pattern level (BTreeMap insertion),
-        // so a native wildcard `*` for a tool shadows ALL structured patterns
-        // for that tool. If a user has `allow: [Bash(otool *)]` AND a native
-        // `deny: [Bash(*)]`, the final state is `Bash/* -> deny` because the
-        // native insertion runs after the structured one. Use one category
-        // (structured OR native) per tool to avoid unexpected shadowing.
-        insert_patterns(
-            &mut permission_map,
-            perms.allow.iter().flat_map(rule_to_patterns),
-            "allow",
-        );
-        insert_patterns(
-            &mut permission_map,
-            perms.ask.iter().flat_map(rule_to_patterns),
-            "ask",
-        );
-        insert_patterns(
-            &mut permission_map,
-            perms.deny.iter().flat_map(rule_to_patterns),
-            "deny",
-        );
-        if let Some(n) = native_perms {
+        // Insertion order: interleaved by action tier (allow, then ask, then
+        // deny), structured before native within each tier. This guarantees
+        // deny always wins for a given tool+pattern regardless of which
+        // source (structured config or native_permissions) wrote it — the
+        // deny tier is inserted last across both sources. A native wildcard
+        // `*` for a tool still shadows all structured patterns for that tool
+        // within the same tier; use one category (structured OR native) per
+        // tool to avoid that shadowing.
+        for (action, structured, native) in [
+            ("allow", &perms.allow, native_perms.map(|n| &n.allow)),
+            ("ask", &perms.ask, native_perms.map(|n| &n.ask)),
+            ("deny", &perms.deny, native_perms.map(|n| &n.deny)),
+        ] {
             insert_patterns(
                 &mut permission_map,
-                n.allow.iter().map(|s| parse_native_rule(s)),
-                "allow",
+                structured.iter().flat_map(rule_to_patterns),
+                action,
             );
-            insert_patterns(
-                &mut permission_map,
-                n.ask.iter().map(|s| parse_native_rule(s)),
-                "ask",
-            );
-            insert_patterns(
-                &mut permission_map,
-                n.deny.iter().map(|s| parse_native_rule(s)),
-                "deny",
-            );
+            if let Some(n) = native {
+                insert_patterns(
+                    &mut permission_map,
+                    n.iter().map(|s| parse_native_rule(s)),
+                    action,
+                );
+            }
         }
 
         let config_permission = if !permission_map.is_empty() {
@@ -1474,6 +1461,41 @@ mod tests {
         assert!(doc["permission"].get("allow").is_none());
         assert!(doc["permission"].get("deny").is_none());
         assert!(doc["permission"].get("ask").is_none());
+    }
+
+    #[test]
+    fn materialize_native_allow_does_not_override_structured_deny() {
+        // Regression test for #877: a native `allow` for the same tool+pattern
+        // as a structured `deny` must not win — deny is the safe-by-default
+        // tier and must always win regardless of which source wrote it.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.permissions.deny.push(crate::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("rm *".into()),
+            paths: vec![],
+        });
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec!["Bash(rm *)".into()],
+                ask: vec![],
+                deny: vec![],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let bash = &doc["permission"]["bash"];
+        assert_eq!(
+            bash["rm *"],
+            serde_json::json!("deny"),
+            "structured deny must win over native allow for the same tool+pattern"
+        );
     }
 
     #[test]
@@ -2361,6 +2383,61 @@ mod tests {
             prop_assert_eq!(
                 &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
                 &serde_json::json!("deny")
+            );
+        }
+
+        /// Generalizes the #877 regression: for a given tool+pattern, the
+        /// highest-precedence tier present (deny > ask > allow) wins the
+        /// final action, regardless of whether that tier's rule came from
+        /// the structured `permissions:` block or the `native_permissions`
+        /// override, and regardless of which other tiers/sources are also
+        /// present.
+        #[test]
+        fn highest_tier_wins_regardless_of_source(
+            tool in "[A-Za-z]{1,8}",
+            pattern in "[a-z]{2,8}",
+            allow_present in any::<bool>(),
+            allow_native in any::<bool>(),
+            ask_present in any::<bool>(),
+            ask_native in any::<bool>(),
+            deny_present in any::<bool>(),
+            deny_native in any::<bool>(),
+        ) {
+            prop_assume!(allow_present || ask_present || deny_present);
+
+            let rule = |t: &str, p: &str| crate::config::PermissionRule {
+                tool: t.to_string(),
+                pattern: Some(p.to_string()),
+                paths: vec![],
+            };
+            let mut caps = crate::config::Capabilities::default();
+            let mut native = crate::config::NativePermissionRules::default();
+            for (present, is_native, structured_tier, native_tier) in [
+                (allow_present, allow_native, &mut caps.permissions.allow, &mut native.allow),
+                (ask_present, ask_native, &mut caps.permissions.ask, &mut native.ask),
+                (deny_present, deny_native, &mut caps.permissions.deny, &mut native.deny),
+            ] {
+                if !present {
+                    continue;
+                }
+                if is_native {
+                    native_tier.push(format!("{tool}({pattern})"));
+                } else {
+                    structured_tier.push(rule(&tool, &pattern));
+                }
+            }
+            caps.native_permissions.insert("opencode".into(), native);
+
+            let expected = if deny_present {
+                "deny"
+            } else if ask_present {
+                "ask"
+            } else {
+                "allow"
+            };
+            prop_assert_eq!(
+                &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
+                &serde_json::json!(expected)
             );
         }
 
