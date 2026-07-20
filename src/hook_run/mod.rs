@@ -457,12 +457,10 @@ pub(crate) fn reset_preloaded_config_for_test() {
 /// Load config from `path`, reusing `main()`'s preload when available. Also
 /// used by non-hook-run CLI commands (`export`, `regenerate`, `statusline`)
 /// that would otherwise re-parse the same `config.yaml` main() already loaded.
-/// Everything else — `login`, `upgrade`, `check-stale`, `status`, `validate`,
-/// `context`, memory-prune, and the detached-store/session-log flows — calls
-/// `Config::load` directly and intentionally does not go through this cache:
-/// each is a one-shot command in its own process, so there's no second parse
-/// in the same process to skip, and routing them through the cache would add
-/// indirection with no measurable benefit (#880).
+/// Every other CLI command intentionally calls `Config::load` directly instead
+/// (#880): each is a one-shot command in its own process, so there's no second
+/// in-process parse to skip, and routing it through this cache would add
+/// indirection with no measurable benefit.
 ///
 /// Once a preload exists, `path` is ignored — every current caller resolves
 /// the same canonical `paths::config_path()` that `main()` preloaded from, so
@@ -1604,16 +1602,7 @@ mod tests {
         reset_preloaded_config_for_test();
 
         let mut preloaded = crate::config::Config::default();
-        preloaded.capabilities.hooks.push(crate::config::Hook {
-            event: "PreloadMarker".into(),
-            matcher: None,
-            handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
-                command: Some("marker".into()),
-                tool: None,
-            },
-            bundle_origin: None,
-        });
+        preloaded.disabled_engines.push("preload-marker".into());
         set_preloaded_config(preloaded.clone());
 
         // The path on disk holds a *different* config, so a correct result
