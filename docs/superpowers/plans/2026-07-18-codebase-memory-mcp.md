@@ -69,6 +69,7 @@ detached-spawn pattern in `src/hook_run/mod.rs`.
 ## Task 1: `CodebaseMemory` schema struct + `Features` field
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/schema.rs:20-54` (`Features` struct, both
   the top-level and the `Capabilities` copy at `schema.rs:543-549`)
 - Modify: `crates/llmenv-config/src/schema.rs:570-605`
@@ -80,6 +81,7 @@ detached-spawn pattern in `src/hook_run/mod.rs`.
   `Memory`/`Features` round-trip tests)
 
 **Interfaces:**
+
 - Produces: `pub struct CodebaseMemory { pub when: Vec<String>, pub index_path: Option<String> }`,
   field `Features.codebase_memory: Vec<CodebaseMemory>`
 - Consumed by: Task 2 (validation), Task 4 (resolver), Task 5 (doctor), Task 6
@@ -177,6 +179,7 @@ git commit -m "feat(config): add CodebaseMemory schema struct and Features field
 ## Task 2: Validation
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/validate.rs:557-644` (`validate_mcps`,
   add a codebase_memory block alongside the existing `memory`/`throttle`
   loops)
@@ -195,6 +198,7 @@ git commit -m "feat(config): add CodebaseMemory schema struct and Features field
   same task so the gap doesn't propagate.)
 
 **Interfaces:**
+
 - Consumes: `CodebaseMemory` from Task 1
 - Produces: `ValidateError::CodebaseMemoryNoTags` variant; validation runs
   inside `Config::validate()` (called via `validate_mcps`)
@@ -341,11 +345,13 @@ git commit -m "feat(config): validate features.codebase_memory tags, add missing
 ## Task 3: Proptest coverage for `CodebaseMemory`
 
 **Files:**
+
 - Modify: `crates/llmenv-config/src/validate.rs:984-1011` (`arb_memory` /
   `arb_config` proptest generators)
 - Test: same file's proptest module
 
 **Interfaces:**
+
 - Consumes: `CodebaseMemory` from Task 1
 
 - [ ] **Step 1: Write the failing property test**
@@ -403,6 +409,7 @@ git commit -m "test(config): add proptest coverage for CodebaseMemory"
 ## Task 4: Resolver — materialize into a local stdio MCP entry
 
 **Files:**
+
 - Modify: `src/mcp/resolve.rs` (new `resolve_codebase_memory` function +
   wiring into `resolve_mcps`; new `ResolveError` variant if needed)
 - Modify: `src/mcp/resolve.rs` call sites — `resolve_mcps`'s signature gains
@@ -421,6 +428,7 @@ git commit -m "test(config): add proptest coverage for CodebaseMemory"
   `memory_*` test shapes)
 
 **Interfaces:**
+
 - Consumes: `CodebaseMemory` (Task 1), `ResolvedKind::Stdio { command, args, env }` (existing)
 - Produces: `pub fn resolve_codebase_memory(cm: &CodebaseMemory, project_root: &Path, state_dir: &Path) -> ResolvedMcp`
 
@@ -571,6 +579,7 @@ git commit -m "feat(mcp): resolve codebase_memory entries to local stdio MCP ser
 ## Task 5: Doctor checks
 
 **Files:**
+
 - Modify: `src/cli/doctor.rs:152-211` (`run_doctor_tool_availability`) — add
   a `codebase-memory-mcp` binary-on-PATH check, gated on
   `config.features.as_ref().is_some_and(|f| !f.codebase_memory.is_empty())`
@@ -583,6 +592,7 @@ git commit -m "feat(mcp): resolve codebase_memory entries to local stdio MCP ser
   harness (likely constructs a `Config` + captures stdout/stderr)
 
 **Interfaces:**
+
 - Consumes: `CodebaseMemory` (Task 1)
 
 - [ ] **Step 1: Write the failing test**
@@ -681,10 +691,12 @@ git commit -m "feat(doctor): check codebase-memory-mcp binary availability and o
 ## Task 6: Status reporting
 
 **Files:**
+
 - Modify: `src/cli/status.rs:222-316` (`run_mcp_ls`) — extend the existing
   loop that appends `Memory` rows to also append `CodebaseMemory` rows
 
 **Interfaces:**
+
 - Consumes: `CodebaseMemory` (Task 1), resolved entries (Task 4)
 
 - [ ] **Step 1: Write the failing test**
@@ -736,6 +748,7 @@ git commit -m "feat(status): report codebase_memory activation in llmenv status 
 ## Task 7: SessionStart hook — register project for auto-watch
 
 **Files:**
+
 - Modify: `src/hook_run/mod.rs` — new function `fn trigger_codebase_memory_index(...)`,
   called from `run_inner`'s `SessionStart` handling
 - Test: `tests/hook_run_failsoft.rs` (new integration test, mirroring the
@@ -743,6 +756,7 @@ git commit -m "feat(status): report codebase_memory activation in llmenv status 
   a unit test for the command-building logic in isolation
 
 **Interfaces:**
+
 - Consumes: `CodebaseMemory`/resolved entries (Tasks 1, 4)
 - Produces: `fn build_index_repository_command(project_root: &Path, cbm: &CodebaseMemory, state_dir: &Path) -> std::process::Command`
   (kept separate from the actual spawn so it's unit-testable without
@@ -898,12 +912,13 @@ git commit -m "feat(hook-run): register project with codebase-memory-mcp on Sess
 ## Task 8: Docs + CHANGELOG
 
 **Files:**
+
 - Modify: `website/docs/` — find wherever `features.memory` is documented
   (grep `website/docs/` for `features.memory` or `server_host`) and add a
   sibling `features.codebase_memory` section: config shape, the two env vars
   llmenv always computes (`CBM_CACHE_DIR`, `CBM_ALLOWED_ROOT`), the
   SessionStart auto-register behavior, and a link to
-  https://github.com/DeusData/codebase-memory-mcp for install instructions.
+  <https://github.com/DeusData/codebase-memory-mcp> for install instructions.
 - Modify: `CHANGELOG-3.md` (`[Unreleased]` → `### Added`) via the
   `keepachangelog` skill
 

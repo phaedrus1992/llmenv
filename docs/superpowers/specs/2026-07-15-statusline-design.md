@@ -21,7 +21,7 @@ renderer.
 Three layers, all inside llmenv core:
 
 | Layer | What | Where |
-|-------|------|-------|
+| ------- | ------ | ------- |
 | **Config** | Widget layout, formatting, colours | `config.yaml` `statusline:` section |
 | **Data** | llmenv stats for this context | `<materialized_dir>/llmenv-status.json` |
 | **Renderer** | Stdin + data + config → ANSI output | `llmenv statusline` subcommand |
@@ -196,6 +196,7 @@ within it.
 #### `icon_set`
 
 Controls how icons are selected:
+
 - `auto` — detect terminal font: Nerd Font icons when a Nerd Font is active,
   fall back to simple ASCII glyphs
 - `nerd` — always use Nerd Font glyphs
@@ -207,7 +208,7 @@ Controls how icons are selected:
 #### Engine-sourced (from stdin)
 
 | Widget | Default format | Example output | Available fields |
-|--------|---------------|----------------|-----------------|
+| -------- | --------------- | ---------------- | ----------------- |
 | `model` | `{short_name} {version}` | `Opus` | `short_name`, `version`, `full_name` |
 | `folder` | `{basename}` | `llmenv` | `basename`, `path` |
 | `branch` | `{name}` | `release/3.x` | `name` |
@@ -222,7 +223,7 @@ Controls how icons are selected:
 #### llmenv-sourced (from data file)
 
 | Widget | Default format | Example output | Available fields |
-|--------|---------------|----------------|-----------------|
+| -------- | --------------- | ---------------- | ----------------- |
 | `scopes` | `║ {tags}` | `║ dev · rust` | `tags`, `count` |
 | `plugins` | `◇ {total}` | `◇ 12` | `total`, `errors`, `error_icon` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
@@ -285,7 +286,7 @@ All fields optional. Missing/parse-error defaults to empty for each widget.
 
 New files:
 
-```
+```text
 src/cli/statusline.rs         — Subcommand entry point
 src/cli/statusline/widget.rs  — Widget type definitions + rendering
 src/cli/statusline/config.rs  — Config parsing (statusline section)
