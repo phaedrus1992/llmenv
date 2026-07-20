@@ -107,36 +107,45 @@ pub fn render_engine_widget(
         "branch" => render_branch(data, cfg, use_color),
         "pr" => render_pr(data, cfg, use_color),
         "progress_bar" => render_progress_bar(data, cfg, use_color),
-        "usage_5h" => render_usage(
-            data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
-            now_unix(),
-            FIVE_HOUR_SECS,
-            cfg,
-            "5h {pct}%{pace} ➡{reset}",
-        ),
-        "usage_7d" => render_usage(
-            data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
-            now_unix(),
-            SEVEN_DAY_SECS,
-            cfg,
-            "7d {pct}%{pace} ➡{reset}",
-        ),
+        "usage_5h" | "usage_7d" => {
+            let state = usage_state_dir();
+            let (window, window_secs, defaults, fmt) = if name == "usage_5h" {
+                (
+                    data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
+                    FIVE_HOUR_SECS,
+                    [70, 90],
+                    "5h {pct}%{delta}{pace} ➡{reset}",
+                )
+            } else {
+                (
+                    data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
+                    SEVEN_DAY_SECS,
+                    [60, 80],
+                    "7d {pct}%{delta}{pace} ➡{reset}",
+                )
+            };
+            render_usage(
+                &UsageArgs {
+                    window,
+                    now: now_unix(),
+                    window_secs,
+                    thresholds: cfg.and_then(|c| c.thresholds).unwrap_or(defaults),
+                    state_dir: state.as_deref(),
+                    state_key: name,
+                    use_color,
+                },
+                cfg,
+                fmt,
+            )
+        }
         "peak" => super::peak::render_peak(cfg),
         _ => return None,
     };
-    // Threshold-colored widgets supply a dynamic style; `finish` applies it
-    // unless the user set an explicit per-widget `style`.
-    let user_thresholds = cfg.and_then(|c| c.thresholds);
+    // `pr` colors by review state via a dynamic style; `finish` applies it
+    // unless the user set an explicit per-widget `style`. (progress_bar and
+    // the usage widgets color themselves per-cell.)
     let dyn_style = match name {
         "pr" => pr_review_style(data),
-        "usage_5h" => usage_threshold_style(
-            data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
-            user_thresholds.unwrap_or([70, 90]),
-        ),
-        "usage_7d" => usage_threshold_style(
-            data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
-            user_thresholds.unwrap_or([60, 80]),
-        ),
         _ => None,
     };
     Some(super::finish(name, raw, cfg, dyn_style, use_color))
@@ -566,7 +575,7 @@ fn render_progress_bar(
     // widget opts out of the `finish` style wrap (default_style is empty and
     // it's not in the dyn_style map).
     let style = threshold_style(used, cfg.and_then(|c| c.thresholds).unwrap_or([50, 80]));
-    let bar = colored_bar(used, width as usize, style, use_color);
+    let bar = colored_bar(used, width as usize, style, None, use_color);
     let pct = used.round() as i64;
     let pct_str = crate::cli::style::apply_style(&pct.to_string(), style, use_color);
     let format = cfg
@@ -588,20 +597,29 @@ fn block_bar(pct: f64, width: usize) -> String {
 const DEFAULT_BAR_WIDTH: u8 = 10;
 
 /// A `width`-cell bar with each cell independently colored: filled cells in
-/// `filled_style`, empty cells dim. Each cell carries its own SGR reset so the
-/// two colors don't bleed (matching the reference tool). With `use_color`
-/// off, degrades to the plain [`block_bar`] glyphs.
-fn colored_bar(pct: f64, width: usize, filled_style: &str, use_color: bool) -> String {
-    if !use_color {
+/// `filled_style`, empty cells dim, and an optional bright pace-target marker
+/// (`│`) at `marker`. Each cell carries its own SGR reset so colors don't
+/// bleed (matching the reference tool). With `use_color` off and no marker,
+/// degrades to the plain [`block_bar`] glyphs.
+fn colored_bar(
+    pct: f64,
+    width: usize,
+    filled_style: &str,
+    marker: Option<usize>,
+    use_color: bool,
+) -> String {
+    if !use_color && marker.is_none() {
         return block_bar(pct, width);
     }
     let filled = ((pct / 100.0 * width as f64) as usize).min(width);
     (0..width)
         .map(|i| {
-            if i < filled {
-                crate::cli::style::apply_style("\u{2593}", filled_style, true)
+            if marker == Some(i) {
+                crate::cli::style::apply_style("\u{2502}", "bold white", use_color) // │
+            } else if i < filled {
+                crate::cli::style::apply_style("\u{2593}", filled_style, use_color)
             } else {
-                crate::cli::style::apply_style("\u{2591}", "dim", true)
+                crate::cli::style::apply_style("\u{2591}", "dim", use_color)
             }
         })
         .collect()
@@ -638,73 +656,156 @@ fn humanize_until(resets_at: i64, now: i64) -> String {
 /// carries a non-finite percentage. `{pct}` is the clamped, rounded used
 /// percentage, `{bar}` a 10-cell fill of it, `{reset}` the time until the
 /// window resets.
-fn render_usage(
-    window: Option<&RateLimitWindow>,
+/// Inputs for a usage-window widget, bundled to keep the argument count sane.
+struct UsageArgs<'a> {
+    window: Option<&'a RateLimitWindow>,
     now: i64,
     window_secs: i64,
+    thresholds: [u8; 2],
+    /// Directory for delta state files (`None` disables delta tracking).
+    state_dir: Option<&'a Path>,
+    state_key: &'a str,
+    use_color: bool,
+}
+
+/// Render a Claude.ai usage window: threshold-colored percentage, a per-cell
+/// bar (filled = threshold color, empty dim) with a bright pace-target marker,
+/// reset countdown, over/under-pace indicator, and a delta from the last
+/// render. `{pct}`/`{bar}`/`{reset}`/`{pace}`/`{delta}` are the placeholders.
+fn render_usage(
+    args: &UsageArgs,
     cfg: Option<&llmenv_config::WidgetConfig>,
     default_format: &str,
 ) -> String {
-    let Some(window) = window else {
+    let Some(window) = args.window else {
         return String::new();
     };
-    let Some(pct) = window.used_percentage else {
+    let Some(raw) = window.used_percentage else {
         return String::new();
     };
-    if !pct.is_finite() {
+    if !raw.is_finite() {
         return String::new();
     }
-    let pct = pct.clamp(0.0, 100.0);
+    let pct = raw.clamp(0.0, 100.0);
+    let style = threshold_style(pct, args.thresholds);
     let reset = window
         .resets_at
-        .map(|r| humanize_until(r, now))
+        .map(|r| humanize_until(r, args.now))
         .unwrap_or_default();
-    let pace = window
-        .resets_at
-        .map(|r| pace_indicator(pct, r, window_secs, now))
-        .unwrap_or_default();
+    let (pace, marker) = match window.resets_at {
+        Some(r) => pace_and_target(
+            pct,
+            r,
+            args.window_secs,
+            args.now,
+            DEFAULT_BAR_WIDTH as usize,
+        ),
+        None => (String::new(), None),
+    };
+    let bar = colored_bar(
+        pct,
+        DEFAULT_BAR_WIDTH as usize,
+        style,
+        marker,
+        args.use_color,
+    );
+    let delta = usage_delta(args.state_dir, args.state_key, pct, args.now);
+    let pct_str =
+        crate::cli::style::apply_style(&(pct.round() as i64).to_string(), style, args.use_color);
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or(default_format);
     format
-        .replace("{pct}", &(pct.round() as i64).to_string())
-        .replace("{bar}", &block_bar(pct, DEFAULT_BAR_WIDTH as usize))
+        .replace("{pct}", &pct_str)
+        .replace("{bar}", &bar)
         .replace("{reset}", &reset)
         .replace("{pace}", &pace)
+        .replace("{delta}", &delta)
 }
 
-/// Over/under-pace indicator for a usage window: `⇡N%` when usage is ahead of
-/// the time elapsed in the window (burning too fast), `⇣N%` when behind,
-/// empty within ±0.5%. Each carries a leading space so it drops out cleanly
-/// when absent. `target` is the percentage you'd be at if usage were linear
-/// across the window.
-fn pace_indicator(current_pct: f64, resets_at: i64, window_secs: i64, now: i64) -> String {
+/// The over/under-pace indicator plus the bar column of the linear-pace
+/// target. `⇡N%` when usage is ahead of the elapsed window time (burning too
+/// fast), `⇣N%` when behind, empty within ±0.5% (with a leading space so it
+/// drops out cleanly). The marker column is `None` at the bar extremes, where
+/// a marker reads oddly.
+fn pace_and_target(
+    pct: f64,
+    resets_at: i64,
+    window_secs: i64,
+    now: i64,
+    width: usize,
+) -> (String, Option<usize>) {
     if window_secs <= 0 {
-        return String::new();
+        return (String::new(), None);
     }
     let remaining = (resets_at - now).clamp(0, window_secs);
     let target = (window_secs - remaining) as f64 / window_secs as f64 * 100.0;
-    let over = current_pct - target;
+    let over = pct - target;
     let abs = over.abs().round() as i64;
-    if over > 0.5 {
+    let indicator = if over > 0.5 {
         format!(" \u{21e1}{abs}%") // ⇡
     } else if over < -0.5 {
         format!(" \u{21e3}{abs}%") // ⇣
     } else {
         String::new()
+    };
+    let pos = (target / 100.0 * width as f64).round() as i64;
+    let marker = (pos > 0 && (pos as usize) < width).then_some(pos as usize);
+    (indicator, marker)
+}
+
+/// Delta from the previously-recorded used percentage for `key`, e.g.
+/// `" (+4.5)"`. Best-effort: reads/writes a small `<state_dir>/<key>` file
+/// (`"<pct> <unix_ts>"`), rewriting at most once a minute so the delta
+/// reflects real change rather than per-render noise. Empty when there's no
+/// state dir, no prior sample, or the change rounds to zero.
+fn usage_delta(state_dir: Option<&Path>, key: &str, pct: f64, now: i64) -> String {
+    let Some(dir) = state_dir else {
+        return String::new();
+    };
+    let path = dir.join(key);
+    let prev = read_usage_state(&path);
+    if prev.is_none_or(|(_, ts)| now - ts >= 60) {
+        write_usage_state(&path, pct, now);
+    }
+    match prev {
+        Some((prev_pct, _)) => format_delta(pct - prev_pct),
+        None => String::new(),
     }
 }
 
-/// Threshold color for a usage window by its used percentage.
-fn usage_threshold_style(
-    window: Option<&RateLimitWindow>,
-    thresholds: [u8; 2],
-) -> Option<&'static str> {
-    let pct = window.and_then(|w| w.used_percentage)?;
-    if !pct.is_finite() {
-        return None;
+fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut it = contents.split_whitespace();
+    let pct = it.next()?.parse().ok()?;
+    let ts = it.next()?.parse().ok()?;
+    Some((pct, ts))
+}
+
+fn write_usage_state(path: &Path, pct: f64, now: i64) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    Some(threshold_style(pct.clamp(0.0, 100.0), thresholds))
+    let _ = std::fs::write(path, format!("{pct} {now}")); // best-effort stat
+}
+
+fn format_delta(delta: f64) -> String {
+    if delta.abs() < 0.05 {
+        String::new()
+    } else if delta > 0.0 {
+        format!(" (+{delta:.1})")
+    } else {
+        format!(" ({delta:.1})")
+    }
+}
+
+/// Directory for usage delta state, alongside the materialized session data
+/// (`$CLAUDE_CONFIG_DIR/statusline-state`). `None` when the engine didn't
+/// export `CLAUDE_CONFIG_DIR`, which disables delta tracking.
+fn usage_state_dir() -> Option<PathBuf> {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .map(|d| PathBuf::from(d).join("statusline-state"))
 }
 
 /// Window durations in seconds for the pace calculation.
@@ -1226,18 +1327,29 @@ mod tests {
         );
     }
 
+    fn usage_args(window: &RateLimitWindow, now: i64, window_secs: i64) -> UsageArgs<'_> {
+        UsageArgs {
+            window: Some(window),
+            now,
+            window_secs,
+            thresholds: [70, 90],
+            state_dir: None, // delta disabled in tests
+            state_key: "t",
+            use_color: false,
+        }
+    }
+
     #[test]
     fn renders_usage_5h_minutes_reset() {
-        // now=1000, resets_at=now+1380 (23m), used 8% → default "5h {pct}% ➡{reset}".
+        // now=1000, resets_at=now+1380 (23m), used 8%. Format has no {bar}, so
+        // the pace marker doesn't show.
         let window = RateLimitWindow {
             used_percentage: Some(8.0),
             resets_at: Some(1000 + 1380),
         };
         assert_eq!(
             render_usage(
-                Some(&window),
-                1000,
-                FIVE_HOUR_SECS,
+                &usage_args(&window, 1000, FIVE_HOUR_SECS),
                 None,
                 "5h {pct}% ➡{reset}"
             ),
@@ -1246,20 +1358,20 @@ mod tests {
     }
 
     #[test]
-    fn renders_usage_bar_and_hours_reset() {
+    fn renders_usage_bar_with_pace_marker() {
+        // now=0, resets_at=10980 (3h03m), window 5h → 39% elapsed, so the
+        // pace-target marker │ lands at bar column 4; used 100% fills the rest.
         let window = RateLimitWindow {
             used_percentage: Some(100.0),
-            resets_at: Some(10_980), // 3h03m from epoch 0
+            resets_at: Some(10_980),
         };
         assert_eq!(
             render_usage(
-                Some(&window),
-                0,
-                FIVE_HOUR_SECS,
+                &usage_args(&window, 0, FIVE_HOUR_SECS),
                 None,
                 "{bar} {pct}% ➡{reset}"
             ),
-            "▓▓▓▓▓▓▓▓▓▓ 100% ➡3h03m"
+            "▓▓▓▓│▓▓▓▓▓ 100% ➡3h03m"
         );
     }
 
@@ -1293,7 +1405,7 @@ mod tests {
             resets_at: Some(1000 + 9000), // 9000s remaining = 50% elapsed
         };
         assert_eq!(
-            render_usage(Some(&under), 1000, 18_000, None, "{pace}"),
+            render_usage(&usage_args(&under, 1000, 18_000), None, "{pace}"),
             " \u{21e3}40%" // ⇣ 50 - 10 = 40 under
         );
         // Over pace: 80% used but only 25% elapsed → ⇡.
@@ -1302,20 +1414,55 @@ mod tests {
             resets_at: Some(1000 + 13_500), // 25% elapsed
         };
         assert_eq!(
-            render_usage(Some(&over), 1000, 18_000, None, "{pace}"),
+            render_usage(&usage_args(&over, 1000, 18_000), None, "{pace}"),
             " \u{21e1}55%" // ⇡ 80 - 25 = 55 over
         );
     }
 
     #[test]
+    fn usage_delta_tracks_change_across_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        let window1 = RateLimitWindow {
+            used_percentage: Some(20.0),
+            resets_at: None,
+        };
+        let args1 = UsageArgs {
+            window: Some(&window1),
+            now: 1_000_000,
+            window_secs: FIVE_HOUR_SECS,
+            thresholds: [70, 90],
+            state_dir: Some(dir.path()),
+            state_key: "usage_5h",
+            use_color: false,
+        };
+        // First render: no prior sample → no delta, but state is written.
+        assert_eq!(render_usage(&args1, None, "{delta}"), "");
+        // Second render 120s later at 24.5% → +4.5.
+        let window2 = RateLimitWindow {
+            used_percentage: Some(24.5),
+            resets_at: None,
+        };
+        let args2 = UsageArgs {
+            window: Some(&window2),
+            now: 1_000_120,
+            ..args1
+        };
+        assert_eq!(render_usage(&args2, None, "{delta}"), " (+4.5)");
+    }
+
+    #[test]
     fn usage_threshold_color_applied_end_to_end() {
-        // 95% of the 5h window (threshold crit 90) → red wrap.
+        // 95% of the 5h window (threshold crit 90) → the pct is red-wrapped
+        // (self-colored, so it's inside the "5h " prefix rather than leading).
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "rate_limits": { "five_hour": { "used_percentage": 95.0 } }
         }))
         .unwrap();
         let out = render_engine_widget("usage_5h", &data, None, true).unwrap();
-        assert!(out.starts_with("\x1b[31m"), "expected red: {out:?}");
+        assert!(
+            out.contains("\x1b[31m95\x1b[0m"),
+            "expected red pct: {out:?}"
+        );
     }
 
     #[test]
@@ -1635,8 +1782,8 @@ mod tests {
         ("branch", &["name"]),
         ("pr", &["number", "url", "review_state"]),
         ("progress_bar", &["pct", "bar"]),
-        ("usage_5h", &["pct", "bar", "reset", "pace"]),
-        ("usage_7d", &["pct", "bar", "reset", "pace"]),
+        ("usage_5h", &["pct", "bar", "reset", "pace", "delta"]),
+        ("usage_7d", &["pct", "bar", "reset", "pace", "delta"]),
         ("peak", &["symbol", "label", "countdown"]),
     ];
 
