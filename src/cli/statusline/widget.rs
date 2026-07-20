@@ -33,6 +33,8 @@ pub struct Worktree {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrInfo {
     pub number: Option<u64>,
+    pub url: Option<String>,
+    pub review_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +129,7 @@ pub fn render_engine_widget(
     let user_thresholds = cfg.and_then(|c| c.thresholds);
     let dyn_style = match name {
         "progress_bar" => progress_bar_threshold_style(data, cfg),
+        "pr" => pr_review_style(data),
         "usage_5h" => usage_threshold_style(
             data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
             user_thresholds.unwrap_or([70, 90]),
@@ -476,11 +479,39 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
 }
 
 fn render_pr(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
-    let Some(n) = data.pr.as_ref().and_then(|p| p.number) else {
+    let Some(pr) = &data.pr else {
         return String::new();
     };
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("#{number}");
-    format.replace("{number}", &n.to_string())
+    let Some(number) = pr.number else {
+        return String::new();
+    };
+    let url = pr.url.as_deref().unwrap_or_default();
+    let review_state = pr.review_state.as_deref().unwrap_or_default();
+    // `display: url` shows the full URL (falling back to `#<number>` when the
+    // engine didn't send one); default/`number` shows `#<number>`. An explicit
+    // `format` overrides both.
+    let default_format = match cfg.and_then(|c| c.display.as_deref()) {
+        Some("url") if !url.is_empty() => "{url}",
+        _ => "#{number}",
+    };
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or(default_format);
+    format
+        .replace("{number}", &number.to_string())
+        .replace("{url}", url)
+        .replace("{review_state}", review_state)
+}
+
+/// Color the `pr` widget by review state: approved green, changes-requested
+/// red, pending yellow; `None` (default `bold magenta`) otherwise.
+fn pr_review_style(data: &EngineData) -> Option<&'static str> {
+    match data.pr.as_ref().and_then(|p| p.review_state.as_deref())? {
+        "approved" => Some("green"),
+        "changes_requested" => Some("red"),
+        "pending" | "review_required" => Some("yellow"),
+        _ => None,
+    }
 }
 
 /// 10-cell block bar. `used` (100 - remaining) is the displayed percentage.
@@ -985,6 +1016,41 @@ mod tests {
     }
 
     #[test]
+    fn pr_url_display_mode_and_number_fallback() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "pr": { "number": 834, "url": "https://github.com/o/r/pull/834" }
+        }))
+        .unwrap();
+        let url_mode = llmenv_config::WidgetConfig {
+            display: Some("url".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_pr(&data, Some(&url_mode)),
+            "https://github.com/o/r/pull/834"
+        );
+        // url mode but no url → falls back to #number.
+        let no_url: EngineData = serde_json::from_value(serde_json::json!({
+            "pr": { "number": 834 }
+        }))
+        .unwrap();
+        assert_eq!(render_pr(&no_url, Some(&url_mode)), "#834");
+    }
+
+    #[test]
+    fn pr_review_state_colors_the_widget() {
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "pr": { "number": 1, "review_state": "approved" }
+        }))
+        .unwrap();
+        let out = render_engine_widget("pr", &data, None, true).unwrap();
+        assert!(
+            out.starts_with("\x1b[32m"),
+            "expected green (approved): {out:?}"
+        );
+    }
+
+    #[test]
     fn renders_progress_bar_from_context_pct() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 65.0 }
@@ -1440,7 +1506,7 @@ mod tests {
         ("budget", &["used", "max"]),
         ("cache_pct", &["pct"]),
         ("branch", &["name"]),
-        ("pr", &["number"]),
+        ("pr", &["number", "url", "review_state"]),
         ("progress_bar", &["pct", "bar"]),
         ("usage_5h", &["pct", "bar", "reset", "pace"]),
         ("usage_7d", &["pct", "bar", "reset", "pace"]),

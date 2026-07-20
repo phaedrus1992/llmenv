@@ -610,7 +610,7 @@ Each entry under `widgets:` accepts:
 | `format` | Custom display template for the widget's own placeholders (see the table below). Only honored by widgets marked "yes" in the **Format?** column — set on a widget that doesn't support it, it's silently ignored |
 | `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
 | `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below. Every widget has a sensible **default colour** when this is unset; set it to `none` (or `""`) to render that one widget in plain text |
-| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`). Overridden by `format` when both are set; ignored by widgets without a display mode |
+| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). Overridden by `format` when both are set; ignored by widgets without a display mode |
 | `width` | `progress_bar` cell width (default `10`). Ignored by other widgets |
 | `thresholds` | Two ascending percentages `[warn, crit]` for value-based coloring. Ignored by widgets without threshold coloring |
 
@@ -636,7 +636,7 @@ All thirteen honor `format:` — set on any of them, it replaces the default lay
 | `model` | yes | `{short_name} {version}` | `Opus 4.8` | `short_name`, `version`, `full_name` |
 | `folder` | yes | 📁 + basename of the working directory | `📁 llmenv` | `basename`, `path` |
 | `branch` | yes | 🌿 + git branch name | `🌿 release/3.x` | `name` |
-| `pr` | yes | `#<number>` | `#834` | `number` |
+| `pr` | yes | `#<number>` (or the URL in `display: url`) | `#834` | `number`, `url`, `review_state` |
 | `progress_bar` | yes | `<pct>%` + block bar (`width` cells, default 10) | `35% ▓▓▓░░░░░░░` | `pct`, `bar` |
 | `tokens` | yes | total context tokens, `k`/`m`-suffixed | `10k` | `total`, `input`, `cache_read`, `cache_create` |
 | `context_pct` | yes | used-context percentage | `35%` | `pct` |
@@ -671,6 +671,8 @@ Notes:
   weekdays 05:00–11:00 America/Los_Angeles) — Claude Code sends no peak data on
   stdin. `{countdown}` counts down to the window boundary (peak ending, or the
   next peak starting).
+- `pr` is colored by `{review_state}` when the engine sends one: `approved`
+  green, `changes_requested` red, `pending`/`review_required` yellow.
 
 `pr` and `tokens` only expose the fields above — the engine's stdin contract has no PR title or
 per-output-type token breakdown today, so those aren't invented placeholders.
