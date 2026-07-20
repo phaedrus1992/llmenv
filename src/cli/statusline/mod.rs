@@ -91,7 +91,7 @@ fn default_style(name: &str) -> &'static str {
         "folder" => "blue",
         "branch" | "icm" => "magenta",
         "pr" => "bold magenta",
-        "context_pct" | "progress_bar" | "config_stale" | "usage_5h" | "usage_7d" => "yellow",
+        "context_pct" | "config_stale" | "usage_5h" | "usage_7d" => "yellow",
         "plugins" | "mcps" => "green",
         "peak" => "bold yellow",
         "throttle" => "bold red",
