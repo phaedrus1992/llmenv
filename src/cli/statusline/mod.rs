@@ -4,6 +4,7 @@
 pub(crate) mod data;
 mod icons;
 mod llmenv_widget;
+mod peak;
 mod template;
 mod widget;
 
@@ -70,6 +71,7 @@ fn default_style(name: &str) -> &'static str {
         "pr" => "bold magenta",
         "context_pct" | "progress_bar" | "config_stale" | "usage_5h" | "usage_7d" => "yellow",
         "plugins" | "mcps" => "green",
+        "peak" => "bold yellow",
         "throttle" => "bold red",
         "budget" | "tokens" | "duration" | "cache_pct" | "cache" | "scopes" | "session_log" => {
             "dim"

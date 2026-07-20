@@ -108,23 +108,34 @@ pub fn render_engine_widget(
         "usage_5h" => render_usage(
             data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
             now_unix(),
+            FIVE_HOUR_SECS,
             cfg,
-            "5h {pct}% ➡{reset}",
+            "5h {pct}%{pace} ➡{reset}",
         ),
         "usage_7d" => render_usage(
             data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
             now_unix(),
+            SEVEN_DAY_SECS,
             cfg,
-            "7d {pct}% ➡{reset}",
+            "7d {pct}%{pace} ➡{reset}",
         ),
+        "peak" => super::peak::render_peak(cfg),
         _ => return None,
     };
     // Threshold-colored widgets supply a dynamic style; `finish` applies it
     // unless the user set an explicit per-widget `style`.
-    let dyn_style = if name == "progress_bar" {
-        progress_bar_threshold_style(data, cfg)
-    } else {
-        None
+    let user_thresholds = cfg.and_then(|c| c.thresholds);
+    let dyn_style = match name {
+        "progress_bar" => progress_bar_threshold_style(data, cfg),
+        "usage_5h" => usage_threshold_style(
+            data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
+            user_thresholds.unwrap_or([70, 90]),
+        ),
+        "usage_7d" => usage_threshold_style(
+            data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
+            user_thresholds.unwrap_or([60, 80]),
+        ),
+        _ => None,
     };
     Some(super::finish(name, raw, cfg, dyn_style, use_color))
 }
@@ -548,6 +559,7 @@ fn humanize_until(resets_at: i64, now: i64) -> String {
 fn render_usage(
     window: Option<&RateLimitWindow>,
     now: i64,
+    window_secs: i64,
     cfg: Option<&llmenv_config::WidgetConfig>,
     default_format: &str,
 ) -> String {
@@ -565,6 +577,10 @@ fn render_usage(
         .resets_at
         .map(|r| humanize_until(r, now))
         .unwrap_or_default();
+    let pace = window
+        .resets_at
+        .map(|r| pace_indicator(pct, r, window_secs, now))
+        .unwrap_or_default();
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or(default_format);
@@ -572,7 +588,46 @@ fn render_usage(
         .replace("{pct}", &(pct.round() as i64).to_string())
         .replace("{bar}", &block_bar(pct, DEFAULT_BAR_WIDTH as usize))
         .replace("{reset}", &reset)
+        .replace("{pace}", &pace)
 }
+
+/// Over/under-pace indicator for a usage window: `⇡N%` when usage is ahead of
+/// the time elapsed in the window (burning too fast), `⇣N%` when behind,
+/// empty within ±0.5%. Each carries a leading space so it drops out cleanly
+/// when absent. `target` is the percentage you'd be at if usage were linear
+/// across the window.
+fn pace_indicator(current_pct: f64, resets_at: i64, window_secs: i64, now: i64) -> String {
+    if window_secs <= 0 {
+        return String::new();
+    }
+    let remaining = (resets_at - now).clamp(0, window_secs);
+    let target = (window_secs - remaining) as f64 / window_secs as f64 * 100.0;
+    let over = current_pct - target;
+    let abs = over.abs().round() as i64;
+    if over > 0.5 {
+        format!(" \u{21e1}{abs}%") // ⇡
+    } else if over < -0.5 {
+        format!(" \u{21e3}{abs}%") // ⇣
+    } else {
+        String::new()
+    }
+}
+
+/// Threshold color for a usage window by its used percentage.
+fn usage_threshold_style(
+    window: Option<&RateLimitWindow>,
+    thresholds: [u8; 2],
+) -> Option<&'static str> {
+    let pct = window.and_then(|w| w.used_percentage)?;
+    if !pct.is_finite() {
+        return None;
+    }
+    Some(threshold_style(pct.clamp(0.0, 100.0), thresholds))
+}
+
+/// Window durations in seconds for the pace calculation.
+const FIVE_HOUR_SECS: i64 = 5 * 3600;
+const SEVEN_DAY_SECS: i64 = 7 * 86_400;
 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
@@ -989,7 +1044,13 @@ mod tests {
             resets_at: Some(1000 + 1380),
         };
         assert_eq!(
-            render_usage(Some(&window), 1000, None, "5h {pct}% ➡{reset}"),
+            render_usage(
+                Some(&window),
+                1000,
+                FIVE_HOUR_SECS,
+                None,
+                "5h {pct}% ➡{reset}"
+            ),
             "5h 8% ➡23m"
         );
     }
@@ -1001,7 +1062,13 @@ mod tests {
             resets_at: Some(10_980), // 3h03m from epoch 0
         };
         assert_eq!(
-            render_usage(Some(&window), 0, None, "{bar} {pct}% ➡{reset}"),
+            render_usage(
+                Some(&window),
+                0,
+                FIVE_HOUR_SECS,
+                None,
+                "{bar} {pct}% ➡{reset}"
+            ),
             "▓▓▓▓▓▓▓▓▓▓ 100% ➡3h03m"
         );
     }
@@ -1025,6 +1092,51 @@ mod tests {
             render_engine_widget("usage_7d", &empty, None, false).unwrap(),
             ""
         );
+    }
+
+    #[test]
+    fn usage_pace_indicator_over_and_under() {
+        // now=1000, window=18000s. resets_at = now + (18000 - elapsed).
+        // Under pace: only 10% used but 50% of the window elapsed → ⇣.
+        let under = RateLimitWindow {
+            used_percentage: Some(10.0),
+            resets_at: Some(1000 + 9000), // 9000s remaining = 50% elapsed
+        };
+        assert_eq!(
+            render_usage(Some(&under), 1000, 18_000, None, "{pace}"),
+            " \u{21e3}40%" // ⇣ 50 - 10 = 40 under
+        );
+        // Over pace: 80% used but only 25% elapsed → ⇡.
+        let over = RateLimitWindow {
+            used_percentage: Some(80.0),
+            resets_at: Some(1000 + 13_500), // 25% elapsed
+        };
+        assert_eq!(
+            render_usage(Some(&over), 1000, 18_000, None, "{pace}"),
+            " \u{21e1}55%" // ⇡ 80 - 25 = 55 over
+        );
+    }
+
+    #[test]
+    fn usage_threshold_color_applied_end_to_end() {
+        // 95% of the 5h window (threshold crit 90) → red wrap.
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "rate_limits": { "five_hour": { "used_percentage": 95.0 } }
+        }))
+        .unwrap();
+        let out = render_engine_widget("usage_5h", &data, None, true).unwrap();
+        assert!(out.starts_with("\x1b[31m"), "expected red: {out:?}");
+    }
+
+    #[test]
+    fn peak_widget_renders_symbol_and_label() {
+        let out = render_engine_widget("peak", &EngineData::default(), None, false).unwrap();
+        // Always one of the two forms, with a label.
+        assert!(
+            out.contains("peak") || out.contains("off-peak"),
+            "peak widget: {out}"
+        );
+        assert!(out.starts_with('\u{25b3}') || out.starts_with('\u{25bd}'));
     }
 
     #[test]
@@ -1330,8 +1442,9 @@ mod tests {
         ("branch", &["name"]),
         ("pr", &["number"]),
         ("progress_bar", &["pct", "bar"]),
-        ("usage_5h", &["pct", "bar", "reset"]),
-        ("usage_7d", &["pct", "bar", "reset"]),
+        ("usage_5h", &["pct", "bar", "reset", "pace"]),
+        ("usage_7d", &["pct", "bar", "reset", "pace"]),
+        ("peak", &["symbol", "label", "countdown"]),
     ];
 
     proptest! {
