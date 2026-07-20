@@ -739,41 +739,23 @@ impl AgentAdapter for OpencodeAdapter {
         // `*` for a tool still shadows all structured patterns for that tool
         // within the same tier; use one category (structured OR native) per
         // tool to avoid that shadowing.
-        insert_patterns(
-            &mut permission_map,
-            perms.allow.iter().flat_map(rule_to_patterns),
-            "allow",
-        );
-        if let Some(n) = native_perms {
+        for (action, structured, native) in [
+            ("allow", &perms.allow, native_perms.map(|n| &n.allow)),
+            ("ask", &perms.ask, native_perms.map(|n| &n.ask)),
+            ("deny", &perms.deny, native_perms.map(|n| &n.deny)),
+        ] {
             insert_patterns(
                 &mut permission_map,
-                n.allow.iter().map(|s| parse_native_rule(s)),
-                "allow",
+                structured.iter().flat_map(rule_to_patterns),
+                action,
             );
-        }
-        insert_patterns(
-            &mut permission_map,
-            perms.ask.iter().flat_map(rule_to_patterns),
-            "ask",
-        );
-        if let Some(n) = native_perms {
-            insert_patterns(
-                &mut permission_map,
-                n.ask.iter().map(|s| parse_native_rule(s)),
-                "ask",
-            );
-        }
-        insert_patterns(
-            &mut permission_map,
-            perms.deny.iter().flat_map(rule_to_patterns),
-            "deny",
-        );
-        if let Some(n) = native_perms {
-            insert_patterns(
-                &mut permission_map,
-                n.deny.iter().map(|s| parse_native_rule(s)),
-                "deny",
-            );
+            if let Some(n) = native {
+                insert_patterns(
+                    &mut permission_map,
+                    n.iter().map(|s| parse_native_rule(s)),
+                    action,
+                );
+            }
         }
 
         let config_permission = if !permission_map.is_empty() {
