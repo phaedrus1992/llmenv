@@ -1703,16 +1703,22 @@ fn build_manifest(
     let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags)
         .context("resolving plugins")?;
     manifest.plugins = sync_plugin_payloads(&cache_root, resolved.plugins);
-    manifest.marketplaces = if config.cache.remote_sync {
-        sync_marketplaces(
-            config,
-            &cache_root,
-            resolved.marketplaces,
-            refresh_marketplaces,
-        )?
-    } else {
-        resolved.marketplaces
-    };
+    // `remote_sync = false` means "don't touch the network", not "ignore the
+    // clones already on disk". Always resolve `install_location` from existing
+    // clones (refresh=false does no git fetch/pull/clone — it only reads local
+    // HEAD); just force refresh off when remote sync is disabled. Skipping the
+    // call entirely left `install_location = None`, which Claude Code tolerates
+    // (reserved marketplaces render as a github source) but opencode/crush do
+    // not — they materialize plugin files from the local clone and fail without
+    // a path. Mirrors `sync_plugin_payloads`, which already resolves local
+    // clones unconditionally.
+    let refresh_marketplaces = refresh_marketplaces && config.cache.remote_sync;
+    manifest.marketplaces = sync_marketplaces(
+        config,
+        &cache_root,
+        resolved.marketplaces,
+        refresh_marketplaces,
+    )?;
 
     // Resolve the active throttle entry (tag intersection, single-active).
     let top_throttle = config
@@ -3822,6 +3828,56 @@ mod tests {
                 .iter()
                 .any(|s| s.name == "test-skill"),
             "root-level skills entry 'test-skill' must appear in manifest capabilities"
+        );
+    }
+
+    #[test]
+    fn marketplace_install_location_resolved_when_remote_sync_disabled() {
+        // Regression: `remote_sync: false` used to skip sync_marketplaces
+        // entirely, leaving install_location=None. Claude Code tolerated that
+        // (reserved marketplaces render as a github source) but opencode/crush
+        // materialize plugin files from the local clone and failed with
+        // "marketplace '<name>' has no install_location (not yet synced?)".
+        // A path-source marketplace resolves its location with no network, so it
+        // must be filled in even with remote_sync off.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+        let market_src = tmp.path().join("market");
+        std::fs::create_dir(&market_src).unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+        config.cache.remote_sync = false;
+        config.marketplace = vec![crate::config::Marketplace {
+            name: "local".into(),
+            source: market_src.to_string_lossy().into_owned(),
+        }];
+        config.plugin_collection = vec![crate::config::PluginCollection {
+            name: "core".into(),
+            when: vec!["tagx".into()],
+            plugins: vec!["local:some-plugin".into()],
+        }];
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+
+        let (manifest, _) = build_manifest(&config, &config_dir, &active, &firing, false)
+            .unwrap()
+            .expect("manifest should be Some with a firing bundle");
+
+        let mk = manifest
+            .marketplaces
+            .iter()
+            .find(|m| m.name == "local")
+            .expect("referenced marketplace must be emitted");
+        assert!(
+            mk.install_location.is_some(),
+            "install_location must be resolved from the local path source even with \
+             remote_sync disabled (was None before fix)"
         );
     }
 
