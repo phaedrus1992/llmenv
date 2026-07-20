@@ -36,6 +36,7 @@ fn strip_control_chars(s: &str) -> String {
 /// hoisted here so the two modules don't each carry a byte-for-byte-identical
 /// private copy.
 pub(super) fn finish(
+    name: &str,
     raw: String,
     cfg: Option<&llmenv_config::WidgetConfig>,
     use_color: bool,
@@ -45,9 +46,32 @@ pub(super) fn finish(
         Some(max) => truncate_ellipsis(&sanitized, max),
         None => sanitized,
     };
-    match cfg.and_then(|c| c.style.as_deref()) {
-        Some(style) => apply_style(&truncated, style, use_color),
-        None => truncated,
+    // An explicit per-widget `style` wins — including `""`/`"none"`, which
+    // `apply_style` renders as plain, so it's the per-widget colour opt-out.
+    // Absent falls back to the widget's default colour for readability.
+    let style = cfg
+        .and_then(|c| c.style.as_deref())
+        .unwrap_or_else(|| default_style(name));
+    apply_style(&truncated, style, use_color)
+}
+
+/// Default ANSI style per widget, so a statusline with no per-widget `style:`
+/// still renders with readable colour instead of monochrome. Opt out per
+/// widget with `style: none` (or any unknown/empty style) or globally with
+/// `statusline.style.color: false`. Unknown widget names get no colour.
+fn default_style(name: &str) -> &'static str {
+    match name {
+        "model" => "bold cyan",
+        "folder" => "blue",
+        "branch" | "icm" => "magenta",
+        "pr" => "bold magenta",
+        "context_pct" | "progress_bar" | "config_stale" | "usage_5h" | "usage_7d" => "yellow",
+        "plugins" | "mcps" => "green",
+        "throttle" => "bold red",
+        "budget" | "tokens" | "duration" | "cache_pct" | "cache" | "scopes" | "session_log" => {
+            "dim"
+        }
+        _ => "",
     }
 }
 
@@ -73,6 +97,9 @@ pub fn run_statusline(
     let status_data = StatusData::load(data_path);
 
     let cfg = config.statusline.clone().unwrap_or_default();
+    // Global colour opt-out: `statusline.style.color: false` forces plain text
+    // for every widget, layered on top of the runtime `--color`/TTY gate.
+    let use_color = use_color && cfg.style.color;
     let rows: Vec<String> = if cfg.rows.is_empty() {
         vec![DEFAULT_ROW.to_string()]
     } else {
@@ -232,9 +259,9 @@ mod tests {
         let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
 
         assert!(out.contains("dev · rust"), "scopes widget: {out}");
-        assert!(out.contains("◇ 3"), "plugins widget: {out}");
+        assert!(out.contains("🔌 3"), "plugins widget: {out}");
         assert!(out.contains("MCP 2"), "mcps widget: {out}");
-        assert!(out.contains("M10"), "icm widget: {out}");
+        assert!(out.contains("🧠 10"), "icm widget: {out}");
         assert!(out.contains("2 KB"), "cache widget: {out}");
         assert!(out.contains("icm: 12s"), "throttle widget: {out}");
         assert!(out.contains('5'), "session_log widget: {out}");
@@ -267,8 +294,52 @@ mod tests {
 
     #[test]
     fn finish_strips_control_chars_before_truncating_and_styling() {
-        let out = finish("Op\x1bus".to_string(), None, false);
+        let out = finish("model", "Op\x1bus".to_string(), None, false);
         assert_eq!(out, "Opus");
+    }
+
+    #[test]
+    fn finish_applies_default_color_when_no_style_configured() {
+        // model's default style is "bold cyan" -> SGR codes 1;36.
+        let out = finish("model", "Opus".to_string(), None, true);
+        assert_eq!(out, "\x1b[1;36mOpus\x1b[0m");
+    }
+
+    #[test]
+    fn finish_per_widget_style_none_opts_out_of_default_color() {
+        let cfg = llmenv_config::WidgetConfig {
+            style: Some("none".to_string()),
+            ..Default::default()
+        };
+        let out = finish("model", "Opus".to_string(), Some(&cfg), true);
+        assert_eq!(
+            out, "Opus",
+            "explicit style:none must suppress the default colour"
+        );
+    }
+
+    #[test]
+    fn global_color_off_forces_plain_even_with_color_flag() {
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{model}".to_string()],
+                style: llmenv_config::StatuslineStyle {
+                    color: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let stdin = br#"{"model":{"display_name":"Opus 4.8"}}"#;
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        // use_color=true at the call site, but style.color=false must win.
+        let out = run_statusline(&config, &data_path, &mut &stdin[..], true).unwrap();
+        assert!(
+            !out.contains('\u{1b}'),
+            "global color off must emit no ANSI: {out:?}"
+        );
     }
 
     #[test]

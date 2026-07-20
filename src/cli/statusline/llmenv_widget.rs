@@ -24,7 +24,7 @@ pub fn render_llmenv_widget(
         "session_log" => render_session_log(data, cfg, icons),
         _ => return None,
     };
-    Some(super::finish(raw, cfg, use_color))
+    Some(super::finish(name, raw, cfg, use_color))
 }
 
 fn render_scopes(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
@@ -43,7 +43,9 @@ fn render_plugins(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) 
     let Some(plugins) = &data.plugins else {
         return String::new();
     };
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("◇ {total}");
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or("🔌 {total}");
     format
         .replace("{total}", &plugins.total.to_string())
         .replace("{errors}", &plugins.errors.to_string())
@@ -67,7 +69,7 @@ fn render_icm(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> S
     };
     let format = cfg
         .and_then(|c| c.format.as_deref())
-        .unwrap_or("M{memories}");
+        .unwrap_or("🧠 {memories}");
     format
         .replace("{memories}", &icm.memories.to_string())
         .replace("{concepts}", &icm.concepts.to_string())
@@ -190,7 +192,7 @@ mod tests {
             ..Default::default()
         };
         let out = render_llmenv_widget("plugins", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "◇ 12");
+        assert_eq!(out, "🔌 12");
     }
 
     #[test]
@@ -203,7 +205,7 @@ mod tests {
             ..Default::default()
         };
         let out = render_llmenv_widget("icm", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "M142");
+        assert_eq!(out, "🧠 142");
     }
 
     #[test]

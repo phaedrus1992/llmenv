@@ -3,6 +3,7 @@
 //! design doc's "Separation of concerns").
 
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EngineData {
@@ -10,18 +11,23 @@ pub struct EngineData {
     pub model: Option<ModelInfo>,
     pub cost: Option<Cost>,
     pub context_window: Option<ContextWindow>,
-    #[expect(
-        dead_code,
-        reason = "part of the stdin contract for forward-compatibility; no widget in the design renders rate-limit data"
-    )]
     pub rate_limits: Option<RateLimits>,
     pub branch: Option<BranchInfo>,
+    pub worktree: Option<Worktree>,
     pub pr: Option<PrInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BranchInfo {
     pub name: Option<String>,
+}
+
+/// Present only for Claude Code `--worktree` sessions — the branch of the
+/// linked worktree. Regular (non-worktree) sessions have no branch in the
+/// stdin JSON at all, so `render_branch` derives it from git instead.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Worktree {
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,23 +66,19 @@ pub struct TokenUsage {
     pub cache_read_input_tokens: Option<u64>,
 }
 
+/// Claude.ai Pro/Max subscription usage windows, present on stdin only after
+/// the first API response in a session; either window may be independently
+/// absent. Rendered by the `usage_5h` / `usage_7d` widgets.
 #[derive(Debug, Clone, Deserialize)]
-#[expect(
-    dead_code,
-    reason = "part of the stdin contract for forward-compatibility; no widget in the design renders rate-limit data"
-)]
 pub struct RateLimits {
     pub five_hour: Option<RateLimitWindow>,
     pub seven_day: Option<RateLimitWindow>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[expect(
-    dead_code,
-    reason = "part of the stdin contract for forward-compatibility; no widget in the design renders rate-limit data"
-)]
 pub struct RateLimitWindow {
     pub used_percentage: Option<f64>,
+    /// Unix epoch seconds at which this window's usage resets.
     pub resets_at: Option<i64>,
 }
 
@@ -103,23 +105,63 @@ pub fn render_engine_widget(
         "branch" => render_branch(data, cfg),
         "pr" => render_pr(data, cfg),
         "progress_bar" => render_progress_bar(data, cfg),
+        "usage_5h" => render_usage(
+            data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
+            now_unix(),
+            cfg,
+            "5h {pct}% ➡{reset}",
+        ),
+        "usage_7d" => render_usage(
+            data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
+            now_unix(),
+            cfg,
+            "7d {pct}% ➡{reset}",
+        ),
         _ => return None,
     };
-    Some(super::finish(raw, cfg, use_color))
+    Some(super::finish(name, raw, cfg, use_color))
+}
+
+/// Strip the parts of a model `display_name` that are neither family nor
+/// version: a trailing parenthetical qualifier (e.g. `" (1M context)"`) that
+/// some Claude Code builds append. Claude Code's `display_name` arrives as
+/// bare `"Opus"`, `"Opus 4.8"`, or `"Opus 4.8 (1M context)"` depending on
+/// build — the parenthetical is a context-window note, not the model name, and
+/// left in place it leaks a stray `"context)"` token into the short name.
+fn clean_display_name(display_name: &str) -> &str {
+    display_name
+        .split('(')
+        .next()
+        .unwrap_or(display_name)
+        .trim()
 }
 
 /// Derive a short model family name from Claude's `display_name` (e.g.
-/// `"Claude Opus 4.8"` -> `"Opus"`): drops a leading "claude" token
-/// (case-insensitive) and any version-shaped token (containing a digit),
-/// leaving just the family name(s) in between.
+/// `"Claude Opus 4.8 (1M context)"` -> `"Opus"`): strips the trailing
+/// parenthetical, then drops a leading "claude" token (case-insensitive) and
+/// any version-shaped token (containing a digit), leaving just the family
+/// name(s) in between.
 fn short_model_name(display_name: &str) -> String {
-    display_name
+    clean_display_name(display_name)
         .split_whitespace()
         .filter(|tok| {
             !tok.eq_ignore_ascii_case("claude") && !tok.chars().any(|c| c.is_ascii_digit())
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The version-shaped token (the first containing a digit) embedded in a
+/// display name, e.g. `"4.8"` in `"Opus 4.8 (1M context)"`. Used only as a
+/// fallback when the engine sends no separate `version` field — Claude Code
+/// embeds the version in `display_name` and provides no `version`, so without
+/// this the default `{short_name} {version}` format would always drop the
+/// version and render a bare `"Opus"`.
+fn version_from_display_name(display_name: &str) -> Option<String> {
+    clean_display_name(display_name)
+        .split_whitespace()
+        .find(|tok| tok.chars().any(|c| c.is_ascii_digit()))
+        .map(str::to_string)
 }
 
 fn render_model(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
@@ -134,9 +176,19 @@ fn render_model(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) ->
         .as_deref()
         .map(short_model_name)
         .unwrap_or_default();
+    let version = model
+        .version
+        .clone()
+        .or_else(|| {
+            model
+                .display_name
+                .as_deref()
+                .and_then(version_from_display_name)
+        })
+        .unwrap_or_default();
     format
         .replace("{short_name}", &short_name)
-        .replace("{version}", model.version.as_deref().unwrap_or(""))
+        .replace("{version}", &version)
         .replace("{full_name}", model.full_name.as_deref().unwrap_or(""))
         .trim()
         .to_string()
@@ -236,12 +288,25 @@ fn render_tokens(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -
         )
 }
 
+/// Humanize a token count: `m` suffix at a million, `k` at a thousand, bare
+/// below. A trailing `.0` is dropped so round values read `"1m"` / `"200k"`
+/// (not `"1.0m"` / `"200.0k"`) — the context-window max is always round, so
+/// the budget's right side stays decimal-free, while a fractional used count
+/// still shows one place (`"109.2k"`).
 fn format_token_count(n: u64) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1000.0)
+    if n >= 1_000_000 {
+        trim_unit(n as f64 / 1_000_000.0, 'm')
+    } else if n >= 1000 {
+        trim_unit(n as f64 / 1000.0, 'k')
     } else {
         n.to_string()
     }
+}
+
+/// One-decimal value with `suffix`, dropping a redundant trailing `.0`.
+fn trim_unit(value: f64, suffix: char) -> String {
+    let s = format!("{value:.1}");
+    format!("{}{suffix}", s.strip_suffix(".0").unwrap_or(&s))
 }
 
 fn render_budget(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
@@ -281,12 +346,63 @@ fn render_cache_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>
     format.replace("{pct}", &pct.to_string())
 }
 
+/// Resolve the current branch, in precedence order:
+///
+/// 1. `branch.name` from stdin — forward-compat if the engine ever sends it.
+/// 2. `worktree.branch` from stdin — Claude Code's only branch field, present
+///    for `--worktree` sessions.
+/// 3. Git, derived from `workspace.current_dir` — Claude Code sends **no
+///    branch** for a regular repo (confirmed against the statusline docs), so
+///    llmenv reads it from `.git/HEAD` rather than leaving the widget blank.
 fn render_branch(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
-    let Some(name) = data.branch.as_ref().and_then(|b| b.name.clone()) else {
+    let name = data
+        .branch
+        .as_ref()
+        .and_then(|b| b.name.clone())
+        .or_else(|| data.worktree.as_ref().and_then(|w| w.branch.clone()))
+        .or_else(|| {
+            data.workspace
+                .as_ref()
+                .and_then(|w| w.current_dir.as_deref())
+                .and_then(|dir| git_branch(Path::new(dir)))
+        });
+    let Some(name) = name else {
         return String::new();
     };
     let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{name}");
     format.replace("{name}", &name)
+}
+
+/// Current branch by reading `.git/HEAD` directly (no `git` subprocess — the
+/// statusline re-renders on every UI tick, and the codebase already avoids
+/// per-render forks). Returns `None` for a detached HEAD or when no repository
+/// encloses `dir`.
+fn git_branch(dir: &Path) -> Option<String> {
+    let git_dir = find_git_dir(dir)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_string)
+}
+
+/// Locate the git directory enclosing `start`, walking up its ancestors.
+/// Handles both a `.git` directory (normal clone) and a `.git` *file* holding
+/// `gitdir: <path>` (a linked worktree or submodule).
+fn find_git_dir(start: &Path) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        let dot_git = dir.join(".git");
+        let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+            continue;
+        };
+        if meta.is_dir() {
+            return Some(dot_git);
+        }
+        // `.git` file: `gitdir: <path>` pointer (worktree/submodule).
+        let content = std::fs::read_to_string(&dot_git).ok()?;
+        let gitdir = content.trim().strip_prefix("gitdir: ")?;
+        return Some(PathBuf::from(gitdir));
+    }
+    None
 }
 
 fn render_pr(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
@@ -316,11 +432,7 @@ fn render_progress_bar(data: &EngineData, cfg: Option<&llmenv_config::WidgetConf
         return String::new();
     }
     let used = (100.0 - remaining).clamp(0.0, 100.0);
-    // Truncate (not round) to the filled cell count: round() bumps a
-    // borderline value like 35.0 up to 4 filled cells, one more than the
-    // 3-cell floor the displayed "35%" label implies.
-    let filled = ((used / 10.0) as usize).min(10);
-    let bar: String = "█".repeat(filled) + &"░".repeat(10 - filled);
+    let bar = block_bar(used);
     let pct = used.round() as i64;
     let format = cfg
         .and_then(|c| c.format.as_deref())
@@ -328,6 +440,74 @@ fn render_progress_bar(data: &EngineData, cfg: Option<&llmenv_config::WidgetConf
     format
         .replace("{pct}", &pct.to_string())
         .replace("{bar}", &bar)
+}
+
+/// A 10-cell block bar for a `0..=100` percentage. Truncates (not rounds) to
+/// the filled cell count: rounding would bump a borderline value like 35.0 up
+/// to 4 filled cells, one more than the 3-cell floor a "35%" label implies.
+fn block_bar(pct: f64) -> String {
+    let filled = ((pct / 10.0) as usize).min(10);
+    "█".repeat(filled) + &"░".repeat(10 - filled)
+}
+
+/// Current wall-clock time as Unix epoch seconds, for computing time-until a
+/// rate-limit window resets. Falls back to 0 on a pre-epoch clock (which just
+/// yields a "reset now" reading, never a panic).
+fn now_unix() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+    .unwrap_or(i64::MAX)
+}
+
+/// Humanize the seconds from `now` until `resets_at`: `"3h04m"` past an hour,
+/// `"23m"` under. A reset already in the past clamps to `"0m"`.
+fn humanize_until(resets_at: i64, now: i64) -> String {
+    let secs = resets_at.saturating_sub(now).max(0);
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else {
+        format!("{m}m")
+    }
+}
+
+/// Render a Claude.ai usage window (`five_hour` / `seven_day`). Empty when the
+/// window is absent (not a subscriber, or before the first API response) or
+/// carries a non-finite percentage. `{pct}` is the clamped, rounded used
+/// percentage, `{bar}` a 10-cell fill of it, `{reset}` the time until the
+/// window resets.
+fn render_usage(
+    window: Option<&RateLimitWindow>,
+    now: i64,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    default_format: &str,
+) -> String {
+    let Some(window) = window else {
+        return String::new();
+    };
+    let Some(pct) = window.used_percentage else {
+        return String::new();
+    };
+    if !pct.is_finite() {
+        return String::new();
+    }
+    let pct = pct.clamp(0.0, 100.0);
+    let reset = window
+        .resets_at
+        .map(|r| humanize_until(r, now))
+        .unwrap_or_default();
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or(default_format);
+    format
+        .replace("{pct}", &(pct.round() as i64).to_string())
+        .replace("{bar}", &block_bar(pct))
+        .replace("{reset}", &reset)
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -364,9 +544,32 @@ mod tests {
     fn renders_model_default_format() {
         // engine_data()'s fixture display_name is "Claude Opus 4.8" with no
         // separate version field — short_name strips the "Claude" prefix and
-        // the version-shaped "4.8" token, leaving just the family name.
+        // the "4.8" token, and the version falls back to that same "4.8" token
+        // parsed out of display_name, so the default format shows both.
         let out = render_engine_widget("model", &engine_data(), None, false).unwrap();
-        assert_eq!(out, "Opus");
+        assert_eq!(out, "Opus 4.8");
+    }
+
+    #[test]
+    fn renders_model_strips_trailing_parenthetical() {
+        // Regression: a "(1M context)" suffix used to leak a "context)" token
+        // into the short name ("Opus context)"). The parenthetical is stripped
+        // and the version parsed from display_name (no separate version field).
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "model": { "display_name": "Opus 4.8 (1M context)" }
+        }))
+        .unwrap();
+        let out = render_engine_widget("model", &data, None, false).unwrap();
+        assert_eq!(out, "Opus 4.8");
+    }
+
+    #[test]
+    fn short_model_name_and_version_split_a_parenthetical_display_name() {
+        assert_eq!(short_model_name("Opus 4.8 (1M context)"), "Opus");
+        assert_eq!(
+            version_from_display_name("Opus 4.8 (1M context)").as_deref(),
+            Some("4.8")
+        );
     }
 
     #[test]
@@ -413,17 +616,31 @@ mod tests {
         let out = render_engine_widget("tokens", &engine_data(), None, false).unwrap();
         // total_tokens = input_tokens(5000) + cache_creation_input_tokens(1000)
         // + cache_read_input_tokens(4000) = 10000; format_token_count(10000):
-        // 10000 >= 1000, so k-suffix with one decimal = 10000 / 1000.0 = "10.0k".
-        assert_eq!(out, "10.0k");
+        // 10000 / 1000 = 10.0, trailing ".0" dropped -> "10k".
+        assert_eq!(out, "10k");
     }
 
     #[test]
     fn renders_budget_default_format() {
         let out = render_engine_widget("budget", &engine_data(), None, false).unwrap();
-        // used = total_tokens(same fixture) = 10000 -> "10.0k"; max =
-        // context_window_size(200_000) -> format_token_count(200_000) = "200.0k";
-        // default format is "{used}/{max}".
-        assert_eq!(out, "10.0k/200.0k");
+        // used = total_tokens(same fixture) = 10000 -> "10k"; max =
+        // context_window_size(200_000) -> format_token_count(200_000) = "200k"
+        // (round values drop the trailing ".0"); default format is "{used}/{max}".
+        assert_eq!(out, "10k/200k");
+    }
+
+    #[test]
+    fn renders_budget_uses_m_suffix_for_million_context_window() {
+        // A 1M context window renders "1m", not "1000.0k".
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "context_window": {
+                "context_window_size": 1_000_000,
+                "current_usage": { "input_tokens": 9200, "cache_read_input_tokens": 100_000 }
+            }
+        }))
+        .unwrap();
+        let out = render_engine_widget("budget", &data, None, false).unwrap();
+        assert_eq!(out, "109.2k/1m");
     }
 
     #[test]
@@ -522,6 +739,70 @@ mod tests {
     }
 
     #[test]
+    fn branch_falls_back_to_worktree_branch_when_no_branch_field() {
+        // Claude Code `--worktree` sessions carry `worktree.branch` but no
+        // top-level `branch`.
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "worktree": { "branch": "feat/thing" }
+        }))
+        .unwrap();
+        assert_eq!(
+            render_engine_widget("branch", &data, None, false).unwrap(),
+            "feat/thing"
+        );
+    }
+
+    #[test]
+    fn branch_derived_from_git_head_when_engine_sends_none() {
+        // A regular Claude Code session sends no branch at all — only
+        // workspace.current_dir. llmenv reads `.git/HEAD` to fill the widget.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".git").join("HEAD"),
+            "ref: refs/heads/release/3.x\n",
+        )
+        .unwrap();
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "workspace": { "current_dir": dir.path().to_string_lossy() }
+        }))
+        .unwrap();
+        assert_eq!(
+            render_engine_widget("branch", &data, None, false).unwrap(),
+            "release/3.x"
+        );
+    }
+
+    #[test]
+    fn branch_empty_for_detached_head() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        // Detached HEAD: a raw sha, no `ref:` line.
+        std::fs::write(
+            dir.path().join(".git").join("HEAD"),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+        )
+        .unwrap();
+        assert_eq!(git_branch(dir.path()), None);
+    }
+
+    #[test]
+    fn find_git_dir_follows_gitfile_pointer() {
+        // A linked worktree has a `.git` *file* pointing at the real gitdir.
+        let dir = tempfile::tempdir().unwrap();
+        let real_gitdir = dir.path().join("real-gitdir");
+        std::fs::create_dir(&real_gitdir).unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(
+            work.join(".git"),
+            format!("gitdir: {}\n", real_gitdir.display()),
+        )
+        .unwrap();
+        assert_eq!(find_git_dir(&work), Some(real_gitdir));
+    }
+
+    #[test]
     fn renders_pr_number() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "pr": { "number": 834 }
@@ -555,6 +836,59 @@ mod tests {
             render_engine_widget("progress_bar", &empty, None, false).unwrap(),
             ""
         );
+    }
+
+    #[test]
+    fn renders_usage_5h_minutes_reset() {
+        // now=1000, resets_at=now+1380 (23m), used 8% → default "5h {pct}% ➡{reset}".
+        let window = RateLimitWindow {
+            used_percentage: Some(8.0),
+            resets_at: Some(1000 + 1380),
+        };
+        assert_eq!(
+            render_usage(Some(&window), 1000, None, "5h {pct}% ➡{reset}"),
+            "5h 8% ➡23m"
+        );
+    }
+
+    #[test]
+    fn renders_usage_bar_and_hours_reset() {
+        let window = RateLimitWindow {
+            used_percentage: Some(100.0),
+            resets_at: Some(10_980), // 3h03m from epoch 0
+        };
+        assert_eq!(
+            render_usage(Some(&window), 0, None, "{bar} {pct}% ➡{reset}"),
+            "██████████ 100% ➡3h03m"
+        );
+    }
+
+    #[test]
+    fn usage_widget_via_dispatcher_reads_five_hour_window() {
+        // engine_data()'s fixture rate_limits.five_hour.used_percentage = 24.5,
+        // which rounds to 25. resets_at is in the past → "➡0m".
+        let out = render_engine_widget("usage_5h", &engine_data(), None, false).unwrap();
+        assert!(out.starts_with("5h 25%"), "usage_5h: {out}");
+    }
+
+    #[test]
+    fn usage_widgets_empty_when_windows_absent() {
+        let empty = EngineData::default();
+        assert_eq!(
+            render_engine_widget("usage_5h", &empty, None, false).unwrap(),
+            ""
+        );
+        assert_eq!(
+            render_engine_widget("usage_7d", &empty, None, false).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn humanize_until_formats_and_clamps() {
+        assert_eq!(humanize_until(500, 1000), "0m"); // past → clamp
+        assert_eq!(humanize_until(1000 + 1380, 1000), "23m");
+        assert_eq!(humanize_until(10_980, 0), "3h03m");
     }
 
     #[test]
@@ -682,7 +1016,7 @@ mod tests {
         };
         assert_eq!(
             render_tokens(&data, Some(&cfg)),
-            "in=5.0k cr=4.0k cc=1.0k tot=10.0k"
+            "in=5k cr=4k cc=1k tot=10k"
         );
     }
 
@@ -693,7 +1027,7 @@ mod tests {
             format: Some("{max} total, {used} used".to_string()),
             ..Default::default()
         };
-        assert_eq!(render_budget(&data, Some(&cfg)), "200.0k total, 10.0k used");
+        assert_eq!(render_budget(&data, Some(&cfg)), "200k total, 10k used");
     }
 
     #[test]
@@ -746,10 +1080,15 @@ mod tests {
     }
 
     #[test]
-    fn format_token_count_below_1000_renders_bare_number() {
+    fn format_token_count_thresholds_and_trimmed_decimals() {
         assert_eq!(format_token_count(42), "42");
         assert_eq!(format_token_count(999), "999");
-        assert_eq!(format_token_count(1000), "1.0k");
+        assert_eq!(format_token_count(1000), "1k"); // trailing ".0" dropped
+        assert_eq!(format_token_count(1500), "1.5k");
+        assert_eq!(format_token_count(109_200), "109.2k");
+        assert_eq!(format_token_count(200_000), "200k");
+        assert_eq!(format_token_count(1_000_000), "1m");
+        assert_eq!(format_token_count(1_500_000), "1.5m");
     }
 
     #[test]
@@ -848,6 +1187,8 @@ mod tests {
         ("branch", &["name"]),
         ("pr", &["number"]),
         ("progress_bar", &["pct", "bar"]),
+        ("usage_5h", &["pct", "bar", "reset"]),
+        ("usage_7d", &["pct", "bar", "reset"]),
     ];
 
     proptest! {
@@ -926,15 +1267,19 @@ mod tests {
         }
 
         /// Numeric formatting across the full `u64` space: no panics on the
-        /// division/rounding, and the `0..1000` vs `>=1000` threshold holds.
+        /// division/rounding, the m/k/bare thresholds hold, and a trailing
+        /// ".0" is always dropped (never surfaces in output).
         #[test]
         fn format_token_count_respects_threshold(n in any::<u64>()) {
             let out = format_token_count(n);
             if n < 1000 {
                 prop_assert_eq!(out, n.to_string());
+            } else if n < 1_000_000 {
+                prop_assert!(out.ends_with('k'), "expected k suffix: {out}");
+                prop_assert!(!out.contains(".0"), "trailing .0 not trimmed: {out}");
             } else {
-                prop_assert!(out.ends_with('k'));
-                prop_assert_eq!(out, format!("{:.1}k", n as f64 / 1000.0));
+                prop_assert!(out.ends_with('m'), "expected m suffix: {out}");
+                prop_assert!(!out.contains(".0"), "trailing .0 not trimmed: {out}");
             }
         }
 
