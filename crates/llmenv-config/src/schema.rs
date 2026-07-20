@@ -909,6 +909,17 @@ pub struct WidgetConfig {
     pub format: Option<String>,
     pub max_len: Option<usize>,
     pub style: Option<String>,
+    /// Widget-specific display mode. Consumed by widgets that offer named
+    /// presets rather than a free-form `format`: `model` (`short` / `version`
+    /// / `full`) and `pr` (`number` / `url`). Ignored by widgets without a
+    /// display mode, and overridden by `format` when both are set.
+    pub display: Option<String>,
+    /// `progress_bar` cell width (default 10). Ignored by other widgets.
+    pub width: Option<u8>,
+    /// Two ascending percentages `[warn, crit]` for value-based coloring
+    /// (green < warn ≤ yellow < crit ≤ red). Used by `progress_bar`. Ignored
+    /// by widgets without threshold coloring.
+    pub thresholds: Option<[u8; 2]>,
 }
 
 /// ReadOnce mode: what happens when a file that was already read is requested

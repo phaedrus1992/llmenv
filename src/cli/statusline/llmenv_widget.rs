@@ -24,7 +24,7 @@ pub fn render_llmenv_widget(
         "session_log" => render_session_log(data, cfg, icons),
         _ => return None,
     };
-    Some(super::finish(name, raw, cfg, use_color))
+    Some(super::finish(name, raw, cfg, None, use_color))
 }
 
 fn render_scopes(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
