@@ -26,9 +26,6 @@ pub fn reap_session_log(log_path: &Path, retention_days: u64) {
     if retention_days == 0 {
         return;
     }
-    if !log_path.try_exists().unwrap_or(false) {
-        return;
-    }
     let Ok(meta) = log_path.metadata() else {
         return;
     };
