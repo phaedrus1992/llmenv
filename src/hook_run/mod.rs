@@ -419,9 +419,33 @@ pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
 /// The memory backend (recall/store) and session logging are independent: a
 /// missing/unreachable memory MCP skips memory actions but must not prevent
 /// the file-sink session log from being written (see `handle_session_log`).
-/// Load config from `path`. Each hook-run is a fresh process that loads
-/// config exactly once, so no cache is needed.
-fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
+/// `main()` loads config once (before the tracing subscriber is set up, to
+/// resolve session-log settings) and stashes it here so `load_cached_config`
+/// can reuse it instead of re-parsing `config.yaml` a second time in the same
+/// process. Direct callers that never went through `main()` (tests, other
+/// entrypoints) fall back to loading from `path` normally.
+static PRELOADED_CONFIG: OnceLock<crate::config::Config> = OnceLock::new();
+
+/// Stash a config already loaded by `main()` for reuse by `load_cached_config`.
+///
+/// Must only be called once per process: a second call is silently dropped by
+/// `OnceLock::set`. `main()` is the only caller today and calls it at most once.
+pub fn set_preloaded_config(config: crate::config::Config) {
+    let _ = PRELOADED_CONFIG.set(config);
+}
+
+/// Load config from `path`, reusing `main()`'s preload when available. Also
+/// used by non-hook-run CLI commands (`export`, `regenerate`, `statusline`)
+/// that would otherwise re-parse the same `config.yaml` main() already loaded.
+///
+/// Once a preload exists, `path` is ignored — every current caller resolves
+/// the same canonical `paths::config_path()` that `main()` preloaded from, so
+/// this is safe today, but a caller passing a *different* path would silently
+/// get main()'s config instead of loading its own.
+pub(crate) fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate::config::Config> {
+    if let Some(config) = PRELOADED_CONFIG.get() {
+        return Ok(config.clone());
+    }
     crate::config::Config::load(path)
 }
 
@@ -1516,6 +1540,23 @@ mod tests {
             envs.get("CBM_CACHE_DIR").map(String::as_str),
             Some("/custom/path")
         );
+    }
+
+    // Only exercises load_cached_config's fallback-to-disk branch. PRELOADED_CONFIG
+    // is a process-global OnceLock with no reset, so a test that populates it via
+    // set_preloaded_config would leak into every other test in this binary that
+    // calls load_cached_config — deliberately not tested here.
+    #[test]
+    fn load_cached_config_falls_back_to_disk_when_nothing_preloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            serde_yaml::to_string(&crate::config::Config::default()).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_cached_config(&path).unwrap();
+        assert_eq!(loaded, crate::config::Config::default());
     }
 
     proptest::proptest! {
