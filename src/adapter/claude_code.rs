@@ -1140,21 +1140,17 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // docs/examples rather than the neutral schema — gets the same rewrite as
     // neutral rules, before suppression comparisons and before landing in
     // settings.json.
-    let native_allow: Vec<String> = native.map_or_else(Vec::new, |n| {
-        n.allow
-            .iter()
-            .map(|s| normalize_deprecated_tool(s))
-            .collect()
-    });
-    let native_ask_rules: Vec<String> = native.map_or_else(Vec::new, |n| {
-        n.ask.iter().map(|s| normalize_deprecated_tool(s)).collect()
-    });
-    let native_deny_rules: Vec<String> = native.map_or_else(Vec::new, |n| {
-        n.deny
-            .iter()
-            .map(|s| normalize_deprecated_tool(s))
-            .collect()
-    });
+    let normalize_native = |select: fn(&crate::config::NativePermissionRules) -> &[String]| {
+        native.map_or_else(Vec::new, |n| {
+            select(n)
+                .iter()
+                .map(|s| normalize_deprecated_tool(s))
+                .collect()
+        })
+    };
+    let native_allow: Vec<String> = normalize_native(|n| &n.allow);
+    let native_ask_rules: Vec<String> = normalize_native(|n| &n.ask);
+    let native_deny_rules: Vec<String> = normalize_native(|n| &n.deny);
 
     // Native rules win over neutral ones, but only in the safe direction: deny is
     // authoritative. Authority runs deny > ask > allow (most restrictive wins). A
@@ -1696,6 +1692,13 @@ fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
 /// warning it exists to spare them from. Only an exact `Write` tool name (bare
 /// or immediately followed by `(`) matches — `WriteFile` or a `Write` mention
 /// inside another tool's pattern must pass through untouched.
+///
+/// Applying this to a `deny` rule is safe by construction, not just by luck:
+/// a deterministic many-to-one rewrite applied uniformly can only merge
+/// distinct strings into new matches, never split an existing match apart, so
+/// no prior deny/suppression relationship is lost — the sole precondition is
+/// the upstream deprecation claim itself (Write no longer needs its own gate
+/// because Edit's rules now cover it).
 fn normalize_deprecated_tool(rule: &str) -> String {
     match rule.strip_prefix("Write") {
         Some(rest) if rest.is_empty() || rest.starts_with('(') => format!("Edit{rest}"),
@@ -1851,7 +1854,7 @@ mod tests {
         // string, regardless of any `paths` (pattern wins per the neutral schema).
         #[test]
         fn pattern_renders_single_tool_pattern_string(
-            tool in "[A-Za-z]{1,12}",
+            tool in "[A-Za-z]{1,12}".prop_filter("not the deprecated Write tool name", |t| t != "Write"),
             pattern in "[^()]{0,20}",
             paths in proptest::collection::vec("[^()]{0,10}", 0..3),
         ) {
@@ -1863,7 +1866,7 @@ mod tests {
         // With no pattern, each path yields one `Tool(path)` string, in order.
         #[test]
         fn paths_render_one_string_each_in_order(
-            tool in "[A-Za-z]{1,12}",
+            tool in "[A-Za-z]{1,12}".prop_filter("not the deprecated Write tool name", |t| t != "Write"),
             paths in proptest::collection::vec("[^()]{1,10}", 1..5),
         ) {
             let rule = PermissionRule { tool: tool.clone(), pattern: None, paths: paths.clone() };
@@ -1874,7 +1877,9 @@ mod tests {
 
         // No pattern and no paths → a bare tool-wide rule.
         #[test]
-        fn bare_tool_renders_tool_name(tool in "[A-Za-z]{1,12}") {
+        fn bare_tool_renders_tool_name(
+            tool in "[A-Za-z]{1,12}".prop_filter("not the deprecated Write tool name", |t| t != "Write"),
+        ) {
             let rule = PermissionRule { tool: tool.clone(), pattern: None, paths: Vec::new() };
             prop_assert_eq!(render_permission_rule(&rule), vec![tool]);
         }
