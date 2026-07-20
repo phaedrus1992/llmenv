@@ -45,7 +45,7 @@ fn main() {
         })
     };
     let resolved = loaded_config
-        .clone()
+        .as_ref()
         .map(|c| c.session_log_resolved())
         .unwrap_or_default();
     if let Some(config) = loaded_config {
