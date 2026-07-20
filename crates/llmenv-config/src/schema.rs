@@ -636,7 +636,9 @@ impl Permissions {
 }
 
 /// Per-engine raw permission rule strings, in the engine's own grammar (e.g.
-/// Claude's `WebFetch(domain:...)`). Appended verbatim — never translated.
+/// Claude's `WebFetch(domain:...)`). Appended verbatim — never translated,
+/// except for the Claude Code adapter's `Write` -> `Edit` deprecation rewrite
+/// (anthropics/claude-code#78817; see `normalize_deprecated_tool`).
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct NativePermissionRules {
     #[serde(default)]
