@@ -701,16 +701,29 @@ impl AgentAdapter for OpencodeAdapter {
 
         // Parse a native string like "Bash(otool *)" or bare "Bash" back into
         // (tool_lowercase, pattern). A bare tool name wildcard-matches everything.
-        fn parse_native_rule(s: &str) -> (String, String) {
-            if let Some(start) = s.find('(')
-                && let Some(end) = s.rfind(')')
-            {
-                return (
-                    s[..start].to_ascii_lowercase(),
-                    s[start + 1..end].to_string(),
-                );
+        // Anything else missing a balanced, non-empty `(pattern)` is a malformed
+        // rule and must error rather than silently fall back to a wildcard —
+        // a typo like "Bash(" would otherwise wildcard-allow all Bash commands.
+        fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<(String, String)> {
+            match (s.find('('), s.rfind(')')) {
+                (None, None) => Ok((s.to_ascii_lowercase(), "*".to_string())),
+                (Some(start), Some(end)) if start < end => {
+                    let tool = s[..start].to_ascii_lowercase();
+                    let pattern = &s[start + 1..end];
+                    anyhow::ensure!(
+                        !tool.is_empty(),
+                        "native_permissions.opencode.{action}: rule {s:?} has no tool name before '('"
+                    );
+                    anyhow::ensure!(
+                        !pattern.is_empty(),
+                        "native_permissions.opencode.{action}: rule {s:?} has an empty pattern '()'"
+                    );
+                    Ok((tool, pattern.to_string()))
+                }
+                _ => anyhow::bail!(
+                    "native_permissions.opencode.{action}: rule {s:?} has unbalanced parentheses"
+                ),
             }
-            (s.to_ascii_lowercase(), "*".to_string())
         }
 
         // Insert (tool, pattern) pairs into the per-tool map.
@@ -750,11 +763,11 @@ impl AgentAdapter for OpencodeAdapter {
                 action,
             );
             if let Some(n) = native {
-                insert_patterns(
-                    &mut permission_map,
-                    n.iter().map(|s| parse_native_rule(s)),
-                    action,
-                );
+                let native_patterns: Vec<(String, String)> = n
+                    .iter()
+                    .map(|s| parse_native_rule(s, action))
+                    .collect::<anyhow::Result<_>>()?;
+                insert_patterns(&mut permission_map, native_patterns.into_iter(), action);
             }
         }
 
@@ -1496,6 +1509,103 @@ mod tests {
             serde_json::json!("deny"),
             "structured deny must win over native allow for the same tool+pattern"
         );
+    }
+
+    #[test]
+    fn materialize_native_rule_missing_closing_paren_is_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec!["Bash(".into()],
+                ask: vec![],
+                deny: vec![],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Bash("), "must name offending rule: {msg}");
+        assert!(
+            msg.contains("native_permissions.opencode.allow"),
+            "must name the action list it came from: {msg}"
+        );
+    }
+
+    #[test]
+    fn materialize_native_rule_missing_opening_paren_is_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec![],
+                ask: vec!["Bash)".into()],
+                deny: vec![],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Bash)"), "must name offending rule: {msg}");
+        assert!(msg.contains("native_permissions.opencode.ask"));
+    }
+
+    #[test]
+    fn materialize_native_rule_empty_tool_name_is_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec!["(rm *)".into()],
+                ask: vec![],
+                deny: vec![],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("(rm *)"));
+    }
+
+    #[test]
+    fn materialize_native_rule_empty_pattern_is_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec![],
+                ask: vec![],
+                deny: vec!["Bash()".into()],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Bash()"), "must name offending rule: {msg}");
+        assert!(msg.contains("native_permissions.opencode.deny"));
     }
 
     #[test]
