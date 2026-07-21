@@ -293,8 +293,11 @@ fn render_context(
         used,
         cfg,
         "{pct}% {bar}",
-        [50, 80],
-        true, // self-colored (threshold), like the old `progress_bar` — see `finish`'s `default_style`
+        // self-colored (threshold), like the old `progress_bar` — see `finish`'s `default_style`
+        BarStyle::Threshold {
+            thresholds: [50, 80],
+            marker: None,
+        },
         use_color,
     )
 }
@@ -429,7 +432,7 @@ fn render_cache_usage(
         return String::new();
     }
     let used = cache as f64 / total as f64 * 100.0;
-    render_pct_and_bar(used, cfg, "\u{21bb}{pct}%", [50, 80], false, use_color) // ↻
+    render_pct_and_bar(used, cfg, "\u{21bb}{pct}%", BarStyle::Plain, use_color) // ↻
 }
 
 /// Resolve the current branch, in precedence order:
@@ -571,38 +574,39 @@ fn resolve_bar_width(cfg: Option<&llmenv_config::WidgetConfig>, default_width: u
     cfg.and_then(|c| c.width).unwrap_or(default_width) as usize
 }
 
+/// Styling for [`pct_and_bar`]'s percent+bar rendering, bundling the trio of
+/// knobs that only ever vary together. `Threshold` colors both the percent
+/// text and filled bar cells by `thresholds` (empty cells dim) — the caller
+/// must exclude this widget's name from `finish`'s `default_style` to avoid
+/// double-coloring — with an optional bright pace-target `marker` column
+/// (`usage_5h`/`usage_7d` only, via [`colored_bar`]; every other caller uses
+/// `None`). `Plain` renders an unstyled percent and a plain [`block_bar`],
+/// leaving `finish`'s static per-widget style as the only coloring applied.
+enum BarStyle {
+    Plain,
+    Threshold {
+        thresholds: [u8; 2],
+        marker: Option<usize>,
+    },
+}
+
 /// Shared percent+bar backend for every percentage-based widget (`context`,
 /// `cache_usage`, `usage_5h`, `usage_7d`): returns a `(pct_str, bar)` pair
 /// for a `0.0..=100.0` used-percentage at the given (already-resolved, see
 /// [`resolve_bar_width`]) `width`. `used` must already be a finite, clamped
 /// `0.0..=100.0` value — callers guard their own NaN/infinite/missing-data
 /// cases before calling this.
-///
-/// `colorize`: when true, both the percent text and bar are threshold-colored
-/// (filled bar cells + percent text in the threshold color, empty cells dim)
-/// and the caller must exclude this widget's name from `finish`'s
-/// `default_style` to avoid double-coloring. When false, the bar is the
-/// plain [`block_bar`] and the percent is unstyled text, leaving `finish`'s
-/// static per-widget style (or lack thereof) as the only coloring applied.
-/// `marker` places a bright pace-target column in the bar (`usage_5h`/
-/// `usage_7d` only, via `colored_bar`); every other caller passes `None`.
-fn pct_and_bar(
-    used: f64,
-    width: usize,
-    thresholds: [u8; 2],
-    colorize: bool,
-    marker: Option<usize>,
-    use_color: bool,
-) -> (String, String) {
+fn pct_and_bar(used: f64, width: usize, style: &BarStyle, use_color: bool) -> (String, String) {
     let pct = used.round() as i64;
-    if colorize {
-        let style = threshold_style(used, thresholds);
-        (
-            crate::cli::style::apply_style(&pct.to_string(), style, use_color),
-            colored_bar(used, width, style, marker, use_color),
-        )
-    } else {
-        (pct.to_string(), block_bar(used, width))
+    match *style {
+        BarStyle::Threshold { thresholds, marker } => {
+            let color = threshold_style(used, thresholds);
+            (
+                crate::cli::style::apply_style(&pct.to_string(), color, use_color),
+                colored_bar(used, width, color, marker, use_color),
+            )
+        }
+        BarStyle::Plain => (pct.to_string(), block_bar(used, width)),
     }
 }
 
@@ -611,17 +615,25 @@ fn pct_and_bar(
 /// `default_format` when the widget has no custom `format` configured), so a
 /// custom format can show either placeholder alone or both together. Built
 /// on the same [`pct_and_bar`] backend `usage_5h`/`usage_7d` use.
+/// `default_style`'s `thresholds` (if `Threshold`) are overridden by a
+/// configured `thresholds:`; its `marker` is always `None` here — only
+/// `render_usage` ever sets one.
 fn render_pct_and_bar(
     used: f64,
     cfg: Option<&llmenv_config::WidgetConfig>,
     default_format: &str,
-    default_thresholds: [u8; 2],
-    colorize: bool,
+    default_style: BarStyle,
     use_color: bool,
 ) -> String {
     let width = resolve_bar_width(cfg, DEFAULT_BAR_WIDTH);
-    let thresholds = cfg.and_then(|c| c.thresholds).unwrap_or(default_thresholds);
-    let (pct_str, bar) = pct_and_bar(used, width, thresholds, colorize, None, use_color);
+    let style = match default_style {
+        BarStyle::Threshold { thresholds, marker } => BarStyle::Threshold {
+            thresholds: cfg.and_then(|c| c.thresholds).unwrap_or(thresholds),
+            marker,
+        },
+        BarStyle::Plain => BarStyle::Plain,
+    };
+    let (pct_str, bar) = pct_and_bar(used, width, &style, use_color);
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or(default_format);
@@ -740,7 +752,11 @@ fn render_usage(
         Some(r) => pace_and_target(pct, r, args.window_secs, args.now, width),
         None => (String::new(), None),
     };
-    let (pct_str, bar) = pct_and_bar(pct, width, args.thresholds, true, marker, args.use_color);
+    let style = BarStyle::Threshold {
+        thresholds: args.thresholds,
+        marker,
+    };
+    let (pct_str, bar) = pct_and_bar(pct, width, &style, args.use_color);
     let delta = usage_delta(args.state_dir, args.state_key, pct, args.now);
     let format = cfg
         .and_then(|c| c.format.as_deref())
