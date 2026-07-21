@@ -107,10 +107,14 @@ pub fn state_path(state_dir: &Path) -> PathBuf {
 /// Returns Ok(None) if the file doesn't exist, Ok(Some(time)) if it does.
 pub fn read_state(state_dir: &Path) -> Result<Option<SystemTime>> {
     let p = state_path(state_dir);
-    if !p.exists() {
-        return Ok(None);
-    }
-    let s = std::fs::read_to_string(&p)?;
+    // #893: a single read that distinguishes NotFound (→ absent) from other I/O
+    // errors (→ propagate), rather than an exists() stat that masked every stat
+    // failure (e.g. EACCES) as "file absent".
+    let s = match std::fs::read_to_string(&p) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", p.display()))),
+    };
     let secs: u64 = s.trim().parse()?;
     Ok(Some(UNIX_EPOCH + Duration::from_secs(secs)))
 }
@@ -245,6 +249,33 @@ mod tests {
                 .unwrap()
                 .as_secs(),
             t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
+        );
+    }
+
+    // #893: a non-NotFound I/O error (here EACCES from an unsearchable dir) must
+    // propagate, not be swallowed as Ok(None) the way the old exists() guard
+    // masked every stat failure as "file absent".
+    #[cfg(unix)]
+    #[test]
+    fn read_state_propagates_permission_error_instead_of_masking_absent() {
+        use super::{read_state, write_state};
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::SystemTime;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+        fs::create_dir(&dir).unwrap();
+        write_state(&dir, SystemTime::UNIX_EPOCH).unwrap();
+        fs::set_permissions(&dir, Permissions::from_mode(0o000)).unwrap();
+        let result = read_state(&dir);
+        let readable_anyway = fs::read_dir(&dir).is_ok();
+        fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "permission error must propagate, got {result:?}"
         );
     }
 }
