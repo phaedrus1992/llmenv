@@ -467,6 +467,11 @@ fn session_start_new_allows_concurrent_sessions_in_the_same_project() {
     let stdout = String::from_utf8(ls.stdout).unwrap();
     assert!(stdout.contains("first"));
     assert!(stdout.contains("second"));
+    // §5: `session ls` shows an idle duration per session.
+    assert!(
+        stdout.contains("idle "),
+        "session ls must show idle duration: {stdout}"
+    );
 }
 
 #[test]
