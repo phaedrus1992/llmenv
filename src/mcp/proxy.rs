@@ -4,6 +4,7 @@
 //! [`ensure_running`] on every export. It re-uses an existing proxy when the
 //! pidfile points at a live process and spawns a new one otherwise.
 
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -299,10 +300,13 @@ pub(crate) fn detach_process_group(cmd: &mut Command) {
 }
 
 fn read_pidfile(pid_path: &Path) -> anyhow::Result<Option<u32>> {
-    if !pid_path.exists() {
-        return Ok(None);
-    }
-    let s = std::fs::read_to_string(pid_path)?;
+    // #893: a single read that distinguishes NotFound (→ absent) from other I/O
+    // errors (→ propagate), rather than an exists() stat that masked every stat
+    // failure (e.g. EACCES) as "no pidfile".
+    let s = match std::fs::read_to_string(pid_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        r => r.with_context(|| format!("reading {}", pid_path.display()))?,
+    };
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -439,6 +443,32 @@ mod tests {
             child_pgid,
             child_pid.to_string(),
             "configure_detached must make the child its own process-group leader"
+        );
+    }
+
+    // #893: a non-NotFound I/O error (EACCES) must propagate, not be swallowed
+    // as Ok(None) the way the old exists() guard masked stat failures.
+    #[cfg(unix)]
+    #[test]
+    fn read_pidfile_propagates_permission_error() {
+        use super::read_pidfile;
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("run");
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("mcp-proxy.pid");
+        fs::write(&path, "123").unwrap();
+        fs::set_permissions(&dir, Permissions::from_mode(0o000)).unwrap();
+        let result = read_pidfile(&path);
+        let readable_anyway = fs::read_dir(&dir).is_ok();
+        fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "permission error must propagate, got {result:?}"
         );
     }
 

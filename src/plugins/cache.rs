@@ -287,11 +287,13 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
     let manifest_path = marketplace_dir
         .join(".claude-plugin")
         .join("marketplace.json");
-    if !manifest_path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    // #893: a single read that distinguishes NotFound (→ empty) from other I/O
+    // errors (→ propagate), rather than an exists() stat that masked every stat
+    // failure (e.g. EACCES) as "no manifest".
+    let content = match std::fs::read_to_string(&manifest_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        r => r.with_context(|| format!("reading {}", manifest_path.display()))?,
+    };
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("parsing {}", manifest_path.display()))?;
     let plugins = json
@@ -1105,6 +1107,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = read_marketplace_plugins(tmp.path()).unwrap();
         assert!(plugins.is_empty());
+    }
+
+    // #893: a non-NotFound I/O error (EACCES) must propagate, not be swallowed
+    // as an empty list the way the old exists() guard masked stat failures.
+    #[cfg(unix)]
+    #[test]
+    fn read_marketplace_plugins_propagates_permission_error() {
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(".claude-plugin");
+        fs::create_dir(&plugin_dir).unwrap();
+        fs::write(plugin_dir.join("marketplace.json"), "{}").unwrap();
+        fs::set_permissions(&plugin_dir, Permissions::from_mode(0o000)).unwrap();
+        let result = read_marketplace_plugins(tmp.path());
+        let readable_anyway = fs::read_dir(&plugin_dir).is_ok();
+        fs::set_permissions(&plugin_dir, Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "permission error must propagate, got {result:?}"
+        );
     }
 
     #[test]
