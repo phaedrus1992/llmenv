@@ -244,15 +244,13 @@ fn collect_tasks() -> Option<TasksData> {
             return None;
         }
     };
-    let cwd = match std::env::current_dir() {
-        Ok(cwd) => cwd,
+    let project = match crate::task::project::current_tag() {
+        Ok(project) => project,
         Err(e) => {
             tracing::debug!("task stat collection unavailable (no cwd): {e}");
             return None;
         }
     };
-    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
-    let project = crate::task::project::resolve_project_tag(&cwd, home.as_deref());
     Some(collect_tasks_from_state_dir(&state_dir, &project))
 }
 

@@ -97,20 +97,42 @@ fn read_llmenv_yaml_id(dir: &Path) -> Option<String> {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            tracing::warn!("could not read {} for project id: {e}", path.display());
+            eprintln!(
+                "llmenv: could not read {} for project id: {e}",
+                path.display()
+            );
             return None;
         }
     };
-    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
-        Ok(value) => value.get("id").and_then(|v| v.as_str()).map(str::to_string),
+    let value: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        Ok(v) => v,
         Err(e) => {
-            tracing::warn!(
-                "{} is not valid YAML; ignoring its project id (falling back to the \
-                 directory name — this changes the project tag): {e}",
+            eprintln!(
+                "llmenv: {} is not valid YAML; ignoring its project id (falling back to \
+                 the directory name — this changes the project tag): {e}",
                 path.display()
             );
-            None
+            return None;
         }
+    };
+    match value.get("id") {
+        // No `id` key is the normal case (the marker just sets tags/bundles);
+        // fall back to the basename silently.
+        None => None,
+        Some(id) => match id.as_str() {
+            Some(s) => Some(s.to_string()),
+            // Present but not a string (`id: 123`, `id: [..]`) — the same
+            // silent tag-swap the malformed-YAML branch guards against,
+            // reached through a different malformation. Warn, don't swallow.
+            None => {
+                eprintln!(
+                    "llmenv: {} has a non-string `id`; ignoring it (falling back to the \
+                     directory name — this changes the project tag)",
+                    path.display()
+                );
+                None
+            }
+        },
     }
 }
 
@@ -128,8 +150,8 @@ fn hash_root(root: &Path) -> String {
     // it — an unstable tag (canonicalize failing on one call, succeeding on
     // another for the same root) would silently re-scope sessions.
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|e| {
-        tracing::debug!(
-            "could not canonicalize project root {}; hashing the raw path \
+        eprintln!(
+            "llmenv: could not canonicalize project root {}; hashing the raw path \
              (project tag may be unstable if this is intermittent): {e}",
             root.display()
         );
