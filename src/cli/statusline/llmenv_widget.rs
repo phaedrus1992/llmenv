@@ -22,6 +22,7 @@ pub fn render_llmenv_widget(
         "config_stale" => render_config_stale(data, cfg, icons),
         "throttle" => render_throttle(data, cfg),
         "session_log" => render_session_log(data, cfg, icons),
+        "tasks" => render_tasks(data, cfg),
         _ => return None,
     };
     Some(super::finish(name, raw, cfg, None, use_color))
@@ -41,7 +42,7 @@ fn render_scopes(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -
         .map(|t| super::sanitize(t))
         .collect::<Vec<_>>()
         .join(" · ");
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("║ {tags}");
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{tags}");
     format.replace("{tags}", &tags)
 }
 
@@ -117,17 +118,19 @@ fn render_config_stale(
     if !stale {
         return String::new();
     }
-    // `{stale_icon}` resolves from the icon set for custom formats; the
-    // default uses a literal gear emoji + "stale" label (matching the 🧠/🔌
-    // widget defaults) so the indicator is legible rather than a cryptic `~`.
-    // It means the loaded config is out of date — relaunch to pick up changes.
+    // `{stale_icon}` resolves from the icon set (mirrors `render_session_log`'s
+    // `{icon}`) so a custom `statusline.icons.config_stale` override applies
+    // to the default format, not only a custom `format:` string. Defaults to
+    // a gear emoji + "stale" label (matching the 🧠/🔌 widget defaults) so the
+    // indicator is legible rather than a cryptic `~`. It means the loaded
+    // config is out of date — relaunch to pick up changes.
     let icon = icons
         .get("config_stale")
         .cloned()
-        .unwrap_or_else(|| "◌".to_string());
+        .unwrap_or_else(|| "\u{2699}\u{fe0f}".to_string()); // ⚙️
     let format = cfg
         .and_then(|c| c.format.as_deref())
-        .unwrap_or("\u{2699}\u{fe0f} stale"); // ⚙️
+        .unwrap_or("{stale_icon} stale");
     format.replace("{stale_icon}", &icon)
 }
 
@@ -164,12 +167,44 @@ fn render_session_log(
         .replace("{entries}", &entries.to_string())
 }
 
+/// Task-tracker progress (#905): `X/total` done-count while a task session
+/// is active, else a bare open+`wip` count. `{done}`/`{total}` are `0` in
+/// the no-session default so a custom format combining all three
+/// placeholders always substitutes something sane. `{current}` (the title
+/// of the task currently `wip`) is always available for a custom format,
+/// e.g. `"{done}/{total} — {current}"`, but isn't in either default —
+/// showing both is opt-in.
+fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+    let Some(tasks) = &data.tasks else {
+        return String::new();
+    };
+    let (done, total) = tasks.session.map_or((0, 0), |s| (s.done, s.total));
+    let current = tasks
+        .current
+        .as_deref()
+        .map(super::sanitize) // task titles are free-form store content, not trusted config
+        .unwrap_or_default();
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or(if tasks.session.is_some() {
+            "\u{2611} {done}/{total}" // ☑
+        } else {
+            "\u{2611} {open}" // ☑
+        });
+    format
+        .replace("{done}", &done.to_string())
+        .replace("{total}", &total.to_string())
+        .replace("{open}", &tasks.open.to_string())
+        .replace("{current}", &current)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::cli::statusline::data::{
-        CacheData, CountData, IcmData, ScopesData, StatusData, ThrottleData,
+        CacheData, CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData,
+        ThrottleData,
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -190,7 +225,7 @@ mod tests {
             ..Default::default()
         };
         let out = render_llmenv_widget("scopes", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "║ dev · rust");
+        assert_eq!(out, "dev · rust");
     }
 
     #[test]
@@ -233,11 +268,15 @@ mod tests {
 
     #[test]
     fn renders_config_stale_icon() {
+        // No icon-set override for `config_stale` here (unlike the shared
+        // `icons()` fixture) — this tests the true hardcoded fallback, not a
+        // configured glyph.
         let data = StatusData {
             config_stale: Some(true),
             ..Default::default()
         };
-        let out = render_llmenv_widget("config_stale", &data, None, &icons(), false).unwrap();
+        let out =
+            render_llmenv_widget("config_stale", &data, None, &BTreeMap::new(), false).unwrap();
         assert_eq!(out, "\u{2699}\u{fe0f} stale"); // ⚙️ stale (default)
     }
 
@@ -324,8 +363,8 @@ mod tests {
 
     #[test]
     fn config_stale_stale_icon_placeholder_falls_back_when_icon_missing() {
-        // The default format uses a literal gear, but a custom `{stale_icon}`
-        // still resolves from the icon set, falling back to `◌` when absent.
+        // A custom `{stale_icon}` format resolves from the icon set, falling
+        // back to the default gear glyph when the icon map has no entry.
         let data = StatusData {
             config_stale: Some(true),
             ..Default::default()
@@ -337,7 +376,7 @@ mod tests {
         let empty_icons = BTreeMap::new();
         let out =
             render_llmenv_widget("config_stale", &data, Some(&cfg), &empty_icons, false).unwrap();
-        assert_eq!(out, "◌");
+        assert_eq!(out, "\u{2699}\u{fe0f}"); // ⚙️
     }
 
     #[test]
@@ -469,6 +508,88 @@ mod tests {
     }
 
     #[test]
+    fn renders_tasks_open_count_when_no_session_active() {
+        let data = StatusData {
+            tasks: Some(TasksData {
+                open: 3,
+                session: None,
+                current: None,
+            }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("tasks", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "\u{2611} 3");
+    }
+
+    #[test]
+    fn renders_tasks_done_over_total_when_session_active() {
+        let data = StatusData {
+            tasks: Some(TasksData {
+                open: 3,
+                session: Some(SessionProgress { done: 2, total: 5 }),
+                current: None,
+            }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("tasks", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "\u{2611} 2/5");
+    }
+
+    #[test]
+    fn render_tasks_honors_custom_format_with_current() {
+        let data = StatusData {
+            tasks: Some(TasksData {
+                open: 3,
+                session: Some(SessionProgress { done: 2, total: 5 }),
+                current: Some("Ship the release".to_string()),
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{done}/{total} - {current}".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "2/5 - Ship the release");
+    }
+
+    #[test]
+    fn render_tasks_current_defaults_to_empty_string_when_none() {
+        let data = StatusData {
+            tasks: Some(TasksData {
+                open: 1,
+                session: None,
+                current: None,
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("[{current}]".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "[]");
+    }
+
+    #[test]
+    fn render_tasks_sanitizes_control_characters_in_current() {
+        let data = StatusData {
+            tasks: Some(TasksData {
+                open: 1,
+                session: None,
+                current: Some("evil\x1b[31mtitle".to_string()),
+            }),
+            ..Default::default()
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            format: Some("{current}".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false).unwrap();
+        assert_eq!(out, "evil[31mtitle");
+    }
+
+    #[test]
     fn missing_data_renders_empty() {
         let data = StatusData::default();
         for name in [
@@ -480,6 +601,7 @@ mod tests {
             "config_stale",
             "throttle",
             "session_log",
+            "tasks",
         ] {
             assert_eq!(
                 render_llmenv_widget(name, &data, None, &icons(), false).unwrap(),
@@ -523,6 +645,11 @@ mod tests {
                 cooldown_secs: 45,
             }),
             session_log: Some(8),
+            tasks: Some(TasksData {
+                open: 3,
+                session: Some(SessionProgress { done: 2, total: 5 }),
+                current: Some("Do the thing".to_string()),
+            }),
         }
     }
 
@@ -537,6 +664,7 @@ mod tests {
         ("config_stale", &["stale_icon"]),
         ("throttle", &["raw", "cooldown_secs", "reason"]),
         ("session_log", &["icon", "entries"]),
+        ("tasks", &["done", "total", "open", "current"]),
     ];
 
     proptest! {

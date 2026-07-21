@@ -80,6 +80,22 @@ const TASK_TRACKER_FRAGMENT: &str = concat!(
     "\n",
     "If a session starts with `wip` tasks already recorded, resume or finish\n",
     "them before starting new top-level work.\n",
+    "\n",
+    "For a batch of related work, group it with a task session:\n",
+    "\n",
+    "- `llmenv task session start \"<name>\"` before adding the batch's tasks.\n",
+    "- `llmenv task add \"<title>\"` — tasks added while a session is active are\n",
+    "  tagged with it automatically.\n",
+    "- `llmenv task session finish` once every task in the session is done, or\n",
+    "  `llmenv task add \"<title>\"` to add more work to it instead if it isn't\n",
+    "  actually finished.\n",
+    "- `llmenv task session start` errors if a session is already active. Either\n",
+    "  finish it first, or if it's genuinely stale/abandoned, re-run with\n",
+    "  `--force` — this abandons it and untags its still-incomplete tasks (they\n",
+    "  fall back to plain open/`wip` tasks, with a note recording what happened).\n",
+    "- If a whole batch of tasks is being deliberately dropped rather than just\n",
+    "  detached from a session, delete them outright with `llmenv task clear\n",
+    "  <slug>...` or `llmenv task clear --session <id>`.\n",
 );
 
 /// `(engine-neutral event, native Claude event)` pairs for the always-on

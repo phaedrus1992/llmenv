@@ -43,6 +43,15 @@ it, or if they describe the old behavior, update them in the same change.
 "Search the docs for the feature name" is not enough — the docs must
 correctly describe the new behavior end-to-end.
 
+**Keep entries short.** A sentence or two — what changed and why it matters
+to a user, not an exhaustive walkthrough of the implementation. The full
+detail belongs in `website/docs/`, not the changelog; for a feature or other
+change substantial enough to have its own docs section, link the entry to
+that page (`https://phaedrus1992.github.io/llmenv/docs/<page>[#anchor]`)
+instead of restating the detail inline. Still write the entry over skipping
+it — a short entry that's slightly too long beats no entry — but "detailed"
+is not the same as "long."
+
 Key invariants (full details in `RELEASING.md`):
 
 - **A version only exists once it has been git-tagged.** Until then every change
