@@ -1,12 +1,17 @@
 #![expect(clippy::unwrap_used, clippy::expect_used, reason = "test scaffolding")]
-//! Integration/smoke tests for `llmenv task` (#231).
+//! Integration/smoke tests for `llmenv task` (#231, reworked for mandatory
+//! sessions — docs/superpowers/specs/2026-07-21-task-project-scoping-design.md).
 //!
 //! Drives the compiled binary end to end via `assert_cmd`, covering the full
-//! CLI surface (add/start/done/ls/show/note/block), nesting via `--parent`,
-//! prefix addressing, and error paths. Unit-level coverage (slug generation,
-//! state transitions, identifier resolution edge cases, proptest invariants)
-//! lives in `src/task/mod.rs`'s own test module — this file exercises the
-//! CLI wiring on top of that, not the store logic itself.
+//! CLI surface (add/start/done/ls/show/note/wait/block/clear + session
+//! start/finish/show/ls), nesting via `--parent`, prefix addressing, the
+//! mandatory-session enforcement, and the resume/replace/new checkpoint.
+//! Unit-level coverage (slug generation, state transitions, session store
+//! logic, proptest invariants) lives in `src/task/`'s own test modules.
+//!
+//! Every test runs with cwd = the repo root (assert_cmd's default), so the
+//! resolved project tag is the same for all `llmenv task` calls within a
+//! test; sessions are isolated per test via a temp `LLMENV_STATE_DIR`.
 
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
@@ -18,9 +23,18 @@ fn llmenv(state_dir: &std::path::Path) -> Command {
     cmd
 }
 
+/// Start a session so subsequent `task add` calls auto-resolve to it.
+fn start_session(dir: &std::path::Path, name: &str) {
+    llmenv(dir)
+        .args(["task", "session", "start", name])
+        .assert()
+        .success();
+}
+
 #[test]
 fn full_lifecycle_add_start_note_done() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
 
     llmenv(dir.path())
         .args(["task", "add", "Ship the release"])
@@ -75,6 +89,7 @@ fn full_lifecycle_add_start_note_done() {
 #[test]
 fn note_reads_from_stdin_when_text_omitted() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Piped note task"])
         .assert()
@@ -97,6 +112,7 @@ fn note_reads_from_stdin_when_text_omitted() {
 #[test]
 fn prefix_addressing_resolves_unambiguous_prefix() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Distinctive title here"])
         .assert()
@@ -111,6 +127,7 @@ fn prefix_addressing_resolves_unambiguous_prefix() {
 #[test]
 fn ambiguous_prefix_fails_with_candidate_list() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Fix login timeout"])
         .assert()
@@ -140,6 +157,7 @@ fn start_on_unknown_task_fails() {
 #[test]
 fn add_with_unknown_parent_fails() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Orphan", "--parent", "no-such-parent"])
         .assert()
@@ -149,6 +167,7 @@ fn add_with_unknown_parent_fails() {
 #[test]
 fn block_on_unknown_target_fails() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Lonely task"])
         .assert()
@@ -164,6 +183,7 @@ fn block_on_unknown_target_fails() {
 #[test]
 fn add_with_parent_links_child_via_cli() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Umbrella project"])
         .assert()
@@ -191,6 +211,7 @@ fn add_with_parent_links_child_via_cli() {
 #[test]
 fn three_level_nesting_chain_via_cli() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Grandparent epic"])
         .assert()
@@ -234,6 +255,7 @@ fn three_level_nesting_chain_via_cli() {
 #[test]
 fn multiple_children_under_one_parent_via_cli() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Shared parent"])
         .assert()
@@ -262,6 +284,7 @@ fn multiple_children_under_one_parent_via_cli() {
 #[test]
 fn completing_child_does_not_change_parent_state_via_cli() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Parent task"])
         .assert()
@@ -292,6 +315,7 @@ fn completing_child_does_not_change_parent_state_via_cli() {
 #[test]
 fn new_top_level_task_while_wip_exists_prints_guard_message() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "In progress work"])
         .assert()
@@ -311,6 +335,7 @@ fn new_top_level_task_while_wip_exists_prints_guard_message() {
 #[test]
 fn new_subtask_while_wip_exists_prints_no_guard_message() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "In progress work"])
         .assert()
@@ -327,147 +352,90 @@ fn new_subtask_while_wip_exists_prints_no_guard_message() {
         .stdout(predicates::str::contains("already in progress").not());
 }
 
-// --- Task sessions (#905) ---
+// --- Mandatory sessions (2026-07-21 rework) ---
 
 #[test]
-fn session_start_show_finish_lifecycle() {
+fn task_add_without_a_session_errors() {
     let dir = TempDir::new().unwrap();
-
     llmenv(dir.path())
-        .args(["task", "session", "show"])
+        .args(["task", "add", "Orphan task"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("No active session"));
-
-    llmenv(dir.path())
-        .args(["task", "session", "start", "sprint 1"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("Started session"));
-
-    llmenv(dir.path())
-        .args(["task", "session", "show"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("Active session"))
-        .stdout(predicates::str::contains("0/0 done"));
-
-    llmenv(dir.path())
-        .args(["task", "add", "Ship the release"])
-        .assert()
-        .success();
-
-    llmenv(dir.path())
-        .args(["task", "session", "show"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("0/1 done"));
-
-    llmenv(dir.path())
-        .args(["task", "done", "ship-the-release"])
-        .assert()
-        .success();
-
-    llmenv(dir.path())
-        .args(["task", "session", "finish"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("Finished session"))
-        .stdout(predicates::str::contains("1/1 done"));
-
-    llmenv(dir.path())
-        .args(["task", "session", "show"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("No active session"));
+        .failure()
+        .stderr(predicates::str::contains("session start"));
 }
 
 #[test]
-fn starting_a_second_session_while_one_is_active_fails() {
+fn session_start_then_task_add_auto_resolves() {
     let dir = TempDir::new().unwrap();
     llmenv(dir.path())
-        .args(["task", "session", "start", "first"])
+        .args([
+            "task",
+            "session",
+            "start",
+            "sprint",
+            "--description",
+            "issue 493",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Started session"));
+    llmenv(dir.path())
+        .args(["task", "add", "Ship it"])
         .assert()
         .success();
+    let ls = llmenv(dir.path())
+        .args(["task", "ls", "--format", "json"])
+        .output()
+        .unwrap();
+    let tasks: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    assert!(tasks[0]["session"].is_string());
+}
+
+#[test]
+fn session_start_twice_without_a_flag_errors_listing_the_existing_one() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "first");
     llmenv(dir.path())
         .args(["task", "session", "start", "second"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("already active"));
+        .stderr(predicates::str::contains("first"))
+        .stderr(predicates::str::contains("--resume"));
 }
 
 #[test]
-fn finishing_with_no_active_session_fails() {
+fn session_start_resume_adopts_the_existing_session() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "first");
     llmenv(dir.path())
-        .args(["task", "session", "finish"])
+        .args(["task", "session", "start", "--resume", "first"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("no session is currently active"));
-}
-
-#[test]
-fn tasks_added_during_a_session_are_tagged_and_survive_it_finishing() {
-    let dir = TempDir::new().unwrap();
-    llmenv(dir.path())
-        .args(["task", "session", "start", "sprint 1"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "add", "In the session"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "session", "finish"])
-        .assert()
-        .success();
-
-    // Added after the session finished — must not be tagged with it, and
-    // must not affect the finished session's already-reported progress.
-    llmenv(dir.path())
-        .args(["task", "add", "After the session"])
-        .assert()
-        .success();
-
-    let show = llmenv(dir.path())
-        .args(["task", "show", "in-the-session"])
+        .success()
+        .stdout(predicates::str::contains("Resumed session"));
+    // Still exactly one open session (no new id created).
+    let ls = llmenv(dir.path())
+        .args(["task", "session", "ls"])
         .output()
         .unwrap();
-    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
-    assert!(task["session"].is_string());
-
-    let show_after = llmenv(dir.path())
-        .args(["task", "show", "after-the-session"])
-        .output()
-        .unwrap();
-    let after: serde_json::Value = serde_json::from_slice(&show_after.stdout).unwrap();
-    assert_eq!(after["session"], serde_json::Value::Null);
+    let stdout = String::from_utf8(ls.stdout).unwrap();
+    assert_eq!(stdout.lines().filter(|l| l.starts_with("first")).count(), 1);
 }
 
 #[test]
-fn force_starting_a_new_session_abandons_the_active_one() {
+fn session_start_replace_abandons_and_creates_fresh() {
     let dir = TempDir::new().unwrap();
-    llmenv(dir.path())
-        .args(["task", "session", "start", "first"])
-        .assert()
-        .success();
+    start_session(dir.path(), "first");
     llmenv(dir.path())
         .args(["task", "add", "Never finished"])
         .assert()
         .success();
 
     llmenv(dir.path())
-        .args(["task", "session", "start", "second", "--force"])
+        .args(["task", "session", "start", "second", "--replace"])
         .assert()
         .success()
         .stdout(predicates::str::contains("Abandoned session"))
         .stdout(predicates::str::contains("Started session"));
-
-    llmenv(dir.path())
-        .args(["task", "session", "show"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("second"));
 
     // The orphaned task is untagged and notes what happened, but still exists.
     let show = llmenv(dir.path())
@@ -485,14 +453,131 @@ fn force_starting_a_new_session_abandons_the_active_one() {
 }
 
 #[test]
-fn force_flag_is_a_no_op_when_nothing_is_active() {
+fn session_start_new_allows_concurrent_sessions_in_the_same_project() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "first");
     llmenv(dir.path())
-        .args(["task", "session", "start", "only", "--force"])
+        .args(["task", "session", "start", "second", "--new"])
+        .assert()
+        .success();
+    let ls = llmenv(dir.path())
+        .args(["task", "session", "ls"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(ls.stdout).unwrap();
+    assert!(stdout.contains("first"));
+    assert!(stdout.contains("second"));
+}
+
+#[test]
+fn task_add_with_two_open_sessions_requires_explicit_session_flag() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "first");
+    llmenv(dir.path())
+        .args(["task", "session", "start", "second", "--new"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Ambiguous"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--session"));
+
+    // Explicit --session resolves the ambiguity.
+    llmenv(dir.path())
+        .args(["task", "add", "Explicit", "--session", "second"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn session_finish_by_id_closes_it_out() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "session", "finish", "sprint"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("Abandoned session").not())
-        .stdout(predicates::str::contains("Started session"));
+        .stdout(predicates::str::contains("Finished session"));
+    llmenv(dir.path())
+        .args(["task", "session", "ls"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No open sessions"));
+}
+
+#[test]
+fn session_finish_auto_resolves_when_exactly_one_open() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "only");
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Finished session"));
+}
+
+#[test]
+fn session_finish_with_no_open_session_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no open session"));
+}
+
+#[test]
+fn session_show_reports_progress() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "show"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("0/1 done"));
+    llmenv(dir.path())
+        .args(["task", "done", "ship-the-release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "show"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1/1 done"));
+}
+
+#[test]
+fn tasks_added_during_a_session_are_tagged_and_survive_it_finishing() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "In the session"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish", "sprint"])
+        .assert()
+        .success();
+
+    // The task keeps its session tag as a historical record.
+    let show = llmenv(dir.path())
+        .args(["task", "show", "in-the-session"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert!(task["session"].is_string());
+
+    // No session is open now, so a bare `task add` errors.
+    llmenv(dir.path())
+        .args(["task", "add", "After the session"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("session start"));
 }
 
 // --- task clear (#905) ---
@@ -500,6 +585,7 @@ fn force_flag_is_a_no_op_when_nothing_is_active() {
 #[test]
 fn clear_by_id_deletes_the_task() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Throwaway task"])
         .assert()
@@ -520,20 +606,24 @@ fn clear_by_id_deletes_the_task() {
 #[test]
 fn clear_by_session_deletes_only_that_sessions_tasks() {
     let dir = TempDir::new().unwrap();
-    llmenv(dir.path())
-        .args(["task", "session", "start", "doomed sprint"])
-        .assert()
-        .success();
+    start_session(dir.path(), "doomed sprint");
     llmenv(dir.path())
         .args(["task", "add", "In the doomed sprint"])
         .assert()
         .success();
+    // A second, concurrent session holds the survivor.
     llmenv(dir.path())
-        .args(["task", "session", "finish"])
+        .args(["task", "session", "start", "survivor sprint", "--new"])
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "add", "Unrelated survivor"])
+        .args([
+            "task",
+            "add",
+            "Unrelated survivor",
+            "--session",
+            "survivor-sprint",
+        ])
         .assert()
         .success();
 
@@ -575,6 +665,7 @@ fn clear_with_both_ids_and_session_is_rejected_by_clap() {
 #[test]
 fn wait_marks_task_waiting_and_notes_reason() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Ship the release"])
         .assert()
@@ -607,6 +698,7 @@ fn wait_marks_task_waiting_and_notes_reason() {
 #[test]
 fn wait_on_done_task_fails() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Ship the release"])
         .assert()
@@ -625,6 +717,7 @@ fn wait_on_done_task_fails() {
 #[test]
 fn start_resumes_a_waiting_task() {
     let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
     llmenv(dir.path())
         .args(["task", "add", "Ship the release"])
         .assert()
@@ -649,20 +742,24 @@ fn start_resumes_a_waiting_task() {
 #[test]
 fn ls_filters_by_session() {
     let dir = TempDir::new().unwrap();
-    llmenv(dir.path())
-        .args(["task", "session", "start", "sprint 1"])
-        .assert()
-        .success();
+    start_session(dir.path(), "sprint 1");
     llmenv(dir.path())
         .args(["task", "add", "In the session"])
         .assert()
         .success();
+    // A second concurrent session holds the other task.
     llmenv(dir.path())
-        .args(["task", "session", "finish"])
+        .args(["task", "session", "start", "sprint 2", "--new"])
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "add", "Outside the session"])
+        .args([
+            "task",
+            "add",
+            "In the other session",
+            "--session",
+            "sprint-2",
+        ])
         .assert()
         .success();
 
@@ -679,20 +776,17 @@ fn ls_filters_by_session() {
 #[test]
 fn ls_unfiltered_shows_tasks_across_sessions() {
     let dir = TempDir::new().unwrap();
-    llmenv(dir.path())
-        .args(["task", "session", "start", "sprint 1"])
-        .assert()
-        .success();
+    start_session(dir.path(), "sprint 1");
     llmenv(dir.path())
         .args(["task", "add", "In the session"])
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "session", "finish"])
+        .args(["task", "session", "start", "sprint 2", "--new"])
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "add", "Outside the session"])
+        .args(["task", "add", "In the other", "--session", "sprint-2"])
         .assert()
         .success();
 
