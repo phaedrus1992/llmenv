@@ -571,3 +571,135 @@ fn clear_with_both_ids_and_session_is_rejected_by_clap() {
         .assert()
         .failure();
 }
+
+#[test]
+fn wait_marks_task_waiting_and_notes_reason() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "ship-the-release"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "wait", "ship-the-release", "waiting on spec review"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Marked"));
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "ship-the-release"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["state"], "waiting");
+    assert!(
+        task["notes"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("waiting on spec review")
+    );
+}
+
+#[test]
+fn wait_on_done_task_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "done", "ship-the-release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "wait", "ship-the-release", "too late"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already done"));
+}
+
+#[test]
+fn start_resumes_a_waiting_task() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "wait", "ship-the-release", "blocked"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "ship-the-release"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "ship-the-release"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["state"], "wip");
+}
+
+#[test]
+fn ls_filters_by_session() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "sprint 1"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "In the session"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Outside the session"])
+        .assert()
+        .success();
+
+    let ls_json = llmenv(dir.path())
+        .args(["task", "ls", "--format", "json", "--session", "sprint-1"])
+        .output()
+        .unwrap();
+    let tasks: serde_json::Value = serde_json::from_slice(&ls_json.stdout).unwrap();
+    let tasks = tasks.as_array().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["title"], "In the session");
+}
+
+#[test]
+fn ls_unfiltered_shows_tasks_across_sessions() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "sprint 1"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "In the session"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Outside the session"])
+        .assert()
+        .success();
+
+    let ls_json = llmenv(dir.path())
+        .args(["task", "ls", "--format", "json"])
+        .output()
+        .unwrap();
+    let tasks: serde_json::Value = serde_json::from_slice(&ls_json.stdout).unwrap();
+    assert_eq!(tasks.as_array().unwrap().len(), 2);
+}
