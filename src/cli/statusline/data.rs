@@ -51,14 +51,15 @@ pub struct CacheData {
     pub prunable_bytes: u64,
 }
 
-/// Task-tracker progress (#905). `session` is `Some((done, total))` when a
-/// task session is active — a bare `open` count (open + `wip` tasks,
-/// store-wide) otherwise. `current` is the title of the most recently
-/// updated `wip` task (scoped to the active session if one exists, else
-/// store-wide) — `None` when nothing is currently in progress.
+/// Task-tracker progress, scoped to sessions open for the current project
+/// (mandatory-sessions design). `session` is `None` when zero sessions are
+/// open for this project (render empty — no active work tracked here);
+/// `Some` gives the summed `(done, total)` across every session open for
+/// this project (a single open session's own totals when there's just one).
+/// `current` is the title of the most recently updated `wip`/`waiting` task
+/// among those sessions — `None` when nothing is currently in progress.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct TasksData {
-    pub open: u64,
     pub session: Option<SessionProgress>,
     pub current: Option<String>,
 }
