@@ -723,6 +723,45 @@ mod tests {
         fn parse_icm_stats_never_panics_on_arbitrary_input(raw in ".{0,200}") {
             let _ = parse_icm_stats(&raw);
         }
+
+        /// Roundtrip: a well-formed "<label>: <n>" line, anywhere among
+        /// arbitrary surrounding lines, must parse back to `n` — whitespace
+        /// around the colon and extra lines before/after don't matter.
+        #[test]
+        fn extract_stat_line_roundtrips_well_formed_line(
+            label in "[A-Za-z]{1,20}",
+            n in any::<u64>(),
+            colon_spaces in " {0,3}",
+            before in proptest::collection::vec("[A-Za-z0-9]{0,20}", 0..3),
+            after in proptest::collection::vec("[A-Za-z0-9]{0,20}", 0..3),
+        ) {
+            let mut lines = before;
+            lines.push(format!("{label}{colon_spaces}: {n}"));
+            lines.extend(after);
+            let raw = lines.join("\n");
+            prop_assert_eq!(extract_stat_line(&raw, &label), Some(n));
+        }
+
+        /// Arbitrary, likely-malformed input must never panic — only ever
+        /// `None` or a correctly-parsed `u64`.
+        #[test]
+        fn extract_stat_line_never_panics_on_arbitrary_input(
+            raw in ".{0,200}",
+            label in "[A-Za-z]{0,20}",
+        ) {
+            let _ = extract_stat_line(&raw, &label);
+        }
+
+        /// A label that's a substring of another line's label (e.g. "Mem"
+        /// vs "Memories") must not false-match — `strip_prefix` only
+        /// accepts an exact-label-then-colon boundary.
+        #[test]
+        fn extract_stat_line_does_not_match_label_substring_collisions(
+            n in any::<u64>(),
+        ) {
+            let raw = format!("Memories: {n}\n");
+            prop_assert_eq!(extract_stat_line(&raw, "Mem"), None);
+        }
     }
 
     // --- collect_throttle ---
