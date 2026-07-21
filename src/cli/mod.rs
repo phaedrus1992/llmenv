@@ -2859,11 +2859,12 @@ fn run_task_session_command(
             }
             for s in &sessions {
                 println!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\tidle {}",
                     s.id,
                     s.name.as_deref().unwrap_or("-"),
                     s.project,
                     s.description.as_deref().unwrap_or("-"),
+                    session::idle_display(&s.last_activity),
                 );
             }
         }

@@ -278,19 +278,26 @@ fn create_session(
 /// open same-project session with enough detail (id, name, description,
 /// idle duration) that the agent or a human can decide `--resume`,
 /// `--replace`, or `--new` without needing to inspect anything further.
-fn checkpoint_error(existing: &[Session]) -> String {
+/// Human-readable idle duration since an RFC3339 `last_activity` timestamp
+/// (e.g. `"2h 5m"`), for `session ls` and the `session start` checkpoint.
+/// `"unknown"` when the timestamp can't be parsed or is in the future.
+#[must_use]
+pub(crate) fn idle_display(last_activity: &str) -> String {
     let now = std::time::SystemTime::now();
+    humantime::parse_rfc3339(last_activity)
+        .ok()
+        .and_then(|t| now.duration_since(t).ok())
+        .map(|d| {
+            humantime::format_duration(std::time::Duration::from_secs(d.as_secs())).to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn checkpoint_error(existing: &[Session]) -> String {
     let lines: Vec<String> = existing
         .iter()
         .map(|s| {
-            let idle = humantime::parse_rfc3339(&s.last_activity)
-                .ok()
-                .and_then(|t| now.duration_since(t).ok())
-                .map(|d| {
-                    humantime::format_duration(std::time::Duration::from_secs(d.as_secs()))
-                        .to_string()
-                })
-                .unwrap_or_else(|| "unknown".to_string());
+            let idle = idle_display(&s.last_activity);
             format!(
                 "  - {} ({}){} — idle {idle}",
                 s.id,

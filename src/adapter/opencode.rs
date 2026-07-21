@@ -1187,6 +1187,32 @@ mod tests {
     }
 
     #[test]
+    fn materialize_llmenv_skill_when_task_tracker_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.features = Some(crate::config::Features {
+            task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+            ..Default::default()
+        });
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+        assert!(out.path().join("skills/llmenv/SKILL.md").exists());
+        assert!(
+            out.path()
+                .join("skills/llmenv/references/task-tracker.md")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn no_llmenv_skill_when_no_features_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        OpencodeAdapter
+            .materialize(&MergedManifest::default(), out.path())
+            .unwrap();
+        assert!(!out.path().join("skills/llmenv").exists());
+    }
+
+    #[test]
     fn materialize_plugin_projected_skills() {
         let out = tempfile::tempdir().unwrap();
         let plugin_dir = tempfile::tempdir().unwrap();

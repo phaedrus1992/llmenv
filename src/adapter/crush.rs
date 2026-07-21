@@ -654,6 +654,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn materialize_llmenv_skill_when_task_tracker_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        let caps = Capabilities {
+            features: Some(crate::config::Features {
+                task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), out.path())
+            .unwrap();
+        assert!(out.path().join("skills/llmenv/SKILL.md").exists());
+        assert!(
+            out.path()
+                .join("skills/llmenv/references/task-tracker.md")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn no_llmenv_skill_when_no_features_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        CrushAdapter
+            .materialize(&empty_manifest(), out.path())
+            .unwrap();
+        assert!(!out.path().join("skills/llmenv").exists());
+    }
+
     fn pretooluse_hook(command: &str) -> Hook {
         Hook {
             event: "PreToolUse".into(),
