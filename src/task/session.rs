@@ -49,7 +49,13 @@ pub struct Session {
 }
 
 impl Session {
-    fn is_open(&self) -> bool {
+    /// A session is open when it has been neither finished nor abandoned.
+    /// The single source of truth for the predicate — callers outside this
+    /// module (the CLI's `session ls` filter, `add_task`'s resolver) reuse
+    /// it rather than re-inlining the two-field check, so adding a future
+    /// close-state field updates every site at once.
+    #[must_use]
+    pub(crate) fn is_open(&self) -> bool {
         self.finished_at.is_none() && self.abandoned_at.is_none()
     }
 }
@@ -147,19 +153,42 @@ pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session
 /// Update a session's `last_activity` to now. No-op (returns `Ok`) if the
 /// session doesn't exist or isn't open — a dangling `task.session` reference
 /// (deleted session file) must never fail the task mutation that triggered
-/// this touch.
+/// this touch. A present-but-corrupt session file is tolerated the same way,
+/// but warned (matching [`list_sessions`]) rather than swallowed silently.
+///
+/// Runs the read-modify-write under the store lock: it's always called from
+/// outside a held lock (after a task mutation's own lock has been released),
+/// so a concurrent `session start --replace`/`finish_session` can't have this
+/// resurrect a just-abandoned/finished session with a stale write.
 ///
 /// # Errors
 /// Propagates an I/O error only from the save of an existing, open session.
 pub fn touch_last_activity(state_dir: &Path, session_id: &str) -> anyhow::Result<()> {
-    let Ok(mut session) = load_session(state_dir, session_id) else {
-        return Ok(());
-    };
-    if !session.is_open() {
-        return Ok(());
-    }
-    session.last_activity = now_rfc3339();
-    save_session(state_dir, &session)
+    super::with_store_lock(state_dir, || {
+        let mut session = match load_session(state_dir, session_id) {
+            Ok(session) => session,
+            Err(e) if is_not_found(&e) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    "could not load session '{session_id}' to update last_activity \
+                     (skipping the touch): {e}"
+                );
+                return Ok(());
+            }
+        };
+        if !session.is_open() {
+            return Ok(());
+        }
+        session.last_activity = now_rfc3339();
+        save_session(state_dir, &session)
+    })
+}
+
+/// True when `err` wraps a `NotFound` I/O error — the "session file simply
+/// doesn't exist" case, distinct from a corrupt/permission/other read error.
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Start, resume, replace, or create-alongside a session per `decision` —
@@ -203,9 +232,7 @@ pub fn start_session(
             let existing = open_sessions_for_project(state_dir, project);
             let mut abandoned = Vec::with_capacity(existing.len());
             for session in existing {
-                let id = session.id.clone();
-                abandon_session(state_dir, session)?;
-                abandoned.push(load_session(state_dir, &id)?);
+                abandoned.push(abandon_session(state_dir, session)?);
             }
             let session = create_session(state_dir, name, description, project)?;
             Ok(StartOutcome::Replaced { session, abandoned })
@@ -293,15 +320,15 @@ fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
 /// Abandon `session`: stamps `abandoned_at`, and for every one of its tasks
 /// that isn't already `done`, clears the `session` tag and appends an
 /// orphaning note. Already-`done` tasks keep their tag — a legitimate
-/// historical record. Caller must already hold the store lock.
-fn abandon_session(state_dir: &Path, mut session: Session) -> anyhow::Result<()> {
+/// historical record. Caller must already hold the store lock. Returns the
+/// stamped session, so the caller doesn't re-read what was just written.
+fn abandon_session(state_dir: &Path, mut session: Session) -> anyhow::Result<Session> {
     let now = now_rfc3339();
     session.abandoned_at = Some(now.clone());
     save_session(state_dir, &session)?;
 
-    let id = session.id.clone();
-    let label = session.name.unwrap_or(session.id);
-    for mut task in tasks_in_session(state_dir, &id)
+    let label = session.name.clone().unwrap_or_else(|| session.id.clone());
+    for mut task in tasks_in_session(state_dir, &session.id)
         .into_iter()
         .filter(|t| t.state != TaskState::Done)
     {
@@ -316,7 +343,7 @@ fn abandon_session(state_dir: &Path, mut session: Session) -> anyhow::Result<()>
         task.updated_at = now.clone();
         super::save_task(state_dir, &task)?;
     }
-    Ok(())
+    Ok(session)
 }
 
 /// Finish an open session by id: stamps `finished_at`.
@@ -624,6 +651,39 @@ mod tests {
             .find(|s| s.id == session.id)
             .expect("test");
         assert_ne!(reloaded.last_activity, original);
+    }
+
+    #[test]
+    fn touch_last_activity_on_missing_session_is_a_noop_ok() {
+        let dir = TempDir::new().expect("test");
+        // No such session file — a dangling task.session reference must not
+        // fail the touch.
+        touch_last_activity(dir.path(), "no-such-session").expect("test");
+    }
+
+    #[test]
+    fn touch_last_activity_on_corrupt_session_file_is_a_noop_ok() {
+        let dir = TempDir::new().expect("test");
+        std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+        std::fs::write(session_path(dir.path(), "corrupt"), b"not valid json").expect("test");
+        // Tolerated (warned, not propagated) — a corrupt session file must
+        // not turn an already-committed task mutation into an error.
+        touch_last_activity(dir.path(), "corrupt").expect("test");
+    }
+
+    #[test]
+    fn touch_last_activity_on_finished_session_does_not_reopen_it() {
+        let dir = TempDir::new().expect("test");
+        let StartOutcome::Created(session) =
+            start_session(dir.path(), Some("s"), None, PROJECT_A, StartDecision::Auto)
+                .expect("test")
+        else {
+            panic!("expected Created");
+        };
+        finish_session(dir.path(), &session.id).expect("test");
+        touch_last_activity(dir.path(), &session.id).expect("test");
+        // Still closed — the touch is a no-op on a non-open session.
+        assert!(open_sessions_for_project(dir.path(), PROJECT_A).is_empty());
     }
 
     #[test]

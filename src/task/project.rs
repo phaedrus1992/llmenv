@@ -7,6 +7,19 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+/// Resolve the project tag for the current process's working directory,
+/// reading ambient `$HOME`. Thin wrapper over [`resolve_project_tag`] for the
+/// common "wherever the agent invoked `llmenv` from" case — every `llmenv
+/// task` invocation and hook runs with cwd set to the project directory.
+///
+/// # Errors
+/// Propagates a failure to read the current working directory.
+pub fn current_tag() -> std::io::Result<String> {
+    let cwd = std::env::current_dir()?;
+    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
+    Ok(resolve_project_tag(&cwd, home.as_deref()))
+}
+
 /// Resolve the project tag for `cwd`: `{name}-{hash}`, where `hash` is the
 /// first 10 hex characters of `SHA-256(canonicalized absolute root path)`.
 ///
@@ -73,9 +86,32 @@ fn find_git_root(start: &Path) -> Option<std::path::PathBuf> {
 }
 
 fn read_llmenv_yaml_id(dir: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(dir.join(".llmenv.yaml")).ok()?;
-    let value: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
-    value.get("id")?.as_str().map(str::to_string)
+    let path = dir.join(".llmenv.yaml");
+    // A missing marker is the normal case (silent). A present-but-malformed
+    // one is a real config error that silently changes the project tag's name
+    // component — and the tag is the equality key for session scoping, so a
+    // silent swap orphans open sessions. Warn on it, matching `list_sessions`'
+    // tolerate-but-warn policy for corrupt store files, rather than lumping it
+    // in with "absent".
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!("could not read {} for project id: {e}", path.display());
+            return None;
+        }
+    };
+    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+        Ok(value) => value.get("id").and_then(|v| v.as_str()).map(str::to_string),
+        Err(e) => {
+            tracing::warn!(
+                "{} is not valid YAML; ignoring its project id (falling back to the \
+                 directory name — this changes the project tag): {e}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 fn basename(path: &Path) -> String {
@@ -86,7 +122,19 @@ fn basename(path: &Path) -> String {
 }
 
 fn hash_root(root: &Path) -> String {
-    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    // Canonicalizing makes the tag stable regardless of how the root was
+    // reached (symlinks, `.`/`..`). A failure (removed/permission-denied
+    // root) falls back to the raw path so a tag is still produced, but log
+    // it — an unstable tag (canonicalize failing on one call, succeeding on
+    // another for the same root) would silently re-scope sessions.
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|e| {
+        tracing::debug!(
+            "could not canonicalize project root {}; hashing the raw path \
+             (project tag may be unstable if this is intermittent): {e}",
+            root.display()
+        );
+        root.to_path_buf()
+    });
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
     let digest = hasher.finalize();

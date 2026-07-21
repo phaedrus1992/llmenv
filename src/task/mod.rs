@@ -230,7 +230,7 @@ pub fn add_task(
 ) -> anyhow::Result<Task> {
     let resolved_session = resolve_session_for_add(state_dir, session_id, project)?;
     let task = add_task_for_session(state_dir, title, parent, &resolved_session)?;
-    session::touch_last_activity(state_dir, &resolved_session)?;
+    touch_task_session(state_dir, &task);
     Ok(task)
 }
 
@@ -293,7 +293,7 @@ fn resolve_session_for_add(
     if let Some(id) = session_id {
         let exists_open = session::list_sessions(state_dir)
             .into_iter()
-            .any(|s| s.id == id && s.finished_at.is_none() && s.abandoned_at.is_none());
+            .any(|s| s.id == id && s.is_open());
         if !exists_open {
             anyhow::bail!("session '{id}' does not exist or is not open");
         }
@@ -382,20 +382,26 @@ pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
         save_task(state_dir, &task)?;
         Ok(task)
     })?;
-    touch_task_session(state_dir, &task)?;
+    touch_task_session(state_dir, &task);
     Ok(task)
 }
 
 /// Bump the `last_activity` of the session a task is tagged to, if any — so a
 /// session with active `add`/`start`/`done`/`note` traffic reads as "recent"
 /// in `session ls` and the `session start` checkpoint. Called outside
-/// `with_store_lock` (it takes its own lock-free read/save path), so the
-/// task's own mutation lock has already been released.
-fn touch_task_session(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
-    if let Some(session_id) = &task.session {
-        session::touch_last_activity(state_dir, session_id)?;
+/// `with_store_lock` (`touch_last_activity` takes the lock itself), *after*
+/// the task mutation has already been committed. Best-effort by design: a
+/// failure to bump the timestamp (pure display bookkeeping) must never turn
+/// an already-persisted task change into a reported error — log and move on.
+fn touch_task_session(state_dir: &Path, task: &Task) {
+    if let Some(session_id) = &task.session
+        && let Err(e) = session::touch_last_activity(state_dir, session_id)
+    {
+        tracing::warn!(
+            "failed to update last_activity for session '{session_id}' after a task \
+             change (the task change itself is already saved): {e}"
+        );
     }
-    Ok(())
 }
 
 /// Delete a task outright (#905) — for a task that's being deliberately
@@ -422,7 +428,7 @@ pub fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
         save_task(state_dir, &task)?;
         Ok(task)
     })?;
-    touch_task_session(state_dir, &task)?;
+    touch_task_session(state_dir, &task);
     Ok(task)
 }
 
@@ -439,7 +445,7 @@ pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Ta
         save_task(state_dir, &task)?;
         Ok(task)
     })?;
-    touch_task_session(state_dir, &task)?;
+    touch_task_session(state_dir, &task);
     Ok(task)
 }
 
@@ -466,7 +472,7 @@ pub fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<
         save_task(state_dir, &task)?;
         Ok(task)
     })?;
-    touch_task_session(state_dir, &task)?;
+    touch_task_session(state_dir, &task);
     Ok(task)
 }
 
@@ -544,11 +550,9 @@ pub fn stop_hook_reminder(state_dir: &Path) -> String {
 /// out. Empty string if none qualify, or on any internal error (degrades
 /// silently — hooks must never block the agent).
 fn session_finish_reminders(state_dir: &Path) -> String {
-    let Ok(cwd) = std::env::current_dir() else {
+    let Ok(project) = project::current_tag() else {
         return String::new();
     };
-    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
-    let project = project::resolve_project_tag(&cwd, home.as_deref());
     let mut lines = Vec::new();
     for session in session::open_sessions_for_project(state_dir, &project) {
         let (done, total) = session::session_progress(state_dir, &session.id);
