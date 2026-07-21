@@ -69,15 +69,37 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
 /// `abandon_session` that wrote `finished_at`/`abandoned_at` but failed to
 /// remove the pointer file — all treated as "no active session" rather than
 /// erroring, since a degraded session pointer must never break a hook or the
-/// statusline collector.
+/// statusline collector. A missing pointer file is expected (no session
+/// ever started) and logged at nothing; an unreadable/corrupt pointer or
+/// session file is not expected, so it's logged at `warn` even though it
+/// still degrades to `None` — otherwise a corrupt state file would silently
+/// bypass `start_session`'s one-session-at-a-time guard with no trace.
 #[must_use]
 pub fn active_session(state_dir: &Path) -> Option<Session> {
-    let raw = std::fs::read_to_string(active_pointer_path(state_dir)).ok()?;
+    let raw = match std::fs::read_to_string(active_pointer_path(state_dir)) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(
+                "active session pointer unreadable (treating as no active session): {e}"
+            );
+            return None;
+        }
+    };
     let id = raw.trim();
     if id.is_empty() {
         return None;
     }
-    let session = load_session(state_dir, id).ok()?;
+    let session = match load_session(state_dir, id) {
+        Ok(session) => session,
+        Err(e) => {
+            tracing::warn!(
+                "active session pointer names '{id}' but its session file could not be \
+                 loaded (treating as no active session): {e}"
+            );
+            return None;
+        }
+    };
     if session.finished_at.is_some() || session.abandoned_at.is_some() {
         return None;
     }
@@ -320,6 +342,17 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let session = start_session(dir.path(), Some("sprint 1"), false).expect("test");
         std::fs::remove_file(session_path(dir.path(), &session.id)).expect("test");
+        assert!(active_session(dir.path()).is_none());
+    }
+
+    #[test]
+    fn active_session_degrades_on_corrupt_session_file_instead_of_panicking() {
+        // Distinct from the dangling-pointer case above: the session file
+        // exists but its content isn't valid JSON (e.g. a partial write from
+        // a crash outside the atomic-rename path, or manual corruption).
+        let dir = TempDir::new().expect("test");
+        let session = start_session(dir.path(), Some("sprint 1"), false).expect("test");
+        std::fs::write(session_path(dir.path(), &session.id), b"not valid json").expect("test");
         assert!(active_session(dir.path()).is_none());
     }
 
