@@ -148,6 +148,14 @@ impl AgentAdapter for CrushAdapter {
         }
         owned.extend(plugin_skill_paths.iter().cloned());
 
+        // Built-in `llmenv` skill: one reference file per enabled first-party
+        // feature. No-op when none are enabled. Counted toward `skills_paths`
+        // below so Crush discovers it even when it's the only skill present.
+        let features = manifest.capabilities.features.clone().unwrap_or_default();
+        let llmenv_skill_paths =
+            crate::adapter::llmenv_skill::materialize_llmenv_skill(out, &features)?;
+        owned.extend(llmenv_skill_paths.iter().cloned());
+
         // P1-1: validate skills (frontmatter + hardcoded-path scan), same gate as ClaudeCodeAdapter
         crate::adapter::skills::validate_skills(out)?;
 
@@ -338,7 +346,10 @@ impl AgentAdapter for CrushAdapter {
 
         // options.skills_paths: emit whenever any skills exist (first-class or plugin-projected).
         // P1-2: must include plugin_skill_paths — plugin-only skill sets omit this key otherwise.
-        if !skill_paths.is_empty() || !plugin_skill_paths.is_empty() {
+        if !skill_paths.is_empty()
+            || !plugin_skill_paths.is_empty()
+            || !llmenv_skill_paths.is_empty()
+        {
             let skills_out = out
                 .join("skills")
                 .into_os_string()
@@ -572,6 +583,36 @@ mod tests {
             capabilities: caps,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn materialize_llmenv_skill_when_task_tracker_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        let caps = Capabilities {
+            features: Some(crate::config::Features {
+                task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), out.path())
+            .unwrap();
+        assert!(out.path().join("skills/llmenv/SKILL.md").exists());
+        assert!(
+            out.path()
+                .join("skills/llmenv/references/task-tracker.md")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn no_llmenv_skill_when_no_features_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        CrushAdapter
+            .materialize(&empty_manifest(), out.path())
+            .unwrap();
+        assert!(!out.path().join("skills/llmenv").exists());
     }
 
     fn pretooluse_hook(command: &str) -> Hook {

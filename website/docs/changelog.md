@@ -74,8 +74,9 @@ On the fix side: opencode permission precedence and malformed-rule handling, ski
 
 ### Added
 
-- Add an in-engine task tracker (`llmenv task add|start|done|ls|show|note|block`), off by default. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#231)
-- Add task sessions (`llmenv task session start|finish|show`, plus `--force` and `task clear`) to group a batch of tasks and track them as a unit. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#905)
+- Add an in-engine task tracker (`llmenv task add|start|done|wait|ls|show|note|block|clear`), off by default. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#231)
+- Add mandatory, project-tagged task sessions: every task belongs to a session, each session is tagged with the project it started in, and any number can be open at once. `task session start` surfaces an existing same-project session with a `--resume`/`--replace`/`--new` checkpoint instead of colliding; sessions carry a `--description`, and `task session ls` lists the open ones for recovery after a context compaction. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#905)
+- Add an `llmenv` skill materialized into every engine (Claude Code, opencode, Crush) with a reference file per enabled built-in (task tracker, memory, context-mode, codebase-memory), replacing the old Claude-Code-only task-tracker CLAUDE.md fragment. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#905)
 - Add a first-class `llmenv statusline` subcommand with 21 configurable widgets, replacing the old ad hoc status line. See [`statusline:`](https://phaedrus1992.github.io/llmenv/docs/configuration) (#836)
 - Opt-in per-phase hook-run timing via `LLMENV_TRACE_TIMING` — emits phase durations as one `llmenv-trace {json}` stderr line, off by default
 - `llmenv doctor` flags `hook.matcher` values shaped like file globs (e.g. `*.rs`) — Claude Code only matches `hook.matcher` against tool name, so these silently never fire (#837)

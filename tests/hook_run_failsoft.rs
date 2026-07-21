@@ -823,6 +823,14 @@ fn stop_with_task_tracker_and_file_session_log_writes_log_and_reminder() {
         .env("LLMENV_CONFIG", &config_path)
         .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", dir.path())
+        .args(["task", "session", "start", "sprint"])
+        .assert()
+        .success();
+    Command::cargo_bin("llmenv")
+        .unwrap()
+        .env("LLMENV_CONFIG", &config_path)
+        .env("LLMENV_CONFIG_DIR", dir.path())
+        .env("LLMENV_STATE_DIR", dir.path())
         .args(["task", "add", "Wrap up the release notes"])
         .assert()
         .success();

@@ -167,18 +167,18 @@ fn render_session_log(
         .replace("{entries}", &entries.to_string())
 }
 
-/// Task-tracker progress (#905): `X/total` done-count while a task session
-/// is active, else a bare open+`wip` count. `{done}`/`{total}` are `0` in
-/// the no-session default so a custom format combining all three
-/// placeholders always substitutes something sane. `{current}` (the title
-/// of the task currently `wip`) is always available for a custom format,
-/// e.g. `"{done}/{total} — {current}"`, but isn't in either default —
-/// showing both is opt-in.
+/// Task-tracker progress for the current project's open session(s):
+/// `{done}`/`{total}` from the summed session progress, empty string when no
+/// session is open for this project. `{current}` (the title of the task
+/// currently `wip`/`waiting`) is always available for a custom format, e.g.
+/// `"{done}/{total} — {current}"`, but isn't in the default.
 fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     let Some(tasks) = &data.tasks else {
         return String::new();
     };
-    let (done, total) = tasks.session.map_or((0, 0), |s| (s.done, s.total));
+    let Some(session) = tasks.session else {
+        return String::new();
+    };
     let current = tasks
         .current
         .as_deref()
@@ -186,15 +186,10 @@ fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) ->
         .unwrap_or_default();
     let format = cfg
         .and_then(|c| c.format.as_deref())
-        .unwrap_or(if tasks.session.is_some() {
-            "\u{2611} {done}/{total}" // ☑
-        } else {
-            "\u{2611} {open}" // ☑
-        });
+        .unwrap_or("\u{2611} {done}/{total}"); // ☑
     format
-        .replace("{done}", &done.to_string())
-        .replace("{total}", &total.to_string())
-        .replace("{open}", &tasks.open.to_string())
+        .replace("{done}", &session.done.to_string())
+        .replace("{total}", &session.total.to_string())
         .replace("{current}", &current)
 }
 
@@ -508,24 +503,22 @@ mod tests {
     }
 
     #[test]
-    fn renders_tasks_open_count_when_no_session_active() {
+    fn renders_tasks_empty_when_no_session_open_for_project() {
         let data = StatusData {
             tasks: Some(TasksData {
-                open: 3,
                 session: None,
                 current: None,
             }),
             ..Default::default()
         };
         let out = render_llmenv_widget("tasks", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "\u{2611} 3");
+        assert_eq!(out, "");
     }
 
     #[test]
-    fn renders_tasks_done_over_total_when_session_active() {
+    fn renders_tasks_done_over_total_when_session_open() {
         let data = StatusData {
             tasks: Some(TasksData {
-                open: 3,
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: None,
             }),
@@ -539,7 +532,6 @@ mod tests {
     fn render_tasks_honors_custom_format_with_current() {
         let data = StatusData {
             tasks: Some(TasksData {
-                open: 3,
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: Some("Ship the release".to_string()),
             }),
@@ -557,8 +549,7 @@ mod tests {
     fn render_tasks_current_defaults_to_empty_string_when_none() {
         let data = StatusData {
             tasks: Some(TasksData {
-                open: 1,
-                session: None,
+                session: Some(SessionProgress { done: 0, total: 0 }),
                 current: None,
             }),
             ..Default::default()
@@ -575,8 +566,7 @@ mod tests {
     fn render_tasks_sanitizes_control_characters_in_current() {
         let data = StatusData {
             tasks: Some(TasksData {
-                open: 1,
-                session: None,
+                session: Some(SessionProgress { done: 0, total: 1 }),
                 current: Some("evil\x1b[31mtitle".to_string()),
             }),
             ..Default::default()
@@ -646,7 +636,6 @@ mod tests {
             }),
             session_log: Some(8),
             tasks: Some(TasksData {
-                open: 3,
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: Some("Do the thing".to_string()),
             }),
@@ -664,7 +653,7 @@ mod tests {
         ("config_stale", &["stale_icon"]),
         ("throttle", &["raw", "cooldown_secs", "reason"]),
         ("session_log", &["icon", "entries"]),
-        ("tasks", &["done", "total", "open", "current"]),
+        ("tasks", &["done", "total", "current"]),
     ];
 
     proptest! {

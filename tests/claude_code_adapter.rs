@@ -1915,9 +1915,11 @@ fn no_stop_hook_when_task_tracker_and_session_log_both_disabled() {
     );
 }
 
-// #231: task-tracker fragment appended to CLAUDE.md when enabled.
+// #231 (reworked): task-tracker guidance now ships as the `llmenv` skill's
+// task-tracker reference file, materialized when task_tracker is enabled —
+// no longer a CLAUDE.md fragment.
 #[test]
-fn task_tracker_fragment_appended_when_enabled() {
+fn llmenv_skill_materialized_when_task_tracker_enabled() {
     let caps = llmenv::config::Capabilities {
         features: Some(llmenv::config::Features {
             task_tracker: Some(llmenv::config::TaskTracker { enabled: true }),
@@ -1931,20 +1933,25 @@ fn task_tracker_fragment_appended_when_enabled() {
         .materialize(&manifest, tmp.path())
         .expect("materialize");
 
+    assert!(
+        tmp.path().join("skills/llmenv/SKILL.md").exists(),
+        "llmenv skill router must be materialized when a feature is enabled"
+    );
+    let task_ref = tmp.path().join("skills/llmenv/references/task-tracker.md");
+    assert!(
+        task_ref.exists(),
+        "task-tracker reference must be materialized when task_tracker enabled"
+    );
     let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("read CLAUDE.md");
     assert!(
-        claude_md.contains("llmenv task"),
-        "CLAUDE.md must contain task-tracker fragment when enabled"
-    );
-    assert!(
-        claude_md.contains("<!-- from task_tracker -->"),
-        "fragment must carry provenance marker"
+        !claude_md.contains("<!-- from task_tracker -->"),
+        "the old CLAUDE.md task-tracker fragment must be gone"
     );
 }
 
-// #231: task-tracker fragment NOT appended when disabled/absent.
+// The skill is absent entirely when no first-party feature is enabled.
 #[test]
-fn task_tracker_fragment_absent_when_disabled() {
+fn llmenv_skill_absent_when_no_features_enabled() {
     let caps = llmenv::config::Capabilities {
         features: Some(llmenv::config::Features {
             task_tracker: Some(llmenv::config::TaskTracker { enabled: false }),
@@ -1958,10 +1965,9 @@ fn task_tracker_fragment_absent_when_disabled() {
         .materialize(&manifest, tmp.path())
         .expect("materialize");
 
-    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("read CLAUDE.md");
     assert!(
-        !claude_md.contains("<!-- from task_tracker -->"),
-        "CLAUDE.md must NOT contain task-tracker fragment when disabled"
+        !tmp.path().join("skills/llmenv").exists(),
+        "llmenv skill must be absent when no first-party feature is enabled"
     );
 }
 
