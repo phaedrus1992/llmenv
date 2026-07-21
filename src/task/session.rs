@@ -234,7 +234,8 @@ pub fn delete_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Re
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::task::{add_task, done_task, load_task, start_task};
+    use crate::task::{add_task, done_task, load_task, save_task, start_task};
+    use proptest::prelude::*;
     use tempfile::TempDir;
 
     #[test]
@@ -477,5 +478,55 @@ mod tests {
         let session = start_session(dir.path(), Some("empty"), false).expect("test");
         let deleted = delete_tasks_in_session(dir.path(), &session.id).expect("test");
         assert!(deleted.is_empty());
+    }
+
+    proptest::proptest! {
+        /// `(done, total)` must satisfy `done <= total`, `total` must equal
+        /// exactly the tasks tagged with the session under test (tasks
+        /// tagged with a *different* session, or untagged, must not leak
+        /// in), and `done` must equal exactly the `Done`-state subset.
+        #[test]
+        fn session_progress_invariants_hold_for_arbitrary_task_mix(
+            // Each entry: (tagged to the session under test, tagged to a
+            // different session instead, is Done).
+            states in proptest::collection::vec(
+                (proptest::bool::ANY, proptest::bool::ANY, proptest::bool::ANY),
+                0..12,
+            ),
+        ) {
+            let dir = TempDir::new().expect("test");
+            let session_id = "session-under-test";
+            let mut expected_total = 0u64;
+            let mut expected_done = 0u64;
+            for (i, (tagged, other_session, done)) in states.iter().enumerate() {
+                let session = if *tagged {
+                    expected_total += 1;
+                    if *done {
+                        expected_done += 1;
+                    }
+                    Some(session_id.to_string())
+                } else if *other_session {
+                    Some("some-other-session".to_string())
+                } else {
+                    None
+                };
+                let task = Task {
+                    slug: format!("task-{i}"),
+                    title: format!("Task {i}"),
+                    state: if *done { TaskState::Done } else { TaskState::Open },
+                    parent: None,
+                    blocked_on: Vec::new(),
+                    notes: Vec::new(),
+                    session,
+                    created_at: now_rfc3339(),
+                    updated_at: now_rfc3339(),
+                };
+                save_task(dir.path(), &task).expect("test");
+            }
+            let (done, total) = session_progress(dir.path(), session_id);
+            prop_assert!(done <= total);
+            prop_assert_eq!(total, expected_total);
+            prop_assert_eq!(done, expected_done);
+        }
     }
 }
