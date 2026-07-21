@@ -326,3 +326,248 @@ fn new_subtask_while_wip_exists_prints_no_guard_message() {
         .success()
         .stdout(predicates::str::contains("already in progress").not());
 }
+
+// --- Task sessions (#905) ---
+
+#[test]
+fn session_start_show_finish_lifecycle() {
+    let dir = TempDir::new().unwrap();
+
+    llmenv(dir.path())
+        .args(["task", "session", "show"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No active session"));
+
+    llmenv(dir.path())
+        .args(["task", "session", "start", "sprint 1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Started session"));
+
+    llmenv(dir.path())
+        .args(["task", "session", "show"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Active session"))
+        .stdout(predicates::str::contains("0/0 done"));
+
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "session", "show"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("0/1 done"));
+
+    llmenv(dir.path())
+        .args(["task", "done", "ship-the-release"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Finished session"))
+        .stdout(predicates::str::contains("1/1 done"));
+
+    llmenv(dir.path())
+        .args(["task", "session", "show"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No active session"));
+}
+
+#[test]
+fn starting_a_second_session_while_one_is_active_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "first"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "second"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already active"));
+}
+
+#[test]
+fn finishing_with_no_active_session_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no session is currently active"));
+}
+
+#[test]
+fn tasks_added_during_a_session_are_tagged_and_survive_it_finishing() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "sprint 1"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "In the session"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .success();
+
+    // Added after the session finished — must not be tagged with it, and
+    // must not affect the finished session's already-reported progress.
+    llmenv(dir.path())
+        .args(["task", "add", "After the session"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "in-the-session"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert!(task["session"].is_string());
+
+    let show_after = llmenv(dir.path())
+        .args(["task", "show", "after-the-session"])
+        .output()
+        .unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&show_after.stdout).unwrap();
+    assert_eq!(after["session"], serde_json::Value::Null);
+}
+
+#[test]
+fn force_starting_a_new_session_abandons_the_active_one() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "first"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Never finished"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "session", "start", "second", "--force"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Abandoned session"))
+        .stdout(predicates::str::contains("Started session"));
+
+    llmenv(dir.path())
+        .args(["task", "session", "show"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("second"));
+
+    // The orphaned task is untagged and notes what happened, but still exists.
+    let show = llmenv(dir.path())
+        .args(["task", "show", "never-finished"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["session"], serde_json::Value::Null);
+    assert!(
+        task["notes"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Orphaned")
+    );
+}
+
+#[test]
+fn force_flag_is_a_no_op_when_nothing_is_active() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "only", "--force"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Abandoned session").not())
+        .stdout(predicates::str::contains("Started session"));
+}
+
+// --- task clear (#905) ---
+
+#[test]
+fn clear_by_id_deletes_the_task() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "add", "Throwaway task"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "clear", "throwaway-task"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Cleared task"));
+
+    llmenv(dir.path())
+        .args(["task", "show", "throwaway-task"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn clear_by_session_deletes_only_that_sessions_tasks() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "doomed sprint"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "In the doomed sprint"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Unrelated survivor"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "clear", "--session", "doomed-sprint"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Cleared 1 task(s)"));
+
+    llmenv(dir.path())
+        .args(["task", "show", "in-the-doomed-sprint"])
+        .assert()
+        .failure();
+    llmenv(dir.path())
+        .args(["task", "show", "unrelated-survivor"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn clear_with_neither_ids_nor_session_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "clear"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("specify one or more task ids"));
+}
+
+#[test]
+fn clear_with_both_ids_and_session_is_rejected_by_clap() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "clear", "some-id", "--session", "some-session"])
+        .assert()
+        .failure();
+}

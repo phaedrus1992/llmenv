@@ -84,6 +84,46 @@ pub struct RateLimitWindow {
     pub resets_at: Option<i64>,
 }
 
+/// `usage_5h`/`usage_7d` dispatch: resolves the window, default thresholds,
+/// and default format that differ between the two, then delegates to the
+/// shared [`render_usage`] backend.
+fn render_usage_widget(
+    name: &str,
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
+    let state = usage_state_dir();
+    let (window, window_secs, defaults, fmt) = if name == "usage_5h" {
+        (
+            data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
+            FIVE_HOUR_SECS,
+            [70, 90],
+            "5h {pct}%{delta}{pace} ➡{reset}",
+        )
+    } else {
+        (
+            data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
+            SEVEN_DAY_SECS,
+            [60, 80],
+            "7d {pct}%{delta}{pace} ➡{reset}",
+        )
+    };
+    render_usage(
+        &UsageArgs {
+            window,
+            now: now_unix(),
+            window_secs,
+            thresholds: cfg.and_then(|c| c.thresholds).unwrap_or(defaults),
+            state_dir: state.as_deref(),
+            state_key: name,
+            use_color,
+        },
+        cfg,
+        fmt,
+    )
+}
+
 /// Render one engine-sourced widget by name. Returns `None` for a name this
 /// function doesn't recognize (the orchestrator treats that identically to
 /// an llmenv-sourced widget miss — render empty). A recognized widget with
@@ -99,50 +139,19 @@ pub fn render_engine_widget(
     let raw = match name {
         "model" => render_model(data, cfg),
         "folder" => render_folder(data, cfg),
-        "context_pct" => render_context_pct(data, cfg),
         "duration" => render_duration(data, cfg),
         "tokens" => render_tokens(data, cfg),
         "budget" => render_budget(data, cfg),
-        "cache_pct" => render_cache_pct(data, cfg),
+        "cache_usage" => render_cache_usage(data, cfg, use_color),
         "branch" => render_branch(data, cfg, use_color),
         "pr" => render_pr(data, cfg, use_color),
-        "progress_bar" => render_progress_bar(data, cfg, use_color),
-        "usage_5h" | "usage_7d" => {
-            let state = usage_state_dir();
-            let (window, window_secs, defaults, fmt) = if name == "usage_5h" {
-                (
-                    data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
-                    FIVE_HOUR_SECS,
-                    [70, 90],
-                    "5h {pct}%{delta}{pace} ➡{reset}",
-                )
-            } else {
-                (
-                    data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
-                    SEVEN_DAY_SECS,
-                    [60, 80],
-                    "7d {pct}%{delta}{pace} ➡{reset}",
-                )
-            };
-            render_usage(
-                &UsageArgs {
-                    window,
-                    now: now_unix(),
-                    window_secs,
-                    thresholds: cfg.and_then(|c| c.thresholds).unwrap_or(defaults),
-                    state_dir: state.as_deref(),
-                    state_key: name,
-                    use_color,
-                },
-                cfg,
-                fmt,
-            )
-        }
+        "context" => render_context(data, cfg, use_color),
+        "usage_5h" | "usage_7d" => render_usage_widget(name, data, cfg, use_color),
         "peak" => super::peak::render_peak(cfg),
         _ => return None,
     };
     // `pr` colors by review state via a dynamic style; `finish` applies it
-    // unless the user set an explicit per-widget `style`. (progress_bar and
+    // unless the user set an explicit per-widget `style`. (`context` and
     // the usage widgets color themselves per-cell.)
     let dyn_style = match name {
         "pr" => pr_review_style(data),
@@ -268,12 +277,17 @@ fn render_folder(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -
         .replace("{path}", &path)
 }
 
-/// Renders the used-context percentage. `remaining_percentage` comes from an
-/// external engine's stdin JSON — untrusted. NaN/infinite values render
-/// empty rather than a garbled cast result; any other value is clamped to
-/// the valid `0.0..=100.0` range before the `i64` cast so a corrupt/hostile
-/// float (e.g. `1e300`) can't produce a saturated, absurd display string.
-fn render_context_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+/// Renders used-context progress: percent, bar, or both, depending on which
+/// placeholders the configured (or default) `format` uses. `remaining_percentage`
+/// comes from an external engine's stdin JSON — untrusted. NaN/infinite values
+/// render empty rather than a garbled cast result; any other value is clamped
+/// to `0.0..=100.0` before display so a corrupt/hostile float (e.g. `1e300`)
+/// can't produce an absurd bar/percentage.
+fn render_context(
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
     let Some(remaining) = data
         .context_window
         .as_ref()
@@ -284,9 +298,18 @@ fn render_context_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfi
     if !remaining.is_finite() {
         return String::new();
     }
-    let used = (100.0 - remaining).clamp(0.0, 100.0).round() as i64;
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{pct}%");
-    format.replace("{pct}", &used.to_string())
+    let used = (100.0 - remaining).clamp(0.0, 100.0);
+    render_pct_and_bar(
+        used,
+        cfg,
+        "{pct}% {bar}",
+        // self-colored (threshold), like the old `progress_bar` — see `finish`'s `default_style`
+        BarStyle::Threshold {
+            thresholds: [50, 80],
+            marker: None,
+        },
+        use_color,
+    )
 }
 
 fn render_duration(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
@@ -393,7 +416,16 @@ fn render_budget(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -
         .replace("{max}", &format_token_count(max))
 }
 
-fn render_cache_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+/// Renders cache-hit-ratio progress: percent, bar, or both, like [`render_context`].
+/// Unlike context/token usage, a *high* cache percentage is good (more cache
+/// hits, cheaper), not a warning level — so this doesn't self-color by
+/// threshold; it keeps its plain default appearance (icon + percent, no
+/// bar), matching its behavior before `{bar}` support was added.
+fn render_cache_usage(
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
     let Some(usage) = data
         .context_window
         .as_ref()
@@ -409,11 +441,8 @@ fn render_cache_pct(data: &EngineData, cfg: Option<&llmenv_config::WidgetConfig>
     if total == 0 {
         return String::new();
     }
-    let pct = (cache as f64 / total as f64 * 100.0).round() as i64;
-    let format = cfg
-        .and_then(|c| c.format.as_deref())
-        .unwrap_or("\u{21bb}{pct}%"); // ↻
-    format.replace("{pct}", &pct.to_string())
+    let used = cache as f64 / total as f64 * 100.0;
+    render_pct_and_bar(used, cfg, "\u{21bb}{pct}%", BarStyle::Plain, use_color) // ↻
 }
 
 /// Resolve the current branch, in precedence order:
@@ -547,40 +576,77 @@ fn pr_review_style(data: &EngineData) -> Option<&'static str> {
     }
 }
 
-/// 10-cell block bar. `used` (100 - remaining) is the displayed percentage.
-///
-/// `remaining_percentage` comes from an external engine's stdin JSON —
-/// untrusted, same field `render_context_pct` guards. NaN survives
-/// `f64::clamp` unchanged (NaN comparisons are always false), so it must be
-/// rejected explicitly before the round/cast rather than relying on clamp
-/// alone; infinite values are rejected for the same reason.
-fn render_progress_bar(
-    data: &EngineData,
+/// Resolve a widget's bar cell width: the configured `width`, or
+/// `default_width` when unset. Shared by every percentage-based widget
+/// (`context`, `cache_usage`, `usage_5h`, `usage_7d`) so `width:` behaves
+/// identically everywhere a bar renders.
+fn resolve_bar_width(cfg: Option<&llmenv_config::WidgetConfig>, default_width: u8) -> usize {
+    cfg.and_then(|c| c.width).unwrap_or(default_width) as usize
+}
+
+/// Styling for [`pct_and_bar`]'s percent+bar rendering, bundling the trio of
+/// knobs that only ever vary together. `Threshold` colors both the percent
+/// text and filled bar cells by `thresholds` (empty cells dim) — the caller
+/// must exclude this widget's name from `finish`'s `default_style` to avoid
+/// double-coloring — with an optional bright pace-target `marker` column
+/// (`usage_5h`/`usage_7d` only, via [`colored_bar`]; every other caller uses
+/// `None`). `Plain` renders an unstyled percent and a plain [`block_bar`],
+/// leaving `finish`'s static per-widget style as the only coloring applied.
+enum BarStyle {
+    Plain,
+    Threshold {
+        thresholds: [u8; 2],
+        marker: Option<usize>,
+    },
+}
+
+/// Shared percent+bar backend for every percentage-based widget (`context`,
+/// `cache_usage`, `usage_5h`, `usage_7d`): returns a `(pct_str, bar)` pair
+/// for a `0.0..=100.0` used-percentage at the given (already-resolved, see
+/// [`resolve_bar_width`]) `width`. `used` must already be a finite, clamped
+/// `0.0..=100.0` value — callers guard their own NaN/infinite/missing-data
+/// cases before calling this.
+fn pct_and_bar(used: f64, width: usize, style: &BarStyle, use_color: bool) -> (String, String) {
+    let pct = used.round() as i64;
+    match *style {
+        BarStyle::Threshold { thresholds, marker } => {
+            let color = threshold_style(used, thresholds);
+            (
+                crate::cli::style::apply_style(&pct.to_string(), color, use_color),
+                colored_bar(used, width, color, marker, use_color),
+            )
+        }
+        BarStyle::Plain => (pct.to_string(), block_bar(used, width)),
+    }
+}
+
+/// `{pct}`/`{bar}`-placeholder rendering for [`render_context`] and
+/// [`render_cache_usage`]: substitutes both into `format` (falling back to
+/// `default_format` when the widget has no custom `format` configured), so a
+/// custom format can show either placeholder alone or both together. Built
+/// on the same [`pct_and_bar`] backend `usage_5h`/`usage_7d` use.
+/// `default_style`'s `thresholds` (if `Threshold`) are overridden by a
+/// configured `thresholds:`; its `marker` is always `None` here — only
+/// `render_usage` ever sets one.
+fn render_pct_and_bar(
+    used: f64,
     cfg: Option<&llmenv_config::WidgetConfig>,
+    default_format: &str,
+    default_style: BarStyle,
     use_color: bool,
 ) -> String {
-    let Some(remaining) = data
-        .context_window
-        .as_ref()
-        .and_then(|c| c.remaining_percentage)
-    else {
-        return String::new();
+    let width = resolve_bar_width(cfg, DEFAULT_BAR_WIDTH);
+    let style = match default_style {
+        BarStyle::Threshold { thresholds, marker } => BarStyle::Threshold {
+            thresholds: cfg.and_then(|c| c.thresholds).unwrap_or(thresholds),
+            marker,
+        },
+        BarStyle::Plain => BarStyle::Plain,
     };
-    if !remaining.is_finite() {
-        return String::new();
-    }
-    let used = (100.0 - remaining).clamp(0.0, 100.0);
-    let width = cfg.and_then(|c| c.width).unwrap_or(DEFAULT_BAR_WIDTH);
-    // Self-colored per cell (filled=threshold color, empty=dim) — so this
-    // widget opts out of the `finish` style wrap (default_style is empty and
-    // it's not in the dyn_style map).
-    let style = threshold_style(used, cfg.and_then(|c| c.thresholds).unwrap_or([50, 80]));
-    let bar = colored_bar(used, width as usize, style, None, use_color);
-    let pct = used.round() as i64;
-    let pct_str = crate::cli::style::apply_style(&pct.to_string(), style, use_color);
+    let (pct_str, bar) = pct_and_bar(used, width, &style, use_color);
     let format = cfg
         .and_then(|c| c.format.as_deref())
-        .unwrap_or("{pct}% {bar}");
+        .unwrap_or(default_format);
     format.replace("{pct}", &pct_str).replace("{bar}", &bar)
 }
 
@@ -593,7 +659,7 @@ fn block_bar(pct: f64, width: usize) -> String {
     "\u{2593}".repeat(filled) + &"\u{2591}".repeat(width - filled)
 }
 
-/// Default `progress_bar` / usage-bar width in cells.
+/// Default `context`/`cache_usage`/usage-bar width in cells.
 const DEFAULT_BAR_WIDTH: u8 = 10;
 
 /// A `width`-cell bar with each cell independently colored: filled cells in
@@ -687,31 +753,21 @@ fn render_usage(
         return String::new();
     }
     let pct = raw.clamp(0.0, 100.0);
-    let style = threshold_style(pct, args.thresholds);
+    let width = resolve_bar_width(cfg, DEFAULT_BAR_WIDTH);
     let reset = window
         .resets_at
         .map(|r| humanize_until(r, args.now))
         .unwrap_or_default();
     let (pace, marker) = match window.resets_at {
-        Some(r) => pace_and_target(
-            pct,
-            r,
-            args.window_secs,
-            args.now,
-            DEFAULT_BAR_WIDTH as usize,
-        ),
+        Some(r) => pace_and_target(pct, r, args.window_secs, args.now, width),
         None => (String::new(), None),
     };
-    let bar = colored_bar(
-        pct,
-        DEFAULT_BAR_WIDTH as usize,
-        style,
+    let style = BarStyle::Threshold {
+        thresholds: args.thresholds,
         marker,
-        args.use_color,
-    );
+    };
+    let (pct_str, bar) = pct_and_bar(pct, width, &style, args.use_color);
     let delta = usage_delta(args.state_dir, args.state_key, pct, args.now);
-    let pct_str =
-        crate::cli::style::apply_style(&(pct.round() as i64).to_string(), style, args.use_color);
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or(default_format);
@@ -783,10 +839,17 @@ fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
 }
 
 fn write_usage_state(path: &Path, pct: f64, now: i64) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::debug!("usage delta state dir unavailable (non-fatal): {e}");
+        return;
     }
-    let _ = std::fs::write(path, format!("{pct} {now}")); // best-effort stat
+    // Best-effort: a failed write only means the next render's `{delta}`
+    // placeholder is empty, not a broken widget — but still worth a trace.
+    if let Err(e) = std::fs::write(path, format!("{pct} {now}")) {
+        tracing::debug!("usage delta state write failed (non-fatal): {e}");
+    }
 }
 
 fn format_delta(delta: f64) -> String {
@@ -902,12 +965,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_context_pct() {
-        let out = render_engine_widget("context_pct", &engine_data(), None, false).unwrap();
-        assert_eq!(out, "35%"); // 100 - remaining_percentage(65) = 35% used
-    }
-
-    #[test]
     fn renders_duration_hms() {
         let out = render_engine_widget("duration", &engine_data(), None, false).unwrap();
         assert_eq!(out, "\u{23f1} 3h 42m"); // ⏱ 3h42m (13_320_000 ms)
@@ -997,8 +1054,8 @@ mod tests {
     }
 
     #[test]
-    fn renders_cache_pct_default_format() {
-        let out = render_engine_widget("cache_pct", &engine_data(), None, false).unwrap();
+    fn renders_cache_usage_default_format() {
+        let out = render_engine_widget("cache_usage", &engine_data(), None, false).unwrap();
         // cache = cache_read(4000) + cache_creation(1000) = 5000;
         // total = input(5000) + cache(5000) = 10000; pct = round(5000/10000*100) = 50.
         assert_eq!(out, "\u{21bb}50%");
@@ -1031,52 +1088,31 @@ mod tests {
     }
 
     #[test]
-    fn context_pct_clamps_absurdly_large_remaining_percentage() {
+    fn context_clamps_absurdly_large_remaining_percentage() {
         // A corrupt/hostile engine sending remaining_percentage: 1e300 must
         // not produce a saturated i64-cast garbage string.
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 1e300 }
         }))
         .unwrap();
-        let out = render_engine_widget("context_pct", &data, None, false).unwrap();
-        assert_eq!(out, "0%");
+        let out = render_engine_widget("context", &data, None, false).unwrap();
+        assert_eq!(
+            out,
+            "0% \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}"
+        );
     }
 
     #[test]
-    fn context_pct_clamps_absurdly_negative_remaining_percentage() {
+    fn context_clamps_absurdly_negative_remaining_percentage() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": -1e300 }
         }))
         .unwrap();
-        let out = render_engine_widget("context_pct", &data, None, false).unwrap();
-        assert_eq!(out, "100%");
-    }
-
-    #[test]
-    fn context_pct_renders_empty_for_nan_and_infinite() {
-        // serde_json can't represent NaN/Infinity literally, so build the
-        // struct directly rather than round-tripping through JSON.
-        let nan_data = EngineData {
-            context_window: Some(ContextWindow {
-                remaining_percentage: Some(f64::NAN),
-                context_window_size: None,
-                current_usage: None,
-            }),
-            ..Default::default()
-        };
-        let out = render_engine_widget("context_pct", &nan_data, None, false).unwrap();
-        assert_eq!(out, "");
-
-        let inf_data = EngineData {
-            context_window: Some(ContextWindow {
-                remaining_percentage: Some(f64::INFINITY),
-                context_window_size: None,
-                current_usage: None,
-            }),
-            ..Default::default()
-        };
-        let out = render_engine_widget("context_pct", &inf_data, None, false).unwrap();
-        assert_eq!(out, "");
+        let out = render_engine_widget("context", &data, None, false).unwrap();
+        assert_eq!(
+            out,
+            "100% \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}"
+        );
     }
 
     #[test]
@@ -1261,17 +1297,17 @@ mod tests {
     }
 
     #[test]
-    fn renders_progress_bar_from_context_pct() {
+    fn renders_context_percent_and_bar_by_default() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 65.0 }
         }))
         .unwrap();
-        let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+        let out = render_engine_widget("context", &data, None, false).unwrap();
         assert_eq!(out, "35% ▓▓▓░░░░░░░");
     }
 
     #[test]
-    fn progress_bar_threshold_colors_by_usage() {
+    fn context_threshold_colors_by_usage() {
         assert_eq!(threshold_style(30.0, [50, 80]), "green");
         assert_eq!(threshold_style(60.0, [50, 80]), "yellow");
         assert_eq!(threshold_style(90.0, [50, 80]), "red");
@@ -1280,18 +1316,18 @@ mod tests {
             "context_window": { "remaining_percentage": 10.0 }
         }))
         .unwrap();
-        let out = render_engine_widget("progress_bar", &data, None, true).unwrap();
+        let out = render_engine_widget("context", &data, None, true).unwrap();
         assert!(out.starts_with("\x1b[31m"), "expected red wrap: {out:?}");
     }
 
     #[test]
-    fn progress_bar_dims_empty_cells_per_cell_under_color() {
+    fn context_dims_empty_cells_per_cell_under_color() {
         // 35% used → 3 filled ▓ + 7 dim ░, each cell independently colored.
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 65.0 }
         }))
         .unwrap();
-        let out = render_engine_widget("progress_bar", &data, None, true).unwrap();
+        let out = render_engine_widget("context", &data, None, true).unwrap();
         assert!(
             out.contains("\x1b[2m░\x1b[0m"),
             "empty cells should be dim: {out:?}"
@@ -1300,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_bar_width_configurable() {
+    fn context_width_configurable() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 50.0 }
         }))
@@ -1310,7 +1346,7 @@ mod tests {
             ..Default::default()
         };
         // 50% of 4 cells = 2 filled.
-        assert_eq!(render_progress_bar(&data, Some(&cfg), false), "50% ▓▓░░");
+        assert_eq!(render_context(&data, Some(&cfg), false), "50% ▓▓░░");
     }
 
     #[test]
@@ -1322,7 +1358,7 @@ mod tests {
         );
         assert_eq!(render_engine_widget("pr", &empty, None, false).unwrap(), "");
         assert_eq!(
-            render_engine_widget("progress_bar", &empty, None, false).unwrap(),
+            render_engine_widget("context", &empty, None, false).unwrap(),
             ""
         );
     }
@@ -1372,6 +1408,28 @@ mod tests {
                 "{bar} {pct}% ➡{reset}"
             ),
             "▓▓▓▓│▓▓▓▓▓ 100% ➡3h03m"
+        );
+    }
+
+    #[test]
+    fn usage_bar_width_configurable() {
+        // 50% of a 4-cell bar = 2 filled, matching `context`/`cache_usage`'s
+        // `width` override (#905 unified percent/bar rendering).
+        let window = RateLimitWindow {
+            used_percentage: Some(50.0),
+            resets_at: None,
+        };
+        let cfg = llmenv_config::WidgetConfig {
+            width: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_usage(
+                &usage_args(&window, 0, FIVE_HOUR_SECS),
+                Some(&cfg),
+                "{pct}% {bar}"
+            ),
+            "50% ▓▓░░"
         );
     }
 
@@ -1488,7 +1546,7 @@ mod tests {
         // Covers the "no data" guard for the 5 engine widgets not exercised
         // by missing_field_renders_empty_not_panic / missing_branch_and_pr_render_empty.
         let empty = EngineData::default();
-        for name in ["folder", "context_pct", "duration", "tokens", "budget"] {
+        for name in ["folder", "context", "duration", "tokens", "budget"] {
             assert_eq!(
                 render_engine_widget(name, &empty, None, false).unwrap(),
                 "",
@@ -1515,10 +1573,10 @@ mod tests {
     }
 
     #[test]
-    fn progress_bar_renders_empty_for_nan_and_infinite() {
-        // Same untrusted-input hazard as render_context_pct: NaN survives
-        // f64::clamp unchanged (NaN comparisons are always false), so this
-        // must be checked explicitly rather than relying on clamp alone.
+    fn context_renders_empty_for_nan_and_infinite() {
+        // Same untrusted-input hazard as elsewhere: NaN survives f64::clamp
+        // unchanged (NaN comparisons are always false), so this must be
+        // checked explicitly rather than relying on clamp alone.
         let nan_data = EngineData {
             context_window: Some(ContextWindow {
                 remaining_percentage: Some(f64::NAN),
@@ -1527,7 +1585,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_engine_widget("progress_bar", &nan_data, None, false).unwrap();
+        let out = render_engine_widget("context", &nan_data, None, false).unwrap();
         assert_eq!(out, "");
 
         let inf_data = EngineData {
@@ -1538,32 +1596,32 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_engine_widget("progress_bar", &inf_data, None, false).unwrap();
+        let out = render_engine_widget("context", &inf_data, None, false).unwrap();
         assert_eq!(out, "");
     }
 
     #[test]
-    fn progress_bar_full_at_zero_remaining() {
+    fn context_full_at_zero_remaining() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 0.0 }
         }))
         .unwrap();
-        let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+        let out = render_engine_widget("context", &data, None, false).unwrap();
         assert_eq!(out, "100% ▓▓▓▓▓▓▓▓▓▓");
     }
 
     #[test]
-    fn progress_bar_empty_at_full_remaining() {
+    fn context_empty_at_full_remaining() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 100.0 }
         }))
         .unwrap();
-        let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+        let out = render_engine_widget("context", &data, None, false).unwrap();
         assert_eq!(out, "0% ░░░░░░░░░░");
     }
 
     #[test]
-    fn render_context_pct_honors_custom_format() {
+    fn render_context_honors_custom_format() {
         let mut data = engine_data();
         data.context_window = Some(ContextWindow {
             remaining_percentage: Some(65.0),
@@ -1573,7 +1631,7 @@ mod tests {
             format: Some("used {pct} percent".to_string()),
             ..Default::default()
         };
-        assert_eq!(render_context_pct(&data, Some(&cfg)), "used 35 percent");
+        assert_eq!(render_context(&data, Some(&cfg), false), "used 35 percent");
     }
 
     #[test]
@@ -1623,13 +1681,13 @@ mod tests {
     }
 
     #[test]
-    fn render_cache_pct_honors_custom_format() {
+    fn render_cache_usage_honors_custom_format() {
         let data = engine_data(); // cache 5000 / total 10000 = 50%
         let cfg = llmenv_config::WidgetConfig {
             format: Some("cache={pct}%".to_string()),
             ..Default::default()
         };
-        assert_eq!(render_cache_pct(&data, Some(&cfg)), "cache=50%");
+        assert_eq!(render_cache_usage(&data, Some(&cfg), false), "cache=50%");
     }
 
     #[test]
@@ -1659,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn render_progress_bar_honors_custom_format() {
+    fn render_context_honors_custom_format_with_bar() {
         let data: EngineData = serde_json::from_value(serde_json::json!({
             "context_window": { "remaining_percentage": 65.0 }
         }))
@@ -1668,10 +1726,7 @@ mod tests {
             format: Some("{pct}|{bar}".to_string()),
             ..Default::default()
         };
-        assert_eq!(
-            render_progress_bar(&data, Some(&cfg), false),
-            "35|▓▓▓░░░░░░░"
-        );
+        assert_eq!(render_context(&data, Some(&cfg), false), "35|▓▓▓░░░░░░░");
     }
 
     #[test]
@@ -1687,22 +1742,7 @@ mod tests {
     }
 
     #[test]
-    fn render_context_pct_rounds_fractional_remaining() {
-        let data = EngineData {
-            context_window: Some(ContextWindow {
-                remaining_percentage: Some(64.5),
-                context_window_size: None,
-                current_usage: None,
-            }),
-            ..Default::default()
-        };
-        // used = 100 - 64.5 = 35.5, rounds up to 36.
-        let out = render_engine_widget("context_pct", &data, None, false).unwrap();
-        assert_eq!(out, "36%");
-    }
-
-    #[test]
-    fn render_progress_bar_rounds_fractional_remaining_pct_but_truncates_bar_fill() {
+    fn render_context_rounds_fractional_remaining_pct_but_truncates_bar_fill() {
         let data = EngineData {
             context_window: Some(ContextWindow {
                 remaining_percentage: Some(64.5),
@@ -1714,12 +1754,12 @@ mod tests {
         // used = 35.5: displayed pct rounds to 36, but fill truncates to 3
         // cells (35.5 / 10.0 = 3.55 -> 3), matching the doc comment's stated
         // "truncate, not round" bar-fill behavior.
-        let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+        let out = render_engine_widget("context", &data, None, false).unwrap();
         assert_eq!(out, "36% ▓▓▓░░░░░░░");
     }
 
     #[test]
-    fn render_cache_pct_empty_when_total_tokens_zero_but_context_window_present() {
+    fn render_cache_usage_empty_when_total_tokens_zero_but_context_window_present() {
         let data = EngineData {
             context_window: Some(ContextWindow {
                 remaining_percentage: None,
@@ -1732,12 +1772,12 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_engine_widget("cache_pct", &data, None, false).unwrap();
+        let out = render_engine_widget("cache_usage", &data, None, false).unwrap();
         assert_eq!(out, "");
     }
 
     #[test]
-    fn tokens_and_cache_pct_saturate_instead_of_overflowing() {
+    fn tokens_and_cache_usage_saturate_instead_of_overflowing() {
         let data = EngineData {
             context_window: Some(ContextWindow {
                 remaining_percentage: None,
@@ -1754,8 +1794,8 @@ mod tests {
         // small number (release overflow).
         let tokens = render_engine_widget("tokens", &data, None, false).unwrap();
         assert!(!tokens.is_empty());
-        let cache_pct = render_engine_widget("cache_pct", &data, None, false).unwrap();
-        assert_eq!(cache_pct, "\u{21bb}100%");
+        let cache_usage = render_engine_widget("cache_usage", &data, None, false).unwrap();
+        assert_eq!(cache_usage, "\u{21bb}100%");
     }
 
     fn data_with_remaining(remaining: f64) -> EngineData {
@@ -1774,14 +1814,13 @@ mod tests {
     const ENGINE_WIDGET_PLACEHOLDERS: &[(&str, &[&str])] = &[
         ("model", &["short_name", "version", "full_name"]),
         ("folder", &["basename", "path"]),
-        ("context_pct", &["pct"]),
         ("duration", &["h", "m", "s", "total_ms"]),
         ("tokens", &["total", "input", "cache_read", "cache_create"]),
         ("budget", &["used", "max"]),
-        ("cache_pct", &["pct"]),
+        ("cache_usage", &["pct", "bar"]),
         ("branch", &["name"]),
         ("pr", &["number", "url", "review_state"]),
-        ("progress_bar", &["pct", "bar"]),
+        ("context", &["pct", "bar"]),
         ("usage_5h", &["pct", "bar", "reset", "pace", "delta"]),
         ("usage_7d", &["pct", "bar", "reset", "pace", "delta"]),
         ("peak", &["symbol", "label", "countdown"]),
@@ -1836,21 +1875,9 @@ mod tests {
         /// panic across the full f64 space (NaN, +/-inf, denormals, extremes)
         /// and must always stay within the documented output contract.
         #[test]
-        fn render_context_pct_never_panics_and_stays_in_contract(remaining in any::<f64>()) {
+        fn render_context_never_panics_and_stays_in_contract(remaining in any::<f64>()) {
             let data = data_with_remaining(remaining);
-            let out = render_engine_widget("context_pct", &data, None, false).unwrap();
-            if remaining.is_finite() {
-                let pct: i64 = out.trim_end_matches('%').parse().unwrap();
-                prop_assert!((0..=100).contains(&pct));
-            } else {
-                prop_assert_eq!(out, "");
-            }
-        }
-
-        #[test]
-        fn render_progress_bar_never_panics_and_stays_in_contract(remaining in any::<f64>()) {
-            let data = data_with_remaining(remaining);
-            let out = render_engine_widget("progress_bar", &data, None, false).unwrap();
+            let out = render_engine_widget("context", &data, None, false).unwrap();
             if remaining.is_finite() {
                 let (pct_str, bar) = out.split_once(' ').unwrap();
                 let pct: i64 = pct_str.trim_end_matches('%').parse().unwrap();
@@ -1908,9 +1935,9 @@ mod tests {
         /// Token counts are untrusted `u64`s from the engine's stdin JSON —
         /// must never panic (saturating arithmetic) and, when a total exists,
         /// the cache percentage must stay within the documented `0..=100`
-        /// contract, mirroring `render_context_pct`'s guarantee.
+        /// contract, mirroring `render_context`'s guarantee.
         #[test]
-        fn render_cache_pct_never_panics_and_stays_in_contract(
+        fn render_cache_usage_never_panics_and_stays_in_contract(
             input in any::<u64>(),
             cache_creation in any::<u64>(),
             cache_read in any::<u64>(),
@@ -1927,7 +1954,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let out = render_engine_widget("cache_pct", &data, None, false).unwrap();
+            let out = render_engine_widget("cache_usage", &data, None, false).unwrap();
             let cache = cache_read.saturating_add(cache_creation);
             let total = input.saturating_add(cache);
             if total == 0 {
@@ -1963,6 +1990,64 @@ mod tests {
                     "kept token {k:?} not found in original order in {tokens:?}"
                 );
             }
+        }
+
+        /// A bar's filled-cell count never exceeds its width, and its total
+        /// glyph count always equals `width` exactly — shared by every
+        /// percentage-based widget via `pct_and_bar`, so a single mutation
+        /// in this math would otherwise silently propagate to all of them.
+        #[test]
+        fn block_bar_filled_never_exceeds_width_and_total_len_matches(
+            pct in 0.0f64..=100.0,
+            width in 0usize..=50,
+        ) {
+            let bar = block_bar(pct, width);
+            let filled = bar.chars().filter(|&c| c == '\u{2593}').count();
+            prop_assert!(filled <= width);
+            prop_assert_eq!(bar.chars().count(), width);
+        }
+
+        /// Monotonicity: a higher percentage never yields fewer filled cells
+        /// at the same width.
+        #[test]
+        fn block_bar_is_monotonic_in_pct(
+            lo in 0.0f64..=100.0,
+            hi in 0.0f64..=100.0,
+            width in 1usize..=50,
+        ) {
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            let filled_lo = block_bar(lo, width).chars().filter(|&c| c == '\u{2593}').count();
+            let filled_hi = block_bar(hi, width).chars().filter(|&c| c == '\u{2593}').count();
+            prop_assert!(filled_lo <= filled_hi);
+        }
+
+        /// Boundaries: 0% is always empty, 100% is always fully filled, at
+        /// any width.
+        #[test]
+        fn block_bar_boundaries(width in 0usize..=50) {
+            let empty = block_bar(0.0, width);
+            prop_assert_eq!(empty.chars().filter(|&c| c == '\u{2593}').count(), 0);
+            let full = block_bar(100.0, width);
+            prop_assert_eq!(full.chars().filter(|&c| c == '\u{2593}').count(), width);
+        }
+
+        /// `colored_bar` with `use_color: false` and no marker must degrade
+        /// to exactly `block_bar`'s output — it's documented as doing so.
+        #[test]
+        fn colored_bar_matches_block_bar_when_uncolored_and_unmarked(
+            pct in 0.0f64..=100.0,
+            width in 0usize..=50,
+        ) {
+            prop_assert_eq!(colored_bar(pct, width, "yellow", None, false), block_bar(pct, width));
+        }
+
+        /// `clean_display_name` is idempotent — applying it a second time
+        /// never changes the result further.
+        #[test]
+        fn clean_display_name_is_idempotent(display_name in ".{0,60}") {
+            let once = clean_display_name(&display_name);
+            let twice = clean_display_name(once);
+            prop_assert_eq!(once, twice);
         }
     }
 }

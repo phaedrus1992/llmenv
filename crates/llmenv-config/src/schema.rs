@@ -914,11 +914,12 @@ pub struct WidgetConfig {
     /// / `full`) and `pr` (`number` / `url`). Ignored by widgets without a
     /// display mode, and overridden by `format` when both are set.
     pub display: Option<String>,
-    /// `progress_bar` cell width (default 10). Ignored by other widgets.
+    /// Bar cell width (default 10) for `context`/`cache_usage`/`usage_5h`/
+    /// `usage_7d`. Ignored by other widgets.
     pub width: Option<u8>,
     /// Two ascending percentages `[warn, crit]` for value-based coloring
-    /// (green < warn ≤ yellow < crit ≤ red). Used by `progress_bar`. Ignored
-    /// by widgets without threshold coloring.
+    /// (green < warn ≤ yellow < crit ≤ red). Used by `context`/`usage_5h`/
+    /// `usage_7d`. Ignored by widgets without threshold coloring.
     pub thresholds: Option<[u8; 2]>,
 }
 
@@ -2467,8 +2468,8 @@ small:
     fn statusline_config_parses_full_example() {
         let yaml = r#"
 rows:
-  - "{model} │ {context_pct} │ {budget}"
-  - "{scopes:t} · {plugins} {config_stale}"
+  - "{model} │ {context} │ {budget}"
+  - "⎿ {scopes:t} · {plugins} {config_stale}"
 style:
   icon_set: auto
 widgets:
@@ -2476,7 +2477,7 @@ widgets:
     format: "{short_name} {version}"
     style: "bold cyan"
   scopes:
-    format: "║ {tags}"
+    format: "{tags}"
     max_len: 40
     style: "dim"
 icons:
