@@ -1991,5 +1991,63 @@ mod tests {
                 );
             }
         }
+
+        /// A bar's filled-cell count never exceeds its width, and its total
+        /// glyph count always equals `width` exactly — shared by every
+        /// percentage-based widget via `pct_and_bar`, so a single mutation
+        /// in this math would otherwise silently propagate to all of them.
+        #[test]
+        fn block_bar_filled_never_exceeds_width_and_total_len_matches(
+            pct in 0.0f64..=100.0,
+            width in 0usize..=50,
+        ) {
+            let bar = block_bar(pct, width);
+            let filled = bar.chars().filter(|&c| c == '\u{2593}').count();
+            prop_assert!(filled <= width);
+            prop_assert_eq!(bar.chars().count(), width);
+        }
+
+        /// Monotonicity: a higher percentage never yields fewer filled cells
+        /// at the same width.
+        #[test]
+        fn block_bar_is_monotonic_in_pct(
+            lo in 0.0f64..=100.0,
+            hi in 0.0f64..=100.0,
+            width in 1usize..=50,
+        ) {
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            let filled_lo = block_bar(lo, width).chars().filter(|&c| c == '\u{2593}').count();
+            let filled_hi = block_bar(hi, width).chars().filter(|&c| c == '\u{2593}').count();
+            prop_assert!(filled_lo <= filled_hi);
+        }
+
+        /// Boundaries: 0% is always empty, 100% is always fully filled, at
+        /// any width.
+        #[test]
+        fn block_bar_boundaries(width in 0usize..=50) {
+            let empty = block_bar(0.0, width);
+            prop_assert_eq!(empty.chars().filter(|&c| c == '\u{2593}').count(), 0);
+            let full = block_bar(100.0, width);
+            prop_assert_eq!(full.chars().filter(|&c| c == '\u{2593}').count(), width);
+        }
+
+        /// `colored_bar` with `use_color: false` and no marker must degrade
+        /// to exactly `block_bar`'s output — it's documented as doing so.
+        #[test]
+        fn colored_bar_matches_block_bar_when_uncolored_and_unmarked(
+            pct in 0.0f64..=100.0,
+            width in 0usize..=50,
+        ) {
+            prop_assert_eq!(colored_bar(pct, width, "yellow", None, false), block_bar(pct, width));
+        }
+
+        /// `clean_display_name` is idempotent — applying it a second time
+        /// never changes the result further.
+        #[test]
+        fn clean_display_name_is_idempotent(display_name in ".{0,60}") {
+            let once = clean_display_name(&display_name);
+            let twice = clean_display_name(once);
+            prop_assert_eq!(once, twice);
+        }
     }
 }
