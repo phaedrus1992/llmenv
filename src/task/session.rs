@@ -122,7 +122,7 @@ pub fn start_session(state_dir: &Path, name: Option<&str>, force: bool) -> anyho
                     existing.id
                 );
             }
-            abandon_session(state_dir, &existing)?;
+            abandon_session(state_dir, existing)?;
         }
         let dir = sessions_dir(state_dir);
         std::fs::create_dir_all(&dir)?;
@@ -162,6 +162,14 @@ pub fn finish_session(state_dir: &Path) -> anyhow::Result<Session> {
     })
 }
 
+/// Every task currently tagged with `session_id`, in `list_tasks`' order.
+fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
+    list_tasks(state_dir)
+        .into_iter()
+        .filter(|t| t.session.as_deref() == Some(session_id))
+        .collect()
+}
+
 /// Abandon `session` (force-superseded by a new one before it was finished):
 /// stamps `abandoned_at`, and for every one of its tasks that isn't already
 /// `done`, clears the `session` tag and appends a note recording the
@@ -172,26 +180,27 @@ pub fn finish_session(state_dir: &Path) -> anyhow::Result<Session> {
 /// historical record of what the session did accomplish.
 ///
 /// Caller must already hold the store lock (called only from
-/// [`start_session`]).
-fn abandon_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
-    let mut session = session.clone();
-    session.abandoned_at = Some(now_rfc3339());
+/// [`start_session`], which owns `session` and doesn't reuse it after).
+fn abandon_session(state_dir: &Path, mut session: Session) -> anyhow::Result<()> {
+    let now = now_rfc3339();
+    session.abandoned_at = Some(now.clone());
     save_session(state_dir, &session)?;
 
-    let label = session.name.clone().unwrap_or_else(|| session.id.clone());
-    for mut task in list_tasks(state_dir)
+    let id = session.id.clone();
+    let label = session.name.unwrap_or(session.id);
+    for mut task in tasks_in_session(state_dir, &id)
         .into_iter()
-        .filter(|t| t.session.as_deref() == Some(session.id.as_str()) && t.state != TaskState::Done)
+        .filter(|t| t.state != TaskState::Done)
     {
         task.notes.push(TaskNote {
-            at: now_rfc3339(),
+            at: now.clone(),
             text: format!(
                 "Orphaned: session '{label}' was abandoned (a new session was force-started) \
                  before this task was finished."
             ),
         });
         task.session = None;
-        task.updated_at = now_rfc3339();
+        task.updated_at = now.clone();
         super::save_task(state_dir, &task)?;
     }
     Ok(())
@@ -201,10 +210,7 @@ fn abandon_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
 /// statusline's "session active" progress numbers.
 #[must_use]
 pub fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
-    let tasks: Vec<Task> = list_tasks(state_dir)
-        .into_iter()
-        .filter(|t| t.session.as_deref() == Some(session_id))
-        .collect();
+    let tasks = tasks_in_session(state_dir, session_id);
     let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
     (done, tasks.len() as u64)
 }
@@ -216,10 +222,7 @@ pub fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
 /// the active pointer.
 pub fn delete_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Vec<Task>> {
     super::with_store_lock(state_dir, || {
-        let tasks: Vec<Task> = list_tasks(state_dir)
-            .into_iter()
-            .filter(|t| t.session.as_deref() == Some(session_id))
-            .collect();
+        let tasks = tasks_in_session(state_dir, session_id);
         for t in &tasks {
             std::fs::remove_file(task_path(state_dir, &t.slug))?;
         }
