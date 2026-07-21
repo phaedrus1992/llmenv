@@ -24,6 +24,14 @@ pub enum TaskState {
     #[default]
     Open,
     Wip,
+    /// Blocked on something outside the agent's control — typically human
+    /// input (a review, a decision, external system access) — that no
+    /// amount of further autonomous action will resolve. Distinct from
+    /// `Wip` so the Stop-hook reminder doesn't nag to "take action" on it:
+    /// the correct behavior here is to actually wait, not keep retrying.
+    /// Resume with `start_task` once the blocker clears (it accepts any
+    /// non-`Done` state as its starting point).
+    Waiting,
     Done,
 }
 
@@ -192,16 +200,17 @@ pub fn open_task_count(state_dir: &Path) -> u64 {
         .count() as u64
 }
 
-/// Title of the most recently updated `wip` task — the statusline's "what's
-/// in progress right now" fill-in (#905). Pass `session_id` to scope the
-/// search to one session's tasks (matching how `open`/`session_progress`
-/// are scoped for the same widget); `None` searches store-wide. `None` when
-/// nothing matching is currently `wip`.
+/// Title of the most recently updated `wip`/`waiting` task — the
+/// statusline's "what's in progress right now" fill-in (#905). Pass
+/// `session_id` to scope the search to one session's tasks (matching how
+/// `open`/`session_progress` are scoped for the same widget); `None`
+/// searches store-wide. `None` when nothing matching is currently
+/// `wip`/`waiting`.
 #[must_use]
 pub fn current_wip_title(state_dir: &Path, session_id: Option<&str>) -> Option<String> {
     list_tasks(state_dir)
         .into_iter()
-        .filter(|t| t.state == TaskState::Wip)
+        .filter(|t| matches!(t.state, TaskState::Wip | TaskState::Waiting))
         .filter(|t| session_id.is_none_or(|sid| t.session.as_deref() == Some(sid)))
         .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
         .map(|t| t.title)
@@ -359,6 +368,31 @@ pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Ta
     })
 }
 
+/// Mark a task `waiting` — blocked on something outside the agent's control
+/// (typically human input) rather than actively being worked. `reason` is
+/// recorded as a note so `llmenv task show` carries the context. Resume with
+/// [`start_task`], which accepts `waiting` as a valid prior state.
+///
+/// # Errors
+/// Errors if the task is already done.
+pub fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<Task> {
+    with_store_lock(state_dir, || {
+        let slug = resolve_identifier(state_dir, input)?;
+        let mut task = load_task(state_dir, &slug)?;
+        if task.state == TaskState::Done {
+            anyhow::bail!("task '{slug}' is already done; cannot mark it waiting");
+        }
+        task.state = TaskState::Waiting;
+        task.notes.push(TaskNote {
+            at: now_rfc3339(),
+            text: format!("Waiting: {reason}"),
+        });
+        task.updated_at = now_rfc3339();
+        save_task(state_dir, &task)?;
+        Ok(task)
+    })
+}
+
 /// Record an ordering dependency: `input` is blocked on `on`.
 ///
 /// # Errors
@@ -458,20 +492,40 @@ fn combine_reminders(parts: [String; 2]) -> String {
         .join("\n\n")
 }
 
+/// Builds the `wip`-task reminder (`header`/`footer` customized per caller,
+/// pushing toward action) and, separately, a `waiting`-task note. The two
+/// are deliberately different in tone: a `wip` task is actionable right now,
+/// a `waiting` one is correctly paused on something outside the agent's
+/// control — nagging to "take action" on it would be actively wrong, so it
+/// gets a plain FYI instead, never the action-pushing footer.
 fn wip_reminder(state_dir: &Path, header: &str, footer: &str) -> String {
-    let wip: Vec<Task> = list_tasks(state_dir)
-        .into_iter()
-        .filter(|t| t.state == TaskState::Wip)
-        .collect();
-    if wip.is_empty() {
-        return String::new();
-    }
-    let list = wip
+    let tasks = list_tasks(state_dir);
+    let wip: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Wip).collect();
+    let waiting: Vec<&Task> = tasks
         .iter()
-        .map(|t| format!("- {} ({})", t.title, t.slug))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{header}:\n{list}\n{footer}")
+        .filter(|t| t.state == TaskState::Waiting)
+        .collect();
+
+    let render = |tasks: &[&Task]| -> String {
+        tasks
+            .iter()
+            .map(|t| format!("- {} ({})", t.title, t.slug))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut parts = Vec::new();
+    if !wip.is_empty() {
+        parts.push(format!("{header}:\n{}\n{footer}", render(&wip)));
+    }
+    if !waiting.is_empty() {
+        parts.push(format!(
+            "Task(s) waiting on external input (no action needed until it \
+             clears — see each task's notes for what's being waited on):\n{}",
+            render(&waiting)
+        ));
+    }
+    parts.join("\n\n")
 }
 
 #[cfg(test)]
@@ -798,6 +852,34 @@ mod tests {
     }
 
     #[test]
+    fn wait_task_transitions_to_waiting_and_notes_reason() {
+        let dir = TempDir::new().expect("test");
+        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        start_task(dir.path(), &task.slug).expect("test");
+        let waiting = wait_task(dir.path(), &task.slug, "need spec review").expect("test");
+        assert_eq!(waiting.state, TaskState::Waiting);
+        assert_eq!(waiting.notes.len(), 1);
+        assert!(waiting.notes[0].text.contains("need spec review"));
+    }
+
+    #[test]
+    fn wait_task_on_done_errors() {
+        let dir = TempDir::new().expect("test");
+        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        done_task(dir.path(), &task.slug).expect("test");
+        assert!(wait_task(dir.path(), &task.slug, "too late").is_err());
+    }
+
+    #[test]
+    fn start_task_resumes_from_waiting() {
+        let dir = TempDir::new().expect("test");
+        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        wait_task(dir.path(), &task.slug, "blocked").expect("test");
+        let resumed = start_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(resumed.state, TaskState::Wip);
+    }
+
+    #[test]
     fn block_task_records_dependency() {
         let dir = TempDir::new().expect("test");
         let blocker = add_task(dir.path(), "Blocker", None).expect("test");
@@ -885,6 +967,33 @@ mod tests {
         assert!(reminder.contains(&task.slug));
     }
 
+    #[test]
+    fn stop_hook_reminder_waiting_task_gets_no_action_framing() {
+        let dir = TempDir::new().expect("test");
+        let task = add_task(dir.path(), "Blocked on review", None).expect("test");
+        wait_task(dir.path(), &task.slug, "spec review").expect("test");
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(reminder.contains(&task.slug));
+        assert!(reminder.contains("no action needed"));
+        // Must not carry the action-pushing footer meant for genuinely wip tasks.
+        assert!(!reminder.contains("exhaust safe autonomous remediation"));
+    }
+
+    #[test]
+    fn stop_hook_reminder_separates_wip_and_waiting_tasks() {
+        let dir = TempDir::new().expect("test");
+        let wip = add_task(dir.path(), "Actively working", None).expect("test");
+        start_task(dir.path(), &wip.slug).expect("test");
+        let waiting = add_task(dir.path(), "Blocked on review", None).expect("test");
+        wait_task(dir.path(), &waiting.slug, "spec review").expect("test");
+
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(reminder.contains(&wip.slug));
+        assert!(reminder.contains(&waiting.slug));
+        assert!(reminder.contains("exhaust safe autonomous remediation"));
+        assert!(reminder.contains("no action needed"));
+    }
+
     // Task/TaskNote/TaskState derive Serialize/Deserialize and persist as
     // JSON. A serde roundtrip must be lossless — a drifted derive (renamed
     // field, wrong rename attr) would silently corrupt a user's task store.
@@ -898,6 +1007,7 @@ mod tests {
             prop_oneof![
                 Just(TaskState::Open),
                 Just(TaskState::Wip),
+                Just(TaskState::Waiting),
                 Just(TaskState::Done),
             ]
         }

@@ -379,15 +379,23 @@ enum TaskCommand {
     Start { id: String },
     /// Mark a task done.
     Done { id: String },
-    /// List all tasks.
+    /// List all tasks. Unfiltered by default; `--session` narrows to one
+    /// session's tasks.
     Ls {
         #[arg(long, value_enum)]
         format: Option<TaskListFormat>,
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Show full detail for one task.
     Show { id: String },
     /// Append a progress note. Reads from stdin if `text` is omitted.
     Note { id: String, text: Option<String> },
+    /// Mark a task `waiting` on external input (e.g. a human review) rather
+    /// than actively `wip` — the Stop-hook reminder won't nag to act on it.
+    /// `reason` is recorded as a note; reads from stdin if omitted. Resume
+    /// with `llmenv task start <id>` once the blocker clears.
+    Wait { id: String, reason: Option<String> },
     /// Record that `id` is blocked on `on`.
     Block {
         id: String,
@@ -2609,7 +2617,12 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
             if parent.is_none() {
                 let wip: Vec<String> = crate::task::list_tasks(&state_dir)
                     .into_iter()
-                    .filter(|t| t.state == crate::task::TaskState::Wip)
+                    .filter(|t| {
+                        matches!(
+                            t.state,
+                            crate::task::TaskState::Wip | crate::task::TaskState::Waiting
+                        )
+                    })
                     .map(|t| t.title)
                     .collect();
                 if !wip.is_empty() {
@@ -2633,8 +2646,11 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
             let task = crate::task::done_task(&state_dir, &id)?;
             println!("Completed '{}'", task.slug);
         }
-        TaskCommand::Ls { format } => {
+        TaskCommand::Ls { format, session } => {
             let mut tasks = crate::task::list_tasks(&state_dir);
+            if let Some(session_id) = &session {
+                tasks.retain(|t| t.session.as_deref() == Some(session_id.as_str()));
+            }
             tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
             match format {
                 Some(TaskListFormat::Json) => {
@@ -2667,6 +2683,19 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
             };
             let task = crate::task::note_task(&state_dir, &id, &text)?;
             println!("Noted on '{}'", task.slug);
+        }
+        TaskCommand::Wait { id, reason } => {
+            let reason = match reason {
+                Some(r) => r,
+                None => {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)?;
+                    buf.trim().to_string()
+                }
+            };
+            let task = crate::task::wait_task(&state_dir, &id, &reason)?;
+            println!("Marked '{}' waiting", task.slug);
         }
         TaskCommand::Block { id, on } => {
             let task = crate::task::block_task(&state_dir, &id, &on)?;
