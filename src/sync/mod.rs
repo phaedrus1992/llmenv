@@ -111,11 +111,13 @@ pub fn read_state(state_dir: &Path) -> Result<Option<SystemTime>> {
     // errors (→ propagate), rather than an exists() stat that masked every stat
     // failure (e.g. EACCES) as "file absent".
     let s = match std::fs::read_to_string(&p) {
-        Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", p.display()))),
+        r => r.with_context(|| format!("reading {}", p.display()))?,
     };
-    let secs: u64 = s.trim().parse()?;
+    let secs: u64 = s
+        .trim()
+        .parse()
+        .with_context(|| format!("parsing sync timestamp from {}", p.display()))?;
     Ok(Some(UNIX_EPOCH + Duration::from_secs(secs)))
 }
 

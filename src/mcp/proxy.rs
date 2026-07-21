@@ -4,6 +4,7 @@
 //! [`ensure_running`] on every export. It re-uses an existing proxy when the
 //! pidfile points at a live process and spawns a new one otherwise.
 
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -303,11 +304,8 @@ fn read_pidfile(pid_path: &Path) -> anyhow::Result<Option<u32>> {
     // errors (→ propagate), rather than an exists() stat that masked every stat
     // failure (e.g. EACCES) as "no pidfile".
     let s = match std::fs::read_to_string(pid_path) {
-        Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("reading {}", pid_path.display())));
-        }
+        r => r.with_context(|| format!("reading {}", pid_path.display()))?,
     };
     let trimmed = s.trim();
     if trimmed.is_empty() {

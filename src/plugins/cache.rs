@@ -291,13 +291,8 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
     // errors (→ propagate), rather than an exists() stat that masked every stat
     // failure (e.g. EACCES) as "no manifest".
     let content = match std::fs::read_to_string(&manifest_path) {
-        Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("reading {}", manifest_path.display()))
-            );
-        }
+        r => r.with_context(|| format!("reading {}", manifest_path.display()))?,
     };
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("parsing {}", manifest_path.display()))?;
