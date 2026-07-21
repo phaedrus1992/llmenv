@@ -839,11 +839,11 @@ fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
 }
 
 fn write_usage_state(path: &Path, pct: f64, now: i64) {
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::debug!("usage delta state dir unavailable (non-fatal): {e}");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::debug!("usage delta state dir unavailable (non-fatal): {e}");
+        return;
     }
     // Best-effort: a failed write only means the next render's `{delta}`
     // placeholder is empty, not a broken widget — but still worth a trace.
