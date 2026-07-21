@@ -2159,14 +2159,21 @@ fn sync_plugin_payloads(
         .into_iter()
         .map(|mut p| {
             let mkt_path = crate::plugins::cache::marketplace_path(cache_root, &p.marketplace);
-            let Ok(entries) = crate::plugins::cache::read_marketplace_plugins(&mkt_path) else {
-                tracing::warn!(
-                    "cannot read marketplace manifest for '{}' — skipping external plugin '{}', \
-                     run `llmenv plugin-sync` to repair",
-                    p.marketplace,
-                    p.plugin
-                );
-                return p;
+            let entries = match crate::plugins::cache::read_marketplace_plugins(&mkt_path) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    // #893: read_marketplace_plugins now propagates real read
+                    // errors (a missing manifest is Ok(empty)), so surface the
+                    // cause rather than a fixed plugin-sync hint that won't fix
+                    // a permission error or a corrupt manifest.
+                    tracing::warn!(
+                        "cannot read marketplace manifest for '{}' ({e:#}) — \
+                         skipping external plugin '{}'",
+                        p.marketplace,
+                        p.plugin
+                    );
+                    return p;
+                }
             };
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
                 tracing::warn!(

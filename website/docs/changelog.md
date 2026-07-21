@@ -102,6 +102,7 @@ On the fix side: opencode permission precedence and malformed-rule handling, ski
 - opencode/crush plugin materialization no longer fails with a missing `install_location` when `cache.remote_sync: false`
 - The `icm` statusline widget always rendered empty — its parser expected JSON, but the underlying tool returns plain text (#903)
 - The `config_stale` statusline widget ignored a custom icon override unless a custom `format` was also set (#904)
+- Sync-state, marketplace-manifest, and MCP-proxy pidfile reads now surface non-`NotFound` I/O errors (e.g. permission denied) instead of masking every stat failure as "file absent" (#893)
 
 ## [3.5.1] - 2026-07-15
 
