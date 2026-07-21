@@ -84,6 +84,46 @@ pub struct RateLimitWindow {
     pub resets_at: Option<i64>,
 }
 
+/// `usage_5h`/`usage_7d` dispatch: resolves the window, default thresholds,
+/// and default format that differ between the two, then delegates to the
+/// shared [`render_usage`] backend.
+fn render_usage_widget(
+    name: &str,
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
+    let state = usage_state_dir();
+    let (window, window_secs, defaults, fmt) = if name == "usage_5h" {
+        (
+            data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
+            FIVE_HOUR_SECS,
+            [70, 90],
+            "5h {pct}%{delta}{pace} ➡{reset}",
+        )
+    } else {
+        (
+            data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
+            SEVEN_DAY_SECS,
+            [60, 80],
+            "7d {pct}%{delta}{pace} ➡{reset}",
+        )
+    };
+    render_usage(
+        &UsageArgs {
+            window,
+            now: now_unix(),
+            window_secs,
+            thresholds: cfg.and_then(|c| c.thresholds).unwrap_or(defaults),
+            state_dir: state.as_deref(),
+            state_key: name,
+            use_color,
+        },
+        cfg,
+        fmt,
+    )
+}
+
 /// Render one engine-sourced widget by name. Returns `None` for a name this
 /// function doesn't recognize (the orchestrator treats that identically to
 /// an llmenv-sourced widget miss — render empty). A recognized widget with
@@ -106,37 +146,7 @@ pub fn render_engine_widget(
         "branch" => render_branch(data, cfg, use_color),
         "pr" => render_pr(data, cfg, use_color),
         "context" => render_context(data, cfg, use_color),
-        "usage_5h" | "usage_7d" => {
-            let state = usage_state_dir();
-            let (window, window_secs, defaults, fmt) = if name == "usage_5h" {
-                (
-                    data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
-                    FIVE_HOUR_SECS,
-                    [70, 90],
-                    "5h {pct}%{delta}{pace} ➡{reset}",
-                )
-            } else {
-                (
-                    data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
-                    SEVEN_DAY_SECS,
-                    [60, 80],
-                    "7d {pct}%{delta}{pace} ➡{reset}",
-                )
-            };
-            render_usage(
-                &UsageArgs {
-                    window,
-                    now: now_unix(),
-                    window_secs,
-                    thresholds: cfg.and_then(|c| c.thresholds).unwrap_or(defaults),
-                    state_dir: state.as_deref(),
-                    state_key: name,
-                    use_color,
-                },
-                cfg,
-                fmt,
-            )
-        }
+        "usage_5h" | "usage_7d" => render_usage_widget(name, data, cfg, use_color),
         "peak" => super::peak::render_peak(cfg),
         _ => return None,
     };
