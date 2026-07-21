@@ -77,6 +77,14 @@ fn config_context_includes_task_tracker_reminder_for_wip_tasks() {
         .env("LLMENV_CONFIG", &config_path)
         .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", state_dir.path())
+        .args(["task", "session", "start", "sprint"])
+        .assert()
+        .success();
+    Command::cargo_bin("llmenv")
+        .unwrap()
+        .env("LLMENV_CONFIG", &config_path)
+        .env("LLMENV_CONFIG_DIR", dir.path())
+        .env("LLMENV_STATE_DIR", state_dir.path())
         .args(["task", "add", "Left over from last session"])
         .assert()
         .success();
@@ -113,6 +121,14 @@ fn config_context_no_task_tracker_reminder_when_disabled() {
     let (dir, config_path) = setup_config();
     let state_dir = TempDir::new().unwrap();
 
+    Command::cargo_bin("llmenv")
+        .unwrap()
+        .env("LLMENV_CONFIG", &config_path)
+        .env("LLMENV_CONFIG_DIR", dir.path())
+        .env("LLMENV_STATE_DIR", state_dir.path())
+        .args(["task", "session", "start", "sprint"])
+        .assert()
+        .success();
     Command::cargo_bin("llmenv")
         .unwrap()
         .env("LLMENV_CONFIG", &config_path)

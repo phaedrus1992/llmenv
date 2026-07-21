@@ -180,7 +180,7 @@ fn smoke_statusline_tasks_widget_shows_session_progress_when_active() {
             "$schema": "llmenv-status-v1",
             "v": 1,
             "ts": "2026-07-17T00:00:00Z",
-            "tasks": { "open": 3, "session": { "done": 2, "total": 5 }, "current": null }
+            "tasks": { "session": { "done": 2, "total": 5 }, "current": null }
         })
         .to_string(),
     )
@@ -195,7 +195,7 @@ fn smoke_statusline_tasks_widget_shows_session_progress_when_active() {
 }
 
 #[test]
-fn smoke_statusline_tasks_widget_shows_open_count_when_no_session() {
+fn smoke_statusline_tasks_widget_empty_when_no_session_open_for_project() {
     let (dir, config_path) = setup_config(&config_with_rows("    - \"{tasks}\""));
     let data_dir = TempDir::new().unwrap();
     fs::write(
@@ -204,7 +204,7 @@ fn smoke_statusline_tasks_widget_shows_open_count_when_no_session() {
             "$schema": "llmenv-status-v1",
             "v": 1,
             "ts": "2026-07-17T00:00:00Z",
-            "tasks": { "open": 4, "session": null, "current": null }
+            "tasks": { "session": null, "current": null }
         })
         .to_string(),
     )
@@ -213,9 +213,10 @@ fn smoke_statusline_tasks_widget_shows_open_count_when_no_session() {
     let mut cmd = statusline_cmd(dir.path(), &config_path, data_dir.path());
     cmd.write_stdin("{}");
 
+    // No session open for this project → the tasks widget renders nothing,
+    // so no done/total slash appears in the line.
     assert_completes_within(cmd, 10)
         .success()
-        .stdout(predicate::str::contains("4"))
         .stdout(predicate::str::contains("/").not());
 }
 
