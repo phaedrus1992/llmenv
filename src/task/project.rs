@@ -208,6 +208,30 @@ mod tests {
     }
 
     #[test]
+    fn non_string_llmenv_yaml_id_falls_back_to_basename() {
+        let dir = TempDir::new().expect("test");
+        let root = dir.path().join("fallback-repo");
+        std::fs::create_dir_all(root.join(".git")).expect("test");
+        // `id` present but not a string — must not be used as the name; falls
+        // back to the directory basename (and warns, tested by not panicking).
+        std::fs::write(root.join(".llmenv.yaml"), "id: 123\n").expect("test");
+
+        let tag = resolve_project_tag(&root, None);
+        assert!(tag.starts_with("fallback-repo-"), "tag was {tag}");
+    }
+
+    #[test]
+    fn malformed_llmenv_yaml_falls_back_to_basename() {
+        let dir = TempDir::new().expect("test");
+        let root = dir.path().join("broken-repo");
+        std::fs::create_dir_all(root.join(".git")).expect("test");
+        std::fs::write(root.join(".llmenv.yaml"), "id: [unterminated\n").expect("test");
+
+        let tag = resolve_project_tag(&root, None);
+        assert!(tag.starts_with("broken-repo-"), "tag was {tag}");
+    }
+
+    #[test]
     fn no_git_anywhere_falls_back_to_llmenv_yaml_walkup() {
         let dir = TempDir::new().expect("test");
         let root = dir.path().join("marker-project");
