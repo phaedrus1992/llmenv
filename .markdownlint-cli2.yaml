@@ -19,3 +19,7 @@ config:
   # Line length
   MD013:
     line_length: 120
+  # Keep a Changelog repeats ### Added/Changed/Fixed/etc. under every
+  # version heading; only flag duplicates within the same parent section.
+  MD024:
+    siblings_only: true

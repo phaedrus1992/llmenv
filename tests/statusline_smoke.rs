@@ -149,9 +149,74 @@ fn smoke_statusline_renders_llmenv_widgets_from_data_file() {
     assert_completes_within(cmd, 10)
         .success()
         .stdout(predicate::str::contains("dev · rust"))
-        .stdout(predicate::str::contains("◇ 3"))
+        .stdout(predicate::str::contains("🔌 3"))
         .stdout(predicate::str::contains("MCP 2"))
         .stdout(predicate::str::contains("~"));
+}
+
+#[test]
+fn smoke_statusline_unknown_widget_name_renders_warning_glyph() {
+    // A row referencing a renamed/removed/typo'd widget (e.g. an old config
+    // still using `context_pct` after the rename to `context`) must not
+    // silently vanish.
+    let (dir, config_path) = setup_config(&config_with_rows("    - \"{context_pct}\""));
+    let data_dir = TempDir::new().unwrap();
+
+    let mut cmd = statusline_cmd(dir.path(), &config_path, data_dir.path());
+    cmd.write_stdin("{}");
+
+    assert_completes_within(cmd, 10)
+        .success()
+        .stdout(predicate::str::contains("\u{26a0}"));
+}
+
+#[test]
+fn smoke_statusline_tasks_widget_shows_session_progress_when_active() {
+    let (dir, config_path) = setup_config(&config_with_rows("    - \"{tasks}\""));
+    let data_dir = TempDir::new().unwrap();
+    fs::write(
+        data_dir.path().join("llmenv-status.json"),
+        serde_json::json!({
+            "$schema": "llmenv-status-v1",
+            "v": 1,
+            "ts": "2026-07-17T00:00:00Z",
+            "tasks": { "open": 3, "session": { "done": 2, "total": 5 }, "current": null }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut cmd = statusline_cmd(dir.path(), &config_path, data_dir.path());
+    cmd.write_stdin("{}");
+
+    assert_completes_within(cmd, 10)
+        .success()
+        .stdout(predicate::str::contains("2/5"));
+}
+
+#[test]
+fn smoke_statusline_tasks_widget_shows_open_count_when_no_session() {
+    let (dir, config_path) = setup_config(&config_with_rows("    - \"{tasks}\""));
+    let data_dir = TempDir::new().unwrap();
+    fs::write(
+        data_dir.path().join("llmenv-status.json"),
+        serde_json::json!({
+            "$schema": "llmenv-status-v1",
+            "v": 1,
+            "ts": "2026-07-17T00:00:00Z",
+            "tasks": { "open": 4, "session": null, "current": null }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut cmd = statusline_cmd(dir.path(), &config_path, data_dir.path());
+    cmd.write_stdin("{}");
+
+    assert_completes_within(cmd, 10)
+        .success()
+        .stdout(predicate::str::contains("4"))
+        .stdout(predicate::str::contains("/").not());
 }
 
 #[test]
@@ -171,13 +236,13 @@ adapter:
 
 statusline:
   rows:
-    - "{context_pct} {config_stale}"
+    - "{context} {config_stale}"
   style:
     icon_set: simple
   icons:
     config_stale: "STALE"
   widgets:
-    context_pct:
+    context:
       format: "ctx={pct}"
 "#,
     );

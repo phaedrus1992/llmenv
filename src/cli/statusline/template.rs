@@ -1,4 +1,4 @@
-//! Row template parsing: `"{model} │ {context_pct}"` → literal + widget
+//! Row template parsing: `"{model} │ {context}"` → literal + widget
 //! tokens, resolved against widget renderers by the orchestrator.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn parses_literal_and_widget_tokens() {
-        let tokens = parse_template("{model} │ {context_pct}");
+        let tokens = parse_template("{model} │ {context}");
         assert_eq!(
             tokens,
             vec![
@@ -78,7 +78,7 @@ mod tests {
                 },
                 TemplateToken::Literal(" │ ".to_string()),
                 TemplateToken::Widget {
-                    name: "context_pct".to_string(),
+                    name: "context".to_string(),
                     truncate: false
                 },
             ]

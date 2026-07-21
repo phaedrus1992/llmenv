@@ -12,6 +12,12 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
+      - id: markdownlint
+        name: markdownlint
+        entry: markdownlint-cli2
+        language: system
+        types: [markdown]
+        stages: [pre-commit]
       - id: cargo-clippy
         name: cargo clippy
         entry: bash -c 'cargo clippy --all-features --tests --jobs "$(scripts/core_count.sh)" -- -D warnings'

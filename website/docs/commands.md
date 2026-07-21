@@ -273,6 +273,10 @@ llmenv task ls [--format json]
 llmenv task show <id>
 llmenv task note <id> [text]
 llmenv task block <id> --on <other>
+llmenv task clear <id>... | --session <id>
+llmenv task session start [name] [--force]
+llmenv task session finish
+llmenv task session show
 ```
 
 In-engine task tracker (#231): durable, cross-session "what am I working on"
@@ -290,11 +294,44 @@ unambiguous prefix of one.
 - `task note <id> [text]` — append a progress note; reads from stdin if
   `text` is omitted.
 - `task block <id> --on <other>` — record that `id` is blocked on `other`.
+- `task clear <id>...` / `task clear --session <id>` — delete task(s)
+  outright, for a batch that's being deliberately abandoned rather than just
+  detached from a session (that's what `session start --force` does, below).
+  Exactly one of explicit ids or `--session` is required.
+
+### Task sessions (#905)
+
+A session groups a batch of related tasks so progress can be reported as
+`done/total` instead of a bare open-task count. Only one session can be
+active at a time.
+
+- `task session start [name] [--force]` — start a session and make it
+  active; errors if one is already active. Tasks created with `task add`
+  while a session is active are tagged with it automatically —
+  permanently, so a task's session membership reflects when it was created,
+  not whatever session happens to be active later. `--force` abandons the
+  currently active session instead of erroring: it's stamped
+  `abandoned_at` (distinct from a clean `task session finish`), and every one
+  of its tasks that isn't already `done` has its session tag cleared and a
+  note appended recording the orphaning — so it falls back into the plain
+  open/`wip` count instead of staying invisibly attributed to a session
+  nobody can track progress on anymore. Already-`done` tasks in the
+  abandoned session keep their tag untouched, as a historical record.
+- `task session finish` — close out the active session; errors if none is
+  active. Unlike `--force`, this never touches its tasks' session tag —
+  a deliberately finished session (even with incomplete tasks left in it) is
+  a legitimate historical record, not something to unwind.
+- `task session show` — print the active session (name, id, progress), or
+  `No active session.`
+
+When every task in the active session is done, the SessionStart/Stop hook
+reminders (below) nudge the agent to run `task session finish` or add more
+work to the session instead.
 
 The CLI subcommands always work. The injected CLAUDE.md guidance and the
 SessionStart/Stop lifecycle reminders (nudging the agent to resume or close
-`wip` tasks) are gated behind `features.task_tracker.enabled` (default
-`false`):
+`wip` tasks, and to close out a fully-done session) are gated behind
+`features.task_tracker.enabled` (default `false`):
 
 ```yaml
 features:

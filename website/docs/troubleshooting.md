@@ -94,7 +94,7 @@ prompt lag. To see where the time goes, set `LLMENV_TRACE_TIMING` (to any value)
 before the hook fires. Each `hook-run` that completes the memory/session-log
 stage then emits one line to **stderr** (stdout is untouched):
 
-```
+```text
 llmenv-trace {"config_load_us":123,"scope_eval_us":456,"prep_us":78,"mcp_us":9012}
 ```
 

@@ -462,8 +462,8 @@ features:
     enabled: true
 ```
 
-| Field     | Required | Notes                                                        |
-|-----------|----------|--------------------------------------------------------------|
+| Field     | Required | Notes                                                           |
+|-----------|----------|-----------------------------------------------------------------|
 | `enabled` | no       | Default `false`. Set to `true` to activate the built-in plugin. |
 
 ## `session_log:`
@@ -579,8 +579,8 @@ it's wired into an engine.
 ```yaml
 statusline:
   rows:
-    - "{model} │ {context_pct} │ {budget}"
-    - "{scopes} · {plugins} {config_stale}"
+    - "{model} │ {context} │ {budget}"
+    - "⎿ {scopes} · {plugins} {config_stale}"
   style:
     icon_set: auto            # auto | nerd | simple | none
   widgets:
@@ -588,7 +588,7 @@ statusline:
       format: "{short_name} {version}"
       style: "bold cyan"
     scopes:
-      format: "║ {tags}"
+      format: "{tags}"
       max_len: 40
       style: "dim"
   icons:
@@ -597,8 +597,9 @@ statusline:
 
 | Field | Required | Notes |
 | ------- | ---------- | ------- |
-| `rows` | no | One row template per rendered status line, each a string with `{widget_name}` placeholders. Default (when `statusline:` is omitted entirely): a single row, `"{model} │ {folder} │ {branch} │ {context_pct} │ {budget}"` |
+| `rows` | no | One row template per rendered status line, each a string with `{widget_name}` placeholders. Default (when `statusline:` is omitted entirely): a single row, `"{model} │ {folder} │ {branch} │ {context} │ {budget}"` |
 | `style.icon_set` | no | `auto`, `nerd`, `simple`, or `none` — see [`icon_set`](#icon_set) below. Default `auto` |
+| `style.color` | no | Master colour switch. `true` (default) lets each widget render its default (or configured) colour; `false` forces the whole statusline to plain text, on top of the runtime `--color`/`NO_COLOR` gate |
 | `widgets` | no | Map of widget name (`model`, `scopes`, ...) to a `format` / `max_len` / `style` override — see the reference table below for each widget's default format and placeholders |
 | `icons` | no | Named icon overrides, merged over the resolved `icon_set` defaults (a name set here always wins) |
 
@@ -608,14 +609,21 @@ Each entry under `widgets:` accepts:
 | --------- | ----- |
 | `format` | Custom display template for the widget's own placeholders (see the table below). Only honored by widgets marked "yes" in the **Format?** column — set on a widget that doesn't support it, it's silently ignored |
 | `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
-| `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below |
+| `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below. Every widget has a sensible **default colour** when this is unset; set it to `none` (or `""`) to render that one widget in plain text |
+| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). Overridden by `format` when both are set; ignored by widgets without a display mode |
+| `width` | Bar cell width for `context`/`cache_usage`/`usage_5h`/`usage_7d` (default `10`). Ignored by other widgets |
+| `thresholds` | Two ascending percentages `[warn, crit]` for value-based coloring. Ignored by widgets without threshold coloring |
 
 A row template can also write `{widget_name:t}` — accepted syntax, but it is a
 no-op beyond what `max_len` already does; truncation is driven entirely by
-`max_len`, not by this shorthand. An unknown widget name in a template, or a
-widget with no data to render, renders as an empty string (not an error). If
-every widget in a row renders empty, that row's line in the output is empty
-too — never a line of bare separator literals.
+`max_len`, not by this shorthand. A recognized widget with no data to render
+(e.g. `pr` with no open PR) renders as an empty string (not an error). An
+**unknown** widget name — a typo, or a config still referencing a widget
+that's since been renamed or removed — renders `⚠️` instead, so a
+misconfigured row is visibly flagged rather than silently vanishing. If every
+widget in a row renders empty, that row's line in the output is empty too —
+never a line of bare separator literals; a row with an unknown-widget warning
+is not empty, so it still prints.
 
 ### Widget reference
 
@@ -625,38 +633,89 @@ read `llmenv-status.json`. A name that matches neither renders empty.
 
 #### Engine-sourced (from the engine's stdin JSON)
 
-All ten honor `format:` — set on any of them, it replaces the default layout below.
+All twelve honor `format:` — set on any of them, it replaces the default layout below.
 
 | Widget | Format? | Default output | Example | `format` placeholders |
-|--------|---------|-----------------|---------|------------------------|
-| `model` | yes | `{short_name} {version}` | `Opus` | `short_name`, `version`, `full_name` |
-| `folder` | yes | basename of the working directory | `llmenv` | `basename`, `path` |
-| `branch` | yes | git branch name | `release/3.x` | `name` |
-| `pr` | yes | `#<number>` | `#834` | `number` |
-| `progress_bar` | yes | `<pct>% ` + 10-cell block bar | `35% ███░░░░░░░` | `pct`, `bar` |
-| `tokens` | yes | total context tokens, `k`-suffixed | `10.0k` | `total`, `input`, `cache_read`, `cache_create` |
-| `context_pct` | yes | used-context percentage | `35%` | `pct` |
-| `budget` | yes | `<used>/<max>`, both `k`-suffixed | `35.0k/200.0k` | `used`, `max` |
-| `duration` | yes | `<h>h<m>m` | `3h42m` | `h`, `m`, `s`, `total_ms` |
-| `cache_pct` | yes | cache-hit percentage | `44%` | `pct` |
+| -------- | --------- | ----------------- | --------- | ------------------------ |
+| `model` | yes | `{short_name} {version}` | `Opus 4.8` | `short_name`, `version`, `full_name` |
+| `folder` | yes | 📁 + basename of the working directory | `📁 llmenv` | `basename`, `path` |
+| `branch` | yes | 🌿 + git branch name | `🌿 release/3.x` | `name` |
+| `pr` | yes | `#<number>` (or the URL in `display: url`) | `#834` | `number`, `url`, `review_state` |
+| `context` | yes | used-context `<pct>%` + block bar (`width` cells, default 10), threshold-colored (default `[50, 80]`) | `35% ▓▓▓░░░░░░░` | `pct`, `bar` — use either alone, or both, in a custom `format` |
+| `tokens` | yes | total context tokens, `k`/`m`-suffixed | `10k` | `total`, `input`, `cache_read`, `cache_create` |
+| `budget` | yes | `<used>/<max>`, `k`/`m`-suffixed | `35k/200k` | `used`, `max` |
+| `duration` | yes | ⏱ + elapsed (h+m past an hour, else m+s, else s) | `⏱ 3h 42m` | `h`, `m`, `s`, `total_ms` |
+| `cache_usage` | yes | ↻ + cache-hit `<pct>%` (no bar by default — unlike `context`, a *high* cache percentage is good, so this doesn't threshold-color) | `↻44%` | `pct`, `bar` (opt-in — e.g. `format: "↻{pct}% {bar}"`) |
+| `usage_5h` | yes | Claude.ai 5-hour usage window | `5h 8% (+4.5) ⇡3% ➡23m` | `pct`, `bar`, `reset`, `pace`, `delta` |
+| `usage_7d` | yes | Claude.ai 7-day usage window | `7d 41% ➡3d4h` | `pct`, `bar`, `reset`, `pace`, `delta` |
+| `peak` | yes | peak / off-peak billing window (local clock) | `△ peak 3h03m` | `symbol`, `label`, `countdown` |
+
+`context` merges what used to be two separate widgets (`context_pct` and
+`progress_bar`) into one — the percentage and the bar are just two
+placeholders of the same widget now, so a custom `format` can show either
+alone or both together, instead of needing two widget entries in a row
+template to combine them. Every percentage-based widget (`context`,
+`cache_usage`, `usage_5h`, `usage_7d`) shares this same percent/bar
+rendering backend, so `width` and the `pct`/`bar` placeholders behave
+identically across all four.
+
+Notes:
+
+- `branch` reads the branch from git (`.git/HEAD`, following a worktree
+  `.git`-file pointer) resolved from the working directory — Claude Code does
+  **not** send a branch on stdin for a regular repo. A `worktree.branch` in the
+  stdin JSON (worktree sessions) takes precedence. Detached HEAD renders empty.
+- `model` strips a trailing `(…)` qualifier (e.g. `Opus 4.8 (1M context)` →
+  `Opus 4.8`) and, when the engine sends no separate `version`, derives it from
+  `display_name`.
+- Numeric counts (`tokens`, `budget`) use `k` at a thousand and `m` at a
+  million, dropping a redundant trailing `.0` (`1000000` → `1m`, `200000` →
+  `200k`, `109200` → `109.2k`).
+- `usage_5h`/`usage_7d` require the Claude.ai subscription `rate_limits` block,
+  which the engine sends only after the first API response in a session; before
+  that (or on API/enterprise plans) they render empty. `{reset}` is the time
+  until the window resets; `{pace}` is an over/under-pace indicator (`⇡N%`
+  when usage is ahead of the time elapsed in the window, `⇣N%` when behind,
+  empty within ±0.5%). `{delta}` is the change in used percentage since the
+  last render (`(+4.5)`), tracked in a small state file under
+  `$CLAUDE_CONFIG_DIR/statusline-state/` and rewritten at most once a minute so
+  it reflects real movement, not per-render noise (empty when `CLAUDE_CONFIG_DIR`
+  is unset). The bar is per-cell (filled in the threshold color, empty dim) with
+  a bright pace-target marker (`│`); both windows are threshold-colored by used
+  percentage (`usage_5h` default `[70, 90]`, `usage_7d` `[60, 80]`; override with
+  `thresholds`).
+- `peak` is computed entirely from the local clock (Anthropic's peak window is
+  weekdays 05:00–11:00 America/Los_Angeles) — Claude Code sends no peak data on
+  stdin. `{countdown}` counts down to the window boundary (peak ending, or the
+  next peak starting).
+- `pr` is colored by `{review_state}` when the engine sends one: `approved`
+  green, `changes_requested` red, `pending`/`review_required` yellow. When a PR
+  URL is present and color is on, `pr` (and the `branch` widget) render as an
+  OSC 8 terminal hyperlink to the PR — the URL is validated (`http`/`https`
+  only, no control chars) before it's embedded.
+- Untrusted free-text (model/folder/branch names, PR URL, tags, throttle
+  backend) is stripped of control characters at the point each widget
+  interpolates it, so a hostile directory or branch name can't inject terminal
+  escapes. Widgets emit only their own trusted escapes (colors, hyperlinks).
 
 `pr` and `tokens` only expose the fields above — the engine's stdin contract has no PR title or
 per-output-type token breakdown today, so those aren't invented placeholders.
 
 #### llmenv-sourced (from `llmenv-status.json`)
 
-All eight honor `format:`.
+All nine honor `format:`.
 
 | Widget | Default `format` | Example | Placeholders |
-|--------|-------------------|---------|--------------|
-| `scopes` | `║ {tags}` | `║ dev · rust` | `tags` (tag list, joined with ` · `) |
-| `plugins` | `◇ {total}` | `◇ 12` | `total`, `errors` |
+| -------- | ------------------- | --------- | -------------- |
+| `scopes` | `{tags}` | `dev · rust` | `tags` (tag list, joined with ` · `) |
+| `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
-| `icm` | `M{memories}` | `M142` | `memories`, `concepts` |
+| `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
 | `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes) |
-| `config_stale` | `{stale_icon}` | `◌` | `stale_icon`. Renders empty when the config isn't stale — there's no "fresh" variant |
+| `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
+| `tasks` | `☑ {done}/{total}` while a task session (`llmenv task session start`, #905) is active, else `☑ {open}` | `☑ 2/5` or `☑ 3` | `done`, `total` (session-scoped; `0`/`0` when no session is active), `open` (open + `wip` count, store-wide, regardless of session), `current` (title of the task currently `wip` — scoped to the active session if one exists, else store-wide; empty when nothing is `wip`). Neither default shows `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
 
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`
 on `pr`, or `{count}` on `scopes`) is left in the output literally rather than
@@ -798,10 +857,10 @@ skills:
     source: "./path/to/skill/dir"    # local path or marketplace-relative
 ```
 
-| Field    | Required | Notes |
-|----------|----------|-------|
-| `name`   | yes      | Registration name; deduplicated first-bundle-wins |
-| `when`   | no       | Activation tags (empty = always active) |
+| Field    | Required | Notes                                                                         |
+|----------|----------|-------------------------------------------------------------------------------|
+| `name`   | yes      | Registration name; deduplicated first-bundle-wins                             |
+| `when`   | no       | Activation tags (empty = always active)                                       |
 | `source` | yes      | Path to skill directory — absolute, `~/`-relative, or bundle-content-relative |
 
 Skills declared here are merged with per-bundle skills from `bundle.yaml`; the

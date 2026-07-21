@@ -868,10 +868,28 @@ pub struct StatuslineConfig {
     pub icons: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StatuslineStyle {
     pub icon_set: IconSet,
+    /// Master colour switch for the whole statusline. `true` (default) lets
+    /// each widget render its default (or configured) colour; `false` forces
+    /// every widget to plain text regardless of per-widget `style`, on top of
+    /// the `--color`/`NO_COLOR` runtime gate. The opt-out for users who want
+    /// the layout without any ANSI.
+    pub color: bool,
+}
+
+impl Default for StatuslineStyle {
+    fn default() -> Self {
+        Self {
+            icon_set: IconSet::default(),
+            // Colour on by default — a bare `statusline:` block should look
+            // readable, not monochrome. `serde(default)` fills a missing
+            // `color:` field from here, so omitting it keeps colour on.
+            color: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -891,6 +909,18 @@ pub struct WidgetConfig {
     pub format: Option<String>,
     pub max_len: Option<usize>,
     pub style: Option<String>,
+    /// Widget-specific display mode. Consumed by widgets that offer named
+    /// presets rather than a free-form `format`: `model` (`short` / `version`
+    /// / `full`) and `pr` (`number` / `url`). Ignored by widgets without a
+    /// display mode, and overridden by `format` when both are set.
+    pub display: Option<String>,
+    /// Bar cell width (default 10) for `context`/`cache_usage`/`usage_5h`/
+    /// `usage_7d`. Ignored by other widgets.
+    pub width: Option<u8>,
+    /// Two ascending percentages `[warn, crit]` for value-based coloring
+    /// (green < warn ≤ yellow < crit ≤ red). Used by `context`/`usage_5h`/
+    /// `usage_7d`. Ignored by widgets without threshold coloring.
+    pub thresholds: Option<[u8; 2]>,
 }
 
 /// ReadOnce mode: what happens when a file that was already read is requested
@@ -2438,8 +2468,8 @@ small:
     fn statusline_config_parses_full_example() {
         let yaml = r#"
 rows:
-  - "{model} │ {context_pct} │ {budget}"
-  - "{scopes:t} · {plugins} {config_stale}"
+  - "{model} │ {context} │ {budget}"
+  - "⎿ {scopes:t} · {plugins} {config_stale}"
 style:
   icon_set: auto
 widgets:
@@ -2447,7 +2477,7 @@ widgets:
     format: "{short_name} {version}"
     style: "bold cyan"
   scopes:
-    format: "║ {tags}"
+    format: "{tags}"
     max_len: 40
     style: "dim"
 icons:

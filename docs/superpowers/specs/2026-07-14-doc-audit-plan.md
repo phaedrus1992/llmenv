@@ -11,12 +11,14 @@ Five files, three tiers from the audit:
 ## Changes
 
 ### README.md
+
 - Replace deprecated `*-ls` commands with `status <subcommand>` forms
 - Add missing commands: `setup`, `regenerate`, `upgrade`, `validate`, `edit`, `completions`, `login`, `check-stale`, `memory`
 - Fix introspection env vars table alignment
 - Remove `sync` (deprecated git sync cmd) and add `plugin-sync`
 
 ### configuration.md
+
 - Add `context_mode` under `features:`
 - Add `disabled_engines` to top-level table
 - Add `init:` section (seeded settings)
@@ -25,13 +27,16 @@ Five files, three tiers from the audit:
 - Tighten `session_log:` prose
 
 ### commands.md
+
 - Add `setup`, `upgrade`, `memory`, `login`, `read-once`, `throttle` commands
 - Add `--compress` to export flags
 - Mark deprecated section accurately
 
 ### getting-started.md
+
 - Replace full commands table with short reference + link to commands.md
 - Add `--compress` to export flags
 
 ### mcp.md
+
 - Add cross-reference from lifecycle hooks section to commands.md

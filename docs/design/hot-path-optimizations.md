@@ -36,6 +36,7 @@ the hook-run environment. Reading it at the `run()` boundary keeps the
 extraction in one place rather than plumbing it through every adapter.
 
 **Files modified:**
+
 - `src/hook_run/mod.rs` — reads env var, passes through to run_inner and
   build_scope_context
 - `src/session_log/scope_header.rs` — adds field to ScopeContext, serializes it
@@ -77,6 +78,7 @@ per process (one hook-run invocation at a time, short-lived CLI process), this
 never contends.
 
 **Trade-offs:**
+
 - **Why `memory` and `host` only, not the full `MergedManifest`?** The cache is
   consumed exclusively by `memory_url()`, which only needs those two fields.
   Storing the full manifest would cache unused data (capabilities, feature
@@ -89,6 +91,7 @@ never contends.
   a persistent process, which is a much larger change.
 
 **Files modified:**
+
 - `src/hook_run/mod.rs` — added `MergeCacheEntry` struct, `merge_cache_key()`
   function, and cache check inside `memory_url()`
 
@@ -97,11 +100,13 @@ never contends.
 ## Item 3: Tokio Runtime Reuse
 
 **Problem:** Each event built a fresh Tokio runtime:
+
 ```rust
 tokio::runtime::Builder::new_current_thread()
     .enable_all()
     .build()?
 ```
+
 This allocates I/O driver state, timer wheels, and thread-local storage — then
 drops it all when the event finishes. The hook only needs `block_on` for a
 single sequential HTTP call to the ICM MCP backend.
@@ -137,6 +142,7 @@ never needs work-stealing. A multi-thread runtime would be strictly worse
 `Future: Send`, which matters for `McpHttpClient`'s internal types.
 
 **Files modified:**
+
 - `src/hook_run/mod.rs` — replaced per-event `Builder::build()` with
   `OnceLock<Runtime>`
 
@@ -158,6 +164,7 @@ static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> =
 ```
 
 On every event:
+
 1. Look up the resolved memory URL in the cache
 2. Cache hit → clone the cached client (cheap — `reqwest::Client` is internally
    `Arc<Inner>`, and the MCP session ID is shared via `Arc`)
@@ -193,6 +200,7 @@ llmenv's fail-soft contract (exit 0, warning on stderr).
       a no-op `DispatchResult::Skipped` which exits normally.
 
 **Files modified:**
+
 - `src/hook_run/mod.rs` — replaced per-event `McpHttpClient::new()` with
   `OnceLock<Mutex<HashMap<...>>>` cache
 
@@ -201,6 +209,7 @@ llmenv's fail-soft contract (exit 0, warning on stderr).
 ## Verification
 
 All existing tests pass:
+
 - `cargo test --all-features` — 1126 passed, 3 ignored, 0 failed
 - `cargo clippy --all-targets --all-features` — no issues
 - `cargo test --test hook_run_failsoft` — 12 passed (all fail-soft contract

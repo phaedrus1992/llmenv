@@ -15,7 +15,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::cli::statusline::data::{
-    CacheData, CountData, IcmData, ScopesData, StatusData, ThrottleData,
+    CacheData, CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData, ThrottleData,
 };
 use crate::config::{Config, HashingMode, McpServer, Throttle};
 
@@ -84,6 +84,7 @@ pub fn collect_status_data(
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
             cache: collect_cache(cache_root, hashing),
             session_log: collect_session_log(),
+            tasks: collect_tasks(),
         },
     }
 }
@@ -199,17 +200,70 @@ fn collect_icm() -> Option<IcmData> {
     parse_icm_stats(&raw)
 }
 
-/// Pure JSON-extraction half of `collect_icm`, split out so it's testable
+/// Pure text-extraction half of `collect_icm`, split out so it's testable
 /// without a live ICM MCP backend.
+///
+/// The `icm_memory_stats` MCP tool has no structured-output mode — it always
+/// returns a human-formatted text block (`"Memories: 2880\nTopics: 155\n..."`),
+/// never JSON. `memories` is required; `concepts` (sourced from the tool's
+/// "Topics" line — its closest analogous count) defaults to 0 when the line
+/// is absent, so an older/trimmed stats response still yields a usable count.
 fn parse_icm_stats(raw: &str) -> Option<IcmData> {
-    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
     Some(IcmData {
-        memories: parsed.get("memories")?.as_u64()?,
-        concepts: parsed
-            .get("concepts")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        memories: extract_stat_line(raw, "Memories")?,
+        concepts: extract_stat_line(raw, "Topics").unwrap_or(0),
     })
+}
+
+/// Extract the `u64` value from a `"<label>: <n>"` line, e.g. `"Memories:
+/// 2880"` for `label = "Memories"`. Whitespace-tolerant around the colon;
+/// `None` if no line matches or the value doesn't parse.
+fn extract_stat_line(raw: &str, label: &str) -> Option<u64> {
+    raw.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(label)?
+            .trim_start()
+            .strip_prefix(':')?
+            .trim()
+            .parse()
+            .ok()
+    })
+}
+
+/// Best-effort task-tracker progress (#905): `session` is `Some` when a task
+/// session is active (`done`/`total` scoped to that session's tasks);
+/// `open` is always the store-wide open+`wip` count, for the "no active
+/// session" fallback the statusline renderer uses. `None` only when the
+/// state dir itself can't be resolved — an empty/missing task store still
+/// yields `Some(TasksData { open: 0, session: None })`, matching how an
+/// empty `llmenv-status.json` degrades other collectors to `0`, not absent.
+fn collect_tasks() -> Option<TasksData> {
+    let state_dir = match crate::paths::state_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::debug!("task stat collection unavailable (non-fatal): {e}");
+            return None;
+        }
+    };
+    Some(collect_tasks_from_state_dir(&state_dir))
+}
+
+/// Internal helper taking an injectable state dir so tests can exercise this
+/// without touching the real, ambient state dir.
+fn collect_tasks_from_state_dir(state_dir: &Path) -> TasksData {
+    let open = crate::task::open_task_count(state_dir);
+    let active_session = crate::task::session::active_session(state_dir);
+    let session = active_session.as_ref().map(|s| {
+        let (done, total) = crate::task::session::session_progress(state_dir, &s.id);
+        SessionProgress { done, total }
+    });
+    let current =
+        crate::task::current_wip_title(state_dir, active_session.as_ref().map(|s| s.id.as_str()));
+    TasksData {
+        open,
+        session,
+        current,
+    }
 }
 
 /// Prefer resolving fresh against current config (reflects a same-render
@@ -384,8 +438,12 @@ mod tests {
         let config = Config::default();
         let active = active_scopes(&[]);
         let dir = tempfile::tempdir().unwrap();
-        // Must not panic even though: no plugins configured, no memory
-        // backend active (icm stays None), no cache dir exists yet.
+        // Must not panic even though: no plugins configured, no cache dir
+        // exists yet. `icm` isn't asserted here — `collect_icm` resolves the
+        // *host's* real config/backend (no DI seam), so its value depends on
+        // whatever ICM setup happens to be active on the machine running the
+        // test; `parse_icm_stats`'s own tests below cover its logic
+        // hermetically.
         let data = collect_status_data(
             &config,
             &active,
@@ -394,10 +452,6 @@ mod tests {
             None,
             dir.path(),
             HashingMode::default(),
-        );
-        assert!(
-            data.data.icm.is_none(),
-            "no ICM backend active — must degrade to None, not error"
         );
         // Empty config resolves cleanly (no error), not "resolve failed".
         assert_eq!(
@@ -595,15 +649,19 @@ mod tests {
     // --- collect_icm / parse_icm_stats ---
 
     #[test]
-    fn collect_icm_returns_none_when_no_backend_active() {
-        // No memory backend configured for this scope anywhere in the test
-        // process — connect() fails, so this must degrade cleanly.
-        assert!(collect_icm().is_none());
+    fn collect_icm_never_panics() {
+        // `collect_icm` resolves the *host's* real config/backend (no DI
+        // seam) — its return value depends on whatever ICM setup is active
+        // on the machine running the test, so this only asserts the
+        // documented degrade-cleanly contract, not a specific outcome.
+        // `parse_icm_stats`'s tests below cover the parsing logic hermetically.
+        let _ = collect_icm();
     }
 
     #[test]
     fn parse_icm_stats_extracts_memories_and_concepts() {
-        let result = parse_icm_stats(r#"{"memories": 142, "concepts": 47}"#);
+        let result =
+            parse_icm_stats("Memories: 142\nTopics: 47\nAvg weight: 0.3\nOldest: x\nNewest: y\n");
         assert_eq!(
             result,
             Some(IcmData {
@@ -615,7 +673,7 @@ mod tests {
 
     #[test]
     fn parse_icm_stats_defaults_concepts_to_zero_when_absent() {
-        let result = parse_icm_stats(r#"{"memories": 10}"#);
+        let result = parse_icm_stats("Memories: 10\n");
         assert_eq!(
             result,
             Some(IcmData {
@@ -626,29 +684,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_icm_stats_returns_none_on_malformed_json() {
-        assert!(parse_icm_stats("{ not valid json").is_none());
+    fn parse_icm_stats_returns_none_on_unrecognized_text() {
+        assert!(parse_icm_stats("not a stats response at all").is_none());
     }
 
     #[test]
     fn parse_icm_stats_returns_none_when_memories_missing() {
-        assert!(parse_icm_stats(r#"{"concepts": 5}"#).is_none());
+        assert!(parse_icm_stats("Topics: 5\n").is_none());
     }
 
     proptest! {
-        /// Roundtrip: any `memories`/`concepts` pair serialized to JSON must
-        /// parse back to the same `IcmData`, with `concepts` defaulting to 0
-        /// when omitted.
+        /// Roundtrip: any `memories`/`concepts` pair formatted as the real
+        /// `icm_memory_stats` text response must parse back to the same
+        /// `IcmData`, with `concepts` defaulting to 0 when its "Topics" line
+        /// is omitted.
         #[test]
         fn parse_icm_stats_roundtrips_arbitrary_values(
             memories in any::<u64>(),
             concepts in proptest::option::of(any::<u64>()),
         ) {
-            let json = match concepts {
-                Some(c) => serde_json::json!({ "memories": memories, "concepts": c }),
-                None => serde_json::json!({ "memories": memories }),
+            let raw = match concepts {
+                Some(c) => format!("Memories: {memories}\nTopics: {c}\n"),
+                None => format!("Memories: {memories}\n"),
             };
-            let result = parse_icm_stats(&json.to_string());
+            let result = parse_icm_stats(&raw);
             prop_assert_eq!(
                 result,
                 Some(IcmData {
@@ -663,6 +722,45 @@ mod tests {
         #[test]
         fn parse_icm_stats_never_panics_on_arbitrary_input(raw in ".{0,200}") {
             let _ = parse_icm_stats(&raw);
+        }
+
+        /// Roundtrip: a well-formed "<label>: <n>" line, anywhere among
+        /// arbitrary surrounding lines, must parse back to `n` — whitespace
+        /// around the colon and extra lines before/after don't matter.
+        #[test]
+        fn extract_stat_line_roundtrips_well_formed_line(
+            label in "[A-Za-z]{1,20}",
+            n in any::<u64>(),
+            colon_spaces in " {0,3}",
+            before in proptest::collection::vec("[A-Za-z0-9]{0,20}", 0..3),
+            after in proptest::collection::vec("[A-Za-z0-9]{0,20}", 0..3),
+        ) {
+            let mut lines = before;
+            lines.push(format!("{label}{colon_spaces}: {n}"));
+            lines.extend(after);
+            let raw = lines.join("\n");
+            prop_assert_eq!(extract_stat_line(&raw, &label), Some(n));
+        }
+
+        /// Arbitrary, likely-malformed input must never panic — only ever
+        /// `None` or a correctly-parsed `u64`.
+        #[test]
+        fn extract_stat_line_never_panics_on_arbitrary_input(
+            raw in ".{0,200}",
+            label in "[A-Za-z]{0,20}",
+        ) {
+            let _ = extract_stat_line(&raw, &label);
+        }
+
+        /// A label that's a substring of another line's label (e.g. "Mem"
+        /// vs "Memories") must not false-match — `strip_prefix` only
+        /// accepts an exact-label-then-colon boundary.
+        #[test]
+        fn extract_stat_line_does_not_match_label_substring_collisions(
+            n in any::<u64>(),
+        ) {
+            let raw = format!("Memories: {n}\n");
+            prop_assert_eq!(extract_stat_line(&raw, "Mem"), None);
         }
     }
 
@@ -836,5 +934,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.jsonl");
         assert_eq!(collect_session_log_from_path(&missing), None);
+    }
+
+    // --- collect_tasks (#905) ---
+
+    #[test]
+    fn collect_tasks_empty_store_is_zero_open_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert_eq!(
+            data,
+            TasksData {
+                open: 0,
+                session: None,
+                current: None,
+            }
+        );
+    }
+
+    #[test]
+    fn collect_tasks_no_session_counts_open_and_wip_globally() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::task::add_task(dir.path(), "Open task", None).unwrap();
+        let wip = crate::task::add_task(dir.path(), "In progress task", None).unwrap();
+        crate::task::start_task(dir.path(), &wip.slug).unwrap();
+        let done = crate::task::add_task(dir.path(), "Done task", None).unwrap();
+        crate::task::done_task(dir.path(), &done.slug).unwrap();
+
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert_eq!(data.open, 2, "open + wip, not done");
+        assert!(data.session.is_none());
+        assert_eq!(data.current.as_deref(), Some("In progress task"));
+    }
+
+    #[test]
+    fn collect_tasks_with_active_session_reports_done_over_total() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::task::session::start_session(dir.path(), Some("sprint 1"), false).unwrap();
+        let t1 = crate::task::add_task(dir.path(), "Task one", None).unwrap();
+        crate::task::add_task(dir.path(), "Task two", None).unwrap();
+        crate::task::done_task(dir.path(), &t1.slug).unwrap();
+
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert_eq!(
+            data.session,
+            Some(crate::cli::statusline::data::SessionProgress { done: 1, total: 2 })
+        );
+    }
+
+    #[test]
+    fn collect_tasks_current_is_none_when_nothing_wip() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::task::add_task(dir.path(), "Just sitting there open", None).unwrap();
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert!(data.current.is_none());
+    }
+
+    #[test]
+    fn collect_tasks_current_scoped_to_active_session_when_one_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        // wip task outside any session — must not leak into the session-scoped `current`.
+        let outside = crate::task::add_task(dir.path(), "Outside session work", None).unwrap();
+        crate::task::start_task(dir.path(), &outside.slug).unwrap();
+
+        crate::task::session::start_session(dir.path(), Some("sprint 1"), false).unwrap();
+        let inside = crate::task::add_task(dir.path(), "Inside session work", None).unwrap();
+        crate::task::start_task(dir.path(), &inside.slug).unwrap();
+
+        let data = collect_tasks_from_state_dir(dir.path());
+        assert_eq!(data.current.as_deref(), Some("Inside session work"));
     }
 }

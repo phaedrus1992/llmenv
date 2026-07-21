@@ -126,6 +126,15 @@ When in doubt, ask: *would someone running the released binary notice or care?*
 If not, leave it out. This applies retroactively to `[Unreleased]` — strip such
 entries before cutting a release rather than freezing them under a version.
 
+### Keep entries short
+
+A sentence or two — what changed and why it matters to a user, not an
+exhaustive description of the implementation. Full detail belongs in
+`website/docs/`; link a feature-sized entry to its docs page
+(`https://phaedrus1992.github.io/llmenv/docs/<page>[#anchor]`) instead of
+restating that detail inline. See AGENTS.md's "Versioning, Changelog &
+Releases" section.
+
 ### Creating a release branch
 
 After tagging the first release of a new major (e.g. `v2.0.0`), branch
@@ -245,10 +254,13 @@ After the release tag is pushed and CI completes:
 
 1. **Move any open issues** from the released milestone (e.g. `v3.3.0`) to the
    next one (e.g. `v3.4.0`). Create the next milestone if it doesn't exist yet:
+
    ```bash
    gh api repos/:owner/:repo/milestones -f title="vX.Y" -f description="<theme>"
    ```
+
 2. **Close the released milestone:**
+
    ```bash
    gh issue list --milestone "vX.Y.Z" --state open -L 100 --json number --jq '.[].number' \
      | xargs -I{} gh issue edit {} --milestone "vX.Y+1"
