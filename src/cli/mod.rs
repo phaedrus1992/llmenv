@@ -2762,12 +2762,7 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
 /// Resolve the project tag for the current process's cwd — every `llmenv
 /// task` invocation runs with cwd set to wherever the agent invoked it from.
 fn current_project_tag() -> anyhow::Result<String> {
-    let cwd = std::env::current_dir()?;
-    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
-    Ok(crate::task::project::resolve_project_tag(
-        &cwd,
-        home.as_deref(),
-    ))
+    Ok(crate::task::project::current_tag()?)
 }
 
 /// Handle `llmenv task session <subcommand>` (#905, reworked for mandatory
@@ -2829,13 +2824,34 @@ fn run_task_session_command(
         }
         TaskSessionCommand::Show { id } => {
             let id = resolve_session_id(state_dir, &project, id)?;
-            let (done, total) = session::session_progress(state_dir, &id);
-            println!("Session '{id}': {done}/{total} done");
+            // Validate the session exists rather than printing "0/0 done" for
+            // a typo'd id (session_progress returns (0, 0) for any unknown id).
+            let session = session::list_sessions(state_dir)
+                .into_iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| anyhow::anyhow!("no session '{id}' found"))?;
+            let (done, total) = session::session_progress(state_dir, &session.id);
+            let state = if session.is_open() {
+                "open"
+            } else if session.finished_at.is_some() {
+                "finished"
+            } else {
+                "abandoned"
+            };
+            println!(
+                "Session '{}'{}: {done}/{total} done ({state})",
+                session.id,
+                session
+                    .name
+                    .as_deref()
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default(),
+            );
         }
         TaskSessionCommand::Ls => {
             let mut sessions: Vec<_> = session::list_sessions(state_dir)
                 .into_iter()
-                .filter(|s| s.finished_at.is_none() && s.abandoned_at.is_none())
+                .filter(session::Session::is_open)
                 .collect();
             sessions.sort_by_key(|s| (s.project != project, s.started_at.clone()));
             if sessions.is_empty() {

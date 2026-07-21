@@ -518,6 +518,16 @@ fn session_finish_auto_resolves_when_exactly_one_open() {
 }
 
 #[test]
+fn session_show_unknown_id_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "show", "no-such-session"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no session"));
+}
+
+#[test]
 fn session_finish_with_no_open_session_fails() {
     let dir = TempDir::new().unwrap();
     llmenv(dir.path())
