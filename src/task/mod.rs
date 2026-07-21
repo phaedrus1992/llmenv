@@ -397,9 +397,9 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
     if let Some(session_id) = &task.session
         && let Err(e) = session::touch_last_activity(state_dir, session_id)
     {
-        tracing::warn!(
-            "failed to update last_activity for session '{session_id}' after a task \
-             change (the task change itself is already saved): {e}"
+        eprintln!(
+            "llmenv: failed to update last_activity for session '{session_id}' after a \
+             task change (the task change itself is already saved): {e}"
         );
     }
 }

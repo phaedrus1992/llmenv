@@ -169,9 +169,9 @@ pub fn touch_last_activity(state_dir: &Path, session_id: &str) -> anyhow::Result
             Ok(session) => session,
             Err(e) if is_not_found(&e) => return Ok(()),
             Err(e) => {
-                tracing::warn!(
-                    "could not load session '{session_id}' to update last_activity \
-                     (skipping the touch): {e}"
+                eprintln!(
+                    "llmenv: could not load session '{session_id}' to update \
+                     last_activity (skipping the touch): {e}"
                 );
                 return Ok(());
             }
@@ -274,12 +274,8 @@ fn create_session(
     Ok(session)
 }
 
-/// Build the `session start` checkpoint error message: lists every existing
-/// open same-project session with enough detail (id, name, description,
-/// idle duration) that the agent or a human can decide `--resume`,
-/// `--replace`, or `--new` without needing to inspect anything further.
 /// Human-readable idle duration since an RFC3339 `last_activity` timestamp
-/// (e.g. `"2h 5m"`), for `session ls` and the `session start` checkpoint.
+/// (e.g. `"2h 5m 3s"`), for `session ls` and the `session start` checkpoint.
 /// `"unknown"` when the timestamp can't be parsed or is in the future.
 #[must_use]
 pub(crate) fn idle_display(last_activity: &str) -> String {
@@ -293,6 +289,10 @@ pub(crate) fn idle_display(last_activity: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Build the `session start` checkpoint error message: lists every existing
+/// open same-project session with enough detail (id, name, description,
+/// idle duration) that the agent or a human can decide `--resume`,
+/// `--replace`, or `--new` without needing to inspect anything further.
 fn checkpoint_error(existing: &[Session]) -> String {
     let lines: Vec<String> = existing
         .iter()
