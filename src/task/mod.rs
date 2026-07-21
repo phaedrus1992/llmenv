@@ -417,8 +417,11 @@ pub fn stop_hook_reminder(state_dir: &Path) -> String {
         wip_reminder(
             state_dir,
             "You still have task(s) in progress",
-            "Run `llmenv task done <slug>` when finished, or `llmenv task note <slug> \"...\"` \
-             to record progress before this session ends.",
+            "Run `llmenv task done <slug>` when finished. If still working, keep going — \
+             don't stop mid-task. If blocked, exhaust safe autonomous remediation first \
+             (retry, an alternate approach, a diagnostic command); only then ask the user, \
+             once, with a specific actionable question, and `llmenv task note <slug> \"...\"` \
+             the blocker instead of repeating the same status every turn.",
         ),
         session_finish_reminder(state_dir),
     ])
