@@ -230,13 +230,12 @@ fn extract_stat_line(raw: &str, label: &str) -> Option<u64> {
     })
 }
 
-/// Best-effort task-tracker progress (#905): `session` is `Some` when a task
-/// session is active (`done`/`total` scoped to that session's tasks);
-/// `open` is always the store-wide open+`wip` count, for the "no active
-/// session" fallback the statusline renderer uses. `None` only when the
-/// state dir itself can't be resolved — an empty/missing task store still
-/// yields `Some(TasksData { open: 0, session: None })`, matching how an
-/// empty `llmenv-status.json` degrades other collectors to `0`, not absent.
+/// Best-effort task-tracker progress, scoped to the sessions open for the
+/// current project (mandatory-sessions design). `session` is `None` when
+/// zero sessions are open for this project (the widget renders empty); `Some`
+/// carries the summed `(done, total)` across every session open for this
+/// project. `None` (the whole `TasksData`) only when the state dir or cwd
+/// can't be resolved.
 fn collect_tasks() -> Option<TasksData> {
     let state_dir = match crate::paths::state_dir() {
         Ok(dir) => dir,
@@ -245,25 +244,32 @@ fn collect_tasks() -> Option<TasksData> {
             return None;
         }
     };
-    Some(collect_tasks_from_state_dir(&state_dir))
+    let project = match crate::task::project::current_tag() {
+        Ok(project) => project,
+        Err(e) => {
+            tracing::debug!("task stat collection unavailable (no cwd): {e}");
+            return None;
+        }
+    };
+    Some(collect_tasks_from_state_dir(&state_dir, &project))
 }
 
-/// Internal helper taking an injectable state dir so tests can exercise this
-/// without touching the real, ambient state dir.
-fn collect_tasks_from_state_dir(state_dir: &Path) -> TasksData {
-    let open = crate::task::open_task_count(state_dir);
-    let active_session = crate::task::session::active_session(state_dir);
-    let session = active_session.as_ref().map(|s| {
-        let (done, total) = crate::task::session::session_progress(state_dir, &s.id);
-        SessionProgress { done, total }
-    });
-    let current =
-        crate::task::current_wip_title(state_dir, active_session.as_ref().map(|s| s.id.as_str()));
-    TasksData {
-        open,
-        session,
-        current,
-    }
+/// Internal helper taking injectable state dir + project tag so tests can
+/// exercise this without touching the real, ambient state dir or cwd.
+fn collect_tasks_from_state_dir(state_dir: &Path, project: &str) -> TasksData {
+    let open_sessions = crate::task::session::open_sessions_for_project(state_dir, project);
+    let session = if open_sessions.is_empty() {
+        None
+    } else {
+        let (done, total) = open_sessions.iter().fold((0, 0), |(ad, at), s| {
+            let (d, t) = crate::task::session::session_progress(state_dir, &s.id);
+            (ad + d, at + t)
+        });
+        Some(SessionProgress { done, total })
+    };
+    let session_ids: Vec<String> = open_sessions.into_iter().map(|s| s.id).collect();
+    let current = crate::task::current_wip_title(state_dir, &session_ids);
+    TasksData { session, current }
 }
 
 /// Prefer resolving fresh against current config (reflects a same-render
@@ -936,72 +942,93 @@ mod tests {
         assert_eq!(collect_session_log_from_path(&missing), None);
     }
 
-    // --- collect_tasks (#905) ---
+    // --- collect_tasks (mandatory-sessions rework) ---
 
-    #[test]
-    fn collect_tasks_empty_store_is_zero_open_no_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = collect_tasks_from_state_dir(dir.path());
-        assert_eq!(
-            data,
-            TasksData {
-                open: 0,
-                session: None,
-                current: None,
-            }
-        );
+    use crate::task::session::{StartDecision, StartOutcome, start_session};
+
+    const PROJECT: &str = "proj-0000000000";
+    const OTHER: &str = "other-1111111111";
+
+    fn created(outcome: StartOutcome) -> crate::task::session::Session {
+        match outcome {
+            StartOutcome::Created(s) => s,
+            other => panic!("expected Created, got {other:?}"),
+        }
     }
 
     #[test]
-    fn collect_tasks_no_session_counts_open_and_wip_globally() {
+    fn collect_tasks_zero_open_sessions_for_project_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        crate::task::add_task(dir.path(), "Open task", None).unwrap();
-        let wip = crate::task::add_task(dir.path(), "In progress task", None).unwrap();
-        crate::task::start_task(dir.path(), &wip.slug).unwrap();
-        let done = crate::task::add_task(dir.path(), "Done task", None).unwrap();
-        crate::task::done_task(dir.path(), &done.slug).unwrap();
-
-        let data = collect_tasks_from_state_dir(dir.path());
-        assert_eq!(data.open, 2, "open + wip, not done");
+        let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
         assert!(data.session.is_none());
-        assert_eq!(data.current.as_deref(), Some("In progress task"));
-    }
-
-    #[test]
-    fn collect_tasks_with_active_session_reports_done_over_total() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::task::session::start_session(dir.path(), Some("sprint 1"), false).unwrap();
-        let t1 = crate::task::add_task(dir.path(), "Task one", None).unwrap();
-        crate::task::add_task(dir.path(), "Task two", None).unwrap();
-        crate::task::done_task(dir.path(), &t1.slug).unwrap();
-
-        let data = collect_tasks_from_state_dir(dir.path());
-        assert_eq!(
-            data.session,
-            Some(crate::cli::statusline::data::SessionProgress { done: 1, total: 2 })
-        );
-    }
-
-    #[test]
-    fn collect_tasks_current_is_none_when_nothing_wip() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::task::add_task(dir.path(), "Just sitting there open", None).unwrap();
-        let data = collect_tasks_from_state_dir(dir.path());
         assert!(data.current.is_none());
     }
 
     #[test]
-    fn collect_tasks_current_scoped_to_active_session_when_one_is_active() {
+    fn collect_tasks_one_open_session_reports_done_over_total() {
         let dir = tempfile::tempdir().unwrap();
-        // wip task outside any session — must not leak into the session-scoped `current`.
-        let outside = crate::task::add_task(dir.path(), "Outside session work", None).unwrap();
-        crate::task::start_task(dir.path(), &outside.slug).unwrap();
+        let session = created(
+            start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).unwrap(),
+        );
+        let t1 = crate::task::add_task_for_session(dir.path(), "one", None, &session.id).unwrap();
+        crate::task::add_task_for_session(dir.path(), "two", None, &session.id).unwrap();
+        crate::task::done_task(dir.path(), &t1.slug).unwrap();
 
-        crate::task::session::start_session(dir.path(), Some("sprint 1"), false).unwrap();
-        let inside = crate::task::add_task(dir.path(), "Inside session work", None).unwrap();
-        crate::task::start_task(dir.path(), &inside.slug).unwrap();
+        let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
+        assert_eq!(data.session, Some(SessionProgress { done: 1, total: 2 }));
+    }
 
-        let data = collect_tasks_from_state_dir(dir.path());
-        assert_eq!(data.current.as_deref(), Some("Inside session work"));
+    #[test]
+    fn collect_tasks_two_open_sessions_sums_across_project_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let s1 = created(
+            start_session(
+                dir.path(),
+                Some("first"),
+                None,
+                PROJECT,
+                StartDecision::Auto,
+            )
+            .unwrap(),
+        );
+        let s2 = created(
+            start_session(
+                dir.path(),
+                Some("second"),
+                None,
+                PROJECT,
+                StartDecision::New,
+            )
+            .unwrap(),
+        );
+        start_session(
+            dir.path(),
+            Some("unrelated"),
+            None,
+            OTHER,
+            StartDecision::Auto,
+        )
+        .unwrap();
+
+        let t1 = crate::task::add_task_for_session(dir.path(), "a", None, &s1.id).unwrap();
+        crate::task::done_task(dir.path(), &t1.slug).unwrap();
+        crate::task::add_task_for_session(dir.path(), "b", None, &s2.id).unwrap();
+
+        let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
+        assert_eq!(data.session, Some(SessionProgress { done: 1, total: 2 }));
+    }
+
+    #[test]
+    fn collect_tasks_current_is_scoped_to_the_projects_open_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = created(
+            start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).unwrap(),
+        );
+        let task = crate::task::add_task_for_session(dir.path(), "In progress", None, &session.id)
+            .unwrap();
+        crate::task::start_task(dir.path(), &task.slug).unwrap();
+
+        let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
+        assert_eq!(data.current.as_deref(), Some("In progress"));
     }
 }

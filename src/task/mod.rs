@@ -11,6 +11,7 @@
 //! ponytail: per-task locking (rather than whole-store) if write throughput
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
+pub mod project;
 pub mod session;
 
 use std::path::{Path, PathBuf};
@@ -190,40 +191,63 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
     tasks
 }
 
-/// Count of tasks currently `open` or `wip`, store-wide (not scoped to any
-/// session) — the statusline's "no active session" fallback (#905).
+/// Title of the most recently updated `wip`/`waiting` task among tasks
+/// tagged to any of `session_ids` — the statusline's "what's in progress
+/// right now" fill-in (#905). `None` when nothing matching is currently
+/// `wip`/`waiting`, or when `session_ids` is empty.
 #[must_use]
-pub fn open_task_count(state_dir: &Path) -> u64 {
-    list_tasks(state_dir)
-        .into_iter()
-        .filter(|t| t.state != TaskState::Done)
-        .count() as u64
-}
-
-/// Title of the most recently updated `wip`/`waiting` task — the
-/// statusline's "what's in progress right now" fill-in (#905). Pass
-/// `session_id` to scope the search to one session's tasks (matching how
-/// `open`/`session_progress` are scoped for the same widget); `None`
-/// searches store-wide. `None` when nothing matching is currently
-/// `wip`/`waiting`.
-#[must_use]
-pub fn current_wip_title(state_dir: &Path, session_id: Option<&str>) -> Option<String> {
+pub fn current_wip_title(state_dir: &Path, session_ids: &[String]) -> Option<String> {
+    if session_ids.is_empty() {
+        return None;
+    }
     list_tasks(state_dir)
         .into_iter()
         .filter(|t| matches!(t.state, TaskState::Wip | TaskState::Waiting))
-        .filter(|t| session_id.is_none_or(|sid| t.session.as_deref() == Some(sid)))
+        .filter(|t| {
+            t.session
+                .as_deref()
+                .is_some_and(|sid| session_ids.iter().any(|s| s == sid))
+        })
         .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
         .map(|t| t.title)
 }
 
-/// Create a new task in `open` state and persist it.
+/// Create a new task in `open` state and persist it, tagged to a resolved
+/// session (mandatory-sessions design).
+///
+/// # Errors
+/// Errors if `parent` doesn't resolve to an existing task. Errors on session
+/// resolution: `session_id` explicit but unknown/closed → error; omitted
+/// with zero or 2+ open sessions for `project` → error telling the agent to
+/// run `llmenv task session start` or pass `--session`; omitted with exactly
+/// one open session for `project` → auto-resolved.
+pub fn add_task(
+    state_dir: &Path,
+    title: &str,
+    parent: Option<&str>,
+    session_id: Option<&str>,
+    project: &str,
+) -> anyhow::Result<Task> {
+    let resolved_session = resolve_session_for_add(state_dir, session_id, project)?;
+    let task = add_task_for_session(state_dir, title, parent, &resolved_session)?;
+    touch_task_session(state_dir, &task);
+    Ok(task)
+}
+
+/// `add_task`, but with the session id already resolved — skips the
+/// mandatory-session lookup dance. Used by `add_task` itself, and directly by
+/// `session.rs`'s own tests (and any caller that already has a validated
+/// session id in hand, e.g. the CLI's `--session <id>` path).
 ///
 /// # Errors
 /// Errors if `parent` is provided but doesn't resolve to an existing task —
-/// same eager-validation reasoning as `block_task`'s `on` (a fresh write,
-/// not a load of possibly-stale state, so a typo'd parent is caught
-/// immediately rather than becoming a silent dangling reference).
-pub fn add_task(state_dir: &Path, title: &str, parent: Option<&str>) -> anyhow::Result<Task> {
+/// same eager-validation reasoning as `block_task`'s `on`.
+pub fn add_task_for_session(
+    state_dir: &Path,
+    title: &str,
+    parent: Option<&str>,
+    session_id: &str,
+) -> anyhow::Result<Task> {
     with_store_lock(state_dir, || {
         let dir = tasks_dir(state_dir);
         let parent_slug = match parent {
@@ -247,13 +271,46 @@ pub fn add_task(state_dir: &Path, title: &str, parent: Option<&str>) -> anyhow::
             parent: parent_slug,
             blocked_on: Vec::new(),
             notes: Vec::new(),
-            session: session::active_session(state_dir).map(|s| s.id),
+            session: Some(session_id.to_string()),
             created_at: now.clone(),
             updated_at: now,
         };
         save_task(state_dir, &task)?;
         Ok(task)
     })
+}
+
+/// Resolve which session a `task add` belongs to, per the mandatory-sessions
+/// rules. An explicit `session_id` is honored as long as it names an
+/// existing, open session (any project — an explicit id is a deliberate
+/// choice). Omitted, it auto-resolves to the current project's single open
+/// session, or errors on zero/2+.
+fn resolve_session_for_add(
+    state_dir: &Path,
+    session_id: Option<&str>,
+    project: &str,
+) -> anyhow::Result<String> {
+    if let Some(id) = session_id {
+        let exists_open = session::list_sessions(state_dir)
+            .into_iter()
+            .any(|s| s.id == id && s.is_open());
+        if !exists_open {
+            anyhow::bail!("session '{id}' does not exist or is not open");
+        }
+        return Ok(id.to_string());
+    }
+    let open = session::open_sessions_for_project(state_dir, project);
+    match open.len() {
+        0 => anyhow::bail!(
+            "no open session for this project — run `llmenv task session start` first, \
+             or pass --session <id>"
+        ),
+        1 => Ok(open[0].id.clone()),
+        n => anyhow::bail!(
+            "{n} open sessions for this project — pass --session <id>, or see \
+             `llmenv task session ls`"
+        ),
+    }
 }
 
 /// Resolve a user-supplied identifier (exact slug or unambiguous prefix) to
@@ -294,7 +351,7 @@ pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<Strin
 /// task whose `blocked_on` list contains a non-`done` task — the agent may
 /// know better than the ordering hint.
 pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
-    with_store_lock(state_dir, || {
+    let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
@@ -324,7 +381,27 @@ pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
         task.updated_at = now_rfc3339();
         save_task(state_dir, &task)?;
         Ok(task)
-    })
+    })?;
+    touch_task_session(state_dir, &task);
+    Ok(task)
+}
+
+/// Bump the `last_activity` of the session a task is tagged to, if any — so a
+/// session with active `add`/`start`/`done`/`note` traffic reads as "recent"
+/// in `session ls` and the `session start` checkpoint. Called outside
+/// `with_store_lock` (`touch_last_activity` takes the lock itself), *after*
+/// the task mutation has already been committed. Best-effort by design: a
+/// failure to bump the timestamp (pure display bookkeeping) must never turn
+/// an already-persisted task change into a reported error — log and move on.
+fn touch_task_session(state_dir: &Path, task: &Task) {
+    if let Some(session_id) = &task.session
+        && let Err(e) = session::touch_last_activity(state_dir, session_id)
+    {
+        eprintln!(
+            "llmenv: failed to update last_activity for session '{session_id}' after a \
+             task change (the task change itself is already saved): {e}"
+        );
+    }
 }
 
 /// Delete a task outright (#905) — for a task that's being deliberately
@@ -343,19 +420,21 @@ pub fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
 
 /// Mark a task done. Idempotent from any prior state (fast-path completion).
 pub fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
-    with_store_lock(state_dir, || {
+    let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
         task.state = TaskState::Done;
         task.updated_at = now_rfc3339();
         save_task(state_dir, &task)?;
         Ok(task)
-    })
+    })?;
+    touch_task_session(state_dir, &task);
+    Ok(task)
 }
 
 /// Append a timestamped progress note to a task.
 pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Task> {
-    with_store_lock(state_dir, || {
+    let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
         task.notes.push(TaskNote {
@@ -365,7 +444,9 @@ pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Ta
         task.updated_at = now_rfc3339();
         save_task(state_dir, &task)?;
         Ok(task)
-    })
+    })?;
+    touch_task_session(state_dir, &task);
+    Ok(task)
 }
 
 /// Mark a task `waiting` — blocked on something outside the agent's control
@@ -376,7 +457,7 @@ pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Ta
 /// # Errors
 /// Errors if the task is already done.
 pub fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<Task> {
-    with_store_lock(state_dir, || {
+    let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
@@ -390,7 +471,9 @@ pub fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<
         task.updated_at = now_rfc3339();
         save_task(state_dir, &task)?;
         Ok(task)
-    })
+    })?;
+    touch_task_session(state_dir, &task);
+    Ok(task)
 }
 
 /// Record an ordering dependency: `input` is blocked on `on`.
@@ -429,7 +512,7 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
             "In-progress tasks from a previous session",
             "Resume one of these or run `llmenv task done <slug>` before starting new work.",
         ),
-        session_finish_reminder(state_dir),
+        session_finish_reminders(state_dir),
     ])
 }
 
@@ -457,29 +540,34 @@ pub fn stop_hook_reminder(state_dir: &Path) -> String {
              once, with a specific actionable question, and `llmenv task note <slug> \"...\"` \
              the blocker instead of repeating the same status every turn.",
         ),
-        session_finish_reminder(state_dir),
+        session_finish_reminders(state_dir),
     ])
 }
 
-/// If a task session (`llmenv task session start`) is active and every task
-/// tagged to it is done, build a reminder nudging the agent to close the
-/// session out — or add more work to it instead, if the session isn't
-/// actually finished. Empty string when no session is active, it has no
-/// tasks yet, or it still has open/in-progress tasks.
-fn session_finish_reminder(state_dir: &Path) -> String {
-    let Some(active) = session::active_session(state_dir) else {
+/// For every session open for the current project (resolved from the
+/// process's actual cwd — hooks run with cwd set to the project directory)
+/// whose tasks are all done, build a reminder nudging the agent to close it
+/// out. Empty string if none qualify, or on any internal error (degrades
+/// silently — hooks must never block the agent).
+fn session_finish_reminders(state_dir: &Path) -> String {
+    let Ok(project) = project::current_tag() else {
         return String::new();
     };
-    let (done, total) = session::session_progress(state_dir, &active.id);
-    if total == 0 || done < total {
-        return String::new();
+    let mut lines = Vec::new();
+    for session in session::open_sessions_for_project(state_dir, &project) {
+        let (done, total) = session::session_progress(state_dir, &session.id);
+        if total == 0 || done < total {
+            continue;
+        }
+        let label = session.name.as_deref().unwrap_or(session.id.as_str());
+        lines.push(format!(
+            "All {total} task(s) in session '{label}' ({id}) are done — run \
+             `llmenv task session finish {id}` to close it out, or \
+             `llmenv task add <title> --session {id}` to add more work to it.",
+            id = session.id
+        ));
     }
-    let label = active.name.as_deref().unwrap_or(active.id.as_str());
-    format!(
-        "All {total} task(s) in session '{label}' are done — run \
-         `llmenv task session finish` to close it out, or `llmenv task add <title>` \
-         to add more work to it."
-    )
+    lines.join("\n\n")
 }
 
 /// Join non-empty reminder strings with a blank line between them; empty
@@ -529,10 +617,21 @@ fn wip_reminder(state_dir: &Path, header: &str, footer: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::session::{StartDecision, StartOutcome, open_sessions_for_project, start_session};
     use super::*;
     use tempfile::TempDir;
+
+    const PROJECT: &str = "test-project-0000000000";
+
+    /// Create a task tagged to a fixed test session id, exercising the same
+    /// creation logic (`add_task_for_session`) the mandatory-session path
+    /// resolves down to — lets the store-behavior tests below (slug/parent/
+    /// nesting) skip the session-resolution dance, which has its own tests.
+    fn mk(dir: &Path, title: &str, parent: Option<&str>) -> anyhow::Result<Task> {
+        add_task_for_session(dir, title, parent, "test-session")
+    }
 
     #[test]
     fn task_state_default_is_open() {
@@ -570,7 +669,7 @@ mod tests {
     #[test]
     fn add_task_creates_file_with_open_state() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Fix login timeout", None).expect("test");
+        let task = mk(dir.path(), "Fix login timeout", None).expect("test");
         assert_eq!(task.slug, "fix-login-timeout");
         assert_eq!(task.state, TaskState::Open);
         assert!(task.parent.is_none());
@@ -582,8 +681,8 @@ mod tests {
     #[test]
     fn add_task_uniquifies_slug_on_collision() {
         let dir = TempDir::new().expect("test");
-        let t1 = add_task(dir.path(), "Fix login timeout", None).expect("test");
-        let t2 = add_task(dir.path(), "Fix login timeout", None).expect("test");
+        let t1 = mk(dir.path(), "Fix login timeout", None).expect("test");
+        let t2 = mk(dir.path(), "Fix login timeout", None).expect("test");
         assert_eq!(t1.slug, "fix-login-timeout");
         assert_eq!(t2.slug, "fix-login-timeout-2");
     }
@@ -601,7 +700,7 @@ mod tests {
             .map(|_| {
                 let dir_path = dir_path.clone();
                 std::thread::spawn(move || {
-                    add_task(&dir_path, "Race condition task", None).expect("test")
+                    mk(&dir_path, "Race condition task", None).expect("test")
                 })
             })
             .collect();
@@ -629,7 +728,7 @@ mod tests {
     #[test]
     fn concurrent_start_task_same_task_is_serialized_not_corrupted() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Shared task", None).expect("test");
+        let task = mk(dir.path(), "Shared task", None).expect("test");
         let dir_path = dir.path().to_path_buf();
         let slug = task.slug.clone();
         let threads: Vec<_> = (0..8)
@@ -654,31 +753,31 @@ mod tests {
     #[test]
     fn add_task_with_parent() {
         let dir = TempDir::new().expect("test");
-        let parent = add_task(dir.path(), "Parent task", None).expect("test");
-        let child = add_task(dir.path(), "Child task", Some(&parent.slug)).expect("test");
+        let parent = mk(dir.path(), "Parent task", None).expect("test");
+        let child = mk(dir.path(), "Child task", Some(&parent.slug)).expect("test");
         assert_eq!(child.parent, Some(parent.slug));
     }
 
     #[test]
     fn add_task_with_unknown_parent_errors() {
         let dir = TempDir::new().expect("test");
-        assert!(add_task(dir.path(), "Orphan", Some("no-such-parent")).is_err());
+        assert!(mk(dir.path(), "Orphan", Some("no-such-parent")).is_err());
     }
 
     #[test]
     fn add_task_parent_accepts_unambiguous_prefix() {
         let dir = TempDir::new().expect("test");
-        let parent = add_task(dir.path(), "Umbrella project", None).expect("test");
-        let child = add_task(dir.path(), "Sub piece", Some("umbrella")).expect("test");
+        let parent = mk(dir.path(), "Umbrella project", None).expect("test");
+        let child = mk(dir.path(), "Sub piece", Some("umbrella")).expect("test");
         assert_eq!(child.parent, Some(parent.slug));
     }
 
     #[test]
     fn nested_chain_of_three_levels_resolves_correctly() {
         let dir = TempDir::new().expect("test");
-        let grandparent = add_task(dir.path(), "Epic", None).expect("test");
-        let parent = add_task(dir.path(), "Story", Some(&grandparent.slug)).expect("test");
-        let child = add_task(dir.path(), "Subtask", Some(&parent.slug)).expect("test");
+        let grandparent = mk(dir.path(), "Epic", None).expect("test");
+        let parent = mk(dir.path(), "Story", Some(&grandparent.slug)).expect("test");
+        let child = mk(dir.path(), "Subtask", Some(&parent.slug)).expect("test");
 
         assert_eq!(grandparent.parent, None);
         assert_eq!(parent.parent, Some(grandparent.slug.clone()));
@@ -697,10 +796,10 @@ mod tests {
     #[test]
     fn multiple_children_under_one_parent_all_listed() {
         let dir = TempDir::new().expect("test");
-        let parent = add_task(dir.path(), "Parent with many kids", None).expect("test");
-        let child_a = add_task(dir.path(), "Child A", Some(&parent.slug)).expect("test");
-        let child_b = add_task(dir.path(), "Child B", Some(&parent.slug)).expect("test");
-        let child_c = add_task(dir.path(), "Child C", Some(&parent.slug)).expect("test");
+        let parent = mk(dir.path(), "Parent with many kids", None).expect("test");
+        let child_a = mk(dir.path(), "Child A", Some(&parent.slug)).expect("test");
+        let child_b = mk(dir.path(), "Child B", Some(&parent.slug)).expect("test");
+        let child_c = mk(dir.path(), "Child C", Some(&parent.slug)).expect("test");
 
         let children: Vec<Task> = list_tasks(dir.path())
             .into_iter()
@@ -721,8 +820,8 @@ mod tests {
     #[test]
     fn starting_and_completing_a_child_does_not_affect_parent_state() {
         let dir = TempDir::new().expect("test");
-        let parent = add_task(dir.path(), "Parent", None).expect("test");
-        let child = add_task(dir.path(), "Child", Some(&parent.slug)).expect("test");
+        let parent = mk(dir.path(), "Parent", None).expect("test");
+        let child = mk(dir.path(), "Child", Some(&parent.slug)).expect("test");
         start_task(dir.path(), &child.slug).expect("test");
         done_task(dir.path(), &child.slug).expect("test");
 
@@ -733,7 +832,7 @@ mod tests {
     #[test]
     fn list_tasks_skips_corrupt_files_with_warning() {
         let dir = TempDir::new().expect("test");
-        add_task(dir.path(), "Good task", None).expect("test");
+        mk(dir.path(), "Good task", None).expect("test");
         std::fs::create_dir_all(tasks_dir(dir.path())).expect("test");
         std::fs::write(tasks_dir(dir.path()).join("bad.json"), b"not json").expect("test");
 
@@ -751,7 +850,7 @@ mod tests {
     #[test]
     fn resolve_identifier_exact_slug() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Fix login timeout", None).expect("test");
+        let task = mk(dir.path(), "Fix login timeout", None).expect("test");
         assert_eq!(
             resolve_identifier(dir.path(), &task.slug).expect("test"),
             task.slug
@@ -761,7 +860,7 @@ mod tests {
     #[test]
     fn resolve_identifier_unambiguous_prefix() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Fix login timeout", None).expect("test");
+        let task = mk(dir.path(), "Fix login timeout", None).expect("test");
         assert_eq!(
             resolve_identifier(dir.path(), "fix-log").expect("test"),
             task.slug
@@ -771,8 +870,8 @@ mod tests {
     #[test]
     fn resolve_identifier_ambiguous_prefix_errors_listing_candidates() {
         let dir = TempDir::new().expect("test");
-        add_task(dir.path(), "Fix login timeout", None).expect("test");
-        add_task(dir.path(), "Fix logout crash", None).expect("test");
+        mk(dir.path(), "Fix login timeout", None).expect("test");
+        mk(dir.path(), "Fix logout crash", None).expect("test");
         let err = resolve_identifier(dir.path(), "fix-log")
             .unwrap_err()
             .to_string();
@@ -803,14 +902,14 @@ mod tests {
     #[test]
     fn resolve_identifier_no_match_errors() {
         let dir = TempDir::new().expect("test");
-        add_task(dir.path(), "Fix login timeout", None).expect("test");
+        mk(dir.path(), "Fix login timeout", None).expect("test");
         assert!(resolve_identifier(dir.path(), "nope").is_err());
     }
 
     #[test]
     fn start_task_transitions_open_to_wip() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        let task = mk(dir.path(), "Do thing", None).expect("test");
         let started = start_task(dir.path(), &task.slug).expect("test");
         assert_eq!(started.state, TaskState::Wip);
     }
@@ -818,7 +917,7 @@ mod tests {
     #[test]
     fn start_task_on_done_errors() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        let task = mk(dir.path(), "Do thing", None).expect("test");
         done_task(dir.path(), &task.slug).expect("test");
         assert!(start_task(dir.path(), &task.slug).is_err());
     }
@@ -826,7 +925,7 @@ mod tests {
     #[test]
     fn done_task_from_open_allowed() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        let task = mk(dir.path(), "Do thing", None).expect("test");
         let done = done_task(dir.path(), &task.slug).expect("test");
         assert_eq!(done.state, TaskState::Done);
     }
@@ -834,8 +933,8 @@ mod tests {
     #[test]
     fn start_task_warns_but_allows_when_blocked_on_open_task() {
         let dir = TempDir::new().expect("test");
-        let blocker = add_task(dir.path(), "Blocker task", None).expect("test");
-        let task = add_task(dir.path(), "Blocked task", None).expect("test");
+        let blocker = mk(dir.path(), "Blocker task", None).expect("test");
+        let task = mk(dir.path(), "Blocked task", None).expect("test");
         block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
         // Not an error — warning only, transition still allowed.
         let started = start_task(dir.path(), &task.slug).expect("test");
@@ -845,7 +944,7 @@ mod tests {
     #[test]
     fn note_task_appends_note() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        let task = mk(dir.path(), "Do thing", None).expect("test");
         let updated = note_task(dir.path(), &task.slug, "made progress").expect("test");
         assert_eq!(updated.notes.len(), 1);
         assert_eq!(updated.notes[0].text, "made progress");
@@ -854,7 +953,7 @@ mod tests {
     #[test]
     fn wait_task_transitions_to_waiting_and_notes_reason() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        let task = mk(dir.path(), "Do thing", None).expect("test");
         start_task(dir.path(), &task.slug).expect("test");
         let waiting = wait_task(dir.path(), &task.slug, "need spec review").expect("test");
         assert_eq!(waiting.state, TaskState::Waiting);
@@ -865,7 +964,7 @@ mod tests {
     #[test]
     fn wait_task_on_done_errors() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        let task = mk(dir.path(), "Do thing", None).expect("test");
         done_task(dir.path(), &task.slug).expect("test");
         assert!(wait_task(dir.path(), &task.slug, "too late").is_err());
     }
@@ -873,7 +972,7 @@ mod tests {
     #[test]
     fn start_task_resumes_from_waiting() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Do thing", None).expect("test");
+        let task = mk(dir.path(), "Do thing", None).expect("test");
         wait_task(dir.path(), &task.slug, "blocked").expect("test");
         let resumed = start_task(dir.path(), &task.slug).expect("test");
         assert_eq!(resumed.state, TaskState::Wip);
@@ -882,8 +981,8 @@ mod tests {
     #[test]
     fn block_task_records_dependency() {
         let dir = TempDir::new().expect("test");
-        let blocker = add_task(dir.path(), "Blocker", None).expect("test");
-        let task = add_task(dir.path(), "Blocked", None).expect("test");
+        let blocker = mk(dir.path(), "Blocker", None).expect("test");
+        let task = mk(dir.path(), "Blocked", None).expect("test");
         let updated = block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
         assert_eq!(updated.blocked_on, vec![blocker.slug]);
     }
@@ -891,21 +990,21 @@ mod tests {
     #[test]
     fn block_task_on_unknown_target_errors() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Blocked", None).expect("test");
+        let task = mk(dir.path(), "Blocked", None).expect("test");
         assert!(block_task(dir.path(), &task.slug, "no-such-task").is_err());
     }
 
     #[test]
     fn block_task_on_self_errors() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Solo task", None).expect("test");
+        let task = mk(dir.path(), "Solo task", None).expect("test");
         assert!(block_task(dir.path(), &task.slug, &task.slug).is_err());
     }
 
     #[test]
     fn add_task_with_no_alphanumeric_title_falls_back_to_timestamp_slug() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "!!!", None).expect("test");
+        let task = mk(dir.path(), "!!!", None).expect("test");
         assert!(!task.slug.is_empty());
         assert!(task.slug.starts_with("task-"));
         let loaded = load_task(dir.path(), &task.slug).expect("test");
@@ -915,8 +1014,8 @@ mod tests {
     #[test]
     fn start_task_blocked_on_deleted_task_warns_but_allows() {
         let dir = TempDir::new().expect("test");
-        let blocker = add_task(dir.path(), "Blocker", None).expect("test");
-        let task = add_task(dir.path(), "Blocked", None).expect("test");
+        let blocker = mk(dir.path(), "Blocker", None).expect("test");
+        let task = mk(dir.path(), "Blocked", None).expect("test");
         block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
         std::fs::remove_file(
             dir.path()
@@ -931,14 +1030,14 @@ mod tests {
     #[test]
     fn session_start_reminder_empty_when_no_wip_tasks() {
         let dir = TempDir::new().expect("test");
-        add_task(dir.path(), "Open task", None).expect("test");
+        mk(dir.path(), "Open task", None).expect("test");
         assert!(session_start_reminder(dir.path()).is_empty());
     }
 
     #[test]
     fn session_start_reminder_lists_wip_tasks() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "In progress task", None).expect("test");
+        let task = mk(dir.path(), "In progress task", None).expect("test");
         start_task(dir.path(), &task.slug).expect("test");
         let reminder = session_start_reminder(dir.path());
         assert!(reminder.contains("In progress task"));
@@ -961,7 +1060,7 @@ mod tests {
     #[test]
     fn stop_hook_reminder_flags_wip_tasks() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Left in progress", None).expect("test");
+        let task = mk(dir.path(), "Left in progress", None).expect("test");
         start_task(dir.path(), &task.slug).expect("test");
         let reminder = stop_hook_reminder(dir.path());
         assert!(reminder.contains(&task.slug));
@@ -970,7 +1069,7 @@ mod tests {
     #[test]
     fn stop_hook_reminder_waiting_task_gets_no_action_framing() {
         let dir = TempDir::new().expect("test");
-        let task = add_task(dir.path(), "Blocked on review", None).expect("test");
+        let task = mk(dir.path(), "Blocked on review", None).expect("test");
         wait_task(dir.path(), &task.slug, "spec review").expect("test");
         let reminder = stop_hook_reminder(dir.path());
         assert!(reminder.contains(&task.slug));
@@ -982,9 +1081,9 @@ mod tests {
     #[test]
     fn stop_hook_reminder_separates_wip_and_waiting_tasks() {
         let dir = TempDir::new().expect("test");
-        let wip = add_task(dir.path(), "Actively working", None).expect("test");
+        let wip = mk(dir.path(), "Actively working", None).expect("test");
         start_task(dir.path(), &wip.slug).expect("test");
-        let waiting = add_task(dir.path(), "Blocked on review", None).expect("test");
+        let waiting = mk(dir.path(), "Blocked on review", None).expect("test");
         wait_task(dir.path(), &waiting.slug, "spec review").expect("test");
 
         let reminder = stop_hook_reminder(dir.path());
@@ -992,6 +1091,113 @@ mod tests {
         assert!(reminder.contains(&waiting.slug));
         assert!(reminder.contains("exhaust safe autonomous remediation"));
         assert!(reminder.contains("no action needed"));
+    }
+
+    // --- mandatory-session wiring (2026-07-21 rework) ---
+
+    fn created(outcome: StartOutcome) -> super::session::Session {
+        match outcome {
+            StartOutcome::Created(s) => s,
+            other => panic!("expected Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_task_with_explicit_session_tags_it() {
+        let dir = TempDir::new().expect("test");
+        let session = created(
+            start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).expect("test"),
+        );
+        let task =
+            add_task(dir.path(), "Do thing", None, Some(&session.id), PROJECT).expect("test");
+        assert_eq!(task.session, Some(session.id));
+    }
+
+    #[test]
+    fn add_task_explicit_session_rejects_unknown_id() {
+        let dir = TempDir::new().expect("test");
+        assert!(
+            add_task(
+                dir.path(),
+                "Do thing",
+                None,
+                Some("no-such-session"),
+                PROJECT
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn add_task_auto_resolves_when_exactly_one_open_session_for_project() {
+        let dir = TempDir::new().expect("test");
+        let session = created(
+            start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).expect("test"),
+        );
+        let task = add_task(dir.path(), "Do thing", None, None, PROJECT).expect("test");
+        assert_eq!(task.session, Some(session.id));
+    }
+
+    #[test]
+    fn add_task_errors_with_zero_open_sessions_for_project() {
+        let dir = TempDir::new().expect("test");
+        let err = add_task(dir.path(), "Do thing", None, None, PROJECT).unwrap_err();
+        assert!(err.to_string().contains("session start"));
+    }
+
+    #[test]
+    fn add_task_errors_with_two_open_sessions_for_project() {
+        let dir = TempDir::new().expect("test");
+        start_session(
+            dir.path(),
+            Some("first"),
+            None,
+            PROJECT,
+            StartDecision::Auto,
+        )
+        .expect("test");
+        start_session(
+            dir.path(),
+            Some("second"),
+            None,
+            PROJECT,
+            StartDecision::New,
+        )
+        .expect("test");
+        let err = add_task(dir.path(), "Do thing", None, None, PROJECT).unwrap_err();
+        assert!(err.to_string().contains("--session"));
+    }
+
+    #[test]
+    fn add_task_does_not_auto_resolve_a_different_projects_session() {
+        let dir = TempDir::new().expect("test");
+        start_session(
+            dir.path(),
+            Some("s"),
+            None,
+            "other-project-1111111111",
+            StartDecision::Auto,
+        )
+        .expect("test");
+        assert!(add_task(dir.path(), "Do thing", None, None, PROJECT).is_err());
+    }
+
+    #[test]
+    fn start_task_touches_its_sessions_last_activity() {
+        let dir = TempDir::new().expect("test");
+        let session = created(
+            start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).expect("test"),
+        );
+        let original = session.last_activity.clone();
+        let task =
+            add_task(dir.path(), "Do thing", None, Some(&session.id), PROJECT).expect("test");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        start_task(dir.path(), &task.slug).expect("test");
+        let reloaded = open_sessions_for_project(dir.path(), PROJECT)
+            .into_iter()
+            .find(|s| s.id == session.id)
+            .expect("test");
+        assert_ne!(reloaded.last_activity, original);
     }
 
     // Task/TaskNote/TaskState derive Serialize/Deserialize and persist as
@@ -1117,7 +1323,7 @@ mod tests {
                 let dir = tempfile::TempDir::new().unwrap();
                 let mut slugs = Vec::new();
                 for title in &titles {
-                    let task = add_task(dir.path(), title, None).unwrap();
+                    let task = mk(dir.path(), title, None).unwrap();
                     slugs.push(task.slug);
                 }
                 for slug in &slugs {
@@ -1133,7 +1339,7 @@ mod tests {
                 let mut prev_slug: Option<String> = None;
                 let mut chain = Vec::new();
                 for title in &titles {
-                    let task = add_task(dir.path(), title, prev_slug.as_deref()).unwrap();
+                    let task = mk(dir.path(), title, prev_slug.as_deref()).unwrap();
                     prop_assert_eq!(&task.parent, &prev_slug);
                     prev_slug = Some(task.slug.clone());
                     chain.push(task);

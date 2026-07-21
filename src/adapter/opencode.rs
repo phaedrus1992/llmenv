@@ -394,6 +394,13 @@ impl AgentAdapter for OpencodeAdapter {
             crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
         owned.extend(skill_owned);
 
+        // Built-in `llmenv` skill: one reference file per enabled first-party
+        // feature. No-op when none are enabled.
+        let features = manifest.capabilities.features.clone().unwrap_or_default();
+        owned.extend(crate::adapter::llmenv_skill::materialize_llmenv_skill(
+            out, &features,
+        )?);
+
         // 4. Plugin content translation (commands, agents, MCP, skills, hooks).
         let mut plugin_mcp_entries: std::collections::BTreeMap<String, serde_json::Value> =
             std::collections::BTreeMap::new();
@@ -1177,6 +1184,32 @@ mod tests {
                 .join("skills/my-oc-skill/subdir/helper.sh")
                 .exists()
         );
+    }
+
+    #[test]
+    fn materialize_llmenv_skill_when_task_tracker_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.features = Some(crate::config::Features {
+            task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+            ..Default::default()
+        });
+        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
+        assert!(out.path().join("skills/llmenv/SKILL.md").exists());
+        assert!(
+            out.path()
+                .join("skills/llmenv/references/task-tracker.md")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn no_llmenv_skill_when_no_features_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        OpencodeAdapter
+            .materialize(&MergedManifest::default(), out.path())
+            .unwrap();
+        assert!(!out.path().join("skills/llmenv").exists());
     }
 
     #[test]

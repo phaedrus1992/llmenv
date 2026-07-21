@@ -266,7 +266,7 @@ re-ingestion on the next turn.
 ## `task`
 
 ```text
-llmenv task add <title> [--parent SLUG]
+llmenv task add <title> [--parent SLUG] [--session <id>]
 llmenv task start <id>
 llmenv task done <id>
 llmenv task wait <id> [reason]
@@ -275,18 +275,22 @@ llmenv task show <id>
 llmenv task note <id> [text]
 llmenv task block <id> --on <other>
 llmenv task clear <id>... | --session <id>
-llmenv task session start [name] [--force]
-llmenv task session finish
-llmenv task session show
+llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
+llmenv task session finish [<id>]
+llmenv task session show [<id>]
+llmenv task session ls
 ```
 
 In-engine task tracker (#231): durable, cross-session "what am I working on"
 state, backed by one JSON file per task. `<id>` accepts an exact slug or any
 unambiguous prefix of one.
 
-- `task add <title> [--parent SLUG]` — create a task (`open` state); pass
-  `--parent` to record it as a sub-task instead of starting unrelated
-  top-level work.
+- `task add <title> [--parent SLUG] [--session <id>]` — create a task
+  (`open` state); pass `--parent` to record it as a sub-task instead of
+  starting unrelated top-level work. **A task must belong to a session**
+  (see below): with exactly one session open for the current project it
+  auto-resolves; pass `--session <id>` when two or more are open; errors
+  with actionable guidance when none is open.
 - `task start <id>` — claim a task, moving it to `wip`. Also the resume
   action for a `waiting` task — it accepts any non-`done` state as its
   starting point.
@@ -307,41 +311,55 @@ unambiguous prefix of one.
 - `task block <id> --on <other>` — record that `id` is blocked on `other`.
 - `task clear <id>...` / `task clear --session <id>` — delete task(s)
   outright, for a batch that's being deliberately abandoned rather than just
-  detached from a session (that's what `session start --force` does, below).
-  Exactly one of explicit ids or `--session` is required.
+  detached from a session (that's what `session start --replace` does,
+  below). Exactly one of explicit ids or `--session` is required.
 
 ### Task sessions (#905)
 
-A session groups a batch of related tasks so progress can be reported as
-`done/total` instead of a bare open-task count. Only one session can be
-active at a time.
+**Sessions are mandatory**: every task belongs to one, and a session is
+tagged with the project it was started in (resolved from the git root, else
+a `.llmenv.yaml` marker, else the cwd). The task/session store stays global
+per engine — `task ls` shows everything — but `task add`'s auto-resolve and
+`session start`'s checkpoint scope to the current project's open sessions, so
+two windows in the same project can't silently collide. Any number of
+sessions may be open at once.
 
-- `task session start [name] [--force]` — start a session and make it
-  active; errors if one is already active. Tasks created with `task add`
-  while a session is active are tagged with it automatically —
-  permanently, so a task's session membership reflects when it was created,
-  not whatever session happens to be active later. `--force` abandons the
-  currently active session instead of erroring: it's stamped
-  `abandoned_at` (distinct from a clean `task session finish`), and every one
-  of its tasks that isn't already `done` has its session tag cleared and a
-  note appended recording the orphaning — so it falls back into the plain
-  open/`wip` count instead of staying invisibly attributed to a session
-  nobody can track progress on anymore. Already-`done` tasks in the
-  abandoned session keep their tag untouched, as a historical record.
-- `task session finish` — close out the active session; errors if none is
-  active. Unlike `--force`, this never touches its tasks' session tag —
-  a deliberately finished session (even with incomplete tasks left in it) is
-  a legitimate historical record, not something to unwind.
-- `task session show` — print the active session (name, id, progress), or
-  `No active session.`
+- `task session start [name] [--description <text>] [--resume <id> |
+  --replace | --new]` — start a session for the current project. Pass
+  `--description` to attach free-text context (e.g. "dev-sprint issue 493"),
+  shown in `session ls` and the checkpoint; it's separate from `name` and
+  never feeds id generation. If one or more sessions are already open for
+  this project, the command **errors and lists them** (id, name, description,
+  idle time), requiring one of:
+  - `--resume <id>` — adopt an existing open session instead of creating a
+    new one (e.g. after a context compaction wiped the agent's memory of it);
+    no new id is generated.
+  - `--replace` — abandon every open session for this project (untagging
+    their still-incomplete tasks with an orphan note; already-`done` tasks
+    keep their tag as a historical record), then start fresh.
+  - `--new` — create a new session anyway, leaving the existing one(s) open
+    — true concurrency for two windows genuinely working in parallel.
 
-When every task in the active session is done, the SessionStart/Stop hook
+  Tasks created with `task add` while a session is open are tagged with it
+  permanently, so a task's session membership reflects when it was created.
+- `task session finish [<id>]` — close out a session; auto-resolves when
+  exactly one is open for the current project, otherwise pass an id. Never
+  touches its tasks' session tag — a finished session (even with incomplete
+  tasks) is a legitimate historical record.
+- `task session show [<id>]` — print a session's progress; auto-resolves
+  like `finish`.
+- `task session ls` — list every currently open session (id, name, project,
+  description), current-project matches first. This is the recovery path
+  after a compaction: with one session open for the project there's exactly
+  one match to resume.
+
+When every task in an open session is done, the SessionStart/Stop hook
 reminders (below) nudge the agent to run `task session finish` or add more
 work to the session instead.
 
-The CLI subcommands always work. The injected CLAUDE.md guidance and the
-SessionStart/Stop lifecycle reminders (nudging the agent to resume or close
-`wip` tasks, and to close out a fully-done session) are gated behind
+The CLI subcommands always work. The injected `llmenv` skill guidance and
+the SessionStart/Stop lifecycle reminders (nudging the agent to resume or
+close `wip` tasks, and to close out a fully-done session) are gated behind
 `features.task_tracker.enabled` (default `false`):
 
 ```yaml

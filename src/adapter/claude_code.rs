@@ -62,48 +62,6 @@ const COMPACT_SURVIVAL_FRAGMENT: &str = concat!(
     "across compactions to catch gaps your restored context might miss.\n",
 );
 
-/// #231: fragment appended to CLAUDE.md when the task tracker is enabled.
-/// Steers the agent to use `llmenv task` for durable cross-session state.
-const TASK_TRACKER_FRAGMENT: &str = concat!(
-    "# Task Tracker\n",
-    "\n",
-    "This project has the llmenv task tracker enabled. Use it to record durable,\n",
-    "cross-session state instead of relying on in-session TODOs:\n",
-    "\n",
-    "- `llmenv task add \"<title>\"` before starting new work.\n",
-    "- `llmenv task start <slug>` to claim a task you're actively working on.\n",
-    "- `llmenv task done <slug>` when it's finished.\n",
-    "- `llmenv task add \"<title>\" --parent <slug>` for a sub-task instead of\n",
-    "  abandoning the current task to start something unrelated.\n",
-    "- `llmenv task note <slug> \"<text>\"` to record progress before a context\n",
-    "  compaction or session end.\n",
-    "- `llmenv task wait <slug> \"<reason>\"` when a task is blocked on something\n",
-    "  outside your control (e.g. waiting on a human review or decision) rather\n",
-    "  than actively `wip`. Marking it `waiting` instead of leaving it `wip` means\n",
-    "  the reminder correctly stops pushing you to \"take action\" on it — the\n",
-    "  right behavior there is to actually wait, not keep retrying. Resume with\n",
-    "  `llmenv task start <slug>` once the blocker clears.\n",
-    "\n",
-    "If a session starts with `wip` tasks already recorded, resume or finish\n",
-    "them before starting new top-level work.\n",
-    "\n",
-    "For a batch of related work, group it with a task session:\n",
-    "\n",
-    "- `llmenv task session start \"<name>\"` before adding the batch's tasks.\n",
-    "- `llmenv task add \"<title>\"` — tasks added while a session is active are\n",
-    "  tagged with it automatically.\n",
-    "- `llmenv task session finish` once every task in the session is done, or\n",
-    "  `llmenv task add \"<title>\"` to add more work to it instead if it isn't\n",
-    "  actually finished.\n",
-    "- `llmenv task session start` errors if a session is already active. Either\n",
-    "  finish it first, or if it's genuinely stale/abandoned, re-run with\n",
-    "  `--force` — this abandons it and untags its still-incomplete tasks (they\n",
-    "  fall back to plain open/`wip` tasks, with a note recording what happened).\n",
-    "- If a whole batch of tasks is being deliberately dropped rather than just\n",
-    "  detached from a session, delete them outright with `llmenv task clear\n",
-    "  <slug>...` or `llmenv task clear --session <id>`.\n",
-);
-
 /// `(engine-neutral event, native Claude event)` pairs for the always-on
 /// baseline hooks. Registered unconditionally — `hook-run` itself no-ops
 /// cheaply when neither memory nor session logging is configured — so this
@@ -307,17 +265,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
             claude_md_content.push_str(COMPACT_SURVIVAL_FRAGMENT);
         }
 
-        // #231: append task-tracker fragment when features.task_tracker.enabled.
-        if let Some(tt) = manifest
-            .capabilities
-            .features
-            .as_ref()
-            .and_then(|f| f.task_tracker.as_ref())
-            && tt.enabled
-        {
-            claude_md_content.push_str("\n\n<!-- from task_tracker -->\n");
-            claude_md_content.push_str(TASK_TRACKER_FRAGMENT);
-        }
         crate::paths::write_owner_only(&out.join("CLAUDE.md"), claude_md_content.as_bytes())?;
         owned.push(PathBuf::from("CLAUDE.md"));
 
@@ -364,6 +311,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let skill_owned =
             crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
         owned.extend(skill_owned);
+
+        // Built-in `llmenv` skill: one reference file per enabled first-party
+        // feature (task tracker, memory, context-mode, codebase-memory),
+        // replacing the old task-tracker CLAUDE.md fragment. No-op when none
+        // are enabled.
+        let features = manifest.capabilities.features.clone().unwrap_or_default();
+        owned.extend(crate::adapter::llmenv_skill::materialize_llmenv_skill(
+            out, &features,
+        )?);
 
         // #317: write /diagnose skill when slippage is enabled with diagnose_command.
         if let Some(s) = manifest
