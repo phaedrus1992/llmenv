@@ -11,6 +11,7 @@
 //! ponytail: per-task locking (rather than whole-store) if write throughput
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
+pub mod project;
 pub mod session;
 
 use std::path::{Path, PathBuf};
