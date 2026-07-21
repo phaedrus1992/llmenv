@@ -269,7 +269,8 @@ re-ingestion on the next turn.
 llmenv task add <title> [--parent SLUG]
 llmenv task start <id>
 llmenv task done <id>
-llmenv task ls [--format json]
+llmenv task wait <id> [reason]
+llmenv task ls [--format json] [--session <id>]
 llmenv task show <id>
 llmenv task note <id> [text]
 llmenv task block <id> --on <other>
@@ -286,10 +287,20 @@ unambiguous prefix of one.
 - `task add <title> [--parent SLUG]` — create a task (`open` state); pass
   `--parent` to record it as a sub-task instead of starting unrelated
   top-level work.
-- `task start <id>` — claim a task, moving it to `wip`.
+- `task start <id>` — claim a task, moving it to `wip`. Also the resume
+  action for a `waiting` task — it accepts any non-`done` state as its
+  starting point.
 - `task done <id>` — mark a task complete.
-- `task ls [--format json]` — list all tasks; `--format json` for
-  machine-readable output.
+- `task wait <id> [reason]` — mark a task `waiting` on something outside the
+  agent's control (a human review, a decision, external system access)
+  instead of `wip`. `reason` is recorded as a note; reads from stdin if
+  omitted. Distinct from `wip` because the Stop-hook reminder (below) treats
+  them differently: a `wip` task gets pushed toward action, a `waiting` one
+  gets a plain FYI with no "take action" framing, since the correct behavior
+  is to actually wait for the reason to clear, not keep retrying.
+- `task ls [--format json] [--session <id>]` — list tasks; `--format json`
+  for machine-readable output; `--session <id>` narrows to one session's
+  tasks (unfiltered by default).
 - `task show <id>` — full detail for one task (notes, parent, blockers).
 - `task note <id> [text]` — append a progress note; reads from stdin if
   `text` is omitted.
