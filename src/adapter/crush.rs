@@ -148,6 +148,14 @@ impl AgentAdapter for CrushAdapter {
         }
         owned.extend(plugin_skill_paths.iter().cloned());
 
+        // Built-in `llmenv` skill: one reference file per enabled first-party
+        // feature. No-op when none are enabled. Counted toward `skills_paths`
+        // below so Crush discovers it even when it's the only skill present.
+        let features = manifest.capabilities.features.clone().unwrap_or_default();
+        let llmenv_skill_paths =
+            crate::adapter::llmenv_skill::materialize_llmenv_skill(out, &features)?;
+        owned.extend(llmenv_skill_paths.iter().cloned());
+
         // P1-1: validate skills (frontmatter + hardcoded-path scan), same gate as ClaudeCodeAdapter
         crate::adapter::skills::validate_skills(out)?;
 
@@ -330,7 +338,10 @@ impl AgentAdapter for CrushAdapter {
 
         // options.skills_paths: emit whenever any skills exist (first-class or plugin-projected).
         // P1-2: must include plugin_skill_paths — plugin-only skill sets omit this key otherwise.
-        if !skill_paths.is_empty() || !plugin_skill_paths.is_empty() {
+        if !skill_paths.is_empty()
+            || !plugin_skill_paths.is_empty()
+            || !llmenv_skill_paths.is_empty()
+        {
             let skills_out = out
                 .join("skills")
                 .into_os_string()

@@ -394,6 +394,13 @@ impl AgentAdapter for OpencodeAdapter {
             crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
         owned.extend(skill_owned);
 
+        // Built-in `llmenv` skill: one reference file per enabled first-party
+        // feature. No-op when none are enabled.
+        let features = manifest.capabilities.features.clone().unwrap_or_default();
+        owned.extend(crate::adapter::llmenv_skill::materialize_llmenv_skill(
+            out, &features,
+        )?);
+
         // 4. Plugin content translation (commands, agents, MCP, skills, hooks).
         let mut plugin_mcp_entries: std::collections::BTreeMap<String, serde_json::Value> =
             std::collections::BTreeMap::new();
