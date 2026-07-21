@@ -11,8 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
-## [3.6.0] - 2026-07-20
-
 3.6.0 includes three new engine-facing pieces — an in-engine task tracker, a first-class `llmenv statusline` subcommand, and reinstated a third supported engine (opencode, alongside Claude Code and Crush) — plus a `codebase-memory-mcp` integration.
 
 A string of hook-run perf work landed too: single-walk `scope.content` matching instead of one walk per matcher, `uname(2)` instead of shelling out to `hostname`, memory-recall dedup, and cutting redundant `config.yaml` re-parses and per-invocation clones/reads/stats across hook-run, export, and regenerate.
@@ -585,8 +583,7 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.6.0...HEAD
-[3.6.0]: https://github.com/phaedrus1992/llmenv/compare/v3.5.1...v3.6.0
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.5.1...HEAD
 [3.5.1]: https://github.com/phaedrus1992/llmenv/compare/v3.5.0...v3.5.1
 [3.5.0]: https://github.com/phaedrus1992/llmenv/compare/v3.4.0...v3.5.0
 [3.4.0]: https://github.com/phaedrus1992/llmenv/compare/v3.3.0...v3.4.0
