@@ -379,10 +379,13 @@ enum TaskCommand {
     Start { id: String },
     /// Mark a task done.
     Done { id: String },
-    /// List all tasks.
+    /// List all tasks. Unfiltered by default; `--session` narrows to one
+    /// session's tasks.
     Ls {
         #[arg(long, value_enum)]
         format: Option<TaskListFormat>,
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Show full detail for one task.
     Show { id: String },
@@ -2643,8 +2646,11 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
             let task = crate::task::done_task(&state_dir, &id)?;
             println!("Completed '{}'", task.slug);
         }
-        TaskCommand::Ls { format } => {
+        TaskCommand::Ls { format, session } => {
             let mut tasks = crate::task::list_tasks(&state_dir);
+            if let Some(session_id) = &session {
+                tasks.retain(|t| t.session.as_deref() == Some(session_id.as_str()));
+            }
             tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
             match format {
                 Some(TaskListFormat::Json) => {
