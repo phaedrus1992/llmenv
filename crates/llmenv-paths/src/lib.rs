@@ -18,6 +18,23 @@ pub fn expand_tilde(p: &str) -> String {
     }
 }
 
+/// `read_dir` that treats a missing directory as "nothing to iterate":
+/// returns `Ok(None)` on `NotFound` but propagates every other I/O error (e.g.
+/// a permission denial). Use instead of an `exists()`-then-`read_dir` guard,
+/// which collapses *all* stat failures — including `EACCES` — to "absent" and
+/// so silently skips a directory the caller can't read (#918).
+///
+/// # Errors
+/// Returns any `read_dir` error other than `NotFound` (e.g. permission denied,
+/// or the path is not a directory). Attach operation context at the call site.
+pub fn read_dir_optional(dir: &Path) -> std::io::Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// True if `path` contains any parent (`..`) component, parsed
 /// component-wise rather than by substring. Catches traversal that string
 /// matching misses: `foo/..`, mixed separators on the host OS, and a bare
@@ -242,6 +259,45 @@ fn write_owner_only_atomic_in_dir(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_dir_optional_returns_none_for_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            read_dir_optional(&tmp.path().join("nope"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_dir_optional_returns_some_for_present_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_dir_optional(tmp.path()).unwrap().is_some());
+    }
+
+    // #918: a non-NotFound I/O error (EACCES) propagates rather than being
+    // masked as an absent directory the way an exists() stat would.
+    #[cfg(unix)]
+    #[test]
+    fn read_dir_optional_propagates_permission_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = read_dir_optional(&child);
+        let readable_anyway = std::fs::read_dir(&child).is_ok();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "permission error must propagate, got {result:?}"
+        );
+    }
 
     #[test]
     fn is_valid_short_name_accepts_alphanumeric_dot_underscore_dash() {
