@@ -2645,16 +2645,14 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
             // New-project guard: warn before starting an unrelated top-level
             // task while another is still in progress. CLI-side check beats
             // a transcript heuristic — this is a plain fact about current
-            // task state, not something to infer.
+            // task state, not something to infer. Only `wip` counts: a
+            // `waiting` task is correctly paused on something external, so
+            // starting new work alongside it is legitimate, not a mistake to
+            // warn about.
             if parent.is_none() {
                 let wip: Vec<String> = crate::task::list_tasks(&state_dir)
                     .into_iter()
-                    .filter(|t| {
-                        matches!(
-                            t.state,
-                            crate::task::TaskState::Wip | crate::task::TaskState::Waiting
-                        )
-                    })
+                    .filter(|t| t.state == crate::task::TaskState::Wip)
                     .map(|t| t.title)
                     .collect();
                 if !wip.is_empty() {
