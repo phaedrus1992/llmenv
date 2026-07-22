@@ -17,7 +17,12 @@
   "labels": ["dependencies"],
   "minimumReleaseAge": "3 days",
 
-  "prCreation": "not-pending",
+  // Open PRs immediately. "not-pending" would defer PR creation until branch
+  // checks finish, but CI here triggers on pull_request (not branch push), so a
+  // branchless PR never gets checks — "not-pending" then stalls every PR until
+  // the ~25h prNotPendingHours fallback. Immediate lets the PR open and trigger
+  // its own pull_request CI.
+  "prCreation": "immediate",
   "prHourlyLimit": 0,
   "rangeStrategy": "bump",
   "rebaseWhen": "behind-base-branch",
