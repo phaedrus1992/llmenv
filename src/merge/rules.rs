@@ -42,10 +42,10 @@ pub struct RuleFile {
 /// Missing `rules/` directory yields an empty Vec.
 pub fn collect_from_bundle(bundle_root: &Path, bundle_name: &str) -> anyhow::Result<Vec<RuleFile>> {
     let dir = bundle_root.join("rules");
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
     let mut out = Vec::new();
+    // #918: walk() tolerates a missing `rules/` (NotFound → empty) but
+    // propagates other read errors, so an unreadable rules dir surfaces
+    // instead of an exists() stat masking it as absent.
     walk(bundle_root, &dir, bundle_name, &mut out)?;
     // Sort by relative path so order is deterministic across filesystems.
     out.sort_by(|a, b| a.rel.cmp(&b.rel));
@@ -58,7 +58,12 @@ fn walk(
     bundle_name: &str,
     out: &mut Vec<RuleFile>,
 ) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+    // #918: NotFound (missing dir, incl. a `rules/` that isn't there) → skip;
+    // other errors (e.g. permission denied) propagate.
+    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
+        return Ok(());
+    };
+    for entry in entries {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let p = entry.path();

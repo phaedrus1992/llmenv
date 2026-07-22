@@ -209,14 +209,17 @@ fn scan_skill_files_for_hardcoded_paths(dir: &Path) -> anyhow::Result<()> {
 /// Called by both `ClaudeCodeAdapter` and `CrushAdapter` after writing skills.
 pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
     let skills_dir = out.join("skills");
-    if !skills_dir.exists() {
+    // #918: a missing skills dir → nothing to validate; a permission error on
+    // it propagates instead of an exists() stat masking it as absent, which
+    // would silently bypass skill validation.
+    let Some(entries) = crate::paths::read_dir_optional(&skills_dir)? else {
         return Ok(());
-    }
+    };
     // Resolve the skills root once; every skill dir must stay inside it so a
     // symlink can't redirect validation (or the path scan) at a foreign file.
     let skills_root = skills_dir.canonicalize()?;
 
-    for entry in std::fs::read_dir(&skills_dir)? {
+    for entry in entries {
         let path = entry?.path();
         if !path.is_dir() {
             continue;
@@ -392,9 +395,40 @@ pub(crate) fn arb_yaml_value(
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "test code")]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use proptest::prelude::*;
 
     use super::*;
+
+    // #918: an unreadable skills dir must make validation FAIL LOUDLY, not be
+    // silently skipped the way the old `exists()` guard did (which would let an
+    // EACCES bypass skill validation entirely).
+    #[cfg(unix)]
+    #[test]
+    fn validate_skills_propagates_permission_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        std::fs::create_dir(&skills_dir).unwrap();
+        std::fs::set_permissions(&skills_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = validate_skills(tmp.path());
+        let readable_anyway = std::fs::read_dir(&skills_dir).is_ok();
+        std::fs::set_permissions(&skills_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "unreadable skills dir must fail validation, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_skills_ok_when_dir_absent() {
+        // Missing skills dir → nothing to validate.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_skills(tmp.path()).is_ok());
+    }
 
     proptest! {
         /// `name`/`description` values come from repo-authored SKILL.md

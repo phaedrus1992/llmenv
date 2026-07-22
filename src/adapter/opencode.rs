@@ -223,18 +223,6 @@ struct PluginHookEntry {
     command: Option<String>,
 }
 
-/// `read_dir` that treats a missing directory as "nothing to iterate" (#912):
-/// returns `Ok(None)` on `NotFound` but propagates other I/O errors (e.g. a
-/// permission error), instead of an `exists()` stat that silently masks every
-/// stat failure as "directory absent".
-fn read_dir_optional(dir: &Path) -> anyhow::Result<Option<std::fs::ReadDir>> {
-    match std::fs::read_dir(dir) {
-        Ok(entries) => Ok(Some(entries)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", dir.display()))),
-    }
-}
-
 /// Parse a plugin hooks manifest (hooks.json or claude-codex-hooks.json) into
 /// [`crate::config::Hook`] structs.
 ///
@@ -244,8 +232,17 @@ fn parse_plugin_hooks(
     hooks_path: &Path,
     payload_path: &Path,
     plugin_name: &str,
-) -> anyhow::Result<Vec<crate::config::Hook>> {
-    let source = std::fs::read_to_string(hooks_path)?;
+) -> anyhow::Result<Option<Vec<crate::config::Hook>>> {
+    // #915: `Ok(None)` means a manifest of this name is absent — the caller
+    // tries the next candidate name. A real read error (e.g. permission
+    // denied) propagates rather than being masked by a caller `exists()` guard.
+    let source = match std::fs::read_to_string(hooks_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("reading {}", hooks_path.display())));
+        }
+    };
     let manifest: PluginHooksManifest = serde_json::from_str(&source)?;
 
     let mut hooks = Vec::new();
@@ -286,7 +283,7 @@ fn parse_plugin_hooks(
         }
     }
 
-    Ok(hooks)
+    Ok(Some(hooks))
 }
 
 /// Human-readable YAML value kind, for error messages when a config value has
@@ -313,9 +310,20 @@ fn parse_plugin_mcp_entries(
     mcp_json_path: &Path,
     plugin_name: &str,
 ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    let content = std::fs::read_to_string(mcp_json_path).map_err(|e| {
-        anyhow::anyhow!("plugin '{plugin_name}': failed to read {mcp_json_path:?}: {e}")
-    })?;
+    // #915: a missing file means the plugin ships no MCP config — nothing to
+    // translate. Other read errors (e.g. permission denied) propagate rather
+    // than being masked by a caller `exists()` guard.
+    let content = match std::fs::read_to_string(mcp_json_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::Map::new());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "plugin '{plugin_name}': failed to read {mcp_json_path:?}: {e}"
+            ));
+        }
+    };
     let yaml_value: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| {
         anyhow::anyhow!("plugin '{plugin_name}': failed to parse LLM_PROVIDER_MCP_JSON: {e}")
     })?;
@@ -442,20 +450,21 @@ impl AgentAdapter for OpencodeAdapter {
                 native_opencode_plugins.push(plugin.plugin.clone());
             } else {
                 let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
-                if mcp_json_path.exists() {
-                    match parse_plugin_mcp_entries(&mcp_json_path, &plugin.plugin) {
-                        Ok(entries) => plugin_mcp_entries.extend(entries),
-                        Err(e) => eprintln!(
-                            "warning: {e} — skipping this plugin's MCP servers, other plugins \
-                             are unaffected."
-                        ),
-                    }
+                // #915: a missing file yields Ok(empty); only a real read/parse
+                // error warns, instead of an exists() guard masking permission
+                // errors as "no MCP config".
+                match parse_plugin_mcp_entries(&mcp_json_path, &plugin.plugin) {
+                    Ok(entries) => plugin_mcp_entries.extend(entries),
+                    Err(e) => eprintln!(
+                        "warning: {e} — skipping this plugin's MCP servers, other plugins \
+                         are unaffected."
+                    ),
                 }
             }
 
             // 4b. Translate commands/ from plugin
             let cmd_dir = payload.join("commands");
-            if let Some(entries) = read_dir_optional(&cmd_dir)? {
+            if let Some(entries) = crate::paths::read_dir_optional(&cmd_dir)? {
                 for entry in entries {
                     let entry = entry?;
                     let path = entry.path();
@@ -479,7 +488,7 @@ impl AgentAdapter for OpencodeAdapter {
 
             // 4c. Translate agents/ from plugin
             let agent_dir = payload.join("agents");
-            if let Some(entries) = read_dir_optional(&agent_dir)? {
+            if let Some(entries) = crate::paths::read_dir_optional(&agent_dir)? {
                 for entry in entries {
                     let entry = entry?;
                     let path = entry.path();
@@ -511,12 +520,13 @@ impl AgentAdapter for OpencodeAdapter {
                 let hooks_dir = payload.join("hooks");
                 for manifest_name in ["hooks.json", "claude-codex-hooks.json"] {
                     let hooks_path = hooks_dir.join(manifest_name);
-                    if !hooks_path.exists() {
-                        continue;
-                    }
+                    // #915: parse_plugin_hooks returns Ok(empty) for a missing
+                    // manifest; a real read/parse error still warns + breaks.
                     let mut parsed = match parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
                     {
-                        Ok(parsed) => parsed,
+                        Ok(Some(parsed)) => parsed,
+                        // Manifest of this name is absent — try the next candidate.
+                        Ok(None) => continue,
                         Err(e) => {
                             eprintln!(
                                 "warning: failed to parse '{}' for plugin '{}': {e} — \
@@ -1098,43 +1108,6 @@ mod tests {
     use crate::merge::rules::RuleFile;
 
     const VALID_FRONTMATTER: &str = "---\nname: x\ndescription: y\n---\nbody\n";
-
-    #[test]
-    fn read_dir_optional_returns_none_for_missing_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("does-not-exist");
-        assert!(read_dir_optional(&missing).unwrap().is_none());
-    }
-
-    #[test]
-    fn read_dir_optional_returns_some_for_present_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(read_dir_optional(tmp.path()).unwrap().is_some());
-    }
-
-    // #912: a non-NotFound I/O error (EACCES) must propagate, not be masked as
-    // an absent directory the way the old exists() guard did.
-    #[cfg(unix)]
-    #[test]
-    fn read_dir_optional_propagates_permission_error() {
-        use std::fs::{self, Permissions};
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let parent = tmp.path().join("parent");
-        let child = parent.join("commands");
-        fs::create_dir_all(&child).unwrap();
-        fs::set_permissions(&parent, Permissions::from_mode(0o000)).unwrap();
-        let result = read_dir_optional(&child);
-        let readable_anyway = fs::read_dir(&child).is_ok();
-        fs::set_permissions(&parent, Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
-        if readable_anyway {
-            return; // running as root / FS ignores perms — can't exercise EACCES
-        }
-        assert!(
-            result.is_err(),
-            "permission error must propagate, got {result:?}"
-        );
-    }
 
     #[test]
     fn materialize_empty_manifest_writes_agents_md_and_json() {
@@ -1920,7 +1893,9 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let hooks = parse_plugin_hooks(&hooks_path, tmp.path(), "my-plugin").unwrap();
+        let hooks = parse_plugin_hooks(&hooks_path, tmp.path(), "my-plugin")
+            .unwrap()
+            .unwrap();
         assert_eq!(hooks.len(), 1, "only the valid command hook must survive");
         assert_eq!(hooks[0].handler.command.as_deref(), Some("echo good"));
     }
@@ -2195,11 +2170,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_plugin_mcp_entries_unreadable_file_errors() {
+    fn parse_plugin_mcp_entries_missing_file_is_empty() {
+        // #915: a missing MCP file means the plugin ships no MCP config — empty,
+        // not an error (the caller no longer guards with exists()).
         let tmp = tempfile::tempdir().unwrap();
-        let err =
-            parse_plugin_mcp_entries(&tmp.path().join("does-not-exist"), "my-plugin").unwrap_err();
-        assert!(err.to_string().contains("failed to read"));
+        let entries =
+            parse_plugin_mcp_entries(&tmp.path().join("does-not-exist"), "my-plugin").unwrap();
+        assert!(entries.is_empty());
+    }
+
+    // #915: a non-NotFound read error (EACCES) still errors, so it isn't
+    // silently dropped now that the exists() guard is gone.
+    #[cfg(unix)]
+    #[test]
+    fn parse_plugin_mcp_entries_unreadable_file_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+        let mcp_path = dir.join("LLM_PROVIDER_MCP_JSON");
+        std::fs::write(&mcp_path, "{}").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = parse_plugin_mcp_entries(&mcp_path, "my-plugin");
+        let readable_anyway = std::fs::read_dir(&dir).is_ok();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(result.unwrap_err().to_string().contains("failed to read"));
     }
 
     #[test]
@@ -2209,6 +2207,16 @@ mod tests {
         std::fs::write(&mcp_path, ": invalid yaml :::").unwrap();
         let err = parse_plugin_mcp_entries(&mcp_path, "my-plugin").unwrap_err();
         assert!(err.to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn parse_plugin_hooks_missing_file_is_none() {
+        // #915: a missing hooks manifest of this name yields Ok(None) — the
+        // caller tries the next candidate name — not an error.
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks =
+            parse_plugin_hooks(&tmp.path().join("hooks.json"), tmp.path(), "my-plugin").unwrap();
+        assert!(hooks.is_none());
     }
 
     #[test]
