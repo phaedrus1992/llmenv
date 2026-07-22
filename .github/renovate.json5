@@ -42,6 +42,15 @@
   // specific package families out of their ecosystem group.
   "packageRules": [
     {
+      // release/1.x and release/2.x are maintenance lines: no routine dependency
+      // churn, only security fixes. Disabling normal updates here still leaves
+      // vulnerabilityAlerts (a separate remediation path) free to open security
+      // PRs against these branches. main and release/3.x keep full updates.
+      "description": "Maintenance release lines get security fixes only",
+      "matchBaseBranches": ["release/1.x", "release/2.x"],
+      "enabled": false,
+    },
+    {
       "description": "Automerge every non-major update once its branch is green",
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
       "automerge": true,
@@ -116,6 +125,7 @@
   // branchConcurrentLimit/prConcurrentLimit, so prPriority would be moot.
   // All we need is the shared "security" label.
   "vulnerabilityAlerts": {
+    "enabled": true,
     "labels": ["dependencies", "security"],
   },
 }
