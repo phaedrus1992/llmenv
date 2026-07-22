@@ -1,5 +1,0 @@
-# Archived planning/spec docs: dense single-paragraph prose and long
-# code/path references routinely exceed the repo-wide line-length limit.
-# Rewrapping past session notes isn't worth the diff — disable MD013 here.
-config:
-  MD013: false
