@@ -8,6 +8,7 @@
 
 pub mod prune;
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::hook_run::mcp_client::McpHttpClient;
@@ -87,6 +88,28 @@ pub fn list() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read the previous snapshot, or write `current` as the baseline on first run.
+///
+/// Returns `None` when there was no prior snapshot (baseline just written),
+/// `Some(previous)` otherwise.
+///
+/// #911: a single read that maps `NotFound` → first-run baseline init and
+/// propagates every other I/O error, rather than an `exists()` stat that masked
+/// a permission error as "no snapshot" — which would then overwrite an existing
+/// baseline with the current state and silently skip the diff.
+fn read_or_init_snapshot(snapshot_path: &Path, current: &str) -> anyhow::Result<Option<String>> {
+    match std::fs::read_to_string(snapshot_path) {
+        Ok(previous) => Ok(Some(previous)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            crate::paths::write_owner_only_atomic(snapshot_path, current.as_bytes())?;
+            Ok(None)
+        }
+        Err(e) => {
+            Err(anyhow::Error::new(e).context(format!("reading {}", snapshot_path.display())))
+        }
+    }
+}
+
 /// Run the `diff` subcommand: compare current state with last snapshot.
 pub fn diff() -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
@@ -101,14 +124,10 @@ pub fn diff() -> anyhow::Result<()> {
         )?
     };
 
-    if !snapshot_path.exists() {
-        // First run: save current state as baseline.
-        crate::paths::write_owner_only_atomic(&snapshot_path, current.as_bytes())?;
+    let Some(previous) = read_or_init_snapshot(&snapshot_path, &current)? else {
         println!("No previous snapshot to diff against. Saved current state as baseline.");
         return Ok(());
-    }
-
-    let previous = std::fs::read_to_string(&snapshot_path)?;
+    };
     if previous == current {
         println!("No changes since last snapshot.");
     } else {
@@ -144,4 +163,56 @@ pub fn prune(dry_run: bool) -> anyhow::Result<()> {
         tracing::info!("memory prune: forgot {} record(s)", result.forgotten);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::read_or_init_snapshot;
+
+    #[test]
+    fn first_run_writes_baseline_and_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("snapshot");
+        let got = read_or_init_snapshot(&path, "current state").unwrap();
+        assert_eq!(got, None);
+        // Baseline was written with the current state.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "current state");
+    }
+
+    #[test]
+    fn returns_previous_without_clobbering_when_snapshot_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("snapshot");
+        std::fs::write(&path, "previous state").unwrap();
+        let got = read_or_init_snapshot(&path, "current state").unwrap();
+        assert_eq!(got.as_deref(), Some("previous state"));
+        // The existing baseline was not overwritten with the current state.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous state");
+    }
+
+    // #911: a non-NotFound I/O error (EACCES) must propagate, not be masked as
+    // "no snapshot" — which would clobber the baseline.
+    #[cfg(unix)]
+    #[test]
+    fn propagates_permission_error_instead_of_masking_absent() {
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("snapshot");
+        fs::write(&path, "previous state").unwrap();
+        fs::set_permissions(&dir, Permissions::from_mode(0o000)).unwrap();
+        let result = read_or_init_snapshot(&path, "current state");
+        let readable_anyway = fs::read_dir(&dir).is_ok();
+        fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "permission error must propagate, got {result:?}"
+        );
+    }
 }

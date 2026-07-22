@@ -48,6 +48,7 @@ On the fix side: opencode permission precedence and malformed-rule handling, ski
 - The `icm` statusline widget always rendered empty — its parser expected JSON, but the underlying tool returns plain text (#903)
 - The `config_stale` statusline widget ignored a custom icon override unless a custom `format` was also set (#904)
 - Sync-state, marketplace-manifest, and MCP-proxy pidfile reads now surface non-`NotFound` I/O errors (e.g. permission denied) instead of masking every stat failure as "file absent" (#893)
+- `llmenv memory diff` no longer risks overwriting the snapshot baseline when a stat error masks an existing snapshot as absent, and now surfaces read errors (#911); the opencode adapter surfaces permission errors on a plugin's `commands/`/`agents/` directories instead of silently skipping them (#912)
 
 ## [3.5.1] - 2026-07-15
 

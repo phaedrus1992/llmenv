@@ -223,6 +223,18 @@ struct PluginHookEntry {
     command: Option<String>,
 }
 
+/// `read_dir` that treats a missing directory as "nothing to iterate" (#912):
+/// returns `Ok(None)` on `NotFound` but propagates other I/O errors (e.g. a
+/// permission error), instead of an `exists()` stat that silently masks every
+/// stat failure as "directory absent".
+fn read_dir_optional(dir: &Path) -> anyhow::Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", dir.display()))),
+    }
+}
+
 /// Parse a plugin hooks manifest (hooks.json or claude-codex-hooks.json) into
 /// [`crate::config::Hook`] structs.
 ///
@@ -443,8 +455,8 @@ impl AgentAdapter for OpencodeAdapter {
 
             // 4b. Translate commands/ from plugin
             let cmd_dir = payload.join("commands");
-            if cmd_dir.exists() {
-                for entry in std::fs::read_dir(&cmd_dir)? {
+            if let Some(entries) = read_dir_optional(&cmd_dir)? {
+                for entry in entries {
                     let entry = entry?;
                     let path = entry.path();
                     if path.extension().is_none_or(|e| e != "md") {
@@ -467,8 +479,8 @@ impl AgentAdapter for OpencodeAdapter {
 
             // 4c. Translate agents/ from plugin
             let agent_dir = payload.join("agents");
-            if agent_dir.exists() {
-                for entry in std::fs::read_dir(&agent_dir)? {
+            if let Some(entries) = read_dir_optional(&agent_dir)? {
+                for entry in entries {
                     let entry = entry?;
                     let path = entry.path();
                     if path.extension().is_none_or(|e| e != "md") {
@@ -1086,6 +1098,43 @@ mod tests {
     use crate::merge::rules::RuleFile;
 
     const VALID_FRONTMATTER: &str = "---\nname: x\ndescription: y\n---\nbody\n";
+
+    #[test]
+    fn read_dir_optional_returns_none_for_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(read_dir_optional(&missing).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_dir_optional_returns_some_for_present_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_dir_optional(tmp.path()).unwrap().is_some());
+    }
+
+    // #912: a non-NotFound I/O error (EACCES) must propagate, not be masked as
+    // an absent directory the way the old exists() guard did.
+    #[cfg(unix)]
+    #[test]
+    fn read_dir_optional_propagates_permission_error() {
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let child = parent.join("commands");
+        fs::create_dir_all(&child).unwrap();
+        fs::set_permissions(&parent, Permissions::from_mode(0o000)).unwrap();
+        let result = read_dir_optional(&child);
+        let readable_anyway = fs::read_dir(&child).is_ok();
+        fs::set_permissions(&parent, Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "permission error must propagate, got {result:?}"
+        );
+    }
 
     #[test]
     fn materialize_empty_manifest_writes_agents_md_and_json() {
