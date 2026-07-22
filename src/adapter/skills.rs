@@ -9,7 +9,6 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 const IGNORE_INLINE: &str = "# llmenv-ignore: hardcoded-path";
@@ -213,9 +212,7 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
     // #918: a missing skills dir → nothing to validate; a permission error on
     // it propagates instead of an exists() stat masking it as absent, which
     // would silently bypass skill validation.
-    let Some(entries) = crate::paths::read_dir_optional(&skills_dir)
-        .with_context(|| format!("reading {}", skills_dir.display()))?
-    else {
+    let Some(entries) = crate::paths::read_dir_optional(&skills_dir)? else {
         return Ok(());
     };
     // Resolve the skills root once; every skill dir must stay inside it so a

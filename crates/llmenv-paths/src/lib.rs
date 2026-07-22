@@ -20,18 +20,19 @@ pub fn expand_tilde(p: &str) -> String {
 
 /// `read_dir` that treats a missing directory as "nothing to iterate":
 /// returns `Ok(None)` on `NotFound` but propagates every other I/O error (e.g.
-/// a permission denial). Use instead of an `exists()`-then-`read_dir` guard,
-/// which collapses *all* stat failures — including `EACCES` — to "absent" and
-/// so silently skips a directory the caller can't read (#918).
+/// a permission denial), with `reading <dir>` context. Use instead of an
+/// `exists()`-then-`read_dir` guard, which collapses *all* stat failures —
+/// including `EACCES` — to "absent" and so silently skips a directory the
+/// caller can't read (#918).
 ///
 /// # Errors
 /// Returns any `read_dir` error other than `NotFound` (e.g. permission denied,
-/// or the path is not a directory). Attach operation context at the call site.
-pub fn read_dir_optional(dir: &Path) -> std::io::Result<Option<std::fs::ReadDir>> {
+/// or the path is not a directory).
+pub fn read_dir_optional(dir: &Path) -> anyhow::Result<Option<std::fs::ReadDir>> {
     match std::fs::read_dir(dir) {
         Ok(entries) => Ok(Some(entries)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", dir.display()))),
     }
 }
 

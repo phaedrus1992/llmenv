@@ -5,8 +5,6 @@ pub mod rules;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
-
 use crate::config::Capabilities;
 use crate::mcp::resolve::ResolvedMcp;
 use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
@@ -288,9 +286,7 @@ fn walk(
     out: &mut BTreeMap<PathBuf, PathBuf>,
 ) -> anyhow::Result<()> {
     // #918: NotFound (missing dir) → skip; other errors propagate.
-    let Some(entries) = crate::paths::read_dir_optional(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-    else {
+    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
         return Ok(());
     };
     for entry in entries {

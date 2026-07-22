@@ -2,8 +2,6 @@ use std::path::{Path, PathBuf};
 
 use std::collections::BTreeMap;
 
-use anyhow::Context;
-
 use super::AgentAdapter;
 use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
@@ -466,9 +464,7 @@ impl AgentAdapter for OpencodeAdapter {
 
             // 4b. Translate commands/ from plugin
             let cmd_dir = payload.join("commands");
-            if let Some(entries) = crate::paths::read_dir_optional(&cmd_dir)
-                .with_context(|| format!("reading {}", cmd_dir.display()))?
-            {
+            if let Some(entries) = crate::paths::read_dir_optional(&cmd_dir)? {
                 for entry in entries {
                     let entry = entry?;
                     let path = entry.path();
@@ -492,9 +488,7 @@ impl AgentAdapter for OpencodeAdapter {
 
             // 4c. Translate agents/ from plugin
             let agent_dir = payload.join("agents");
-            if let Some(entries) = crate::paths::read_dir_optional(&agent_dir)
-                .with_context(|| format!("reading {}", agent_dir.display()))?
-            {
+            if let Some(entries) = crate::paths::read_dir_optional(&agent_dir)? {
                 for entry in entries {
                     let entry = entry?;
                     let path = entry.path();

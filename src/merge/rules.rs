@@ -15,7 +15,6 @@
 //! covers a single canonical representation regardless of which adapter
 //! renders later.
 
-use anyhow::Context;
 use std::path::{Path, PathBuf};
 
 /// A single rule file resolved from a bundle's `rules/` subtree.
@@ -61,9 +60,7 @@ fn walk(
 ) -> anyhow::Result<()> {
     // #918: NotFound (missing dir, incl. a `rules/` that isn't there) → skip;
     // other errors (e.g. permission denied) propagate.
-    let Some(entries) = crate::paths::read_dir_optional(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-    else {
+    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
         return Ok(());
     };
     for entry in entries {
