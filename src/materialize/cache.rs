@@ -272,11 +272,13 @@ pub fn prune(
     dry_run: bool,
 ) -> anyhow::Result<PruneReport> {
     let mut report = PruneReport::default();
-    if !cache_root.exists() {
+    // #918: a missing cache dir → nothing to prune; a permission error on it
+    // propagates instead of an exists() stat masking it as absent.
+    let Some(entries) = crate::paths::read_dir_optional(cache_root)? else {
         return Ok(report);
-    }
+    };
     let now = SystemTime::now();
-    for entry in std::fs::read_dir(cache_root)? {
+    for entry in entries {
         let entry = entry?;
         let p = entry.path();
         // lstat-equivalent: a symlink at the top level is never followed. We
@@ -415,15 +417,16 @@ pub fn gc(
     hashing: HashingMode,
 ) -> anyhow::Result<GcReport> {
     let mut report = GcReport::default();
-    if !cache_root.exists() {
+    // #918: a missing cache dir → nothing to gc; a permission error propagates.
+    let Some(entries) = crate::paths::read_dir_optional(cache_root)? else {
         return Ok(report);
-    }
+    };
     let now = SystemTime::now();
     let current_version = match hashing {
         HashingMode::Normal => Some(version_mm()),
         _ => None,
     };
-    for entry in std::fs::read_dir(cache_root)? {
+    for entry in entries {
         let entry = entry?;
         let p = entry.path();
         // Use `file_type()` (lstat-equivalent) — a symlink at the top level

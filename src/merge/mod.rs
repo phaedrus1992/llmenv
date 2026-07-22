@@ -97,9 +97,9 @@ pub fn merge(
         }
         for sub in COPIED_SUBDIRS {
             let dir = b.path.join(sub);
-            if !dir.exists() {
-                continue;
-            }
+            // #918: walk() tolerates a missing dir (NotFound) but propagates
+            // other read errors, so an unreadable subdir surfaces instead of
+            // an exists() stat masking it as absent.
             walk(&b.path, &dir, &mut files)?;
         }
         rule_files.extend(rules::collect_from_bundle(&b.path, &b.name)?);
@@ -285,7 +285,11 @@ fn walk(
     dir: &Path,
     out: &mut BTreeMap<PathBuf, PathBuf>,
 ) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+    // #918: NotFound (missing dir) → skip; other errors propagate.
+    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
+        return Ok(());
+    };
+    for entry in entries {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let p = entry.path();

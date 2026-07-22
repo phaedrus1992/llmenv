@@ -2563,11 +2563,11 @@ fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
     use dialoguer::MultiSelect;
 
     let global_settings = PathBuf::from(paths::expand_tilde("~/.claude")).join("settings.json");
-    if !global_settings.exists() {
-        return Ok(());
-    }
+    // #918: NotFound → no settings to import (silent); a permission error
+    // surfaces a warning instead of an exists() stat masking it as absent.
     let bytes = match std::fs::read(&global_settings) {
         Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
             eprintln!(
                 "warning: could not read {} — skipping settings import: {e}",
