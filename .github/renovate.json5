@@ -9,7 +9,9 @@
   // General settings
   "dependencyDashboard": false,
   "assigneesFromCodeOwners": true,
-  "baseBranchPatterns": ["main"],
+  // Track main plus every maintained release line (release/1.x, release/2.x, …).
+  // Anchored so it excludes the transient forward-merge/release/* branches.
+  "baseBranchPatterns": ["main", "/^release\\/.+$/"],
   "branchConcurrentLimit": 5,
   "internalChecksFilter": "strict",
   "labels": ["dependencies"],
@@ -26,6 +28,12 @@
   postUpdateOptions: [
     'cargoLockPackages',
   ],
+
+  // The pre-commit manager is disabled by default; .pre-commit-config.yaml
+  // exists in this repo, so opt in to keep hook versions updated too.
+  "pre-commit": {
+    "enabled": true,
+  },
 
   // Package- or manager-specific rules
   "packageRules": [
