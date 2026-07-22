@@ -506,13 +506,14 @@ pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Tas
 /// there are none, or on any internal error (logged to stderr, never
 /// propagated — hooks must never block the agent).
 pub fn session_start_reminder(state_dir: &Path) -> String {
+    let tasks = list_tasks(state_dir);
     combine_reminders([
         wip_reminder(
-            state_dir,
+            &tasks,
             "In-progress tasks from a previous session",
             "Resume one of these or run `llmenv task done <slug>` before starting new work.",
         ),
-        waiting_reminder(state_dir),
+        waiting_reminder(&tasks),
         session_finish_reminders(state_dir),
     ])
 }
@@ -536,9 +537,10 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 /// ponytail: add session-scoped mtime filtering if the blanket reminder
 /// proves too chatty in practice.
 pub fn stop_hook_reminder(state_dir: &Path) -> String {
+    let tasks = list_tasks(state_dir);
     combine_reminders([
         wip_reminder(
-            state_dir,
+            &tasks,
             "You still have task(s) in progress",
             "Run `llmenv task done <slug>` when finished. If still working, keep going — \
              don't stop mid-task. If blocked, exhaust safe autonomous remediation first \
@@ -596,14 +598,16 @@ fn render_task_list(tasks: &[&Task]) -> String {
 }
 
 /// Builds the `wip`-task reminder (`header`/`footer` customized per caller,
-/// pushing toward action). Empty when no `wip` tasks exist.
-fn wip_reminder(state_dir: &Path, header: &str, footer: &str) -> String {
-    let tasks = list_tasks(state_dir);
+/// pushing toward action). Empty when no `wip` tasks exist. Takes the
+/// already-loaded task list so the caller reads the store once and shares it
+/// with [`waiting_reminder`].
+fn wip_reminder(tasks: &[Task], header: &str, footer: &str) -> String {
     let wip: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Wip).collect();
     if wip.is_empty() {
         return String::new();
     }
-    format!("{header}:\n{}\n{footer}", render_task_list(&wip))
+    let list = render_task_list(&wip);
+    format!("{header}:\n{list}\n{footer}")
 }
 
 /// Builds the `waiting`-task FYI. Deliberately different in tone from
@@ -612,9 +616,9 @@ fn wip_reminder(state_dir: &Path, header: &str, footer: &str) -> String {
 /// "take action" on it would be actively wrong, so it gets a plain, no-action
 /// note. Surfaced only at session start (resume/wake); never on Stop, where
 /// re-injecting it every turn would nag about a state meant to be quiet. Empty
-/// when no `waiting` tasks exist.
-fn waiting_reminder(state_dir: &Path) -> String {
-    let tasks = list_tasks(state_dir);
+/// when no `waiting` tasks exist. Takes the already-loaded task list (shared
+/// with [`wip_reminder`]) so session start reads the store once.
+fn waiting_reminder(tasks: &[Task]) -> String {
     let waiting: Vec<&Task> = tasks
         .iter()
         .filter(|t| t.state == TaskState::Waiting)
@@ -622,10 +626,10 @@ fn waiting_reminder(state_dir: &Path) -> String {
     if waiting.is_empty() {
         return String::new();
     }
+    let list = render_task_list(&waiting);
     format!(
         "Task(s) waiting on external input (no action needed until it \
-         clears — see each task's notes for what's being waited on):\n{}",
-        render_task_list(&waiting)
+         clears — see each task's notes for what's being waited on):\n{list}"
     )
 }
 
