@@ -35,24 +35,43 @@
     "enabled": true,
   },
 
-  // Package- or manager-specific rules
+  // Package- or manager-specific rules.
+  // Rules apply top-to-bottom; later rules override earlier ones for the same
+  // field. So: (1) set the automerge/major policy broadly, (2) give each
+  // ecosystem its own grouped PR, (3) let the finer sub-groups below carve
+  // specific package families out of their ecosystem group.
   "packageRules": [
     {
-      "groupName": "auto-merge non-major dependencies",
-      "groupSlug": "all-non-major",
-      "matchUpdateTypes": ["!major"],
+      "description": "Automerge every non-major update once its branch is green",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
       "automerge": true,
     },
     {
-      "groupName": "auto-merge developer dependencies",
-      "groupSlug": "dev-dependencies",
-      "matchDepTypes": ["devDependencies"],
-      "automerge": true,
-    },
-    {
-      "description": "Separate major updates into individual PRs for review",
+      "description": "Major updates: one PR each, reviewed and merged by hand",
       "matchUpdateTypes": ["major"],
       "groupName": null,
+      "automerge": false,
+    },
+    {
+      "description": "All non-major Rust crate updates in one PR",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "rust crates",
+      "groupSlug": "rust-crates",
+    },
+    {
+      "description": "All non-major npm updates in one PR",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "npm packages",
+      "groupSlug": "npm-packages",
+    },
+    {
+      "description": "All non-major pre-commit hook updates in one PR",
+      "matchManagers": ["pre-commit"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "pre-commit hooks",
+      "groupSlug": "pre-commit",
     },
     {
       "description": "Group non-major GitHub Actions updates",
