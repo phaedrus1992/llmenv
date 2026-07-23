@@ -140,6 +140,20 @@ pub fn render_engine_widget(
     cfg: Option<&llmenv_config::WidgetConfig>,
     use_color: bool,
 ) -> Option<String> {
+    // `pr` is special-cased: it needs the resolved PR for both the text
+    // (`render_pr_info`) and the dynamic review-state style
+    // (`pr_style_for`). Resolving once here — rather than letting each
+    // helper call `resolve_pr` independently — avoids a duplicate cache
+    // read + JSON deserialize (and a duplicate `gh` derivation on a cold
+    // cache) on every single render.
+    if name == "pr" {
+        let pr = resolve_pr(data);
+        let raw = pr
+            .as_ref()
+            .map_or_else(String::new, |pr| render_pr_info(pr, cfg, use_color));
+        let dyn_style = pr.as_ref().and_then(pr_style_for);
+        return Some(super::finish(name, raw, cfg, dyn_style, use_color));
+    }
     let raw = match name {
         "model" => render_model(data, cfg),
         "folder" => render_folder(data, cfg),
@@ -148,20 +162,14 @@ pub fn render_engine_widget(
         "budget" => render_budget(data, cfg),
         "cache_usage" => render_cache_usage(data, cfg, use_color),
         "branch" => render_branch(data, cfg, use_color),
-        "pr" => render_pr(data, cfg, use_color),
         "context" => render_context(data, cfg, use_color),
         "usage_5h" | "usage_7d" => render_usage_widget(name, data, cfg, use_color),
         "peak" => super::peak::render_peak(cfg),
         _ => return None,
     };
-    // `pr` colors by review state via a dynamic style; `finish` applies it
-    // unless the user set an explicit per-widget `style`. (`context` and
-    // the usage widgets color themselves per-cell.)
-    let dyn_style = match name {
-        "pr" => pr_review_style(data),
-        _ => None,
-    };
-    Some(super::finish(name, raw, cfg, dyn_style, use_color))
+    // Every other widget renders with `finish`'s static per-widget style
+    // (`context` and the usage widgets color themselves per-cell instead).
+    Some(super::finish(name, raw, cfg, None, use_color))
 }
 
 /// Map a value to a `green` / `yellow` / `red` style name by two ascending
@@ -533,17 +541,6 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
-fn render_pr(
-    data: &EngineData,
-    cfg: Option<&llmenv_config::WidgetConfig>,
-    use_color: bool,
-) -> String {
-    let Some(pr) = resolve_pr(data) else {
-        return String::new();
-    };
-    render_pr_info(&pr, cfg, use_color)
-}
-
 /// Format an already-resolved [`PrInfo`] (engine-supplied or derived via
 /// [`resolve_pr`]) into the `pr` widget's text.
 fn render_pr_info(
@@ -584,12 +581,13 @@ fn render_pr_info(
 }
 
 /// Color the `pr` widget by review state: approved green, changes-requested
-/// red, pending yellow; `None` (default `bold magenta`) otherwise. Uses the
-/// same resolved PR (engine-supplied or derived) as [`render_pr`], so a
-/// derived PR's review state colors the widget exactly like an engine-supplied
-/// one would.
-fn pr_review_style(data: &EngineData) -> Option<&'static str> {
-    match resolve_pr(data)?.review_state.as_deref()? {
+/// red, pending yellow; `None` (default `bold magenta`) otherwise. Takes the
+/// already-resolved [`PrInfo`] — [`render_engine_widget`] resolves it once
+/// via [`resolve_pr`] and shares it with [`render_pr_info`], so a derived
+/// PR's review state colors the widget exactly like an engine-supplied one
+/// would, without a second lookup.
+fn pr_style_for(pr: &PrInfo) -> Option<&'static str> {
+    match pr.review_state.as_deref()? {
         "approved" => Some("green"),
         "changes_requested" => Some("red"),
         "pending" | "review_required" => Some("yellow"),
@@ -830,7 +828,7 @@ fn parse_gh_pr_view(stdout: &[u8]) -> Option<PrInfo> {
 }
 
 /// Map `gh`'s `reviewDecision` enum values to the lowercase snake_case
-/// `review_state` strings [`pr_review_style`] matches on. `gh` never emits a
+/// `review_state` strings [`pr_style_for`] matches on. `gh` never emits a
 /// `"pending"` decision (that value exists only for a possible future
 /// engine-supplied `review_state`) — an absent/unrecognized decision maps to
 /// `None`, rendering with the widget's default color.
@@ -1147,6 +1145,18 @@ const SEVEN_DAY_SECS: i64 = 7 * 86_400;
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Test-only convenience wrapper: the `pr` widget's full render
+    /// (resolve + text + dynamic style), matching what `render_engine_widget`
+    /// dispatches to for `"pr"` since the resolve-once refactor folded the
+    /// old standalone `render_pr` into that dispatch.
+    fn render_pr(
+        data: &EngineData,
+        cfg: Option<&llmenv_config::WidgetConfig>,
+        use_color: bool,
+    ) -> String {
+        render_engine_widget("pr", data, cfg, use_color).unwrap()
+    }
 
     fn engine_data() -> EngineData {
         serde_json::from_value(serde_json::json!({
