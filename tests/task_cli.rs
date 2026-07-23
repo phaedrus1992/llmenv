@@ -845,3 +845,242 @@ fn ls_unfiltered_shows_tasks_across_sessions() {
     let tasks: serde_json::Value = serde_json::from_slice(&ls_json.stdout).unwrap();
     assert_eq!(tasks.as_array().unwrap().len(), 2);
 }
+
+// --- task ls: human output, grouping, glyphs, filtering (#926) ---
+
+/// Run `task ls` (+ extra args) with color forced off; return stdout as a String.
+fn ls(dir: &std::path::Path, extra: &[&str]) -> String {
+    let mut args = vec!["task", "ls"];
+    args.extend_from_slice(extra);
+    let out = llmenv(dir)
+        .env("NO_COLOR", "1")
+        .args(&args)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn ls_human_groups_by_session_with_glyphs_labels_and_indented_subtasks() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Parent epic"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Child step", "--parent", "parent-epic"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "parent-epic"])
+        .assert()
+        .success();
+
+    let out = ls(dir.path(), &[]);
+    // Session header present.
+    assert!(out.contains("sprint"), "expected session header:\n{out}");
+    // State labels rendered.
+    assert!(out.contains("wip"), "expected wip label:\n{out}");
+    assert!(out.contains("open"), "expected open label:\n{out}");
+    // Subtask indented deeper than its parent.
+    let parent_line = out.lines().find(|l| l.contains("parent-epic")).unwrap();
+    let child_line = out.lines().find(|l| l.contains("child-step")).unwrap();
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    assert!(
+        indent(child_line) > indent(parent_line),
+        "child not indented under parent:\n{out}"
+    );
+}
+
+#[test]
+fn ls_marks_blocked_tasks_with_their_refs() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Upstream"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Downstream"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "block", "downstream", "--on", "upstream"])
+        .assert()
+        .success();
+
+    let out = ls(dir.path(), &[]);
+    assert!(
+        out.contains("blocked on: upstream"),
+        "expected blocked annotation:\n{out}"
+    );
+}
+
+#[test]
+fn ls_hide_done_and_active_alias_hide_completed() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Keep me"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Finish me"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "done", "finish-me"])
+        .assert()
+        .success();
+
+    for flag in ["--hide-done", "--active"] {
+        let out = ls(dir.path(), &[flag]);
+        assert!(
+            out.contains("keep-me"),
+            "{flag} dropped active task:\n{out}"
+        );
+        assert!(
+            !out.contains("finish-me"),
+            "{flag} did not hide done task:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn ls_state_filter_is_repeatable() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "An open one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "A wip one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "a-wip-one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "A waiting one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "wait", "a-waiting-one", "blocked"])
+        .assert()
+        .success();
+
+    let out = ls(dir.path(), &["--state", "wip", "--state", "waiting"]);
+    assert!(out.contains("a-wip-one"), "{out}");
+    assert!(out.contains("a-waiting-one"), "{out}");
+    assert!(
+        !out.contains("an-open-one"),
+        "open task leaked past filter:\n{out}"
+    );
+}
+
+#[test]
+fn ls_state_filter_composes_with_session() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "alpha");
+    llmenv(dir.path())
+        .args(["task", "add", "Alpha wip"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "alpha-wip"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Alpha open"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "beta", "--new"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Beta wip", "--session", "beta"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "beta-wip"])
+        .assert()
+        .success();
+
+    // Only alpha's wip task: session narrows to alpha, state filter to wip.
+    let out = ls(dir.path(), &["--session", "alpha", "--state", "wip"]);
+    assert!(out.contains("alpha-wip"), "{out}");
+    assert!(
+        !out.contains("alpha-open"),
+        "state filter failed within session:\n{out}"
+    );
+    assert!(!out.contains("beta-wip"), "session filter failed:\n{out}");
+}
+
+#[test]
+fn ls_empty_prints_no_tasks() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    assert_eq!(ls(dir.path(), &[]).trim(), "No tasks.");
+    // A filter that matches nothing also yields the empty message.
+    llmenv(dir.path())
+        .args(["task", "add", "Only open"])
+        .assert()
+        .success();
+    assert_eq!(ls(dir.path(), &["--state", "done"]).trim(), "No tasks.");
+}
+
+#[test]
+fn ls_human_output_has_no_ansi_escapes_when_color_disabled() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Plain task"])
+        .assert()
+        .success();
+    let out = ls(dir.path(), &[]);
+    assert!(
+        !out.contains('\u{1b}'),
+        "unexpected ANSI escape in no-color output:\n{out:?}"
+    );
+}
+
+#[test]
+fn ls_json_applies_filters_only_when_passed() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Open one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Wip one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "wip-one"])
+        .assert()
+        .success();
+
+    // No filter: both tasks in the stable machine format.
+    let all = llmenv(dir.path())
+        .args(["task", "ls", "--format", "json"])
+        .output()
+        .unwrap();
+    let all: serde_json::Value = serde_json::from_slice(&all.stdout).unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 2);
+
+    // Filter passed: applies to JSON too.
+    let filtered = llmenv(dir.path())
+        .args(["task", "ls", "--format", "json", "--state", "wip"])
+        .output()
+        .unwrap();
+    let filtered: serde_json::Value = serde_json::from_slice(&filtered.stdout).unwrap();
+    let arr = filtered.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["slug"], "wip-one");
+}

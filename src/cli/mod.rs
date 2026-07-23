@@ -385,12 +385,19 @@ enum TaskCommand {
     /// Mark a task done.
     Done { id: String },
     /// List all tasks. Unfiltered by default; `--session` narrows to one
-    /// session's tasks.
+    /// session's tasks, `--state`/`--hide-done` filter by lifecycle state.
     Ls {
         #[arg(long, value_enum)]
         format: Option<TaskListFormat>,
         #[arg(long)]
         session: Option<String>,
+        /// Only show tasks in these state(s). Repeatable:
+        /// `--state wip --state waiting`. Omit for all states.
+        #[arg(long = "state", value_enum)]
+        state: Vec<TaskStateArg>,
+        /// Hide completed (`done`) tasks. Alias: `--active`.
+        #[arg(long, visible_alias = "active")]
+        hide_done: bool,
     },
     /// Show full detail for one task.
     Show { id: String },
@@ -461,6 +468,26 @@ enum TaskSessionCommand {
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum TaskListFormat {
     Json,
+}
+
+/// `--state` filter values for `task ls`, mapped onto `task::TaskState`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TaskStateArg {
+    Open,
+    Wip,
+    Waiting,
+    Done,
+}
+
+impl From<TaskStateArg> for crate::task::TaskState {
+    fn from(arg: TaskStateArg) -> Self {
+        match arg {
+            TaskStateArg::Open => Self::Open,
+            TaskStateArg::Wip => Self::Wip,
+            TaskStateArg::Waiting => Self::Waiting,
+            TaskStateArg::Done => Self::Done,
+        }
+    }
 }
 
 /// `llmenv memory` sub-subcommands (R2).
@@ -2632,6 +2659,73 @@ fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Render the human-readable `task ls` output (#926): tasks grouped under a
+/// session header (current-project sessions first), subtasks indented under
+/// their parent, each row prefixed with a state glyph + label and annotated
+/// with any `blocked_on` refs. `tasks` is already filtered by the caller.
+fn render_task_ls_human(
+    state_dir: &Path,
+    tasks: Vec<crate::task::Task>,
+    use_color: bool,
+) -> String {
+    if tasks.is_empty() {
+        return "No tasks.\n".to_string();
+    }
+    let priority: Vec<String> = crate::task::project::current_tag()
+        .ok()
+        .map(|p| {
+            crate::task::session::open_sessions_for_project(state_dir, &p)
+                .into_iter()
+                .map(|s| s.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let labels: std::collections::HashMap<String, String> =
+        crate::task::session::list_sessions(state_dir)
+            .into_iter()
+            .map(|s| (s.id.clone(), s.name.unwrap_or(s.id)))
+            .collect();
+
+    let rows = crate::task::display_rows(tasks, &priority);
+    let mut out = String::new();
+    let mut current_group: Option<Option<String>> = None;
+    for row in &rows {
+        let group = row.task.session.clone();
+        if current_group.as_ref() != Some(&group) {
+            if current_group.is_some() {
+                out.push('\n');
+            }
+            let header = match &group {
+                Some(id) => labels.get(id).cloned().unwrap_or_else(|| id.clone()),
+                None => "(no session)".to_string(),
+            };
+            out.push_str(&style::apply_style(&header, "bold", use_color));
+            out.push('\n');
+            current_group = Some(group);
+        }
+        out.push_str(&render_task_ls_row(row, use_color));
+        out.push('\n');
+    }
+    out
+}
+
+/// Render one indented `task ls` row: `<indent><glyph> <label> <slug>  <title>`
+/// plus a `(blocked on: …)` suffix when the task has `blocked_on` refs.
+fn render_task_ls_row(row: &crate::task::DisplayRow, use_color: bool) -> String {
+    let indent = "  ".repeat(row.depth + 1);
+    let glyph = style::task_state_glyph(row.task.state, use_color);
+    let label = format!("{:<7}", style::task_state_label(row.task.state));
+    let mut line = format!(
+        "{indent}{glyph} {label} {}  {}",
+        row.task.slug, row.task.title
+    );
+    if !row.task.blocked_on.is_empty() {
+        line.push_str("  ");
+        line.push_str(&style::blocked_annotation(&row.task.blocked_on, use_color));
+    }
+    line
+}
+
 /// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
 /// `crate::task`, which owns the store logic.
 fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
@@ -2683,23 +2777,31 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
             let task = crate::task::done_task(&state_dir, &id)?;
             println!("Completed '{}'", task.slug);
         }
-        TaskCommand::Ls { format, session } => {
+        TaskCommand::Ls {
+            format,
+            session,
+            state,
+            hide_done,
+        } => {
             let mut tasks = crate::task::list_tasks(&state_dir);
             if let Some(session_id) = &session {
                 tasks.retain(|t| t.session.as_deref() == Some(session_id.as_str()));
             }
-            tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            let states: Vec<crate::task::TaskState> =
+                state.iter().copied().map(Into::into).collect();
+            tasks = crate::task::filter_by_state(tasks, &states);
+            if hide_done {
+                tasks.retain(|t| t.state != crate::task::TaskState::Done);
+            }
             match format {
                 Some(TaskListFormat::Json) => {
+                    tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
                     println!("{}", serde_json::to_string(&tasks)?);
                 }
                 None => {
-                    if tasks.is_empty() {
-                        println!("No tasks.");
-                    }
-                    for t in &tasks {
-                        println!("{:?}\t{}\t{}", t.state, t.slug, t.title);
-                    }
+                    use std::io::IsTerminal;
+                    let use_color = should_use_color(None, std::io::stdout().is_terminal());
+                    print!("{}", render_task_ls_human(&state_dir, tasks, use_color));
                 }
             }
         }
