@@ -58,6 +58,7 @@ For each plugin in `existing_configs.claude_code.plugins`:
   mention that and just add the plugin reference
 
 For each marketplace in `existing_configs.claude_code.marketplaces`:
+
 - Ask: "Add this marketplace to your llmenv config?"
 - If yes, record a marketplace entry
 
@@ -93,6 +94,7 @@ Based on their answers, suggest creating additional bundles (e.g. `work`,
 `rust-dev`, `aws-tools`, etc.) with appropriate `when:` tags.
 
 For each suggested bundle:
+
 - Ask: "Should I create a `{name}` bundle?"
 - If yes, create the bundle directory and add it to config.yaml's bundle list
 - Set up the `when:` tag (or just create the skeleton and note the tag)
@@ -122,4 +124,4 @@ Write out all recorded configuration:
 - Summarize everything that was created
 - Recommend next steps (edit config.yaml, add project markers, run
   `llmenv status` to verify)
-- Point to the docs: https://phaedrus1992.github.io/llmenv/
+- Point to the docs: <https://phaedrus1992.github.io/llmenv/>

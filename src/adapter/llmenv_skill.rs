@@ -132,6 +132,29 @@ mod tests {
     }
 
     #[test]
+    fn task_tracker_reference_ships_linking_and_notes_guidance() {
+        // The reference is include_str!'d, so the same content reaches every
+        // engine adapter via the shared materialization. Guard the #932
+        // guidance so it can't be silently gutted.
+        let dir = TempDir::new().expect("test");
+        materialize_llmenv_skill(dir.path(), &features_with(true, false, false, false))
+            .expect("test");
+        let content =
+            std::fs::read_to_string(dir.path().join("skills/llmenv/references/task-tracker.md"))
+                .expect("test");
+        assert!(content.contains("--parent"), "missing parent guidance");
+        assert!(content.contains("block"), "missing blocked_on guidance");
+        assert!(
+            content.contains("task note"),
+            "missing note-taking guidance"
+        );
+        assert!(
+            content.contains("design decision"),
+            "missing decision-recording guidance"
+        );
+    }
+
+    #[test]
     fn all_four_features_writes_all_four_references() {
         let dir = TempDir::new().expect("test");
         materialize_llmenv_skill(dir.path(), &features_with(true, true, true, true)).expect("test");

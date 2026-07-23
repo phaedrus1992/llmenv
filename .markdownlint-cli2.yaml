@@ -7,16 +7,13 @@ ignores:
   - "website/docs/third-party-licenses.md"
   - "website/docs/changelog.md"
   - ".claude/"
-  - "node_modules/"
   - ".superpowers/"
   - ".tmp/"
-  # Archived planning/spec docs — dense prose and long path/code references
-  # that aren't worth rewrapping to satisfy the repo-wide lint rules.
-  - "docs/superpowers/"
+  - "node_modules/"
   - "website/node_modules/"
-  - "skills/"
   - "tests/fixtures/"
-  - "llmenv_DIFFERENTIAL_REVIEW_2026-07-02.md"
+  - "docs/design/"
+  - "docs/superpowers/"
 
 config:
   # Line length

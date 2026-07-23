@@ -111,6 +111,51 @@ pub fn doctor_info(use_color: bool) -> String {
     }
 }
 
+/// Glyph + ANSI color for a task lifecycle state, for human `task ls` output
+/// (#926). Mirrors the `doctor_*` markers: the Unicode glyph is kept even
+/// without color; only the ANSI wrapping is gated on `use_color`.
+#[must_use]
+pub fn task_state_glyph(state: crate::task::TaskState, use_color: bool) -> String {
+    use crate::task::TaskState;
+    let (glyph, color) = match state {
+        TaskState::Open => ("○", AnsiColor::White),
+        TaskState::Wip => ("◐", AnsiColor::Cyan),
+        TaskState::Waiting => ("⏸", AnsiColor::Yellow),
+        TaskState::Done => ("✓", AnsiColor::Green),
+    };
+    paint(glyph, color, use_color)
+}
+
+/// Lowercase label for a task lifecycle state (`open`/`wip`/`waiting`/`done`).
+#[must_use]
+pub fn task_state_label(state: crate::task::TaskState) -> &'static str {
+    use crate::task::TaskState;
+    match state {
+        TaskState::Open => "open",
+        TaskState::Wip => "wip",
+        TaskState::Waiting => "waiting",
+        TaskState::Done => "done",
+    }
+}
+
+/// Strip control characters (ANSI/CSI/OSC escapes, NUL, embedded newlines,
+/// etc.) from agent-authored text before it's rendered to a TTY. Task titles
+/// and session names come from `task add`/`session start` with attacker- or
+/// agent-influenced content, so a title carrying raw escapes could spoof
+/// `task ls` output or retitle the terminal window when a human runs it. Slugs
+/// (kebab-only) and the `--format json` path don't need this.
+#[must_use]
+pub fn sanitize_for_terminal(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Red `(blocked on: …)` annotation listing the slugs a task is blocked on.
+#[must_use]
+pub fn blocked_annotation(refs: &[String], use_color: bool) -> String {
+    let body = format!("(blocked on: {})", refs.join(", "));
+    paint(&body, AnsiColor::Red, use_color)
+}
+
 /// Truncate `s` to at most `max_len` **characters** (not bytes), appending
 /// `…` (U+2026, itself counted within `max_len`) when truncation occurs.
 /// UTF-8-boundary-safe: always truncates on a `char` boundary since it

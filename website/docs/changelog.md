@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `llmenv task ls` human output now groups tasks by session (current-project sessions first), indents subtasks under their parent, prefixes each row with a state glyph + label, and annotates blocked tasks with their `blocked_on` refs; new `--state <open|wip|waiting|done>` (repeatable) and `--hide-done`/`--active` filters compose with `--session` and apply to `--format json` too. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#926)
+
+### Changed
+
+- The bundled `llmenv` skill's task rules now guide agents to link tasks liberally with `--parent` (ordered decomposition) and `block --on` (real dependencies) and to record milestones, design rationale, and failures with `task note`. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#932)
+
 ### Fixed
 
 - The task-tracker Stop hook no longer re-injects the `waiting`-task FYI every turn; `waiting` tasks are now silent on Stop and surface only in the SessionStart reminder. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#933)

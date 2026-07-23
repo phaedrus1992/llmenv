@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of a tracked task.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
     #[default]
@@ -189,6 +189,136 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
         }
     }
     tasks
+}
+
+/// A task paired with its indentation depth for human `task ls` rendering: a
+/// parent is depth 0, its subtasks depth 1, and so on (#926).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayRow {
+    pub depth: usize,
+    pub task: Task,
+}
+
+/// Keep only tasks whose state is one of `states`. An empty `states` keeps
+/// everything (the "no `--state` filter" case), so callers pass either the
+/// states the user asked for or an empty slice.
+#[must_use]
+pub fn filter_by_state(tasks: Vec<Task>, states: &[TaskState]) -> Vec<Task> {
+    if states.is_empty() {
+        return tasks;
+    }
+    tasks
+        .into_iter()
+        .filter(|t| states.contains(&t.state))
+        .collect()
+}
+
+/// Sort key for a task's session group in human `task ls` output: prioritized
+/// sessions first (in `priority` order — the caller puts current-project open
+/// sessions there), then any other session id alphabetically, then the
+/// no-session bucket last.
+fn session_rank(key: &Option<String>, priority: &[String]) -> (u8, usize, String) {
+    match key {
+        Some(id) => match priority.iter().position(|p| p == id) {
+            Some(i) => (0, i, String::new()),
+            None => (1, 0, id.clone()),
+        },
+        None => (2, 0, String::new()),
+    }
+}
+
+/// Order tasks for human display (#926): grouped by session (prioritized
+/// sessions first per `session_priority`, then other sessions alphabetically,
+/// then no-session tasks), and within each group parent-before-children — a
+/// parent immediately followed by its subtree (recursively), roots and
+/// siblings in creation order. Nothing is dropped regardless of
+/// `session_priority`: any session present but unlisted still gets a group.
+#[must_use]
+pub fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<DisplayRow> {
+    let mut keys: Vec<Option<String>> = tasks
+        .iter()
+        .map(|t| t.session.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    // Cache the key (it allocates for the "other sessions" bucket) so it's
+    // computed once per element, not on every comparison.
+    keys.sort_by_cached_key(|k| session_rank(k, session_priority));
+
+    let mut rows = Vec::new();
+    for key in &keys {
+        let group: Vec<&Task> = tasks.iter().filter(|t| &t.session == key).collect();
+        append_forest(&group, &mut rows);
+    }
+    rows
+}
+
+/// Append one session group's tasks to `rows` as a parent→child forest.
+/// Tasks whose parent is absent from this group are treated as roots; a
+/// `visited` guard makes malformed parent cycles terminate instead of
+/// recursing forever.
+fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
+    use std::collections::{HashMap, HashSet};
+    let present: HashSet<&str> = group.iter().map(|t| t.slug.as_str()).collect();
+    let mut children: HashMap<&str, Vec<&Task>> = HashMap::new();
+    let mut roots: Vec<&Task> = Vec::new();
+    for &t in group {
+        match &t.parent {
+            Some(p) if present.contains(p.as_str()) => {
+                children.entry(p.as_str()).or_default().push(t)
+            }
+            _ => roots.push(t),
+        }
+    }
+    // created_at is only second-precision, so tasks created in the same second
+    // tie; fall back to slug for a deterministic, stable order (readdir order
+    // from `list_tasks` is otherwise arbitrary).
+    let order = |a: &&Task, b: &&Task| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.slug.cmp(&b.slug))
+    };
+    roots.sort_by(order);
+    for kids in children.values_mut() {
+        kids.sort_by(order);
+    }
+    let mut visited: HashSet<&str> = HashSet::new();
+    for root in roots {
+        visit(root, 0, &children, &mut visited, rows);
+    }
+    // Completeness guard: any task not reached from a root (e.g. a malformed
+    // parent cycle where every node points at another present task) is
+    // rendered as a depth-0 row rather than silently dropped from the listing.
+    let mut orphans: Vec<&Task> = group
+        .iter()
+        .copied()
+        .filter(|t| !visited.contains(t.slug.as_str()))
+        .collect();
+    orphans.sort_by(order);
+    for orphan in orphans {
+        visit(orphan, 0, &children, &mut visited, rows);
+    }
+}
+
+fn visit<'a>(
+    task: &'a Task,
+    depth: usize,
+    children: &std::collections::HashMap<&'a str, Vec<&'a Task>>,
+    visited: &mut std::collections::HashSet<&'a str>,
+    rows: &mut Vec<DisplayRow>,
+) {
+    if !visited.insert(task.slug.as_str()) {
+        return;
+    }
+    rows.push(DisplayRow {
+        depth,
+        task: task.clone(),
+    });
+    if let Some(kids) = children.get(task.slug.as_str()) {
+        for child in kids {
+            visit(child, depth + 1, children, visited, rows);
+        }
+    }
 }
 
 /// Title of the most recently updated `wip`/`waiting` task among tasks
@@ -1135,6 +1265,119 @@ mod tests {
         assert!(reminder.contains("no action needed"));
     }
 
+    // --- task ls ordering + filtering (#926) ---
+
+    fn t(slug: &str, state: TaskState, parent: Option<&str>, session: Option<&str>) -> Task {
+        Task {
+            slug: slug.to_string(),
+            title: format!("Title for {slug}"),
+            state,
+            parent: parent.map(str::to_string),
+            blocked_on: Vec::new(),
+            notes: Vec::new(),
+            session: session.map(str::to_string),
+            // Identical timestamps on purpose: exercises the slug tiebreak.
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn slugs(rows: &[DisplayRow]) -> Vec<(usize, String)> {
+        rows.iter()
+            .map(|r| (r.depth, r.task.slug.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn filter_by_state_empty_keeps_all() {
+        let tasks = vec![
+            t("a", TaskState::Open, None, None),
+            t("b", TaskState::Done, None, None),
+        ];
+        assert_eq!(filter_by_state(tasks, &[]).len(), 2);
+    }
+
+    #[test]
+    fn filter_by_state_keeps_only_listed_states() {
+        let tasks = vec![
+            t("a", TaskState::Open, None, None),
+            t("b", TaskState::Wip, None, None),
+            t("c", TaskState::Waiting, None, None),
+            t("d", TaskState::Done, None, None),
+        ];
+        let kept = filter_by_state(tasks, &[TaskState::Wip, TaskState::Waiting]);
+        assert_eq!(
+            kept.iter().map(|x| x.slug.as_str()).collect::<Vec<_>>(),
+            ["b", "c"]
+        );
+    }
+
+    #[test]
+    fn display_rows_indents_subtasks_under_parent_in_creation_order() {
+        // Deliberately unsorted input; slug tiebreak must produce a stable order.
+        let tasks = vec![
+            t("deploy", TaskState::Open, None, Some("s")),
+            t("child-b", TaskState::Open, Some("api"), Some("s")),
+            t("api", TaskState::Wip, None, Some("s")),
+            t("child-a", TaskState::Done, Some("api"), Some("s")),
+        ];
+        let rows = display_rows(tasks, &["s".to_string()]);
+        assert_eq!(
+            slugs(&rows),
+            vec![
+                (0, "api".to_string()),
+                (1, "child-a".to_string()),
+                (1, "child-b".to_string()),
+                (0, "deploy".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn display_rows_orders_priority_sessions_first_then_others_then_none() {
+        let tasks = vec![
+            t("z", TaskState::Open, None, None),
+            t("other", TaskState::Open, None, Some("zzz")),
+            t("cur", TaskState::Open, None, Some("current")),
+        ];
+        let rows = display_rows(tasks, &["current".to_string()]);
+        assert_eq!(
+            rows.iter().map(|r| r.task.slug.clone()).collect::<Vec<_>>(),
+            ["cur", "other", "z"]
+        );
+    }
+
+    #[test]
+    fn display_rows_keeps_unlisted_session_tasks() {
+        // A session absent from the priority list must still get a group.
+        let tasks = vec![t("only", TaskState::Open, None, Some("ghost"))];
+        let rows = display_rows(tasks, &[]);
+        assert_eq!(slugs(&rows), vec![(0, "only".to_string())]);
+    }
+
+    #[test]
+    fn display_rows_orphan_parent_reference_renders_child_as_root() {
+        // Parent not present in the group -> child is a depth-0 root, not lost.
+        let tasks = vec![t("child", TaskState::Open, Some("missing"), Some("s"))];
+        let rows = display_rows(tasks, &["s".to_string()]);
+        assert_eq!(slugs(&rows), vec![(0, "child".to_string())]);
+    }
+
+    #[test]
+    fn display_rows_survives_parent_cycle_without_infinite_recursion() {
+        // Malformed data: a <-> b cite each other as parent. Must terminate.
+        let mut a = t("a", TaskState::Open, Some("b"), Some("s"));
+        let mut b = t("b", TaskState::Open, Some("a"), Some("s"));
+        a.created_at = "2026-01-01T00:00:01Z".to_string();
+        b.created_at = "2026-01-01T00:00:02Z".to_string();
+        let rows = display_rows(vec![a, b], &["s".to_string()]);
+        // Neither is a root (each cites the other), but the completeness guard
+        // still renders both exactly once instead of dropping them or looping.
+        let mut got: Vec<String> = rows.iter().map(|r| r.task.slug.clone()).collect();
+        got.sort();
+        assert_eq!(got, ["a", "b"]);
+    }
+
     // --- mandatory-session wiring (2026-07-21 rework) ---
 
     fn created(outcome: StartOutcome) -> super::session::Session {
@@ -1303,6 +1546,33 @@ mod tests {
                 )
         }
 
+        /// A single-session task forest with unique slugs `t0..tn` where each
+        /// task's parent (if any) is an earlier index — guaranteeing an acyclic
+        /// forest so the depth/parent-order invariants are well-defined.
+        fn arb_forest() -> impl Strategy<Value = Vec<Task>> {
+            proptest::collection::vec((arb_task_state(), proptest::option::of(0usize..7)), 1..8)
+                .prop_map(|specs| {
+                    specs
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (state, parent_pick))| {
+                            let parent = parent_pick.filter(|&p| p < i).map(|p| format!("t{p}"));
+                            Task {
+                                slug: format!("t{i}"),
+                                title: format!("task {i}"),
+                                state,
+                                parent,
+                                blocked_on: Vec::new(),
+                                notes: Vec::new(),
+                                session: Some("s".to_string()),
+                                created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
+                                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                            }
+                        })
+                        .collect()
+                })
+        }
+
         proptest! {
             #[test]
             fn task_note_json_roundtrips(note in arb_task_note()) {
@@ -1396,6 +1666,51 @@ mod tests {
                         let loaded = load_task(dir.path(), task.parent.as_ref().unwrap()).unwrap();
                         prop_assert_eq!(loaded.slug, chain[i - 1].slug.clone());
                     }
+                }
+            }
+
+            #[test]
+            fn display_rows_is_complete_and_indents_children(tasks in arb_forest()) {
+                let input: std::collections::BTreeSet<String> =
+                    tasks.iter().map(|t| t.slug.clone()).collect();
+                let rows = display_rows(tasks.clone(), &["s".to_string()]);
+                // Completeness: every input task appears exactly once.
+                prop_assert_eq!(rows.len(), tasks.len());
+                let output: std::collections::BTreeSet<String> =
+                    rows.iter().map(|r| r.task.slug.clone()).collect();
+                prop_assert_eq!(output, input);
+                // Depth invariant + parent-before-child ordering.
+                let depth: std::collections::HashMap<String, usize> =
+                    rows.iter().map(|r| (r.task.slug.clone(), r.depth)).collect();
+                let pos: std::collections::HashMap<String, usize> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (r.task.slug.clone(), i))
+                    .collect();
+                for r in &rows {
+                    match &r.task.parent {
+                        Some(p) => {
+                            prop_assert_eq!(r.depth, depth[p] + 1);
+                            prop_assert!(pos[p] < pos[&r.task.slug]);
+                        }
+                        None => prop_assert_eq!(r.depth, 0),
+                    }
+                }
+            }
+
+            #[test]
+            fn filter_by_state_keeps_exactly_matching_states(
+                tasks in proptest::collection::vec(arb_task(), 0..12),
+                states in proptest::collection::hash_set(arb_task_state(), 0..4),
+            ) {
+                let want: Vec<TaskState> = states.iter().copied().collect();
+                let kept = filter_by_state(tasks.clone(), &want);
+                if want.is_empty() {
+                    prop_assert_eq!(kept.len(), tasks.len());
+                } else {
+                    prop_assert!(kept.iter().all(|t| want.contains(&t.state)));
+                    let expected = tasks.iter().filter(|t| want.contains(&t.state)).count();
+                    prop_assert_eq!(kept.len(), expected);
                 }
             }
         }
