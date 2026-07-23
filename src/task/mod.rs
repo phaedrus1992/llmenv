@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of a tracked task.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
     #[default]
@@ -238,10 +238,12 @@ pub fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<Displa
     let mut keys: Vec<Option<String>> = tasks
         .iter()
         .map(|t| t.session.clone())
-        .collect::<std::collections::BTreeSet<_>>()
+        .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    keys.sort_by_key(|k| session_rank(k, session_priority));
+    // Cache the key (it allocates for the "other sessions" bucket) so it's
+    // computed once per element, not on every comparison.
+    keys.sort_by_cached_key(|k| session_rank(k, session_priority));
 
     let mut rows = Vec::new();
     for key in &keys {
@@ -1544,6 +1546,33 @@ mod tests {
                 )
         }
 
+        /// A single-session task forest with unique slugs `t0..tn` where each
+        /// task's parent (if any) is an earlier index — guaranteeing an acyclic
+        /// forest so the depth/parent-order invariants are well-defined.
+        fn arb_forest() -> impl Strategy<Value = Vec<Task>> {
+            proptest::collection::vec((arb_task_state(), proptest::option::of(0usize..7)), 1..8)
+                .prop_map(|specs| {
+                    specs
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (state, parent_pick))| {
+                            let parent = parent_pick.filter(|&p| p < i).map(|p| format!("t{p}"));
+                            Task {
+                                slug: format!("t{i}"),
+                                title: format!("task {i}"),
+                                state,
+                                parent,
+                                blocked_on: Vec::new(),
+                                notes: Vec::new(),
+                                session: Some("s".to_string()),
+                                created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
+                                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                            }
+                        })
+                        .collect()
+                })
+        }
+
         proptest! {
             #[test]
             fn task_note_json_roundtrips(note in arb_task_note()) {
@@ -1637,6 +1666,51 @@ mod tests {
                         let loaded = load_task(dir.path(), task.parent.as_ref().unwrap()).unwrap();
                         prop_assert_eq!(loaded.slug, chain[i - 1].slug.clone());
                     }
+                }
+            }
+
+            #[test]
+            fn display_rows_is_complete_and_indents_children(tasks in arb_forest()) {
+                let input: std::collections::BTreeSet<String> =
+                    tasks.iter().map(|t| t.slug.clone()).collect();
+                let rows = display_rows(tasks.clone(), &["s".to_string()]);
+                // Completeness: every input task appears exactly once.
+                prop_assert_eq!(rows.len(), tasks.len());
+                let output: std::collections::BTreeSet<String> =
+                    rows.iter().map(|r| r.task.slug.clone()).collect();
+                prop_assert_eq!(output, input);
+                // Depth invariant + parent-before-child ordering.
+                let depth: std::collections::HashMap<String, usize> =
+                    rows.iter().map(|r| (r.task.slug.clone(), r.depth)).collect();
+                let pos: std::collections::HashMap<String, usize> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (r.task.slug.clone(), i))
+                    .collect();
+                for r in &rows {
+                    match &r.task.parent {
+                        Some(p) => {
+                            prop_assert_eq!(r.depth, depth[p] + 1);
+                            prop_assert!(pos[p] < pos[&r.task.slug]);
+                        }
+                        None => prop_assert_eq!(r.depth, 0),
+                    }
+                }
+            }
+
+            #[test]
+            fn filter_by_state_keeps_exactly_matching_states(
+                tasks in proptest::collection::vec(arb_task(), 0..12),
+                states in proptest::collection::hash_set(arb_task_state(), 0..4),
+            ) {
+                let want: Vec<TaskState> = states.iter().copied().collect();
+                let kept = filter_by_state(tasks.clone(), &want);
+                if want.is_empty() {
+                    prop_assert_eq!(kept.len(), tasks.len());
+                } else {
+                    prop_assert!(kept.iter().all(|t| want.contains(&t.state)));
+                    let expected = tasks.iter().filter(|t| want.contains(&t.state)).count();
+                    prop_assert_eq!(kept.len(), expected);
                 }
             }
         }
