@@ -49,12 +49,45 @@ is in play and you need to have durably noted your specific session id
 somewhere in your own context before the compaction — there's no engine-level
 mechanism that preserves it for you across a compaction.
 
-## Sub-tasks and dependencies
+## Link tasks liberally: `parent` and `blocked_on`
+
+Don't let tasks land flat and unrelated — the links are what let the tracker
+drive ordered work and stay legible after a compaction. Reach for them by
+default, not just for big epics.
 
 ```
-llmenv task add "<title>" --parent <slug>   # sub-task
-llmenv task block <slug> --on <other-slug>  # ordering dependency
+llmenv task add "<title>" --parent <slug>   # ordered sub-task
+llmenv task block <slug> --on <other-slug>  # real dependency
 ```
+
+- **`--parent <slug>`** — decompose work into ordered sub-tasks. A parent
+  immediately followed by its children reads top-to-bottom in execution order
+  in `llmenv task ls`, so you (or another agent) can pick up mid-stream. Use it
+  whenever a task breaks into steps.
+- **`block <slug> --on <other>`** — record that `slug` can't proceed until
+  `other` is done. `task ls` marks blocked tasks with what they're waiting on,
+  so nothing gets started out of order.
+
+Prefer several small linked tasks over one vague umbrella task: the links are
+cheap and make the plan readable.
+
+## Notes: keep the record
+
+`task note` is the durable memory of *why*, not just *what* — and it's what the
+SessionStart/Stop reminders and any memory write draw on. Add a note when:
+
+- you hit a **milestone** worth marking (a phase finished, a decision reached);
+- you make a **design decision** — record the rationale and the alternatives
+  you rejected, so it isn't re-litigated later;
+- something **fails** — what you tried and why it didn't work, so the next
+  attempt (yours after a compaction, or another agent's) doesn't repeat it.
+
+```
+llmenv task note <slug> "<what happened and why it matters>"
+```
+
+Notes survive `/clear`, `/compact`, and new sessions — the record that outlives
+your context window.
 
 ## Closing out
 
