@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - ReleaseDate
 
 ### Added
+
 - Add Opencode engine adapter (`src/adapter/opencode.rs`) — full
   feature parity with the Claude Code adapter: renders
   `opencode.json` (MCP, LSP, permissions, env vars), `AGENTS.md`
@@ -37,12 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   ([#694](https://github.com/phaedrus1992/llmenv/issues/694))
 
 ### Changed
+
 - **Breaking:** Remove the deprecated boolean `session_log` shape
   (`file: bool`, `transcript: bool`, `verbose: bool`). Configs
   using the old format must migrate to the per-sink mapping blocks
   introduced in 3.3.0 ([#744](https://github.com/phaedrus1992/llmenv/issues/744))
 
 ### Fixed
+
 - Fix opencode hook shim generating misleading warning when bundle
   path resolution fails — diagnostic now correctly describes stale
   or restructured bundles ([#769](https://github.com/phaedrus1992/llmenv/issues/769))
