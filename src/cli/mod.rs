@@ -660,7 +660,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Upgrade { check, track }) => {
             upgrade::run_upgrade(track, check)?;
         }
-        Some(Command::Task { command }) => run_task_command(command)?,
+        Some(Command::Task { command }) => run_task_command(command, cli.color.to_mode())?,
         Some(Command::Prune {
             all,
             older_than,
@@ -2699,6 +2699,7 @@ fn render_task_ls_human(
                 Some(id) => labels.get(id).cloned().unwrap_or_else(|| id.clone()),
                 None => "(no session)".to_string(),
             };
+            let header = style::sanitize_for_terminal(&header);
             out.push_str(&style::apply_style(&header, "bold", use_color));
             out.push('\n');
             current_group = Some(group);
@@ -2714,11 +2715,10 @@ fn render_task_ls_human(
 fn render_task_ls_row(row: &crate::task::DisplayRow, use_color: bool) -> String {
     let indent = "  ".repeat(row.depth + 1);
     let glyph = style::task_state_glyph(row.task.state, use_color);
+    // Pad to 7 = width of the longest `task_state_label` ("waiting").
     let label = format!("{:<7}", style::task_state_label(row.task.state));
-    let mut line = format!(
-        "{indent}{glyph} {label} {}  {}",
-        row.task.slug, row.task.title
-    );
+    let title = style::sanitize_for_terminal(&row.task.title);
+    let mut line = format!("{indent}{glyph} {label} {}  {title}", row.task.slug);
     if !row.task.blocked_on.is_empty() {
         line.push_str("  ");
         line.push_str(&style::blocked_annotation(&row.task.blocked_on, use_color));
@@ -2728,7 +2728,7 @@ fn render_task_ls_row(row: &crate::task::DisplayRow, use_color: bool) -> String 
 
 /// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
 /// `crate::task`, which owns the store logic.
-fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
+fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     match command {
         TaskCommand::Add {
@@ -2795,12 +2795,18 @@ fn run_task_command(command: TaskCommand) -> anyhow::Result<()> {
             }
             match format {
                 Some(TaskListFormat::Json) => {
-                    tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                    // Stable order even at second-precision timestamp ties, so
+                    // scripts parsing the JSON get deterministic output.
+                    tasks.sort_by(|a, b| {
+                        a.created_at
+                            .cmp(&b.created_at)
+                            .then_with(|| a.slug.cmp(&b.slug))
+                    });
                     println!("{}", serde_json::to_string(&tasks)?);
                 }
                 None => {
                     use std::io::IsTerminal;
-                    let use_color = should_use_color(None, std::io::stdout().is_terminal());
+                    let use_color = should_use_color(Some(color), std::io::stdout().is_terminal());
                     print!("{}", render_task_ls_human(&state_dir, tasks, use_color));
                 }
             }

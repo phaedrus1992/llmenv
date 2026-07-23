@@ -138,6 +138,17 @@ pub fn task_state_label(state: crate::task::TaskState) -> &'static str {
     }
 }
 
+/// Strip control characters (ANSI/CSI/OSC escapes, NUL, embedded newlines,
+/// etc.) from agent-authored text before it's rendered to a TTY. Task titles
+/// and session names come from `task add`/`session start` with attacker- or
+/// agent-influenced content, so a title carrying raw escapes could spoof
+/// `task ls` output or retitle the terminal window when a human runs it. Slugs
+/// (kebab-only) and the `--format json` path don't need this.
+#[must_use]
+pub fn sanitize_for_terminal(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Red `(blocked on: …)` annotation listing the slugs a task is blocked on.
 #[must_use]
 pub fn blocked_annotation(refs: &[String], use_color: bool) -> String {

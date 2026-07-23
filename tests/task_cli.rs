@@ -1084,3 +1084,35 @@ fn ls_json_applies_filters_only_when_passed() {
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["slug"], "wip-one");
 }
+
+#[test]
+fn ls_respects_color_flag_over_tty_detection() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Colored task"])
+        .assert()
+        .success();
+
+    // --color always forces ANSI even though stdout is piped (not a TTY).
+    let always = llmenv(dir.path())
+        .args(["--color", "always", "task", "ls"])
+        .output()
+        .unwrap();
+    let always = String::from_utf8(always.stdout).unwrap();
+    assert!(
+        always.contains('\u{1b}'),
+        "expected ANSI with --color always:\n{always:?}"
+    );
+
+    // --color never suppresses ANSI regardless of environment.
+    let never = llmenv(dir.path())
+        .args(["--color", "never", "task", "ls"])
+        .output()
+        .unwrap();
+    let never = String::from_utf8(never.stdout).unwrap();
+    assert!(
+        !never.contains('\u{1b}'),
+        "unexpected ANSI with --color never:\n{never:?}"
+    );
+}
