@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - The task-tracker Stop hook no longer re-injects the `waiting`-task FYI every turn; `waiting` tasks are now silent on Stop and surface only in the SessionStart reminder. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#933)
 - `llmenv task add` no longer warns "you have N task(s) already in progress" for `waiting` tasks — only genuinely `wip` tasks count, since starting new work alongside a task paused on external input is legitimate (#933)
+- The statusline `{pr}` widget no longer renders empty under engines (like Claude Code) that don't send a `pr` field — it now self-resolves via `gh pr view` for the current branch, cached briefly so it doesn't shell out on every render. See [`statusline:`](https://phaedrus1992.github.io/llmenv/docs/configuration) (#950)
 
 ## [3.6.0] - 2026-07-22
 

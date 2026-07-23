@@ -2,8 +2,12 @@
 //! returns a string — no side effects, no shared mutable state (per the
 //! design doc's "Separation of concerns").
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EngineData {
@@ -30,7 +34,7 @@ pub struct Worktree {
     pub branch: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct PrInfo {
     pub number: Option<u64>,
     pub url: Option<String>,
@@ -453,15 +457,12 @@ fn render_cache_usage(
 /// 3. Git, derived from `workspace.current_dir` — Claude Code sends **no
 ///    branch** for a regular repo (confirmed against the statusline docs), so
 ///    llmenv reads it from `.git/HEAD` rather than leaving the widget blank.
-fn render_branch(
-    data: &EngineData,
-    cfg: Option<&llmenv_config::WidgetConfig>,
-    use_color: bool,
-) -> String {
-    // Precedence: stdin `branch.name` (forward-compat) → `worktree.branch`
-    // (Claude Code worktree sessions) → git from `workspace.current_dir`.
-    let name = data
-        .branch
+///
+/// Shared by [`render_branch`] and the `pr` widget's self-resolving fallback
+/// ([`resolve_pr`]) — both need "what branch is this" before they can do
+/// anything engine-independent.
+fn resolve_branch_name(data: &EngineData) -> Option<String> {
+    data.branch
         .as_ref()
         .and_then(|b| b.name.clone())
         .or_else(|| data.worktree.as_ref().and_then(|w| w.branch.clone()))
@@ -470,8 +471,15 @@ fn render_branch(
                 .as_ref()
                 .and_then(|w| w.current_dir.as_deref())
                 .and_then(|dir| git_branch(Path::new(dir)))
-        });
-    let Some(name) = name else {
+        })
+}
+
+fn render_branch(
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
+    let Some(name) = resolve_branch_name(data) else {
         return String::new();
     };
     let name = super::sanitize(&name); // untrusted (stdin / git ref)
@@ -530,9 +538,19 @@ fn render_pr(
     cfg: Option<&llmenv_config::WidgetConfig>,
     use_color: bool,
 ) -> String {
-    let Some(pr) = &data.pr else {
+    let Some(pr) = resolve_pr(data) else {
         return String::new();
     };
+    render_pr_info(&pr, cfg, use_color)
+}
+
+/// Format an already-resolved [`PrInfo`] (engine-supplied or derived via
+/// [`resolve_pr`]) into the `pr` widget's text.
+fn render_pr_info(
+    pr: &PrInfo,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+) -> String {
     let Some(number) = pr.number else {
         return String::new();
     };
@@ -566,12 +584,231 @@ fn render_pr(
 }
 
 /// Color the `pr` widget by review state: approved green, changes-requested
-/// red, pending yellow; `None` (default `bold magenta`) otherwise.
+/// red, pending yellow; `None` (default `bold magenta`) otherwise. Uses the
+/// same resolved PR (engine-supplied or derived) as [`render_pr`], so a
+/// derived PR's review state colors the widget exactly like an engine-supplied
+/// one would.
 fn pr_review_style(data: &EngineData) -> Option<&'static str> {
-    match data.pr.as_ref().and_then(|p| p.review_state.as_deref())? {
+    match resolve_pr(data)?.review_state.as_deref()? {
         "approved" => Some("green"),
         "changes_requested" => Some("red"),
         "pending" | "review_required" => Some("yellow"),
+        _ => None,
+    }
+}
+
+/// How long a derived `gh pr view` result stays cached before re-querying.
+/// The statusline re-execs on every prompt — without this, an unauthenticated
+/// or slow `gh` would run (or fail) on every single render. 60s is short
+/// enough that opening/merging/closing a PR shows up within about a prompt or
+/// two, long enough that a fast typing session doesn't repeat the subprocess
+/// call on every render.
+const PR_CACHE_TTL_SECS: i64 = 60;
+
+/// How long to wait for `gh pr view` before giving up and degrading to no PR.
+/// `gh` hits the GitHub API over the network; a stalled connection must not
+/// hang the statusline render. 3s is generous for a healthy connection and
+/// short enough that a bad one doesn't stall the prompt.
+const GH_PR_TIMEOUT_SECS: u64 = 3;
+
+/// Resolve the PR for the current session, in precedence order:
+///
+/// 1. `data.pr` from stdin — forward-compat if an engine ever sends one
+///    directly (Claude Code currently doesn't).
+/// 2. Derived via `gh pr view` for the branch [`resolve_branch_name`]
+///    resolves, cached with a short TTL (see [`PR_CACHE_TTL_SECS`]) keyed by
+///    (repo directory, branch) in the same state directory the `usage_5h`/
+///    `usage_7d` delta tracking uses.
+///
+/// `None` whenever the derivation can't proceed or `gh` can't produce a PR —
+/// no workspace directory, no resolvable branch (including detached HEAD),
+/// `gh` not installed, not authenticated, no remote, or no open PR for the
+/// branch. All of these degrade silently, matching [`render_branch`]'s
+/// fallback.
+fn resolve_pr(data: &EngineData) -> Option<PrInfo> {
+    resolve_pr_with(data, "gh")
+}
+
+/// [`resolve_pr`]'s backend, with the `gh` binary injectable so tests can
+/// exercise the full engine-precedence + branch-resolution + derivation chain
+/// against a fake `gh` instead of the real one.
+fn resolve_pr_with(data: &EngineData, gh_cmd: &str) -> Option<PrInfo> {
+    if let Some(pr) = &data.pr {
+        return Some(pr.clone());
+    }
+    let dir = data
+        .workspace
+        .as_ref()
+        .and_then(|w| w.current_dir.as_deref())?;
+    let branch = resolve_branch_name(data)?;
+    derive_pr(
+        gh_cmd,
+        Path::new(dir),
+        &branch,
+        usage_state_dir().as_deref(),
+        now_unix(),
+    )
+}
+
+/// Cache-then-derive backend for [`resolve_pr`]'s fallback path, fully
+/// parameterized (`gh_cmd`, `cache_dir`, `now`) so tests can substitute a
+/// fake `gh` and a controlled clock without touching the real network or
+/// process environment.
+fn derive_pr(
+    gh_cmd: &str,
+    repo_dir: &Path,
+    branch: &str,
+    cache_dir: Option<&Path>,
+    now: i64,
+) -> Option<PrInfo> {
+    let cache_path = cache_dir.map(|dir| pr_cache_path(dir, repo_dir, branch));
+    if let Some(path) = &cache_path
+        && let Some(cached) = read_pr_cache(path, now)
+    {
+        return cached;
+    }
+    let fresh = gh_pr_view(gh_cmd, repo_dir, branch);
+    if let Some(path) = &cache_path {
+        write_pr_cache(path, &fresh, now);
+    }
+    fresh
+}
+
+/// Cache file path for a (repo, branch) key: `<cache_dir>/pr-cache-<hash>`.
+/// Hashed (not a sanitized literal path) so an arbitrary repo directory or
+/// branch name — including one with path separators or other characters
+/// invalid in a filename — always yields a safe, collision-resistant filename.
+fn pr_cache_path(cache_dir: &Path, repo_dir: &Path, branch: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(repo_dir.to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(branch.as_bytes());
+    cache_dir.join(format!("pr-cache-{}", hex::encode(hasher.finalize())))
+}
+
+/// On-disk shape of a cached PR lookup: the Unix timestamp it was written and
+/// the result (`None` caches "no open PR" too, so that outcome doesn't
+/// retrigger a `gh` call on every render either).
+#[derive(Serialize, Deserialize)]
+struct PrCacheEntry {
+    ts: i64,
+    pr: Option<PrInfo>,
+}
+
+/// Read a still-fresh cache entry. `None` for a missing/corrupt file *or* an
+/// expired one — both cases fall through to a fresh `gh` call in [`derive_pr`].
+fn read_pr_cache(path: &Path, now: i64) -> Option<Option<PrInfo>> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let entry: PrCacheEntry = serde_json::from_str(&contents).ok()?;
+    (now - entry.ts < PR_CACHE_TTL_SECS).then_some(entry.pr)
+}
+
+/// Best-effort cache write: a failed write only means the next render
+/// re-queries `gh`, not a broken widget.
+fn write_pr_cache(path: &Path, pr: &Option<PrInfo>, now: i64) {
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::debug!("pr cache dir unavailable (non-fatal): {e}");
+        return;
+    }
+    let Ok(json) = serde_json::to_string(&PrCacheEntry {
+        ts: now,
+        pr: pr.clone(),
+    }) else {
+        return;
+    };
+    if let Err(e) = std::fs::write(path, json) {
+        tracing::debug!("pr cache write failed (non-fatal): {e}");
+    }
+}
+
+/// Shell out to `gh pr view <branch> --json number,url,reviewDecision` in
+/// `repo_dir` and parse the result. `None` on any failure — spawn error (`gh`
+/// not installed), non-zero exit (not authenticated, no remote, no open PR
+/// for the branch), a timeout ([`GH_PR_TIMEOUT_SECS`]), or unparseable
+/// output. Every failure is logged at `debug` only — this must degrade
+/// silently to the statusline, never print or panic.
+fn gh_pr_view(gh_cmd: &str, repo_dir: &Path, branch: &str) -> Option<PrInfo> {
+    let mut cmd = Command::new(gh_cmd);
+    cmd.args(["pr", "view", branch, "--json", "number,url,reviewDecision"])
+        .current_dir(repo_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::debug!("gh pr view: spawn failed (non-fatal): {e}");
+            return None;
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(GH_PR_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = Vec::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_end(&mut stdout);
+                }
+                if !status.success() {
+                    tracing::debug!("gh pr view exited {status} (non-fatal)");
+                    return None;
+                }
+                return parse_gh_pr_view(&stdout);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::debug!("gh pr view timed out after {GH_PR_TIMEOUT_SECS}s (non-fatal)");
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                tracing::debug!("gh pr view: wait failed (non-fatal): {e}");
+                return None;
+            }
+        }
+    }
+}
+
+/// Parse `gh pr view --json number,url,reviewDecision`'s stdout into a
+/// [`PrInfo`], mapping `gh`'s `reviewDecision` (`"APPROVED"` /
+/// `"CHANGES_REQUESTED"` / `"REVIEW_REQUIRED"` / absent) onto the same
+/// lowercase `review_state` values an engine-supplied PR uses.
+fn parse_gh_pr_view(stdout: &[u8]) -> Option<PrInfo> {
+    #[derive(Deserialize)]
+    struct GhPrView {
+        number: Option<u64>,
+        url: Option<String>,
+        #[serde(rename = "reviewDecision")]
+        review_decision: Option<String>,
+    }
+    let parsed: GhPrView = serde_json::from_slice(stdout).ok()?;
+    parsed.number?;
+    Some(PrInfo {
+        number: parsed.number,
+        url: parsed.url,
+        review_state: parsed
+            .review_decision
+            .as_deref()
+            .and_then(map_review_decision)
+            .map(str::to_string),
+    })
+}
+
+/// Map `gh`'s `reviewDecision` enum values to the lowercase snake_case
+/// `review_state` strings [`pr_review_style`] matches on. `gh` never emits a
+/// `"pending"` decision (that value exists only for a possible future
+/// engine-supplied `review_state`) — an absent/unrecognized decision maps to
+/// `None`, rendering with the widget's default color.
+fn map_review_decision(decision: &str) -> Option<&'static str> {
+    match decision {
+        "APPROVED" => Some("approved"),
+        "CHANGES_REQUESTED" => Some("changes_requested"),
+        "REVIEW_REQUIRED" => Some("review_required"),
         _ => None,
     }
 }
@@ -1272,6 +1509,284 @@ mod tests {
             out.contains("\x1b]8;;https://github.com/o/r/pull/5"),
             "expected branch→PR link: {out:?}"
         );
+    }
+
+    #[test]
+    fn resolve_pr_none_when_no_workspace_dir() {
+        assert_eq!(resolve_pr(&EngineData::default()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_pr_with_derives_pr_when_engine_sends_none() {
+        // Full chain: no engine-supplied `pr`, but a resolvable branch and a
+        // (faked) gh that has an open PR for it.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo_dir.path().join(".git")).unwrap();
+        std::fs::write(
+            repo_dir.path().join(".git").join("HEAD"),
+            "ref: refs/heads/feat/x\n",
+        )
+        .unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\necho '{\"number\":834,\"url\":\"https://github.com/o/r/pull/834\",\"reviewDecision\":\"APPROVED\"}'\n",
+        );
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "workspace": { "current_dir": repo_dir.path().to_string_lossy() }
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_pr_with(&data, &gh.to_string_lossy()),
+            Some(PrInfo {
+                number: Some(834),
+                url: Some("https://github.com/o/r/pull/834".to_string()),
+                review_state: Some("approved".to_string()),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_pr_prefers_engine_supplied_over_derivation() {
+        // gh would return a *different* PR (#999) if invoked — proves the
+        // engine-supplied value wins without ever consulting derivation.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".git").join("HEAD"),
+            "ref: refs/heads/feat/x\n",
+        )
+        .unwrap();
+        let gh = write_fake_gh(bin_dir.path(), "#!/bin/sh\necho '{\"number\":999}'\n");
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "workspace": { "current_dir": dir.path().to_string_lossy() },
+            "pr": { "number": 5, "url": "https://github.com/o/r/pull/5" }
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_pr_with(&data, &gh.to_string_lossy()),
+            Some(PrInfo {
+                number: Some(5),
+                url: Some("https://github.com/o/r/pull/5".to_string()),
+                review_state: None,
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_pr_none_for_detached_head_never_calls_gh() {
+        // A gh that would succeed if invoked — proves detached HEAD stops
+        // derivation before ever reaching gh, not that gh happened to fail.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".git").join("HEAD"),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+        )
+        .unwrap();
+        let gh = write_fake_gh(bin_dir.path(), "#!/bin/sh\necho '{\"number\":1}'\n");
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "workspace": { "current_dir": dir.path().to_string_lossy() }
+        }))
+        .unwrap();
+        assert_eq!(resolve_pr_with(&data, &gh.to_string_lossy()), None);
+    }
+
+    #[test]
+    fn map_review_decision_matches_gh_values() {
+        assert_eq!(map_review_decision("APPROVED"), Some("approved"));
+        assert_eq!(
+            map_review_decision("CHANGES_REQUESTED"),
+            Some("changes_requested")
+        );
+        assert_eq!(
+            map_review_decision("REVIEW_REQUIRED"),
+            Some("review_required")
+        );
+        assert_eq!(map_review_decision(""), None);
+        assert_eq!(map_review_decision("SOMETHING_NEW"), None);
+    }
+
+    #[test]
+    fn parse_gh_pr_view_maps_fields_and_review_decision() {
+        let json = br#"{"number":834,"url":"https://github.com/o/r/pull/834","reviewDecision":"APPROVED"}"#;
+        assert_eq!(
+            parse_gh_pr_view(json),
+            Some(PrInfo {
+                number: Some(834),
+                url: Some("https://github.com/o/r/pull/834".to_string()),
+                review_state: Some("approved".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_gh_pr_view_none_for_missing_number_or_malformed_json() {
+        assert_eq!(parse_gh_pr_view(br#"{"url":"https://x"}"#), None);
+        assert_eq!(parse_gh_pr_view(b"not json"), None);
+    }
+
+    #[cfg(unix)]
+    fn write_fake_gh(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("gh");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_pr_view_derived_path_renders_expected_widget() {
+        // Full derived-PR chain: a fake `gh` stands in for the real
+        // subprocess, its JSON is parsed into a PrInfo, and that PrInfo
+        // renders exactly like an engine-supplied one would.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\necho '{\"number\":834,\"url\":\"https://github.com/o/r/pull/834\",\"reviewDecision\":\"CHANGES_REQUESTED\"}'\n",
+        );
+        let pr = gh_pr_view(&gh.to_string_lossy(), repo_dir.path(), "feat/x").unwrap();
+        assert_eq!(pr.number, Some(834));
+        assert_eq!(render_pr_info(&pr, None, false), "#834");
+        assert_eq!(pr.review_state.as_deref(), Some("changes_requested"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_pr_view_none_when_binary_missing() {
+        // Simulates "gh isn't installed": spawn itself fails.
+        let repo_dir = tempfile::tempdir().unwrap();
+        let missing = repo_dir.path().join("no-such-gh-binary");
+        assert_eq!(
+            gh_pr_view(&missing.to_string_lossy(), repo_dir.path(), "feat/x"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_pr_view_none_when_gh_exits_nonzero() {
+        // Covers "not authenticated" / "no remote" / "no open PR" — from
+        // gh_pr_view's perspective these are indistinguishable: a non-zero
+        // exit degrades silently to no PR either way.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\necho 'no pull requests found' >&2\nexit 1\n",
+        );
+        assert_eq!(
+            gh_pr_view(&gh.to_string_lossy(), repo_dir.path(), "feat/x"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derive_pr_cache_miss_calls_gh_and_writes_cache() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\necho called >> gh-calls.log\necho '{\"number\":1,\"url\":null,\"reviewDecision\":null}'\n",
+        );
+        let pr = derive_pr(
+            &gh.to_string_lossy(),
+            repo_dir.path(),
+            "feat/x",
+            Some(cache_dir.path()),
+            1_000,
+        );
+        assert_eq!(pr.as_ref().and_then(|p| p.number), Some(1));
+        let calls = std::fs::read_to_string(repo_dir.path().join("gh-calls.log")).unwrap();
+        assert_eq!(calls.lines().count(), 1, "gh should be called on a miss");
+        let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
+        assert!(cache_path.exists(), "cache miss must write a cache entry");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derive_pr_cache_hit_skips_gh() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\necho called >> gh-calls.log\necho '{\"number\":1,\"url\":null,\"reviewDecision\":null}'\n",
+        );
+        let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
+        write_pr_cache(
+            &cache_path,
+            &Some(PrInfo {
+                number: Some(999),
+                url: None,
+                review_state: None,
+            }),
+            1_000,
+        );
+        // now=1_030 is within the 60s TTL of the ts=1_000 cache entry.
+        let pr = derive_pr(
+            &gh.to_string_lossy(),
+            repo_dir.path(),
+            "feat/x",
+            Some(cache_dir.path()),
+            1_030,
+        );
+        assert_eq!(
+            pr.as_ref().and_then(|p| p.number),
+            Some(999),
+            "must return the cached value, not gh's"
+        );
+        assert!(
+            !repo_dir.path().join("gh-calls.log").exists(),
+            "a cache hit must not shell out to gh"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derive_pr_cache_expiry_calls_gh_again() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\necho called >> gh-calls.log\necho '{\"number\":2,\"url\":null,\"reviewDecision\":null}'\n",
+        );
+        let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
+        write_pr_cache(
+            &cache_path,
+            &Some(PrInfo {
+                number: Some(999),
+                url: None,
+                review_state: None,
+            }),
+            1_000,
+        );
+        // now=1_000+PR_CACHE_TTL_SECS+1 is past the cache entry's TTL.
+        let now = 1_000 + PR_CACHE_TTL_SECS + 1;
+        let pr = derive_pr(
+            &gh.to_string_lossy(),
+            repo_dir.path(),
+            "feat/x",
+            Some(cache_dir.path()),
+            now,
+        );
+        assert_eq!(
+            pr.as_ref().and_then(|p| p.number),
+            Some(2),
+            "expiry must re-query gh, not reuse the stale cache"
+        );
+        let calls = std::fs::read_to_string(repo_dir.path().join("gh-calls.log")).unwrap();
+        assert_eq!(calls.lines().count(), 1, "gh should be called after expiry");
     }
 
     #[test]
