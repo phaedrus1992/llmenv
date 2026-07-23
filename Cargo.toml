@@ -54,7 +54,7 @@ llmenv-paths = { path = "crates/llmenv-paths", version = "3.6.0" }
 llmenv-git = { path = "crates/llmenv-git", version = "3.6.0" }
 llmenv-config = { path = "crates/llmenv-config", version = "3.6.0" }
 llmenv-util = { path = "crates/llmenv-util", version = "3.6.0" }
-clap = { version = "=4.6.3", features = ["derive"] }
+clap = { version = "=4.6.4", features = ["derive"] }
 clap_complete = "=4.6.7"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
@@ -71,7 +71,7 @@ hex = "=0.4.3"
 humantime = "=2.4.0"
 jiff = { version = "=0.2.34", default-features = false, features = ["std"] }
 anstyle = "=1.0.14"
-glob = "=0.3.3"
+glob = "=0.3.4"
 globset = { workspace = true }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
 url = "=2.5.8"
