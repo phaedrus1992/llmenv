@@ -1190,6 +1190,15 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // destructive tools were blocked outright, even though the feature was
     // enabled. Default policy: read-only/mutation -> allow, destructive -> ask;
     // overridable per feature via `mcp_permissions`.
+    // Hoisted once and shared by both tier-permission call sites below (NLL
+    // ends this borrow at the last `apply_mcp_tier_permissions` call, so the
+    // `dedup(&mut allow/ask/deny)` calls after still borrow independently).
+    let mut buckets = PermBuckets {
+        allow: &mut allow,
+        ask: &mut ask,
+        deny: &mut deny,
+    };
+
     if manifest.plugins.iter().any(|p| {
         p.marketplace == crate::config::CONTEXT_MODE_MARKETPLACE
             && p.plugin == crate::config::CONTEXT_MODE_PLUGIN
@@ -1201,11 +1210,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .and_then(|f| f.context_mode.as_ref())
             .and_then(|c| c.mcp_permissions.as_ref());
         apply_mcp_tier_permissions(
-            &mut PermBuckets {
-                allow: &mut allow,
-                ask: &mut ask,
-                deny: &mut deny,
-            },
+            &mut buckets,
             crate::config::CONTEXT_MODE_MCP_PREFIX,
             [
                 (CTX_READ_ONLY, McpTier::ReadOnly),
@@ -1218,11 +1223,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 
     if let Some(icm) = manifest.mcps.iter().find(|m| m.name == MEMORY_MCP_NAME) {
         apply_mcp_tier_permissions(
-            &mut PermBuckets {
-                allow: &mut allow,
-                ask: &mut ask,
-                deny: &mut deny,
-            },
+            &mut buckets,
             ICM_MCP_PREFIX,
             [
                 (ICM_READ_ONLY, McpTier::ReadOnly),
