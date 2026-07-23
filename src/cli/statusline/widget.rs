@@ -699,7 +699,13 @@ struct PrCacheEntry {
 /// expired one — both cases fall through to a fresh `gh` call in [`derive_pr`].
 fn read_pr_cache(path: &Path, now: i64) -> Option<Option<PrInfo>> {
     let contents = std::fs::read_to_string(path).ok()?;
-    let entry: PrCacheEntry = serde_json::from_str(&contents).ok()?;
+    let entry: PrCacheEntry = match serde_json::from_str(&contents) {
+        Ok(entry) => entry,
+        Err(e) => {
+            tracing::debug!("pr cache: unparseable entry (non-fatal, treating as miss): {e}");
+            return None;
+        }
+    };
     (now - entry.ts < PR_CACHE_TTL_SECS).then_some(entry.pr)
 }
 
@@ -751,8 +757,14 @@ fn gh_pr_view(gh_cmd: &str, repo_dir: &Path, branch: &str) -> Option<PrInfo> {
                 if let Some(mut out) = child.stdout.take() {
                     let _ = out.read_to_end(&mut stdout);
                 }
+                let mut stderr = Vec::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_end(&mut stderr);
+                }
                 if !status.success() {
-                    tracing::debug!("gh pr view exited {status} (non-fatal)");
+                    let first_line = String::from_utf8_lossy(&stderr);
+                    let first_line = first_line.lines().next().unwrap_or("");
+                    tracing::debug!("gh pr view exited {status} (non-fatal): {first_line}");
                     return None;
                 }
                 return parse_gh_pr_view(&stdout);
@@ -786,7 +798,13 @@ fn parse_gh_pr_view(stdout: &[u8]) -> Option<PrInfo> {
         #[serde(rename = "reviewDecision")]
         review_decision: Option<String>,
     }
-    let parsed: GhPrView = serde_json::from_slice(stdout).ok()?;
+    let parsed: GhPrView = match serde_json::from_slice(stdout) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            tracing::debug!("gh pr view: unparseable JSON (non-fatal): {e}");
+            return None;
+        }
+    };
     parsed.number?;
     Some(PrInfo {
         number: parsed.number,

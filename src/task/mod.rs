@@ -698,8 +698,12 @@ pub fn stop_hook_reminder(state_dir: &Path) -> String {
 /// [`session_finish_reminders`]'s own project resolution. Empty when the
 /// project can't be resolved (degrades silently — hooks must never error).
 fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
-    let Ok(project) = project::current_tag() else {
-        return Vec::new();
+    let project = match project::current_tag() {
+        Ok(project) => project,
+        Err(e) => {
+            tracing::debug!("project::current_tag failed (non-fatal): {e}");
+            return Vec::new();
+        }
     };
     let session_ids: std::collections::HashSet<String> = session::list_sessions(state_dir)
         .into_iter()
@@ -726,8 +730,12 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
 /// out. Empty string if none qualify, or on any internal error (degrades
 /// silently — hooks must never block the agent).
 fn session_finish_reminders(state_dir: &Path) -> String {
-    let Ok(project) = project::current_tag() else {
-        return String::new();
+    let project = match project::current_tag() {
+        Ok(project) => project,
+        Err(e) => {
+            tracing::debug!("project::current_tag failed (non-fatal): {e}");
+            return String::new();
+        }
     };
     let mut lines = Vec::new();
     for session in session::open_sessions_for_project(state_dir, &project) {
