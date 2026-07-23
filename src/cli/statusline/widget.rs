@@ -729,7 +729,7 @@ fn write_pr_cache(path: &Path, pr: &Option<PrInfo>, now: i64) {
     }
 }
 
-/// Shell out to `gh pr view <branch> --json number,url,reviewDecision` in
+/// Shell out to `gh pr view --json number,url,reviewDecision -- <branch>` in
 /// `repo_dir` and parse the result. `None` on any failure — spawn error (`gh`
 /// not installed), non-zero exit (not authenticated, no remote, no open PR
 /// for the branch), a timeout ([`GH_PR_TIMEOUT_SECS`]), or unparseable
@@ -737,11 +737,23 @@ fn write_pr_cache(path: &Path, pr: &Option<PrInfo>, now: i64) {
 /// silently to the statusline, never print or panic.
 fn gh_pr_view(gh_cmd: &str, repo_dir: &Path, branch: &str) -> Option<PrInfo> {
     let mut cmd = Command::new(gh_cmd);
-    cmd.args(["pr", "view", branch, "--json", "number,url,reviewDecision"])
-        .current_dir(repo_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    // `--` terminates option parsing so `branch` (derived from git state) is
+    // always read as the positional argument, never as a `gh` flag — a
+    // branch named e.g. `--json` (or starting with `-`) can't be
+    // misinterpreted. The flags stay before `--`; only the positional goes
+    // after it.
+    cmd.args([
+        "pr",
+        "view",
+        "--json",
+        "number,url,reviewDecision",
+        "--",
+        branch,
+    ])
+    .current_dir(repo_dir)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -1674,6 +1686,34 @@ mod tests {
         assert_eq!(pr.number, Some(834));
         assert_eq!(render_pr_info(&pr, None, false), "#834");
         assert_eq!(pr.review_state.as_deref(), Some("changes_requested"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_pr_view_terminates_options_before_a_dash_prefixed_branch() {
+        // A branch name that looks like a flag (e.g. from a hostile or
+        // unusual git ref) must land after `--` so `gh` reads it as the
+        // positional branch argument, not an option. The fake `gh` dumps its
+        // argv so the test can check `--` immediately precedes the branch.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > argv.log\necho '{\"number\":1}'\n",
+        );
+        let branch = "--json";
+        let _ = gh_pr_view(&gh.to_string_lossy(), repo_dir.path(), branch);
+        let argv = std::fs::read_to_string(repo_dir.path().join("argv.log")).unwrap();
+        let args: Vec<&str> = argv.lines().collect();
+        let dash_dash = args
+            .iter()
+            .position(|a| *a == "--")
+            .expect("no -- terminator in argv");
+        assert_eq!(
+            args.get(dash_dash + 1),
+            Some(&branch),
+            "branch must immediately follow -- in argv: {args:?}"
+        );
     }
 
     #[cfg(unix)]
