@@ -241,7 +241,7 @@ pub fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<Displa
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    keys.sort_by(|a, b| session_rank(a, session_priority).cmp(&session_rank(b, session_priority)));
+    keys.sort_by_key(|k| session_rank(k, session_priority));
 
     let mut rows = Vec::new();
     for key in &keys {
