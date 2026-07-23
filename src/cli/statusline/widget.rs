@@ -687,7 +687,7 @@ fn pr_cache_path(cache_dir: &Path, repo_dir: &Path, branch: &str) -> PathBuf {
 /// On-disk shape of a cached PR lookup: the Unix timestamp it was written and
 /// the result (`None` caches "no open PR" too, so that outcome doesn't
 /// retrigger a `gh` call on every render either).
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PrCacheEntry {
     ts: i64,
     pr: Option<PrInfo>,
@@ -2409,6 +2409,20 @@ mod tests {
         ("peak", &["symbol", "label", "countdown"]),
     ];
 
+    /// Arbitrary [`PrInfo`], for the JSON-roundtrip and cache-entry proptests.
+    fn arb_pr_info() -> impl Strategy<Value = PrInfo> {
+        (
+            prop::option::of(any::<u64>()),
+            prop::option::of(".{0,80}"),
+            prop::option::of(".{0,40}"),
+        )
+            .prop_map(|(number, url, review_state)| PrInfo {
+                number,
+                url,
+                review_state,
+            })
+    }
+
     proptest! {
         /// The format string comes from user config — untrusted-ish. No
         /// arbitrary text should ever make a `.replace()` chain panic.
@@ -2631,6 +2645,56 @@ mod tests {
             let once = clean_display_name(&display_name);
             let twice = clean_display_name(once);
             prop_assert_eq!(once, twice);
+        }
+
+        /// `PrInfo` round-trips through JSON exactly — both the on-disk cache
+        /// entry and any future engine-supplied `pr` field depend on this.
+        #[test]
+        fn pr_info_json_roundtrips(pr in arb_pr_info()) {
+            let json = serde_json::to_string(&pr).unwrap();
+            let parsed: PrInfo = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(pr, parsed);
+        }
+
+        /// `PrCacheEntry` (the on-disk cache record) round-trips through JSON
+        /// exactly, matching `read_pr_cache`/`write_pr_cache`'s expectations.
+        #[test]
+        fn pr_cache_entry_json_roundtrips(ts in any::<i64>(), pr in prop::option::of(arb_pr_info())) {
+            let entry = PrCacheEntry { ts, pr };
+            let json = serde_json::to_string(&entry).unwrap();
+            let parsed: PrCacheEntry = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(entry, parsed);
+        }
+
+        /// `pr_cache_path` is deterministic: the same (cache_dir, repo_dir,
+        /// branch) key always yields the same path.
+        #[test]
+        fn pr_cache_path_is_deterministic(
+            repo in "[a-zA-Z0-9/_.-]{1,40}",
+            branch in "[a-zA-Z0-9/_.-]{1,40}",
+        ) {
+            let cache_dir = Path::new("/tmp/llmenv-pr-cache");
+            let repo_dir = PathBuf::from(format!("/{repo}"));
+            let a = pr_cache_path(cache_dir, &repo_dir, &branch);
+            let b = pr_cache_path(cache_dir, &repo_dir, &branch);
+            prop_assert_eq!(a, b);
+        }
+
+        /// Distinct `(repo_dir, branch)` pairs must produce distinct cache
+        /// filenames — otherwise two unrelated repos/branches could collide
+        /// on (and clobber, or read) each other's cached PR.
+        #[test]
+        fn pr_cache_path_distinct_for_distinct_keys(
+            repo1 in "[a-zA-Z0-9/_.-]{1,40}",
+            branch1 in "[a-zA-Z0-9/_.-]{1,40}",
+            repo2 in "[a-zA-Z0-9/_.-]{1,40}",
+            branch2 in "[a-zA-Z0-9/_.-]{1,40}",
+        ) {
+            prop_assume!(repo1 != repo2 || branch1 != branch2);
+            let cache_dir = Path::new("/tmp/llmenv-pr-cache");
+            let a = pr_cache_path(cache_dir, &PathBuf::from(format!("/{repo1}")), &branch1);
+            let b = pr_cache_path(cache_dir, &PathBuf::from(format!("/{repo2}")), &branch2);
+            prop_assert_ne!(a, b);
         }
     }
 }
