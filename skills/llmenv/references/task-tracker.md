@@ -7,7 +7,7 @@ TODOs.
 
 Every task belongs to a session. Before your first `task add`:
 
-```
+```text
 llmenv task session start "<name>" [--description "<text>"]
 ```
 
@@ -28,7 +28,7 @@ start` errors and lists them (id, name, description, idle time). Pick one:
 
 ## Adding and working tasks
 
-```
+```text
 llmenv task add "<title>"                # auto-tags to your one open session
 llmenv task add "<title>" --session <id> # explicit, if you have 2+ open
 llmenv task start <slug>                 # claim it
@@ -55,7 +55,7 @@ Don't let tasks land flat and unrelated — the links are what let the tracker
 drive ordered work and stay legible after a compaction. Reach for them by
 default, not just for big epics.
 
-```
+```text
 llmenv task add "<title>" --parent <slug>   # ordered sub-task
 llmenv task block <slug> --on <other-slug>  # real dependency
 ```
@@ -82,7 +82,7 @@ SessionStart/Stop reminders and any memory write draw on. Add a note when:
 - something **fails** — what you tried and why it didn't work, so the next
   attempt (yours after a compaction, or another agent's) doesn't repeat it.
 
-```
+```text
 llmenv task note <slug> "<what happened and why it matters>"
 ```
 
@@ -91,7 +91,7 @@ your context window.
 
 ## Closing out
 
-```
+```text
 llmenv task session finish [<id>]   # auto-resolves if exactly one is open
 llmenv task session show [<id>]
 ```
