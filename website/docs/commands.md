@@ -305,9 +305,16 @@ unambiguous prefix of one.
   behavior is to wait for the reason to clear, not keep retrying (and
   re-injecting the FYI every turn would just nag about a state meant to be
   quiet).
-- `task ls [--format json] [--session <id>]` — list tasks; `--format json`
-  for machine-readable output; `--session <id>` narrows to one session's
-  tasks (unfiltered by default).
+- `task ls [--format json] [--session <id>] [--state <s>]... [--hide-done]` —
+  list tasks. The default human output groups tasks by session (current-project
+  sessions first), indents subtasks under their parent, prefixes each row with a
+  state glyph + label (`open`/`wip`/`waiting`/`done`), and annotates blocked
+  tasks with their `blocked_on` refs; color follows TTY / `NO_COLOR` /
+  `CLICOLOR_FORCE`. `--format json` is the stable machine format. `--session
+  <id>` narrows to one session; `--state <open|wip|waiting|done>` (repeatable)
+  keeps only those states; `--hide-done` (alias `--active`) drops completed
+  tasks. Filters compose with each other and with `--session`, and apply to the
+  JSON output too when passed.
 - `task show <id>` — full detail for one task (notes, parent, blockers).
 - `task note <id> [text]` — append a progress note; reads from stdin if
   `text` is omitted.
