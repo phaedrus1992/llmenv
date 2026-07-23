@@ -332,7 +332,10 @@ a `.llmenv.yaml` marker, else the cwd). The task/session store stays global
 per engine — `task ls` shows everything — but `task add`'s auto-resolve and
 `session start`'s checkpoint scope to the current project's open sessions, so
 two windows in the same project can't silently collide. Any number of
-sessions may be open at once.
+sessions may be open at once. The SessionStart/Stop `wip`/`waiting` lifecycle
+reminders (below) are likewise scoped to the current project's sessions, so a
+task from a different project sharing this store never nags the wrong
+project's hook.
 
 - `task session start [name] [--description <text>] [--resume <id> |
   --replace | --new]` — start a session for the current project. Pass

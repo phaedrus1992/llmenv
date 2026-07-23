@@ -4,10 +4,11 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::{
-    Bundle, Cache, Capabilities, ContentMatch, ContentScope, Features, Hook, HookHandler,
-    HookHandlerKind, HostEntry, HostMatch, HostScope, Marketplace, McpServer, McpTransport, Memory,
-    NativePermissionRules, NetworkMatch, NetworkScope, PermissionMode, Permissions,
-    PluginCollection, Scopes, Throttle, UserMatch, UserScope,
+    Bundle, Cache, Capabilities, ContentMatch, ContentScope, ContextMode, Features, Hook,
+    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, Marketplace,
+    McpPermissionAction, McpPermissions, McpServer, McpTransport, Memory, NativePermissionRules,
+    NetworkMatch, NetworkScope, PermissionMode, Permissions, PluginCollection, Scopes, Throttle,
+    UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -1037,6 +1038,45 @@ mod tests {
         }
     }
 
+    fn arb_mcp_permission_action() -> impl Strategy<Value = McpPermissionAction> {
+        prop_oneof![
+            Just(McpPermissionAction::Allow),
+            Just(McpPermissionAction::Ask),
+            Just(McpPermissionAction::Deny),
+        ]
+    }
+
+    fn arb_mcp_permissions() -> impl Strategy<Value = McpPermissions> {
+        (
+            prop::option::of(arb_mcp_permission_action()),
+            prop::option::of(arb_mcp_permission_action()),
+            prop::option::of(arb_mcp_permission_action()),
+        )
+            .prop_map(|(read_only, mutation, destructive)| McpPermissions {
+                read_only,
+                mutation,
+                destructive,
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn mcp_permissions_yaml_roundtrips(perms in arb_mcp_permissions()) {
+            let yaml = serde_yaml::to_string(&perms).unwrap();
+            let parsed: McpPermissions = serde_yaml::from_str(&yaml).unwrap();
+            prop_assert_eq!(perms, parsed);
+        }
+    }
+
+    fn arb_context_mode() -> impl Strategy<Value = ContextMode> {
+        (any::<bool>(), prop::option::of(arb_mcp_permissions())).prop_map(
+            |(enabled, mcp_permissions)| ContextMode {
+                enabled,
+                mcp_permissions,
+            },
+        )
+    }
+
     fn arb_memory() -> impl Strategy<Value = Memory> {
         (
             arb_string(),
@@ -1048,9 +1088,10 @@ mod tests {
             ],
             prop::collection::vec(arb_string(), 0..3),
             prop::collection::vec(arb_string(), 0..3),
+            prop::option::of(arb_mcp_permissions()),
         )
             .prop_map(
-                |(server_host, port, listen_host, when, default_topics)| Memory {
+                |(server_host, port, listen_host, when, default_topics, mcp_permissions)| Memory {
                     server_host,
                     port,
                     listen_host,
@@ -1062,6 +1103,7 @@ mod tests {
                     retention: None,
                     auto_prune: false,
                     consolidation: None,
+                    mcp_permissions,
                 },
             )
     }
@@ -1163,18 +1205,23 @@ mod tests {
                     })
                     .collect()
             }),
-            prop::collection::vec(arb_plugin_collection(), 0..3).prop_map(
-                |cs: Vec<PluginCollection>| {
-                    cs.into_iter()
-                        .enumerate()
-                        .map(|(i, mut c)| {
-                            c.name = format!("col-{i}-{}", c.name);
-                            c
-                        })
-                        .collect()
-                },
+            (
+                prop::collection::vec(arb_plugin_collection(), 0..3).prop_map(
+                    |cs: Vec<PluginCollection>| {
+                        cs.into_iter()
+                            .enumerate()
+                            .map(|(i, mut c)| {
+                                c.name = format!("col-{i}-{}", c.name);
+                                c
+                            })
+                            .collect()
+                    },
+                ),
+                prop::option::of(arb_session_log()),
+                // Nested (rather than a 13th top-level tuple element) —
+                // proptest's tuple `Strategy` impl tops out at arity 12.
+                prop::option::of(arb_context_mode()),
             ),
-            prop::option::of(arb_session_log()),
         )
             .prop_map(
                 |(
@@ -1188,8 +1235,7 @@ mod tests {
                     host,
                     capabilities,
                     marketplace,
-                    plugin_collection,
-                    session_log,
+                    (plugin_collection, session_log, context_mode),
                 )| {
                     Config {
                         disabled_engines: vec![],
@@ -1207,13 +1253,14 @@ mod tests {
                         features: if memory.is_empty()
                             && throttle.is_empty()
                             && codebase_memory.is_empty()
+                            && context_mode.is_none()
                         {
                             None
                         } else {
                             Some(Features {
                                 memory,
                                 throttle,
-                                context_mode: None,
+                                context_mode,
                                 upgrade: None,
                                 read_once: None,
                                 slippage: None,
@@ -1660,6 +1707,7 @@ mod tests {
             consolidation: None,
             retention: None,
             auto_prune: false,
+            mcp_permissions: None,
         }
     }
 

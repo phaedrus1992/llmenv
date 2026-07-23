@@ -354,6 +354,7 @@ features:
 | `listen_host` | no | IP address to listen on (`127.0.0.1` for loopback, `0.0.0.0` for all interfaces); default `127.0.0.1` |
 | `when` | no | Activation tags |
 | `default_topics` | no | Documentation only; preserved across round-trips |
+| `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
@@ -462,9 +463,48 @@ features:
     enabled: true
 ```
 
-| Field     | Required | Notes                                                           |
-|-----------|----------|-----------------------------------------------------------------|
-| `enabled` | no       | Default `false`. Set to `true` to activate the built-in plugin. |
+| Field             | Required | Notes                                                                                                                   |
+|-------------------|----------|-------------------------------------------------------------------------------------------------------------------------|
+| `enabled`         | no       | Default `false`. Set to `true` to activate the built-in plugin.                                                         |
+| `mcp_permissions` | no       | Per-tier permission override for the context-mode MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
+
+### `features.mcp_permissions:`
+
+Every feature-enabled MCP (`features.context_mode` and each `features.memory`
+entry) exposes its tools in three risk tiers — read-only, mutation, and
+destructive — and llmenv renders one coherent `allow`/`ask`/`deny` policy for
+them, never a wildcard grant that a more specific rule can silently shadow.
+The default policy:
+
+| Tier          | Action  |
+|---------------|---------|
+| `read_only`   | `allow` |
+| `mutation`    | `allow` |
+| `destructive` | `ask`   |
+
+Override any tier by nesting `mcp_permissions` under the feature. Each key
+takes `allow`, `ask`, or `deny`; an omitted key falls back to the default
+above.
+
+```yaml
+features:
+  context_mode:
+    enabled: true
+    mcp_permissions:
+      read_only: allow
+      mutation: allow
+      destructive: ask   # or "deny" to block destructive tools outright
+
+  memory:
+    - server_host: home-server
+      port: 9092
+      when: [home]
+      mcp_permissions:
+        destructive: deny
+```
+
+An unrecognized value (anything other than `allow`/`ask`/`deny`) is a config
+error at load time.
 
 ## `session_log:`
 
@@ -693,6 +733,16 @@ Notes:
   URL is present and color is on, `pr` (and the `branch` widget) render as an
   OSC 8 terminal hyperlink to the PR — the URL is validated (`http`/`https`
   only, no control chars) before it's embedded.
+- `pr` self-resolves when the engine sends none — Claude Code never sends a
+  `pr` field on stdin, so llmenv runs `gh pr view` for the branch `branch`
+  resolves (git, from the working directory) and maps `gh`'s `reviewDecision`
+  onto the same `review_state` values above. The result is cached for 60
+  seconds (keyed by repo + branch, alongside the `usage_5h`/`usage_7d` state
+  under `$CLAUDE_CONFIG_DIR/statusline-state/`) so the statusline — re-rendered
+  on every prompt — doesn't shell out on every render. `pr` renders empty,
+  with no error output, whenever `gh` isn't installed, isn't authenticated,
+  there's no remote, HEAD is detached, or there's no open PR for the branch.
+  An engine-supplied `pr` always takes precedence over the derived one.
 - Untrusted free-text (model/folder/branch names, PR URL, tags, throttle
   backend) is stripped of control characters at the point each widget
   interpolates it, so a hostile directory or branch name can't inject terminal

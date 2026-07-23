@@ -870,6 +870,7 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
                 headers: BTreeMap::new(),
                 timeout: None,
                 disabled_tools: vec![],
+                mcp_permissions: None,
             },
             ResolvedMcp {
                 name: "icm".into(),
@@ -880,6 +881,7 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
                 headers: BTreeMap::new(),
                 timeout: None,
                 disabled_tools: vec![],
+                mcp_permissions: None,
             },
         ],
         ..Default::default()
@@ -1022,6 +1024,7 @@ fn global_and_bundle_mcps_both_render() {
         headers: BTreeMap::new(),
         timeout: None,
         disabled_tools: vec![],
+        mcp_permissions: None,
     });
     manifest.mcps.extend(
         resolve_bundle_mcps(&manifest.capabilities.mcp, &BTreeSet::new())
@@ -1076,6 +1079,7 @@ fn native_mcp_enabled_list_is_dropped() {
             headers: BTreeMap::new(),
             timeout: None,
             disabled_tools: vec![],
+            mcp_permissions: None,
         }],
         capabilities: llmenv::config::Capabilities {
             native_mcp,
@@ -1118,6 +1122,7 @@ fn auto_memory_disabled_when_icm_active() {
             headers: BTreeMap::new(),
             timeout: None,
             disabled_tools: vec![],
+            mcp_permissions: None,
         }],
         ..Default::default()
     };
@@ -1187,6 +1192,7 @@ fn user_native_auto_memory_overrides_icm_default() {
             headers: BTreeMap::new(),
             timeout: None,
             disabled_tools: vec![],
+            mcp_permissions: None,
         }],
         native,
         ..Default::default()
