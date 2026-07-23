@@ -1201,9 +1201,11 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .and_then(|f| f.context_mode.as_ref())
             .and_then(|c| c.mcp_permissions.as_ref());
         apply_mcp_tier_permissions(
-            &mut allow,
-            &mut ask,
-            &mut deny,
+            &mut PermBuckets {
+                allow: &mut allow,
+                ask: &mut ask,
+                deny: &mut deny,
+            },
             crate::config::CONTEXT_MODE_MCP_PREFIX,
             [
                 (CTX_READ_ONLY, McpTier::ReadOnly),
@@ -1216,9 +1218,11 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 
     if let Some(icm) = manifest.mcps.iter().find(|m| m.name == MEMORY_MCP_NAME) {
         apply_mcp_tier_permissions(
-            &mut allow,
-            &mut ask,
-            &mut deny,
+            &mut PermBuckets {
+                allow: &mut allow,
+                ask: &mut ask,
+                deny: &mut deny,
+            },
             ICM_MCP_PREFIX,
             [
                 (ICM_READ_ONLY, McpTier::ReadOnly),
@@ -1772,15 +1776,22 @@ fn default_mcp_tier_action(tier: McpTier) -> PermissionAction {
     }
 }
 
-/// Render one feature-enabled MCP's tool tiers into the `allow`/`ask`/`deny`
-/// rule vectors, applying the default tier policy or the feature's
-/// `mcp_permissions` override. Each tool lands in exactly one action bucket —
-/// unlike the #490 wildcard this replaces, there is no broader rule left to
-/// conflict with these specific ones.
+/// The three permission rule vectors rendered into `settings.json`, bundled
+/// so functions that touch all three (like [`apply_mcp_tier_permissions`])
+/// stay under the project's 5-positional-param limit.
+struct PermBuckets<'a> {
+    allow: &'a mut Vec<String>,
+    ask: &'a mut Vec<String>,
+    deny: &'a mut Vec<String>,
+}
+
+/// Render one feature-enabled MCP's tool tiers into `buckets`, applying the
+/// default tier policy or the feature's `mcp_permissions` override. Each tool
+/// lands in exactly one action bucket — unlike the #490 wildcard this
+/// replaces, there is no broader rule left to conflict with these specific
+/// ones.
 fn apply_mcp_tier_permissions(
-    allow: &mut Vec<String>,
-    ask: &mut Vec<String>,
-    deny: &mut Vec<String>,
+    buckets: &mut PermBuckets<'_>,
     prefix: &str,
     tiers: [(&[&str], McpTier); 3],
     overrides: Option<&crate::config::McpPermissions>,
@@ -1798,9 +1809,9 @@ fn apply_mcp_tier_permissions(
             None => default_mcp_tier_action(tier),
         };
         let bucket = match action {
-            PermissionAction::Allow => &mut *allow,
-            PermissionAction::Ask => &mut *ask,
-            PermissionAction::Deny => &mut *deny,
+            PermissionAction::Allow => &mut *buckets.allow,
+            PermissionAction::Ask => &mut *buckets.ask,
+            PermissionAction::Deny => &mut *buckets.deny,
         };
         bucket.extend(tools.iter().map(|t| format!("{prefix}{t}")));
     }
@@ -2607,6 +2618,77 @@ mod tests {
             assert!(
                 !ask.contains(&rule.as_str()),
                 "{rule} must not also be in ask: {ask:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn icm_mcp_permissions_override_destructive_to_deny() {
+        // #946: `features.memory[].mcp_permissions` overrides the default
+        // policy per tier for ICM — mirrors
+        // `mcp_permissions_override_destructive_to_deny` (context-mode path)
+        // but resolves the `Memory` entry through the real `resolve_mcps`
+        // pipeline (Memory -> resolve_memory -> ResolvedMcp) for a genuine
+        // end-to-end check, rather than hand-constructing the resolved struct.
+        let host = std::collections::BTreeMap::from([(
+            "still".to_string(),
+            crate::config::HostEntry {
+                addr: "still.local".into(),
+            },
+        )]);
+        let memory = crate::config::Memory {
+            server_host: "still".into(),
+            port: 7878,
+            listen_host: "127.0.0.1".into(),
+            when: vec!["home".into()],
+            default_topics: vec![],
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
+            consolidation: None,
+            mcp_permissions: Some(crate::config::McpPermissions {
+                read_only: None,
+                mutation: None,
+                destructive: Some(crate::config::McpPermissionAction::Deny),
+            }),
+        };
+        let active_tags = std::collections::BTreeSet::from(["home".to_string()]);
+        let resolved = crate::mcp::resolve::resolve_mcps(&[], &[memory], &host, &active_tags)
+            .expect("memory entry with intersecting tags must resolve");
+        assert_eq!(
+            resolved.len(),
+            1,
+            "expected exactly the ICM entry to resolve"
+        );
+
+        let manifest = crate::merge::MergedManifest {
+            mcps: resolved,
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let ask = perm_action(&settings, "ask");
+        let deny = perm_action(&settings, "deny");
+
+        for tool in ICM_DESTRUCTIVE {
+            let rule = format!("mcp__icm__{tool}");
+            assert!(
+                deny.contains(&rule.as_str()),
+                "{rule} missing from deny: {deny:?}"
+            );
+            assert!(
+                !ask.contains(&rule.as_str()),
+                "{rule} must not also be in ask: {ask:?}"
+            );
+        }
+        // Read-only/mutation are untouched by the override — still default allow.
+        for tool in ICM_READ_ONLY.iter().chain(ICM_MUTATION) {
+            let rule = format!("mcp__icm__{tool}");
+            assert!(
+                allow.contains(&rule.as_str()),
+                "{rule} missing from allow: {allow:?}"
             );
         }
     }
