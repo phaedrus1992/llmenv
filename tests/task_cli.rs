@@ -711,6 +711,39 @@ fn wait_marks_task_waiting_and_notes_reason() {
 }
 
 #[test]
+fn add_guard_warns_for_wip_but_not_waiting_tasks() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "First task"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "first-task"])
+        .assert()
+        .success();
+
+    // A `wip` task should trip the "already in progress" guard.
+    llmenv(dir.path())
+        .args(["task", "add", "Second task"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("already in progress"));
+
+    // Park it as `waiting` — the agent may legitimately start new work while
+    // it's paused on something external, so the guard must stay silent (#933).
+    llmenv(dir.path())
+        .args(["task", "wait", "first-task", "blocked on review"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Third task"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("already in progress").not());
+}
+
+#[test]
 fn wait_on_done_task_fails() {
     let dir = TempDir::new().unwrap();
     start_session(dir.path(), "sprint");
