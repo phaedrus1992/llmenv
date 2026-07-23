@@ -74,6 +74,18 @@
       "automerge": false,
     },
     {
+      // A Cargo `"1.2.3"` requirement is a caret range (`^1.2.3`), so
+      // `cargo update` pulls the newest in-range patch — which under
+      // `minimumReleaseAge` can be newer than the version Renovate targets,
+      // making the Cargo.lock artifact update disagree with the PR and fail
+      // (renovate #41624: Renovate can't force an exact version to the package
+      // manager). Pinning to exact versions keeps cargo and Renovate in
+      // agreement and matches this repo's no-caret convention.
+      "description": "Pin Rust crate versions to exact",
+      "matchManagers": ["cargo"],
+      "rangeStrategy": "pin",
+    },
+    {
       "description": "All non-major Rust crate updates in one PR",
       "matchManagers": ["cargo"],
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
