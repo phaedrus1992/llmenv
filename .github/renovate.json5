@@ -7,12 +7,19 @@
   ],
 
   // General settings
-  "dependencyDashboard": false,
+  // Enabled for visibility into per-base pending/rate-limited updates — which
+  // updates are queued behind the concurrency limit, and why they're held.
+  "dependencyDashboard": true,
   "assigneesFromCodeOwners": true,
   // Track main plus every maintained release line (release/1.x, release/2.x, …).
   // Anchored so it excludes the transient forward-merge/release/* branches.
   "baseBranchPatterns": ["main", "/^release\\/.+$/"],
-  "branchConcurrentLimit": 5,
+  // `main` and every active release/* line each raise their own grouped PRs
+  // (rust crates, npm, actions, pre-commit, …). This limit is global, not
+  // per-base, so the old cap of 5 let a full main queue starve the release
+  // branches entirely. Raise both limits to fit multiple active base lines.
+  "branchConcurrentLimit": 20,
+  "prConcurrentLimit": 20,
   "internalChecksFilter": "strict",
   "labels": ["dependencies"],
   "minimumReleaseAge": "3 days",
