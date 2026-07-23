@@ -354,6 +354,7 @@ features:
 | `listen_host` | no | IP address to listen on (`127.0.0.1` for loopback, `0.0.0.0` for all interfaces); default `127.0.0.1` |
 | `when` | no | Activation tags |
 | `default_topics` | no | Documentation only; preserved across round-trips |
+| `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
@@ -462,9 +463,48 @@ features:
     enabled: true
 ```
 
-| Field     | Required | Notes                                                           |
-|-----------|----------|-----------------------------------------------------------------|
-| `enabled` | no       | Default `false`. Set to `true` to activate the built-in plugin. |
+| Field             | Required | Notes                                                                                                                   |
+|-------------------|----------|-------------------------------------------------------------------------------------------------------------------------|
+| `enabled`         | no       | Default `false`. Set to `true` to activate the built-in plugin.                                                         |
+| `mcp_permissions` | no       | Per-tier permission override for the context-mode MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
+
+### `features.mcp_permissions:`
+
+Every feature-enabled MCP (`features.context_mode` and each `features.memory`
+entry) exposes its tools in three risk tiers — read-only, mutation, and
+destructive — and llmenv renders one coherent `allow`/`ask`/`deny` policy for
+them, never a wildcard grant that a more specific rule can silently shadow.
+The default policy:
+
+| Tier          | Action  |
+|---------------|---------|
+| `read_only`   | `allow` |
+| `mutation`    | `allow` |
+| `destructive` | `ask`   |
+
+Override any tier by nesting `mcp_permissions` under the feature. Each key
+takes `allow`, `ask`, or `deny`; an omitted key falls back to the default
+above.
+
+```yaml
+features:
+  context_mode:
+    enabled: true
+    mcp_permissions:
+      read_only: allow
+      mutation: allow
+      destructive: ask   # or "deny" to block destructive tools outright
+
+  memory:
+    - server_host: home-server
+      port: 9092
+      when: [home]
+      mcp_permissions:
+        destructive: deny
+```
+
+An unrecognized value (anything other than `allow`/`ask`/`deny`) is a config
+error at load time.
 
 ## `session_log:`
 

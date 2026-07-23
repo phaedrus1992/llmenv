@@ -27,14 +27,15 @@ pub use schema::{
     Bundle, Cache, Capabilities, CodebaseMemory, Config, ConsolidationBackend, ConsolidationConfig,
     ContentMatch, ContentScope, ContextMode, EnvVar, Features, FileSinkConfig, HashingMode, Hook,
     HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, IconSet, ImportanceLevel,
-    InitConfig, LogLevel, LspServer, Marketplace, MarketplaceSource, McpServer, McpTransport,
-    Memory, MemoryType, ModelCost, ModelProvider, ModelRef, ModelSource, NativePermissionRules,
-    NetworkMatch, NetworkScope, OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule,
-    Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, Scopes,
-    SessionLog, SkillSource, SlippageControl, StateConfig, StateTool, StatuslineConfig,
-    StatuslineStyle, TaskTracker, Throttle, TranscriptSinkConfig, UpgradeConfig, UpgradeTrack,
-    UserMatch, UserScope, WidgetConfig, classify_source, github_owner_repo,
-    is_reserved_official_marketplace, split_plugin_ref,
+    InitConfig, LogLevel, LspServer, Marketplace, MarketplaceSource, McpPermissionAction,
+    McpPermissions, McpServer, McpTransport, Memory, MemoryType, ModelCost, ModelProvider,
+    ModelRef, ModelSource, NativePermissionRules, NetworkMatch, NetworkScope,
+    OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
+    RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, Scopes, SessionLog, SkillSource,
+    SlippageControl, StateConfig, StateTool, StatuslineConfig, StatuslineStyle, TaskTracker,
+    Throttle, TranscriptSinkConfig, UpgradeConfig, UpgradeTrack, UserMatch, UserScope,
+    WidgetConfig, classify_source, github_owner_repo, is_reserved_official_marketplace,
+    split_plugin_ref,
 };
 pub use template::generate_template;
 pub use validate::{
@@ -181,5 +182,58 @@ mod tests {
     #[should_panic(expected = "expanded path")]
     fn load_rejects_tilde_path_in_debug() {
         let _ = Config::load(Path::new("~/.config/llmenv/config.yaml"));
+    }
+
+    #[test]
+    fn mcp_permissions_rejects_invalid_action_value() {
+        // #946: `features.<name>.mcp_permissions` values must be one of
+        // allow|ask|deny — anything else is a clear config error.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        std::fs::write(
+            &p,
+            "cache: {}\n\
+             features:\n\
+             \x20\x20context_mode:\n\
+             \x20\x20\x20\x20enabled: true\n\
+             \x20\x20\x20\x20mcp_permissions:\n\
+             \x20\x20\x20\x20\x20\x20read_only: maybe\n",
+        )
+        .unwrap();
+        let err = Config::load(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("failed to parse config file"),
+            "expected a config-parse error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mcp_permissions_accepts_valid_action_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        std::fs::write(
+            &p,
+            "cache: {}\n\
+             features:\n\
+             \x20\x20context_mode:\n\
+             \x20\x20\x20\x20enabled: true\n\
+             \x20\x20\x20\x20mcp_permissions:\n\
+             \x20\x20\x20\x20\x20\x20read_only: allow\n\
+             \x20\x20\x20\x20\x20\x20mutation: allow\n\
+             \x20\x20\x20\x20\x20\x20destructive: deny\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&p).unwrap();
+        let perms = cfg
+            .features
+            .unwrap()
+            .context_mode
+            .unwrap()
+            .mcp_permissions
+            .unwrap();
+        assert_eq!(perms.read_only, Some(McpPermissionAction::Allow));
+        assert_eq!(perms.mutation, Some(McpPermissionAction::Allow));
+        assert_eq!(perms.destructive, Some(McpPermissionAction::Deny));
     }
 }

@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::config::{CodebaseMemory, HostEntry, McpServer, McpTransport, Memory};
+use crate::config::{CodebaseMemory, HostEntry, McpPermissions, McpServer, McpTransport, Memory};
 
 use tracing::debug;
 
@@ -36,6 +36,11 @@ pub struct ResolvedMcp {
     /// Tool names the engine should hide for this server.
     /// #506: consumed by CrushAdapter when it renders its MCP config.
     pub disabled_tools: Vec<String>,
+    /// Per-tier permission override (#946), carried through from the source
+    /// `features.memory` entry for the ICM MCP. `None` for every other server
+    /// (plain `mcp` entries and `codebase_memory` have no tier constants to
+    /// override). Consumed by `ClaudeCodeAdapter` only today.
+    pub mcp_permissions: Option<McpPermissions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +197,7 @@ fn resolve_static(m: &McpServer) -> Result<ResolvedMcp, ResolveError> {
         headers: m.headers.clone(),
         timeout: m.timeout,
         disabled_tools: m.disabled_tools.clone(),
+        mcp_permissions: None,
     })
 }
 
@@ -216,6 +222,9 @@ fn resolve_memory(
         headers: std::collections::BTreeMap::new(),
         timeout: None,
         disabled_tools: vec![],
+        // #946: threads the per-tier override through so the adapter can
+        // apply it when rendering ICM's tool-tier permissions.
+        mcp_permissions: mem.mcp_permissions.clone(),
     })
 }
 
@@ -264,6 +273,7 @@ pub fn resolve_codebase_memory(
         headers: BTreeMap::new(),
         timeout: None,
         disabled_tools: vec![],
+        mcp_permissions: None,
     }
 }
 
@@ -379,6 +389,7 @@ mod tests {
             retention: None,
             auto_prune: false,
             consolidation: None,
+            mcp_permissions: None,
         }
     }
 
@@ -482,6 +493,7 @@ mod tests {
             retention: None,
             auto_prune: false,
             consolidation: None,
+            mcp_permissions: None,
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
@@ -495,6 +507,7 @@ mod tests {
             retention: None,
             auto_prune: false,
             consolidation: None,
+            mcp_permissions: None,
         };
         let mut host = base_host();
         host.insert(
@@ -525,6 +538,7 @@ mod tests {
             retention: None,
             auto_prune: false,
             consolidation: None,
+            mcp_permissions: None,
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
@@ -538,6 +552,7 @@ mod tests {
             retention: None,
             auto_prune: false,
             consolidation: None,
+            mcp_permissions: None,
         };
         let mut host = base_host();
         host.insert(

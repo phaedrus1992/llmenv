@@ -292,6 +292,7 @@ fn o3_true_conflict_same_identity_different_content_mcp_servers() {
                 headers: Default::default(),
                 timeout: None,
                 disabled_tools: vec![],
+                mcp_permissions: None,
             },
             ResolvedMcp {
                 name: "my-server".into(),
@@ -303,6 +304,7 @@ fn o3_true_conflict_same_identity_different_content_mcp_servers() {
                 headers: Default::default(),
                 timeout: None,
                 disabled_tools: vec![],
+                mcp_permissions: None,
             },
         ],
         ..Default::default()
@@ -768,6 +770,7 @@ fn d3_mcp_servers_present_when_resolved() {
             headers: Default::default(),
             timeout: None,
             disabled_tools: vec![],
+            mcp_permissions: None,
         }],
         ..Default::default()
     };

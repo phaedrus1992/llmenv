@@ -1062,6 +1062,7 @@ mod tests {
                     retention: None,
                     auto_prune: false,
                     consolidation: None,
+                    mcp_permissions: None,
                 },
             )
     }
@@ -1660,6 +1661,7 @@ mod tests {
             consolidation: None,
             retention: None,
             auto_prune: false,
+            mcp_permissions: None,
         }
     }
 

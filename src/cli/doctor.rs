@@ -1165,6 +1165,7 @@ mod tests {
                     retention: None,
                     auto_prune: false,
                     consolidation: None,
+                    mcp_permissions: None,
                 }],
                 ..Features::default()
             }),
@@ -1195,6 +1196,7 @@ mod tests {
                     retention: None,
                     auto_prune: false,
                     consolidation: None,
+                    mcp_permissions: None,
                 }],
                 ..Features::default()
             }),

@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `llmenv task ls` human output now groups tasks by session (current-project sessions first), indents subtasks under their parent, prefixes each row with a state glyph + label, and annotates blocked tasks with their `blocked_on` refs; new `--state <open|wip|waiting|done>` (repeatable) and `--hide-done`/`--active` filters compose with `--session` and apply to `--format json` too. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#926)
+- Feature-enabled MCPs (`features.context_mode`, `features.memory`) now take a `mcp_permissions` override to customize the read-only/mutation/destructive tier→action policy per feature. See [`mcp_permissions`](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmcp_permissions) (#946)
 
 ### Changed
 
@@ -34,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv task add` no longer warns "you have N task(s) already in progress" for `waiting` tasks — only genuinely `wip` tasks count, since starting new work alongside a task paused on external input is legitimate (#933)
 - The statusline `{pr}` widget no longer renders empty under engines (like Claude Code) that don't send a `pr` field — it now self-resolves via `gh pr view` for the current branch, cached briefly so it doesn't shell out on every render. See [`statusline:`](https://phaedrus1992.github.io/llmenv/docs/configuration) (#950)
 - The task-tracker Stop hook's `wip` reminder and SessionStart's `waiting` reminder no longer leak across projects sharing the same task store — a `wip`/`waiting` task from one project no longer nags a hook running in another. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#949)
+- Feature-enabled MCP permissions (context-mode, ICM) no longer conflict between a wildcard allow and per-tool tier rules; Claude Code's `deny > ask > allow` precedence was silently shadowing the wildcard, so mutation tools prompted on every call and destructive tools were blocked outright even with the feature enabled. Default policy now allows read-only and mutation tools without prompting, and asks before destructive ones. See [`mcp_permissions`](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmcp_permissions) (#946)
 
 ## [3.6.0] - 2026-07-22
 

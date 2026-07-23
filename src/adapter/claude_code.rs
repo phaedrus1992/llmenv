@@ -87,9 +87,11 @@ const SESSION_LOG_HOOK_EVENTS: &[(&str, &str)] = &[
     ("pre_compact", "PreCompact"),
 ];
 
-/// #694 (backport): Built-in ICM MCP server tool tiers.
-/// Read-only tools → allow, mutation tools → ask, destructive → deny.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
+/// #694/#946: Built-in ICM MCP server tool tiers, rendered by
+/// `apply_mcp_tier_permissions` into one coherent allow/ask/deny policy (no
+/// wildcard/tier conflict — see #946). Default policy: read-only and
+/// mutation tools → allow, destructive → ask; overridable per feature via
+/// `features.memory[].mcp_permissions`.
 const ICM_READ_ONLY: &[&str] = &[
     "icm_wake_up",
     "icm_memory_recall",
@@ -109,7 +111,6 @@ const ICM_READ_ONLY: &[&str] = &[
     "icm_memoir_list",
 ];
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
 const ICM_MUTATION: &[&str] = &[
     "icm_memory_store",
     "icm_memory_update",
@@ -126,14 +127,12 @@ const ICM_MUTATION: &[&str] = &[
     "icm_memoir_link",
 ];
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
 const ICM_DESTRUCTIVE: &[&str] = &["icm_memory_forget", "icm_memory_forget_topic"];
 
-/// Backport: Built-in context-mode MCP plugin tool tiers (without common prefix).
-#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
+/// #946: Built-in context-mode MCP plugin tool tiers (without the common
+/// `CONTEXT_MODE_MCP_PREFIX`), rendered the same way as the ICM tiers above.
 const CTX_READ_ONLY: &[&str] = &["ctx_search", "ctx_stats", "ctx_doctor", "ctx_insight"];
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
 const CTX_MUTATION: &[&str] = &[
     "ctx_index",
     "ctx_execute",
@@ -142,8 +141,11 @@ const CTX_MUTATION: &[&str] = &[
     "ctx_batch_execute",
 ];
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by coverage tests"))]
 const CTX_DESTRUCTIVE: &[&str] = &["ctx_purge", "ctx_upgrade"];
+
+/// Claude Code's MCP tool-name prefix for the ICM memory server
+/// (`mcp__<server>__<tool>`, server name = [`MEMORY_MCP_NAME`]).
+const ICM_MCP_PREFIX: &str = "mcp__icm__";
 
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
@@ -1177,17 +1179,59 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     };
 
     let mut allow = render_action(&perms.allow, &native_allow, PermissionAction::Allow);
-    let ask = render_action(&perms.ask, &native_ask_rules, PermissionAction::Ask);
-    let deny = render_action(&perms.deny, &native_deny_rules, PermissionAction::Deny);
+    let mut ask = render_action(&perms.ask, &native_ask_rules, PermissionAction::Ask);
+    let mut deny = render_action(&perms.deny, &native_deny_rules, PermissionAction::Deny);
 
-    // #490: Grant wildcard MCP permission for the context-mode built-in plugin.
+    // #946: feature-enabled MCP tool tiers render into exactly one action per
+    // tool (allow/ask/deny), replacing #490's wildcard allow. The wildcard used
+    // to coexist with these same tier-based ask/deny entries; because Claude
+    // Code resolves deny > ask > allow (specific beats wildcard), the wildcard
+    // was silently shadowed — mutation tools prompted every call and
+    // destructive tools were blocked outright, even though the feature was
+    // enabled. Default policy: read-only/mutation -> allow, destructive -> ask;
+    // overridable per feature via `mcp_permissions`.
     if manifest.plugins.iter().any(|p| {
         p.marketplace == crate::config::CONTEXT_MODE_MARKETPLACE
             && p.plugin == crate::config::CONTEXT_MODE_PLUGIN
     }) {
-        allow.push(format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX));
-        dedup(&mut allow);
+        let overrides = manifest
+            .capabilities
+            .features
+            .as_ref()
+            .and_then(|f| f.context_mode.as_ref())
+            .and_then(|c| c.mcp_permissions.as_ref());
+        apply_mcp_tier_permissions(
+            &mut allow,
+            &mut ask,
+            &mut deny,
+            crate::config::CONTEXT_MODE_MCP_PREFIX,
+            [
+                (CTX_READ_ONLY, McpTier::ReadOnly),
+                (CTX_MUTATION, McpTier::Mutation),
+                (CTX_DESTRUCTIVE, McpTier::Destructive),
+            ],
+            overrides,
+        );
     }
+
+    if let Some(icm) = manifest.mcps.iter().find(|m| m.name == MEMORY_MCP_NAME) {
+        apply_mcp_tier_permissions(
+            &mut allow,
+            &mut ask,
+            &mut deny,
+            ICM_MCP_PREFIX,
+            [
+                (ICM_READ_ONLY, McpTier::ReadOnly),
+                (ICM_MUTATION, McpTier::Mutation),
+                (ICM_DESTRUCTIVE, McpTier::Destructive),
+            ],
+            icm.mcp_permissions.as_ref(),
+        );
+    }
+
+    dedup(&mut allow);
+    dedup(&mut ask);
+    dedup(&mut deny);
 
     let has_perms =
         !allow.is_empty() || !ask.is_empty() || !deny.is_empty() || perms.default_mode.is_some();
@@ -1709,6 +1753,59 @@ enum PermissionAction {
     Deny,
 }
 
+/// Which of the three tool-risk tiers (#946) a feature-enabled MCP's tool
+/// belongs to. Read-only/mutation default to `allow`; destructive defaults to
+/// `ask` — see [`apply_mcp_tier_permissions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpTier {
+    ReadOnly,
+    Mutation,
+    Destructive,
+}
+
+/// Default action for a tier absent an override: read-only and mutation tools
+/// are usable without prompting; destructive tools ask first (#946).
+fn default_mcp_tier_action(tier: McpTier) -> PermissionAction {
+    match tier {
+        McpTier::ReadOnly | McpTier::Mutation => PermissionAction::Allow,
+        McpTier::Destructive => PermissionAction::Ask,
+    }
+}
+
+/// Render one feature-enabled MCP's tool tiers into the `allow`/`ask`/`deny`
+/// rule vectors, applying the default tier policy or the feature's
+/// `mcp_permissions` override. Each tool lands in exactly one action bucket —
+/// unlike the #490 wildcard this replaces, there is no broader rule left to
+/// conflict with these specific ones.
+fn apply_mcp_tier_permissions(
+    allow: &mut Vec<String>,
+    ask: &mut Vec<String>,
+    deny: &mut Vec<String>,
+    prefix: &str,
+    tiers: [(&[&str], McpTier); 3],
+    overrides: Option<&crate::config::McpPermissions>,
+) {
+    for (tools, tier) in tiers {
+        let configured = overrides.and_then(|o| match tier {
+            McpTier::ReadOnly => o.read_only,
+            McpTier::Mutation => o.mutation,
+            McpTier::Destructive => o.destructive,
+        });
+        let action = match configured {
+            Some(crate::config::McpPermissionAction::Allow) => PermissionAction::Allow,
+            Some(crate::config::McpPermissionAction::Ask) => PermissionAction::Ask,
+            Some(crate::config::McpPermissionAction::Deny) => PermissionAction::Deny,
+            None => default_mcp_tier_action(tier),
+        };
+        let bucket = match action {
+            PermissionAction::Allow => &mut *allow,
+            PermissionAction::Ask => &mut *ask,
+            PermissionAction::Deny => &mut *deny,
+        };
+        bucket.extend(tools.iter().map(|t| format!("{prefix}{t}")));
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -2190,6 +2287,7 @@ mod tests {
                 headers: std::collections::BTreeMap::new(),
                 timeout: None,
                 disabled_tools: vec![],
+                mcp_permissions: None,
             });
         let remote =
             ("[a-z][a-z0-9_-]{0,10}", "https://[a-z]{1,8}\\.test").prop_map(|(name, url)| {
@@ -2202,6 +2300,7 @@ mod tests {
                     headers: std::collections::BTreeMap::new(),
                     timeout: None,
                     disabled_tools: vec![],
+                    mcp_permissions: None,
                 }
             });
         prop_oneof![stdio, remote]
@@ -2298,6 +2397,7 @@ mod tests {
                 headers: Default::default(),
                 timeout: None,
                 disabled_tools: vec![],
+                mcp_permissions: None,
             }],
             ..Default::default()
         };
@@ -2359,11 +2459,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn context_mode_plugin_grants_mcp_permission() {
-        // #490: context-mode plugin in manifest → permissions.allow must contain
-        // the wildcard for its MCP server.
-        let manifest = crate::merge::MergedManifest {
+    /// String array at `settings.json`'s `permissions.<action>`, empty when absent.
+    fn perm_action<'a>(settings: &'a serde_json::Value, action: &str) -> Vec<&'a str> {
+        settings
+            .get("permissions")
+            .and_then(|p| p.get(action))
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    fn context_mode_plugin_manifest() -> crate::merge::MergedManifest {
+        crate::merge::MergedManifest {
             plugins: vec![crate::plugins::resolve::ResolvedPlugin {
                 marketplace: crate::config::CONTEXT_MODE_MARKETPLACE.into(),
                 plugin: crate::config::CONTEXT_MODE_PLUGIN.into(),
@@ -2372,13 +2479,43 @@ mod tests {
                 git_commit_sha: None,
             }],
             ..Default::default()
-        };
-        let settings = render_settings_for_test(&manifest);
-        let allow = settings["permissions"]["allow"].as_array().unwrap();
-        let expected = format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX);
+        }
+    }
+
+    #[test]
+    fn context_mode_plugin_default_policy_no_wildcard_conflict() {
+        // #946: the #490 wildcard allow used to coexist with tier-based
+        // ask/deny entries, which Claude Code's deny > ask > allow precedence
+        // silently shadowed. Default policy: read-only and mutation tools
+        // allow, destructive tools ask — one coherent policy, no wildcard.
+        let settings = render_settings_for_test(&context_mode_plugin_manifest());
+        let allow = perm_action(&settings, "allow");
+        let ask = perm_action(&settings, "ask");
+        let deny = perm_action(&settings, "deny");
+
+        for tool in CTX_READ_ONLY.iter().chain(CTX_MUTATION) {
+            let rule = format!("{}{tool}", crate::config::CONTEXT_MODE_MCP_PREFIX);
+            assert!(
+                allow.contains(&rule.as_str()),
+                "{rule} missing from allow: {allow:?}"
+            );
+        }
+        for tool in CTX_DESTRUCTIVE {
+            let rule = format!("{}{tool}", crate::config::CONTEXT_MODE_MCP_PREFIX);
+            assert!(
+                ask.contains(&rule.as_str()),
+                "{rule} missing from ask: {ask:?}"
+            );
+        }
         assert!(
-            allow.iter().any(|v| v == &expected),
-            "expected {expected:?} in allow, got {allow:?}"
+            deny.is_empty(),
+            "no deny entries expected by default: {deny:?}"
+        );
+
+        let wildcard = format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX);
+        assert!(
+            !allow.contains(&wildcard.as_str()),
+            "wildcard allow from #490 must no longer be emitted: {allow:?}"
         );
     }
 
@@ -2387,17 +2524,132 @@ mod tests {
         // #490: no context-mode plugin in manifest → MCP grant must NOT appear.
         let manifest = crate::merge::MergedManifest::default();
         let settings = render_settings_for_test(&manifest);
-        let allow = settings
-            .get("permissions")
-            .and_then(|p| p.get("allow"))
-            .and_then(|a| a.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let prefix = format!("{}*", crate::config::CONTEXT_MODE_MCP_PREFIX);
+        let allow = perm_action(&settings, "allow");
         assert!(
-            !allow.iter().any(|v| v == &prefix),
+            CTX_READ_ONLY
+                .iter()
+                .chain(CTX_MUTATION)
+                .chain(CTX_DESTRUCTIVE)
+                .all(|t| !allow.iter().any(|a| a.contains(t))),
             "context-mode MCP grant must be absent when plugin is absent; got {allow:?}"
         );
+    }
+
+    #[test]
+    fn icm_active_default_policy_no_wildcard_conflict() {
+        // #946: same policy for the ICM MCP as context-mode — read-only and
+        // mutation allow, destructive asks.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let ask = perm_action(&settings, "ask");
+        let deny = perm_action(&settings, "deny");
+
+        for tool in ICM_READ_ONLY.iter().chain(ICM_MUTATION) {
+            let rule = format!("mcp__icm__{tool}");
+            assert!(
+                allow.contains(&rule.as_str()),
+                "{rule} missing from allow: {allow:?}"
+            );
+        }
+        for tool in ICM_DESTRUCTIVE {
+            let rule = format!("mcp__icm__{tool}");
+            assert!(
+                ask.contains(&rule.as_str()),
+                "{rule} missing from ask: {ask:?}"
+            );
+        }
+        assert!(
+            deny.is_empty(),
+            "no deny entries expected by default: {deny:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_permissions_override_destructive_to_deny() {
+        // #946: `features.context_mode.mcp_permissions` overrides the default
+        // policy per tier.
+        let mut manifest = context_mode_plugin_manifest();
+        manifest.capabilities.features = Some(crate::config::Features {
+            context_mode: Some(crate::config::ContextMode {
+                enabled: true,
+                mcp_permissions: Some(crate::config::McpPermissions {
+                    read_only: None,
+                    mutation: None,
+                    destructive: Some(crate::config::McpPermissionAction::Deny),
+                }),
+            }),
+            ..Default::default()
+        });
+        let settings = render_settings_for_test(&manifest);
+        let ask = perm_action(&settings, "ask");
+        let deny = perm_action(&settings, "deny");
+
+        for tool in CTX_DESTRUCTIVE {
+            let rule = format!("{}{tool}", crate::config::CONTEXT_MODE_MCP_PREFIX);
+            assert!(
+                deny.contains(&rule.as_str()),
+                "{rule} missing from deny: {deny:?}"
+            );
+            assert!(
+                !ask.contains(&rule.as_str()),
+                "{rule} must not also be in ask: {ask:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_tier_deny_still_outranks_unrelated_ask_and_allow() {
+        // #946: the tier policy must not break the pre-existing native-wins
+        // deny > ask > allow precedence (a native deny suppresses a neutral
+        // allow of the same rule string) for unrelated (non-tier) rules.
+        let mut manifest = context_mode_plugin_manifest();
+        manifest.capabilities.permissions = crate::config::Permissions {
+            allow: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("rm *".into()),
+                paths: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let mut native_permissions = std::collections::BTreeMap::new();
+        native_permissions.insert(
+            "claude_code".to_string(),
+            crate::config::NativePermissionRules {
+                allow: Vec::new(),
+                ask: Vec::new(),
+                deny: vec!["Bash(rm *)".into()],
+            },
+        );
+        manifest.capabilities.native_permissions = native_permissions;
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let deny = perm_action(&settings, "deny");
+        assert!(deny.contains(&"Bash(rm *)"), "deny missing: {deny:?}");
+        assert!(
+            !allow.contains(&"Bash(rm *)"),
+            "native deny must suppress the conflicting neutral allow: {allow:?}"
+        );
+        // Unrelated tier-based allow entries are unaffected.
+        let ctx_read = format!(
+            "{}{}",
+            crate::config::CONTEXT_MODE_MCP_PREFIX,
+            CTX_READ_ONLY[0]
+        );
+        assert!(allow.contains(&ctx_read.as_str()));
     }
 
     #[test]
@@ -2940,6 +3192,7 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             timeout: None,
             disabled_tools: vec![],
+            mcp_permissions: None,
         }
     }
 
@@ -2953,6 +3206,7 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             timeout: None,
             disabled_tools: vec![],
+            mcp_permissions: None,
         }
     }
 
