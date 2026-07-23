@@ -46,9 +46,9 @@ jobs:
             ~/.rustup/settings.toml
           # Keep toolchain + components in the key in sync with the step below.
           key: &rustup-cache-key rustup-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c  # master
         with:
-          toolchain: 1.95
+          toolchain: 1.97
           components: rustfmt, clippy
       - run: rustc --version && cargo fmt --version && cargo clippy --version
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -57,7 +57,7 @@ jobs:
           path: *rustup-cache-path
           key: *rustup-cache-key
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25  # v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2
         with:
           tool: cargo-nextest
       - name: Detect CPU count
@@ -71,6 +71,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe  # v2.0.20
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
         with:
           command: check
