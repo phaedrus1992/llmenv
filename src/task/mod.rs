@@ -506,12 +506,14 @@ pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Tas
 /// there are none, or on any internal error (logged to stderr, never
 /// propagated — hooks must never block the agent).
 pub fn session_start_reminder(state_dir: &Path) -> String {
+    let tasks = list_tasks(state_dir);
     combine_reminders([
         wip_reminder(
-            state_dir,
+            &tasks,
             "In-progress tasks from a previous session",
             "Resume one of these or run `llmenv task done <slug>` before starting new work.",
         ),
+        waiting_reminder(&tasks),
         session_finish_reminders(state_dir),
     ])
 }
@@ -519,20 +521,26 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 /// Stop hook (end-of-turn skip detection): if `wip` tasks remain at the end
 /// of a turn, remind the agent to update or finish them.
 ///
-/// First cut: flags any remaining `wip` task, same underlying check as
-/// [`session_start_reminder`]. The design doc's fuller heuristic — only fire
-/// when *this session* touched the task store (via file mtimes within the
-/// session window) — is deliberately deferred: the current session has no
-/// cheap way to distinguish "I started this task" from "a task was already
-/// wip when I woke up" without threading session_id through task state, and
-/// firing on every wip task each Stop is a reasonable, simpler starting
-/// behavior (advisory-only, never blocks).
+/// Only `wip` tasks are actionable at end-of-turn, so only they surface here.
+/// `waiting` tasks are deliberately silent on Stop — they're correctly paused
+/// on something outside the agent's control, and re-injecting their FYI on
+/// every turn nags about a state that is meant to be quiet (they still show at
+/// session start via [`session_start_reminder`]).
+///
+/// First cut: flags any remaining `wip` task. The design doc's fuller
+/// heuristic — only fire when *this session* touched the task store (via file
+/// mtimes within the session window) — is deliberately deferred: the current
+/// session has no cheap way to distinguish "I started this task" from "a task
+/// was already wip when I woke up" without threading session_id through task
+/// state, and firing on every wip task each Stop is a reasonable, simpler
+/// starting behavior (advisory-only, never blocks).
 /// ponytail: add session-scoped mtime filtering if the blanket reminder
 /// proves too chatty in practice.
 pub fn stop_hook_reminder(state_dir: &Path) -> String {
+    let tasks = list_tasks(state_dir);
     combine_reminders([
         wip_reminder(
-            state_dir,
+            &tasks,
             "You still have task(s) in progress",
             "Run `llmenv task done <slug>` when finished. If still working, keep going — \
              don't stop mid-task. If blocked, exhaust safe autonomous remediation first \
@@ -572,7 +580,7 @@ fn session_finish_reminders(state_dir: &Path) -> String {
 
 /// Join non-empty reminder strings with a blank line between them; empty
 /// parts are dropped rather than leaving stray blank lines.
-fn combine_reminders(parts: [String; 2]) -> String {
+fn combine_reminders(parts: impl IntoIterator<Item = String>) -> String {
     parts
         .into_iter()
         .filter(|p| !p.is_empty())
@@ -580,40 +588,49 @@ fn combine_reminders(parts: [String; 2]) -> String {
         .join("\n\n")
 }
 
+/// Render a bullet list of tasks (`- title (slug)`), one per line.
+fn render_task_list(tasks: &[&Task]) -> String {
+    tasks
+        .iter()
+        .map(|t| format!("- {} ({})", t.title, t.slug))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Builds the `wip`-task reminder (`header`/`footer` customized per caller,
-/// pushing toward action) and, separately, a `waiting`-task note. The two
-/// are deliberately different in tone: a `wip` task is actionable right now,
-/// a `waiting` one is correctly paused on something outside the agent's
-/// control — nagging to "take action" on it would be actively wrong, so it
-/// gets a plain FYI instead, never the action-pushing footer.
-fn wip_reminder(state_dir: &Path, header: &str, footer: &str) -> String {
-    let tasks = list_tasks(state_dir);
+/// pushing toward action). Empty when no `wip` tasks exist. Takes the
+/// already-loaded task list so the caller reads the store once and shares it
+/// with [`waiting_reminder`].
+fn wip_reminder(tasks: &[Task], header: &str, footer: &str) -> String {
     let wip: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Wip).collect();
+    if wip.is_empty() {
+        return String::new();
+    }
+    let list = render_task_list(&wip);
+    format!("{header}:\n{list}\n{footer}")
+}
+
+/// Builds the `waiting`-task FYI. Deliberately different in tone from
+/// [`wip_reminder`]: a `wip` task is actionable right now, a `waiting` one is
+/// correctly paused on something outside the agent's control — nagging to
+/// "take action" on it would be actively wrong, so it gets a plain, no-action
+/// note. Surfaced only at session start (resume/wake); never on Stop, where
+/// re-injecting it every turn would nag about a state meant to be quiet. Empty
+/// when no `waiting` tasks exist. Takes the already-loaded task list (shared
+/// with [`wip_reminder`]) so session start reads the store once.
+fn waiting_reminder(tasks: &[Task]) -> String {
     let waiting: Vec<&Task> = tasks
         .iter()
         .filter(|t| t.state == TaskState::Waiting)
         .collect();
-
-    let render = |tasks: &[&Task]| -> String {
-        tasks
-            .iter()
-            .map(|t| format!("- {} ({})", t.title, t.slug))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let mut parts = Vec::new();
-    if !wip.is_empty() {
-        parts.push(format!("{header}:\n{}\n{footer}", render(&wip)));
+    if waiting.is_empty() {
+        return String::new();
     }
-    if !waiting.is_empty() {
-        parts.push(format!(
-            "Task(s) waiting on external input (no action needed until it \
-             clears — see each task's notes for what's being waited on):\n{}",
-            render(&waiting)
-        ));
-    }
-    parts.join("\n\n")
+    let list = render_task_list(&waiting);
+    format!(
+        "Task(s) waiting on external input (no action needed until it \
+         clears — see each task's notes for what's being waited on):\n{list}"
+    )
 }
 
 #[cfg(test)]
@@ -1067,19 +1084,16 @@ mod tests {
     }
 
     #[test]
-    fn stop_hook_reminder_waiting_task_gets_no_action_framing() {
+    fn stop_hook_reminder_silent_when_only_waiting_tasks() {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Blocked on review", None).expect("test");
         wait_task(dir.path(), &task.slug, "spec review").expect("test");
-        let reminder = stop_hook_reminder(dir.path());
-        assert!(reminder.contains(&task.slug));
-        assert!(reminder.contains("no action needed"));
-        // Must not carry the action-pushing footer meant for genuinely wip tasks.
-        assert!(!reminder.contains("exhaust safe autonomous remediation"));
+        // `waiting` is meant to be quiet — Stop must not re-inject its FYI.
+        assert!(stop_hook_reminder(dir.path()).is_empty());
     }
 
     #[test]
-    fn stop_hook_reminder_separates_wip_and_waiting_tasks() {
+    fn stop_hook_reminder_shows_wip_but_not_waiting() {
         let dir = TempDir::new().expect("test");
         let wip = mk(dir.path(), "Actively working", None).expect("test");
         start_task(dir.path(), &wip.slug).expect("test");
@@ -1088,8 +1102,36 @@ mod tests {
 
         let reminder = stop_hook_reminder(dir.path());
         assert!(reminder.contains(&wip.slug));
-        assert!(reminder.contains(&waiting.slug));
         assert!(reminder.contains("exhaust safe autonomous remediation"));
+        // The waiting task and its FYI must stay silent on Stop.
+        assert!(!reminder.contains(&waiting.slug));
+        assert!(!reminder.contains("no action needed"));
+    }
+
+    #[test]
+    fn session_start_reminder_lists_waiting_tasks() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Blocked on review", None).expect("test");
+        wait_task(dir.path(), &task.slug, "spec review").expect("test");
+        let reminder = session_start_reminder(dir.path());
+        // At session start (resume/wake) the waiting FYI is useful, unlike Stop.
+        assert!(reminder.contains(&task.slug));
+        assert!(reminder.contains("no action needed"));
+        // Still a plain FYI, never the action-pushing wip footer.
+        assert!(!reminder.contains("exhaust safe autonomous remediation"));
+    }
+
+    #[test]
+    fn session_start_reminder_shows_both_wip_and_waiting() {
+        let dir = TempDir::new().expect("test");
+        let wip = mk(dir.path(), "Actively working", None).expect("test");
+        start_task(dir.path(), &wip.slug).expect("test");
+        let waiting = mk(dir.path(), "Blocked on review", None).expect("test");
+        wait_task(dir.path(), &waiting.slug, "spec review").expect("test");
+
+        let reminder = session_start_reminder(dir.path());
+        assert!(reminder.contains(&wip.slug));
+        assert!(reminder.contains(&waiting.slug));
         assert!(reminder.contains("no action needed"));
     }
 

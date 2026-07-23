@@ -10,6 +10,9 @@ ignores:
   - "node_modules/"
   - ".superpowers/"
   - ".tmp/"
+  # Archived planning/spec docs — dense prose and long path/code references
+  # that aren't worth rewrapping to satisfy the repo-wide lint rules.
+  - "docs/superpowers/"
   - "website/node_modules/"
   - "skills/"
   - "tests/fixtures/"

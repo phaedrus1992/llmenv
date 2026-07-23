@@ -298,10 +298,13 @@ unambiguous prefix of one.
 - `task wait <id> [reason]` — mark a task `waiting` on something outside the
   agent's control (a human review, a decision, external system access)
   instead of `wip`. `reason` is recorded as a note; reads from stdin if
-  omitted. Distinct from `wip` because the Stop-hook reminder (below) treats
-  them differently: a `wip` task gets pushed toward action, a `waiting` one
-  gets a plain FYI with no "take action" framing, since the correct behavior
-  is to actually wait for the reason to clear, not keep retrying.
+  omitted. Distinct from `wip` in how the lifecycle reminders (below) treat
+  it: a `wip` task is surfaced on every Stop and pushed toward action, while a
+  `waiting` task is silent on Stop — it appears only in the SessionStart
+  reminder, as a plain FYI with no "take action" framing, since the correct
+  behavior is to wait for the reason to clear, not keep retrying (and
+  re-injecting the FYI every turn would just nag about a state meant to be
+  quiet).
 - `task ls [--format json] [--session <id>]` — list tasks; `--format json`
   for machine-readable output; `--session <id>` narrows to one session's
   tasks (unfiltered by default).
