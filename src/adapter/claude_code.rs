@@ -1997,7 +1997,7 @@ mod tests {
         CLAUDE_JSON_FILE, CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND,
         CONFIG_GUARD_COMMAND, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter,
         HOOK_RUN_COMMAND, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS,
-        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
+        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path, dedup_hooks_doc,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
         read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
@@ -2017,6 +2017,37 @@ mod tests {
             source: source.into(),
             install_location: install.map(Into::into),
             head: None,
+        }
+    }
+
+    proptest! {
+        // dedup_hooks_doc is idempotent and leaves no per-event duplicates,
+        // for any hooks doc built from a small pool of entries (which forces
+        // collisions). Pins the #977 normalization primitive.
+        #[test]
+        fn prop_dedup_hooks_doc_idempotent_and_unique(
+            picks in proptest::collection::vec(0usize..3, 0..12)
+        ) {
+            let pool = [
+                serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "a" }] }),
+                serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "a", "tool": null }] }),
+                serde_json::json!({ "hooks": [{ "type": "command", "command": "b" }] }),
+            ];
+            let entries: Vec<serde_json::Value> = picks.iter().map(|i| pool[*i].clone()).collect();
+            let mut doc = serde_json::json!({ "PreToolUse": entries });
+
+            dedup_hooks_doc(&mut doc);
+            let once = doc.clone();
+            dedup_hooks_doc(&mut doc);
+            prop_assert_eq!(&doc, &once, "dedup must be idempotent");
+
+            if let Some(arr) = doc["PreToolUse"].as_array() {
+                for i in 0..arr.len() {
+                    for j in (i + 1)..arr.len() {
+                        prop_assert_ne!(&arr[i], &arr[j], "no duplicate entries survive");
+                    }
+                }
+            }
         }
     }
 

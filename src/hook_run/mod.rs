@@ -1252,6 +1252,11 @@ pub(crate) fn memory_url(
         all_host.insert(k.clone(), v.clone());
     }
 
+    // Full `active.tags` (not `non_project_tags()`) on purpose: this resolves
+    // the memory backend for the *live* hook-run session, which is legitimately
+    // project-aware — unlike `build_manifest`'s static host-cache render, which
+    // must exclude project-only tags (#696/#979). Do not "align" this with
+    // build_manifest's host_tags; that would break recall in project scopes.
     let resolved = resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
         .map_err(|e| anyhow::anyhow!("failed to resolve MCP servers: {e}"))?;
     Ok(resolved.into_iter().find_map(|m| match m.kind {

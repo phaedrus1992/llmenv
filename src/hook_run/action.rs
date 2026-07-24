@@ -162,16 +162,20 @@ impl Action {
 /// interactive session but inject ~1KB of pure noise per user turn when piped
 /// through the hook-runner's `emit_hook_context` (issue #692).
 ///
-/// Only the specific advisory patterns are stripped — all other content passes
-/// through unchanged. Matching is case-insensitive so a wording/case variant
-/// from the ICM server (e.g. lowercase "consider saving", "No memories found."
-/// with trailing punctuation) is still stripped rather than leaking a
-/// "No memories found" block into every turn's context (#978).
+/// Only the two advisory line shapes are stripped — `No memories found.` (the
+/// empty-store marker) and the `[ICM: N tool calls … Consider saving …]`
+/// counter/nag — matched at the *start* of the trimmed line, case-insensitively.
+///
+/// Anchoring to the line prefix (not a bare substring scan of arbitrary prose)
+/// is deliberate: a recalled memory whose body merely contains "consider
+/// saving" or "no memories found" mid-sentence must pass through unchanged, or
+/// it would be silently dropped from the injected context. Case-insensitive so
+/// a wording/case variant from the server is still recognized (#978).
 fn strip_advisory(text: &str) -> String {
     text.lines()
         .filter(|line| {
-            let lower = line.to_ascii_lowercase();
-            !lower.contains("consider saving") && !lower.contains("no memories found")
+            let lower = line.trim_start().to_ascii_lowercase();
+            !lower.starts_with("no memories found") && !lower.starts_with("[icm:")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -510,5 +514,35 @@ mod tests {
             strip_advisory(text).is_empty(),
             "lowercase advisory variants must still be stripped"
         );
+    }
+
+    // A recalled memory whose body merely contains the advisory phrases
+    // mid-sentence must survive — the filter anchors on the line prefix, not a
+    // bare substring, so real content is never silently dropped.
+    #[test]
+    fn strip_advisory_preserves_prose_containing_advisory_phrases() {
+        let text = "Consider saving the connection pool between requests\nThe runbook said no memories found in the cache tier";
+        assert_eq!(strip_advisory(text), text);
+    }
+
+    proptest! {
+        // Idempotent: re-stripping already-stripped text is a no-op.
+        #[test]
+        fn prop_strip_advisory_idempotent(s in ".*") {
+            let once = strip_advisory(&s);
+            prop_assert_eq!(strip_advisory(&once), once.clone());
+        }
+
+        // No advisory line survives: after stripping, no line starts with an
+        // advisory marker (case-insensitively).
+        #[test]
+        fn prop_strip_advisory_leaves_no_advisory_line(s in ".*") {
+            let out = strip_advisory(&s);
+            for line in out.lines() {
+                let lower = line.trim_start().to_ascii_lowercase();
+                prop_assert!(!lower.starts_with("no memories found"));
+                prop_assert!(!lower.starts_with("[icm:"));
+            }
+        }
     }
 }
