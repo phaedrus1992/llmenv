@@ -633,6 +633,7 @@ mod tests {
             retention: None,
             auto_prune: false,
             consolidation: None,
+            mcp_permissions: None,
         };
         let config = Config {
             features: Some(Features {

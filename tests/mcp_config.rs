@@ -41,6 +41,7 @@ fn stdio(name: &str, command: &str, args: &[&str]) -> ResolvedMcp {
         headers: BTreeMap::new(),
         timeout: None,
         disabled_tools: vec![],
+        mcp_permissions: None,
     }
 }
 
@@ -54,6 +55,7 @@ fn remote(name: &str, url: &str) -> ResolvedMcp {
         headers: BTreeMap::new(),
         timeout: None,
         disabled_tools: vec![],
+        mcp_permissions: None,
     }
 }
 
