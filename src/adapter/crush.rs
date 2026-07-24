@@ -639,6 +639,7 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             timeout: None,
             disabled_tools: vec![],
+            mcp_permissions: None,
         }
     }
 
@@ -1219,6 +1220,7 @@ mod tests {
             )]),
             timeout: Some(30),
             disabled_tools: vec!["dangerous_tool".into()],
+            mcp_permissions: None,
         });
         manifest.mcps.push(ResolvedMcp {
             name: "sse-server".into(),
@@ -1229,6 +1231,7 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             timeout: None,
             disabled_tools: vec![],
+            mcp_permissions: None,
         });
 
         CrushAdapter.materialize(&manifest, tmp.path()).unwrap();

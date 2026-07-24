@@ -838,6 +838,39 @@ pub struct ContextMode {
     /// Whether the built-in context-mode plugin is wired up.
     #[serde(default)]
     pub enabled: bool,
+    /// Per-tier permission override for the context-mode MCP's tools (#946).
+    /// Falls back to the default tier->action policy (read-only -> allow,
+    /// mutation -> allow, destructive -> ask) when unset.
+    #[serde(default)]
+    pub mcp_permissions: Option<McpPermissions>,
+}
+
+/// Action Claude Code should take for an MCP tool tier: `allow` (usable
+/// without prompting), `ask` (prompt each call), or `deny` (blocked outright).
+/// Mirrors Claude Code's own permission-rule vocabulary.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpPermissionAction {
+    Allow,
+    Ask,
+    Deny,
+}
+
+/// Per-tier permission override for a feature-enabled MCP's tools (#946):
+/// read-only, mutation, and destructive tiers each map to exactly one action.
+/// An unset tier falls back to the default policy (read-only -> allow,
+/// mutation -> allow, destructive -> ask), applied by the adapter that owns
+/// the tier constants (currently Claude Code only). Nested under
+/// `features.<name>.mcp_permissions`, e.g. `features.context_mode`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct McpPermissions {
+    #[serde(default)]
+    pub read_only: Option<McpPermissionAction>,
+    #[serde(default)]
+    pub mutation: Option<McpPermissionAction>,
+    #[serde(default)]
+    pub destructive: Option<McpPermissionAction>,
 }
 
 /// In-engine task tracker (#231): a file-based task store with CLI commands,
@@ -1164,6 +1197,11 @@ pub struct Memory {
     /// `llmenv materialize`. Defaults to `false` — opt-in.
     #[serde(default)]
     pub auto_prune: bool,
+    /// Per-tier permission override for the ICM MCP's tools (#946). Falls
+    /// back to the default tier->action policy (read-only -> allow, mutation
+    /// -> allow, destructive -> ask) when unset.
+    #[serde(default)]
+    pub mcp_permissions: Option<McpPermissions>,
 }
 
 /// A local, tag-activated `codebase-memory-mcp` server. Unlike `Memory`
@@ -2348,7 +2386,10 @@ index_path: /custom/index/path
     fn capabilities_is_empty_false_with_context_mode() {
         let caps = Capabilities {
             features: Some(Features {
-                context_mode: Some(ContextMode { enabled: true }),
+                context_mode: Some(ContextMode {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()

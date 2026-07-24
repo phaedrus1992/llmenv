@@ -368,7 +368,10 @@ mod tests {
     fn context_mode_feature_injects_plugin_and_marketplace() {
         let cfg = Config {
             features: Some(crate::config::Features {
-                context_mode: Some(crate::config::ContextMode { enabled: true }),
+                context_mode: Some(crate::config::ContextMode {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Config::default()
@@ -416,7 +419,10 @@ mod tests {
                 plugins: vec!["context-mode:context-mode".into()],
             }],
             features: Some(crate::config::Features {
-                context_mode: Some(crate::config::ContextMode { enabled: true }),
+                context_mode: Some(crate::config::ContextMode {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Config::default()
@@ -456,7 +462,10 @@ mod tests {
                 plugins: vec!["context-mode:context-mode".into()],
             }],
             features: Some(crate::config::Features {
-                context_mode: Some(crate::config::ContextMode { enabled: true }),
+                context_mode: Some(crate::config::ContextMode {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Config::default()
@@ -483,7 +492,10 @@ mod tests {
                 source: "https://github.com/myfork/context-mode".into(),
             }],
             features: Some(crate::config::Features {
-                context_mode: Some(crate::config::ContextMode { enabled: true }),
+                context_mode: Some(crate::config::ContextMode {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Config::default()
@@ -545,7 +557,10 @@ mod tests {
                     if cm_enabled {
                         use crate::config::{ContextMode, Features};
                         let features = cfg.features.get_or_insert_with(Features::default);
-                        features.context_mode = Some(ContextMode { enabled: true });
+                        features.context_mode = Some(ContextMode {
+                            enabled: true,
+                            ..Default::default()
+                        });
                     }
                     (cfg, active, cm_enabled)
                 },

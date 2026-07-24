@@ -83,7 +83,10 @@ mod tests {
             } else {
                 Vec::new()
             },
-            context_mode: context_mode.then_some(ContextMode { enabled: true }),
+            context_mode: context_mode.then_some(ContextMode {
+                enabled: true,
+                ..Default::default()
+            }),
             codebase_memory: if codebase_memory {
                 vec![serde_yaml::from_str("{}").unwrap()]
             } else {
