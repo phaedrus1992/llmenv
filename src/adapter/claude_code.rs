@@ -1404,6 +1404,14 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 
     let settings_path = out.join("settings.json");
 
+    // #991: the hooks llmenv is rendering this round, captured before reconcile
+    // consumes `settings_value`. Persisted to a sidecar so the *next* reconcile
+    // can tell an llmenv-owned hook that was dropped from config (must be purged)
+    // from a genuinely-foreign hook a plugin self-registered (must be kept).
+    let rendered_hooks = settings_value.get("hooks").cloned();
+    let hooks_sidecar = out.join(HOOKS_SIDECAR_FILE);
+    let prev_owned_hooks = read_hooks_sidecar(&hooks_sidecar);
+
     // #196/#175: in version mode `out` is the agent's live config dir for the
     // whole session, so a plugin may have self-registered hooks (or other keys)
     // into settings.json after llmenv last wrote it. A wholesale overwrite would
@@ -1411,7 +1419,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // already on disk, while making llmenv authoritative over the keys it owns.
     // In strict mode the file never pre-exists (fresh content-hashed folder), so
     // this is a no-op there.
-    let reconciled = reconcile_settings(&settings_path, settings_value)?;
+    let reconciled = reconcile_settings(&settings_path, settings_value, prev_owned_hooks.as_ref())?;
     let json_str = serde_json::to_string_pretty(&reconciled)?;
 
     crate::paths::write_owner_only_atomic(&settings_path, json_str.as_bytes()).with_context(
@@ -1423,7 +1431,29 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         },
     )?;
 
+    // Record what llmenv rendered this round for the next reconcile's owned-vs-
+    // foreign diff. Best-effort: a missing/failed sidecar just degrades reconcile
+    // to its prior union-only behavior (foreign preserved, stale llmenv hooks
+    // linger) — never fail the render over it.
+    if let Some(hooks) = rendered_hooks
+        && let Ok(bytes) = serde_json::to_vec(&hooks)
+        && let Err(e) = crate::paths::write_owner_only_atomic(&hooks_sidecar, &bytes)
+    {
+        tracing::debug!(error = %e, path = %hooks_sidecar.display(), "failed to write hooks sidecar");
+    }
+
     Ok(())
+}
+
+/// Sidecar recording the `hooks` object llmenv rendered, for the owned-vs-foreign
+/// diff in [`reconcile_settings`] (#991). Dotfile so it stays out of the way.
+const HOOKS_SIDECAR_FILE: &str = ".llmenv-hooks.json";
+
+/// Read the previously-rendered hooks sidecar. Returns `None` when absent or
+/// unparseable — reconcile then falls back to union-only behavior.
+fn read_hooks_sidecar(path: &Path) -> Option<serde_json::Value> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Top-level settings.json keys llmenv renders authoritatively. On a re-render
@@ -1667,7 +1697,11 @@ fn dedup_hooks_doc(hooks: &mut serde_json::Value) {
 /// - An owned key llmenv does *not* render this round (e.g. no plugins → no
 ///   `enabledPlugins`) is removed from the on-disk doc, so dropping all plugins
 ///   actually clears the key rather than leaving a stale one.
-fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+fn reconcile_settings(
+    path: &Path,
+    fresh: serde_json::Value,
+    prev_owned_hooks: Option<&serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
     let existing = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
             .inspect_err(|e| tracing::warn!("failed to parse {}: {e:#}", path.display()))
@@ -1707,6 +1741,11 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
                 merged_obj
                     .get_mut(key)
                     .map(|v| {
+                        // #991: before unioning, drop any on-disk hook that llmenv
+                        // rendered last time (prev_owned) but not this time — a
+                        // hook removed from config must disappear, not linger via
+                        // the union. Foreign hooks (never in prev_owned) are kept.
+                        purge_stale_owned_hooks(v, prev_owned_hooks, fresh_val);
                         merge_json(v, fresh_val.clone());
                         // merge_json only dedups byte-identical entries; entries
                         // differing by null-vs-absent keys need the strip-then-
@@ -1741,6 +1780,57 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
     }
 
     Ok(merged)
+}
+
+/// Normalize a hook entry for equality comparison — a clone with null-valued
+/// keys stripped, so entries differing only by null-vs-absent compare equal
+/// (same basis [`dedup_hooks_doc`] uses).
+fn normalized_hook(entry: &serde_json::Value) -> serde_json::Value {
+    let mut clone = entry.clone();
+    strip_json_nulls(&mut clone);
+    clone
+}
+
+/// Drop from the on-disk `existing` hooks doc any entry that llmenv rendered in
+/// the previous round (`prev_owned`) but is not rendering this round (`fresh`).
+///
+/// This is the owned-vs-foreign distinction (#991): an entry present in
+/// `prev_owned` was llmenv's, so if it's gone from `fresh` the user removed it
+/// from config and it must be purged rather than preserved by the union. A hook
+/// never in `prev_owned` is foreign (a plugin self-registered it) and is left
+/// for the union to keep. No-op when there's no sidecar (`prev_owned` is None).
+fn purge_stale_owned_hooks(
+    existing: &mut serde_json::Value,
+    prev_owned: Option<&serde_json::Value>,
+    fresh: &serde_json::Value,
+) {
+    let (Some(prev), Some(existing_obj)) = (
+        prev_owned.and_then(|v| v.as_object()),
+        existing.as_object_mut(),
+    ) else {
+        return;
+    };
+    for (event, prev_entries) in prev {
+        let Some(prev_arr) = prev_entries.as_array() else {
+            continue;
+        };
+        let fresh_norm: Vec<serde_json::Value> = fresh
+            .get(event)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().map(normalized_hook).collect())
+            .unwrap_or_default();
+        let stale: Vec<serde_json::Value> = prev_arr
+            .iter()
+            .map(normalized_hook)
+            .filter(|e| !fresh_norm.contains(e))
+            .collect();
+        if stale.is_empty() {
+            continue;
+        }
+        if let Some(arr) = existing_obj.get_mut(event).and_then(|v| v.as_array_mut()) {
+            arr.retain(|e| !stale.contains(&normalized_hook(e)));
+        }
+    }
 }
 
 /// Recursively remove null-valued keys from every JSON object in `value`.
@@ -3311,7 +3401,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("settings.json");
         let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
-        let out = reconcile_settings(&path, fresh.clone()).unwrap();
+        let out = reconcile_settings(&path, fresh.clone(), None).unwrap();
         assert_eq!(
             out, fresh,
             "no prior file → llmenv's render is the whole truth"
@@ -3331,7 +3421,7 @@ mod tests {
             }),
         );
         let fresh = serde_json::json!({ "permissions": { "deny": ["FRESH"] } });
-        let out = reconcile_settings(&path, fresh).unwrap();
+        let out = reconcile_settings(&path, fresh, None).unwrap();
         // Owned key replaced authoritatively; foreign key untouched.
         assert_eq!(out["permissions"]["deny"], serde_json::json!(["FRESH"]));
         assert_eq!(out["contextModeState"]["session"], "abc");
@@ -3352,7 +3442,7 @@ mod tests {
         let fresh = serde_json::json!({
             "hooks": { "SessionStart": [{ "command": "llmenv-hook" }] }
         });
-        let out = reconcile_settings(&path, fresh).unwrap();
+        let out = reconcile_settings(&path, fresh, None).unwrap();
         let entries = out["hooks"]["SessionStart"].as_array().unwrap();
         let cmds: Vec<&str> = entries
             .iter()
@@ -3377,9 +3467,65 @@ mod tests {
             "hooks": { "SessionStart": [{ "command": "llmenv-hook" }] }
         });
         write_json(&path, &llmenv_hook);
-        let out = reconcile_settings(&path, llmenv_hook.clone()).unwrap();
+        let out = reconcile_settings(&path, llmenv_hook.clone(), None).unwrap();
         let entries = out["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "identical hook deduped, not doubled");
+    }
+
+    #[test]
+    fn reconcile_purges_owned_hook_removed_from_config() {
+        // #991: a hook llmenv rendered last round (in prev_owned) but not this
+        // round must be purged from disk, not preserved by the union.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let old = serde_json::json!({
+            "hooks": { "PreToolUse": [
+                { "matcher": "X", "hooks": [{ "type": "command", "command": "old-owned" }] }
+            ] }
+        });
+        write_json(&path, &old);
+        let prev_owned = old["hooks"].clone();
+        let fresh = serde_json::json!({ "hooks": {} });
+        let out = reconcile_settings(&path, fresh, Some(&prev_owned)).unwrap();
+        let pre = out["hooks"].get("PreToolUse").and_then(|v| v.as_array());
+        assert!(
+            pre.is_none_or(|a| a.is_empty()),
+            "owned hook removed from config must be purged: {:?}",
+            out["hooks"]
+        );
+    }
+
+    #[test]
+    fn reconcile_preserves_foreign_hook_never_owned() {
+        // #991: a hook llmenv never rendered (absent from prev_owned) is a plugin
+        // self-registration and must survive even though it's absent from fresh.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        write_json(
+            &path,
+            &serde_json::json!({
+                "hooks": { "PreToolUse": [
+                    { "matcher": "X", "hooks": [{ "type": "command", "command": "foreign-plugin" }] }
+                ] }
+            }),
+        );
+        // prev_owned covered a different event/command — the foreign one was never ours.
+        let prev_owned = serde_json::json!({
+            "SessionStart": [{ "hooks": [{ "type": "command", "command": "llmenv-x" }] }]
+        });
+        let fresh = serde_json::json!({ "hooks": {} });
+        let out = reconcile_settings(&path, fresh, Some(&prev_owned)).unwrap();
+        let cmds: Vec<&str> = out["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["hooks"][0]["command"].as_str())
+            .collect();
+        assert!(
+            cmds.contains(&"foreign-plugin"),
+            "foreign (never-owned) hook must be preserved: {:?}",
+            out["hooks"]
+        );
     }
 
     #[test]
@@ -3417,7 +3563,7 @@ mod tests {
                 ]
             }
         });
-        let out = reconcile_settings(&path, fresh).unwrap();
+        let out = reconcile_settings(&path, fresh, None).unwrap();
         let entries = out["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "null-vs-absent tool deduped, not doubled");
     }
@@ -3451,7 +3597,7 @@ mod tests {
                 ]
             }
         });
-        let out = reconcile_settings(&path, fresh).unwrap();
+        let out = reconcile_settings(&path, fresh, None).unwrap();
         let entries = out["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "nulls at any depth stripped before dedup");
     }
@@ -3557,7 +3703,7 @@ mod tests {
             &serde_json::json!({ "enabledPlugins": { "old@market": true } }),
         );
         let fresh = serde_json::json!({ "permissions": { "deny": [] } });
-        let out = reconcile_settings(&path, fresh).unwrap();
+        let out = reconcile_settings(&path, fresh, None).unwrap();
         assert!(
             out.get("enabledPlugins").is_none(),
             "stale owned key cleared on re-render"
@@ -3572,7 +3718,7 @@ mod tests {
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, b"{ not valid json").unwrap();
         let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
-        let out = reconcile_settings(&path, fresh.clone()).unwrap();
+        let out = reconcile_settings(&path, fresh.clone(), None).unwrap();
         assert_eq!(out, fresh);
     }
 
@@ -3591,7 +3737,7 @@ mod tests {
             "statusLine": { "type": "command", "command": "my-status-script" },
             "cleanupPeriodDays": 365,
         });
-        let out = reconcile_settings(&path, fresh).unwrap();
+        let out = reconcile_settings(&path, fresh, None).unwrap();
         assert_eq!(
             out["statusLine"]["command"], "my-status-script",
             "native passthrough key must survive re-render"
@@ -3622,8 +3768,8 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("settings.json");
             write_json(&path, &existing);
-            let a = reconcile_settings(&path, fresh.clone()).unwrap();
-            let b = reconcile_settings(&path, fresh.clone()).unwrap();
+            let a = reconcile_settings(&path, fresh.clone(), None).unwrap();
+            let b = reconcile_settings(&path, fresh.clone(), None).unwrap();
             prop_assert_eq!(a, b);
         }
 
@@ -3634,9 +3780,9 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("settings.json");
             write_json(&path, &existing);
-            let once = reconcile_settings(&path, fresh.clone()).unwrap();
+            let once = reconcile_settings(&path, fresh.clone(), None).unwrap();
             write_json(&path, &once);
-            let twice = reconcile_settings(&path, fresh).unwrap();
+            let twice = reconcile_settings(&path, fresh, None).unwrap();
             prop_assert_eq!(once, twice);
         }
 
@@ -3651,7 +3797,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("settings.json");
             write_json(&path, &existing);
-            let out = reconcile_settings(&path, fresh.clone()).unwrap();
+            let out = reconcile_settings(&path, fresh.clone(), None).unwrap();
             let fresh_obj = fresh.as_object().unwrap();
             for key in LLMENV_OWNED_SETTINGS_KEYS {
                 if key == "hooks" {
@@ -3693,7 +3839,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("settings.json");
             write_json(&path, &existing);
-            let out = reconcile_settings(&path, fresh).unwrap();
+            let out = reconcile_settings(&path, fresh, None).unwrap();
 
             let session_start = out["hooks"]["SessionStart"].as_array().unwrap();
             prop_assert!(
@@ -4417,7 +4563,8 @@ mod tests {
             "permissions": { "allow": [], "ask": [], "deny": [] }
         });
 
-        let merged = reconcile_settings(&path, fresh).expect("reconcile_settings should succeed");
+        let merged =
+            reconcile_settings(&path, fresh, None).expect("reconcile_settings should succeed");
         let ss = merged["hooks"]["SessionStart"].as_array().unwrap();
         let commands: Vec<&str> = ss
             .iter()
