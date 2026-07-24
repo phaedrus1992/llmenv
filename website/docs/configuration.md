@@ -742,7 +742,11 @@ Notes:
   on every prompt — doesn't shell out on every render. `pr` renders empty,
   with no error output, whenever `gh` isn't installed, isn't authenticated,
   there's no remote, HEAD is detached, or there's no open PR for the branch.
-  An engine-supplied `pr` always takes precedence over the derived one.
+  An engine-supplied `pr` always takes precedence over the derived one. The
+  `branch` widget's OSC 8 hyperlink uses this same resolution (engine-supplied
+  first, then derived), so the branch text links to its PR under Claude Code
+  too — sharing the same cache, so enabling both widgets doesn't double the
+  `gh` lookups.
 - Untrusted free-text (model/folder/branch names, PR URL, tags, throttle
   backend) is stripped of control characters at the point each widget
   interpolates it, so a hostile directory or branch name can't inject terminal

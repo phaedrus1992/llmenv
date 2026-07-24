@@ -1162,6 +1162,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         &mut hooks_value,
         manifest.capabilities.native_hooks.get("claude_code"),
     )?;
+    // #977: dedup the fresh doc itself. reconcile_settings only dedups when a
+    // prior settings.json exists (it returns `fresh` verbatim otherwise), so a
+    // first/strict render — or a native_hooks overlay that repeats a typed hook
+    // — would otherwise write each hook entry twice and run every guard twice
+    // per event. Same (strip-nulls, then per-event dedup) invariant reconcile
+    // applies, so both paths converge on one entry per (event, matcher, command).
+    dedup_hooks_doc(&mut hooks_value);
     settings.insert("hooks".into(), hooks_value);
 
     // #34: Render neutral permission rules into Claude's string grammar
@@ -1601,6 +1608,24 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
     apply_seeded_settings(out, &seeded)
 }
 
+/// Collapse duplicate hook entries in a settings.json-shaped hooks doc.
+///
+/// Null-valued keys (e.g. a null `tool`) differ from absent keys under JSON
+/// `PartialEq`, so entries differing only by null-vs-absent don't dedup. Strip
+/// nulls first, then dedup each event's entry array so entries from different
+/// sources (typed hooks, the `native_hooks` overlay, prior render generations)
+/// converge to one entry per event, matcher, and command.
+fn dedup_hooks_doc(hooks: &mut serde_json::Value) {
+    strip_json_nulls(hooks);
+    if let Some(obj) = hooks.as_object_mut() {
+        for entries in obj.values_mut() {
+            if let Some(arr) = entries.as_array_mut() {
+                dedup(arr);
+            }
+        }
+    }
+}
+
 /// Merge llmenv's freshly-rendered settings (`fresh`) onto whatever already
 /// exists at `path`, preserving foreign in-session state (#175, #196).
 ///
@@ -1660,19 +1685,10 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
                     .get_mut(key)
                     .map(|v| {
                         merge_json(v, fresh_val.clone());
-                        // Null-valued keys (e.g. "tool": null) differ from
-                        // absent keys in JSON PartialEq, so hook entries that
-                        // differ only by null vs absent don't dedup inside
-                        // merge_json. Strip nulls then re-dedup so entries
-                        // from different render generations converge.
-                        strip_json_nulls(v);
-                        if let Some(obj) = v.as_object_mut() {
-                            for entries in obj.values_mut() {
-                                if let Some(arr) = entries.as_array_mut() {
-                                    dedup(arr);
-                                }
-                            }
-                        }
+                        // merge_json only dedups byte-identical entries; entries
+                        // differing by null-vs-absent keys need the strip-then-
+                        // dedup pass to converge across render generations (#977).
+                        dedup_hooks_doc(v);
                     })
                     .or_else(|| {
                         merged_obj.insert(key.to_string(), fresh_val.clone());
@@ -1981,7 +1997,7 @@ mod tests {
         CLAUDE_JSON_FILE, CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND,
         CONFIG_GUARD_COMMAND, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter,
         HOOK_RUN_COMMAND, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS,
-        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path,
+        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path, dedup_hooks_doc,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
         read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
@@ -2001,6 +2017,37 @@ mod tests {
             source: source.into(),
             install_location: install.map(Into::into),
             head: None,
+        }
+    }
+
+    proptest! {
+        // dedup_hooks_doc is idempotent and leaves no per-event duplicates,
+        // for any hooks doc built from a small pool of entries (which forces
+        // collisions). Pins the #977 normalization primitive.
+        #[test]
+        fn prop_dedup_hooks_doc_idempotent_and_unique(
+            picks in proptest::collection::vec(0usize..3, 0..12)
+        ) {
+            let pool = [
+                serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "a" }] }),
+                serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "a", "tool": null }] }),
+                serde_json::json!({ "hooks": [{ "type": "command", "command": "b" }] }),
+            ];
+            let entries: Vec<serde_json::Value> = picks.iter().map(|i| pool[*i].clone()).collect();
+            let mut doc = serde_json::json!({ "PreToolUse": entries });
+
+            dedup_hooks_doc(&mut doc);
+            let once = doc.clone();
+            dedup_hooks_doc(&mut doc);
+            prop_assert_eq!(&doc, &once, "dedup must be idempotent");
+
+            if let Some(arr) = doc["PreToolUse"].as_array() {
+                for i in 0..arr.len() {
+                    for j in (i + 1)..arr.len() {
+                        prop_assert_ne!(&arr[i], &arr[j], "no duplicate entries survive");
+                    }
+                }
+            }
         }
     }
 
