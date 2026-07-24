@@ -1832,7 +1832,73 @@ fn build_manifest(
 
     manifest.session_log = config.session_log_resolved();
 
+    // Fold the root-level `config.features` into the merged manifest. `merge()`
+    // above is fed only `config.capabilities`, so a root `features:` block never
+    // reaches `manifest.capabilities.features` on its own — and renderers gate on
+    // the manifest (slippage fragments, the built-in skill docs, the task-tracker
+    // hooks, `mcp_permissions` overrides). Done last so the memory/throttle/
+    // codebase_memory resolution above (which reads the pre-fold manifest plus
+    // root config directly) isn't double-counted (#987).
+    manifest.capabilities.features = fold_root_features(
+        config.features.as_ref(),
+        manifest.capabilities.features.take(),
+    );
+
     Ok(Some((manifest, cache_root)))
+}
+
+/// Fold the root-level `config.features` into a merged manifest's
+/// `capabilities.features`.
+///
+/// `build_manifest` gives `merge()` only `config.capabilities`, so a `features:`
+/// block at the *root* of `config.yaml` never reaches
+/// `manifest.capabilities.features` — yet renderers gate on the manifest
+/// (slippage, the built-in `llmenv` skill reference docs, the task-tracker
+/// hooks, the `context_mode.mcp_permissions` override). Without this fold those
+/// root settings are silently dropped (#987). Root config is the
+/// highest-precedence contributor, so its scalars win and its list entries lead.
+///
+/// The `root` struct is destructured exhaustively on purpose: adding a
+/// `Features` field fails to compile here until it's folded, so the manifest
+/// can't silently fall back out of sync.
+fn fold_root_features(
+    root: Option<&crate::config::Features>,
+    merged: Option<crate::config::Features>,
+) -> Option<crate::config::Features> {
+    let Some(root) = root else {
+        return merged;
+    };
+    let crate::config::Features {
+        memory,
+        throttle,
+        codebase_memory,
+        context_mode,
+        upgrade,
+        read_once,
+        slippage,
+        task_tracker,
+    } = root.clone();
+    let mut out = merged.unwrap_or_default();
+
+    // Lists: root entries lead, then the merged ones, deduped.
+    out.memory = concat_dedup(memory, out.memory);
+    out.throttle = concat_dedup(throttle, out.throttle);
+    out.codebase_memory = concat_dedup(codebase_memory, out.codebase_memory);
+    // Scalars: the root value wins when set, else keep the merged one.
+    out.context_mode = context_mode.or(out.context_mode);
+    out.upgrade = upgrade.or(out.upgrade);
+    out.read_once = read_once.or(out.read_once);
+    out.slippage = slippage.or(out.slippage);
+    out.task_tracker = task_tracker.or(out.task_tracker);
+
+    Some(out)
+}
+
+/// Concatenate `lead` before `rest`, then dedup (first-seen order preserved).
+fn concat_dedup<T: PartialEq + Clone>(mut lead: Vec<T>, rest: Vec<T>) -> Vec<T> {
+    lead.extend(rest);
+    crate::util::dedup(&mut lead);
+    lead
 }
 
 /// `llmenv check-stale`: warn when the booted agent config has drifted (#196).
@@ -3818,6 +3884,53 @@ mod tests {
         let input = "line1  \nline2   \nline3";
         let expected = "line1\nline2\nline3";
         assert_eq!(compress_agents_md(input), expected);
+    }
+
+    // #987: root `config.features` must reach `manifest.capabilities.features`.
+    #[test]
+    fn fold_root_features_propagates_root_scalar_into_empty_manifest() {
+        let root = crate::config::Features {
+            task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+            ..Default::default()
+        };
+        let out = fold_root_features(Some(&root), None).expect("features present");
+        assert_eq!(
+            out.task_tracker,
+            Some(crate::config::TaskTracker { enabled: true }),
+            "a root-only feature scalar must land in the manifest"
+        );
+    }
+
+    #[test]
+    fn fold_root_features_root_scalar_wins_over_merged() {
+        let root = crate::config::Features {
+            task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+            ..Default::default()
+        };
+        let merged = crate::config::Features {
+            task_tracker: Some(crate::config::TaskTracker { enabled: false }),
+            ..Default::default()
+        };
+        let out = fold_root_features(Some(&root), Some(merged)).expect("features present");
+        assert_eq!(
+            out.task_tracker,
+            Some(crate::config::TaskTracker { enabled: true }),
+            "root config outranks a bundle-contributed scalar"
+        );
+    }
+
+    #[test]
+    fn fold_root_features_none_root_passes_merged_through() {
+        let merged = Some(crate::config::Features {
+            slippage: None,
+            ..Default::default()
+        });
+        assert_eq!(fold_root_features(None, merged.clone()), merged);
+    }
+
+    #[test]
+    fn concat_dedup_leads_with_root_then_dedups() {
+        assert_eq!(concat_dedup(vec![1, 2], vec![2, 3]), vec![1, 2, 3]);
     }
 
     #[test]

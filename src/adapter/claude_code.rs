@@ -1081,7 +1081,9 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // tracker so tasks actually land there instead of Claude's ephemeral state.
     // Only registered when the task tracker is enabled; the `pre_tool_use`
     // handler dispatches on tool_name (TaskCreate/TaskList/TaskUpdate) and denies
-    // the native tool with the equivalent `llmenv task` result.
+    // the native tool with the equivalent `llmenv task` result. (Root-level
+    // `features.task_tracker` reaches this gate because build_manifest folds
+    // root features into the manifest — see fold_root_features, #987.)
     if manifest
         .capabilities
         .features
