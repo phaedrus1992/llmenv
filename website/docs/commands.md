@@ -381,6 +381,16 @@ features:
     enabled: true
 ```
 
+With the tracker enabled, llmenv also **redirects Claude Code's built-in task
+tools** (`TaskCreate`/`TaskList`/`TaskUpdate`) into this tracker via an
+auto-injected `PreToolUse` hook, so a skill or agent that reaches for the native
+tools still lands durable tasks here rather than Claude's ephemeral per-session
+state. `TaskCreate` records a task (auto-starting a session when none is open),
+`TaskList` returns the tracker's view, and `TaskUpdate` maps its status to
+start/done/delete. The native tool is suppressed and the agent is told the
+`llmenv task` id to use for follow-up. This is Claude-Code-specific (those tools
+are Claude Code's) and off when the tracker is disabled. (#985)
+
 ## `login`
 
 ```text

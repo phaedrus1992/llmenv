@@ -11,6 +11,7 @@ pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 pub(crate) mod read_once;
+pub(crate) mod task_tools;
 
 use std::io::Write;
 use std::str::FromStr;
@@ -489,50 +490,69 @@ fn run_inner(
     let t_config = std::time::Instant::now();
     let log_cfg = config.session_log_resolved();
 
-    // #318/#864: read-once file dedup hook — computed before scope/memory
-    // resolution since it doesn't need any of that. Only takes the early-
-    // return fast path when session-log has no interest in PreToolUse at
-    // Debug level (EventKind::ToolUse's level); otherwise falls through so
-    // `run_session_log` still runs, and the read_once advisory/deny text is
-    // appended to `out` further down — never unconditionally short-
-    // circuiting, or enabling read_once would silently drop Debug-level
-    // session logging for every PreToolUse event. Mirrors the #231 fix for
-    // the task-tracker Stop hook (same early-return-drops-logging bug class).
-    let read_once_text = if event == HookEvent::PreToolUse
-        && let Some(ref features) = config.features
-        && let Some(ref read_once) = features.read_once
-        && read_once.enabled
-    {
-        let text = crate::hook_run::read_once::handle_pre_tool_use(
-            stdin_payload,
-            claude_session_id,
-            read_once,
-        );
-        // Derived from the same `event_to_log_kind` mapping `run_session_log`
-        // itself uses, rather than hardcoding `LogLevel::Debug` — a hardcoded
-        // level would silently drift out of sync if `EventKind::ToolUse`'s
-        // level ever changed, reintroducing this exact bug class.
-        let level = event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
-        if !log_cfg.any_sink_wants(level) {
-            return Ok(text);
-        }
-        Some(text)
-    } else {
-        None
-    };
-
-    // #231: whether the task tracker's Stop reminder is wanted. Computed
-    // before the #702 early-exit (below) so it can both take the cheap fast
-    // path when session-log has no interest in Stop, and be appended to
-    // `out` further down when session-log *does* want Stop — never
-    // unconditionally short-circuiting, or enabling task_tracker would
-    // silently drop Stop-event session logging (that early-return shape was
-    // tried and reverted; see the git history on this block).
+    // Whether the task tracker is enabled — hoisted here because the #985
+    // task-tool redirect below gates on it, and the Stop reminder further down
+    // reuses it.
     let task_tracker_enabled = config
         .features
         .as_ref()
         .and_then(|f| f.task_tracker.as_ref())
         .is_some_and(|t| t.enabled);
+
+    // PreToolUse text decision, shared by two mutually-exclusive interceptors
+    // that key off distinct tool names: the #985 task-tool redirect
+    // (TaskCreate/TaskList/TaskUpdate → `llmenv task`) and the #318/#864
+    // read-once dedup (Read). Both are computed before scope/memory resolution
+    // (neither needs it) and folded into one `pre_tool_text`, so the shared
+    // session-log handling below applies to both: take the early-return fast
+    // path only when session-log has no interest in PreToolUse at Debug level
+    // (EventKind::ToolUse's level); otherwise fall through so `run_session_log`
+    // still runs and the decision text is appended to `out` further down. Never
+    // unconditionally short-circuit, or enabling either would silently drop
+    // Debug-level session logging for every PreToolUse event (the #231/#864
+    // early-return-drops-logging bug class).
+    let pre_tool_text = if event == HookEvent::PreToolUse {
+        let text = if task_tracker_enabled
+            && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
+        {
+            Some(t)
+        } else if let Some(ref features) = config.features
+            && let Some(ref read_once) = features.read_once
+            && read_once.enabled
+        {
+            Some(crate::hook_run::read_once::handle_pre_tool_use(
+                stdin_payload,
+                claude_session_id,
+                read_once,
+            ))
+        } else {
+            None
+        };
+        match text {
+            Some(t) => {
+                // Derived from the same `event_to_log_kind` mapping
+                // `run_session_log` uses, rather than hardcoding `LogLevel::Debug`
+                // — a hardcoded level would drift if `EventKind::ToolUse`'s level
+                // ever changed, reintroducing this exact bug class.
+                let level =
+                    event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
+                if !log_cfg.any_sink_wants(level) {
+                    return Ok(t);
+                }
+                Some(t)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // #231: the task tracker's Stop reminder is computed before the #702
+    // early-exit (below) so it can take the cheap fast path when session-log
+    // has no interest in Stop, and be appended to `out` further down when
+    // session-log *does* want Stop — never unconditionally short-circuiting, or
+    // enabling task_tracker would silently drop Stop-event session logging
+    // (that early-return shape was tried and reverted; see the git history).
     if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
         let state_dir = crate::paths::state_dir()?;
         return Ok(crate::task::stop_hook_reminder(&state_dir));
@@ -792,12 +812,12 @@ fn run_inner(
                 }
             }
 
-            // #864: append the read_once advisory/deny text. Only reached here
-            // when session-log also wants PreToolUse at Debug level (the
-            // early-return above already short-circuited before this point
-            // otherwise) — so this never displaces run_session_log, it just adds
-            // to `out`.
-            if let Some(text) = &read_once_text
+            // #864/#985: append the PreToolUse decision text (read-once or the
+            // task-tool redirect). Only reached here when session-log also wants
+            // PreToolUse at Debug level (the early-return above already short-
+            // circuited otherwise) — so this never displaces run_session_log, it
+            // just adds to `out` (a deny replaces it via append_read_once_result).
+            if let Some(text) = &pre_tool_text
                 && !text.is_empty()
             {
                 append_read_once_result(&mut out, text);
@@ -838,19 +858,19 @@ fn run_inner(
     match pipeline_result {
         Ok(out) => Ok(out),
         Err(e) => {
-            // #867: an already-computed read_once result must not be lost to
-            // an unrelated pipeline error — recover it instead of letting `?`
-            // propagate the error past the point where it was decided. Still
-            // surfaced via the same `eprintln!` convention `run()`'s Err arm
-            // uses (pre-pr-review finding: a bare `warn!` is invisible with
-            // the default `RUST_LOG`, silently hiding the diagnostic even
-            // though the read_once result itself is preserved).
-            if let Some(text) = read_once_text {
+            // #867: an already-computed PreToolUse decision (read-once or the
+            // #985 task-tool redirect) must not be lost to an unrelated pipeline
+            // error — recover it instead of letting `?` propagate the error past
+            // the point where it was decided. Still surfaced via the same
+            // `eprintln!` convention `run()`'s Err arm uses (pre-pr-review
+            // finding: a bare `warn!` is invisible with the default `RUST_LOG`,
+            // silently hiding the diagnostic even though the result is preserved).
+            if let Some(text) = pre_tool_text {
                 eprintln!("llmenv: memory {event} skipped: {e}");
                 warn!(
                     error = %e,
-                    "hook-run: pipeline failed after read_once already computed a \
-                     result; returning it instead of silently dropping it"
+                    "hook-run: pipeline failed after a PreToolUse decision was \
+                     already computed; returning it instead of silently dropping it"
                 );
                 Ok(text)
             } else {
