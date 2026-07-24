@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.6.1] - 2026-07-24
+
 ### Added
 
 - Add Opencode engine adapter (`src/adapter/opencode.rs`) — full
@@ -57,4 +59,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   parse error paths
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...HEAD
+[3.6.1]: https://github.com/phaedrus1992/llmenv/compare/v3.2.0...v3.6.1

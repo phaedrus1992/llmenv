@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.6.1] - 2026-07-24
+
 ### Added
 
 - Add Opencode engine adapter (`src/adapter/opencode.rs`) — full
