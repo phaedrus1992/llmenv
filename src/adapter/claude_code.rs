@@ -1162,6 +1162,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         &mut hooks_value,
         manifest.capabilities.native_hooks.get("claude_code"),
     )?;
+    // #977: dedup the fresh doc itself. reconcile_settings only dedups when a
+    // prior settings.json exists (it returns `fresh` verbatim otherwise), so a
+    // first/strict render — or a native_hooks overlay that repeats a typed hook
+    // — would otherwise write each hook entry twice and run every guard twice
+    // per event. Same (strip-nulls, then per-event dedup) invariant reconcile
+    // applies, so both paths converge on one entry per (event, matcher, command).
+    dedup_hooks_doc(&mut hooks_value);
     settings.insert("hooks".into(), hooks_value);
 
     // #34: Render neutral permission rules into Claude's string grammar
@@ -1601,6 +1608,24 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
     apply_seeded_settings(out, &seeded)
 }
 
+/// Collapse duplicate hook entries in a settings.json-shaped hooks doc.
+///
+/// Null-valued keys (e.g. a null `tool`) differ from absent keys under JSON
+/// `PartialEq`, so entries differing only by null-vs-absent don't dedup. Strip
+/// nulls first, then dedup each event's entry array so entries from different
+/// sources (typed hooks, the `native_hooks` overlay, prior render generations)
+/// converge to one entry per event, matcher, and command.
+fn dedup_hooks_doc(hooks: &mut serde_json::Value) {
+    strip_json_nulls(hooks);
+    if let Some(obj) = hooks.as_object_mut() {
+        for entries in obj.values_mut() {
+            if let Some(arr) = entries.as_array_mut() {
+                dedup(arr);
+            }
+        }
+    }
+}
+
 /// Merge llmenv's freshly-rendered settings (`fresh`) onto whatever already
 /// exists at `path`, preserving foreign in-session state (#175, #196).
 ///
@@ -1660,19 +1685,10 @@ fn reconcile_settings(path: &Path, fresh: serde_json::Value) -> anyhow::Result<s
                     .get_mut(key)
                     .map(|v| {
                         merge_json(v, fresh_val.clone());
-                        // Null-valued keys (e.g. "tool": null) differ from
-                        // absent keys in JSON PartialEq, so hook entries that
-                        // differ only by null vs absent don't dedup inside
-                        // merge_json. Strip nulls then re-dedup so entries
-                        // from different render generations converge.
-                        strip_json_nulls(v);
-                        if let Some(obj) = v.as_object_mut() {
-                            for entries in obj.values_mut() {
-                                if let Some(arr) = entries.as_array_mut() {
-                                    dedup(arr);
-                                }
-                            }
-                        }
+                        // merge_json only dedups byte-identical entries; entries
+                        // differing by null-vs-absent keys need the strip-then-
+                        // dedup pass to converge across render generations (#977).
+                        dedup_hooks_doc(v);
                     })
                     .or_else(|| {
                         merged_obj.insert(key.to_string(), fresh_val.clone());

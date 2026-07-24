@@ -599,6 +599,68 @@ fn native_hooks_merge_into_settings_hooks() {
     assert_eq!(cmd, "/bin/engine-only.sh");
 }
 
+// #977: on a fresh render (no prior settings.json), a hook that appears both
+// as a typed `hooks:` entry and — differing only by a null-vs-absent `tool`
+// key — in the `native_hooks` overlay must render ONCE. Before the fix the
+// fresh doc was only deduped inside reconcile_settings when a prior file
+// existed, so the first render emitted the guard twice for the same event.
+#[test]
+fn fresh_render_dedups_typed_and_native_hook_duplicate() {
+    let mut native_hooks = BTreeMap::new();
+    native_hooks.insert(
+        "claude_code".to_string(),
+        serde_yaml::from_str::<serde_yaml::Value>(
+            "PreToolUse:\n  - matcher: Bash\n    hooks:\n      - type: command\n        command: /bin/guard.sh\n        tool: null\n",
+        )
+        .expect("parse native hooks"),
+    );
+    let m = llmenv::merge::MergedManifest {
+        capabilities: llmenv::config::Capabilities {
+            hooks: vec![llmenv::config::Hook {
+                event: "PreToolUse".to_string(),
+                matcher: Some("Bash".to_string()),
+                handler: llmenv::config::HookHandler {
+                    kind: llmenv::config::HookHandlerKind::Command,
+                    command: Some("/bin/guard.sh".to_string()),
+                    tool: None,
+                },
+                bundle_origin: None,
+            }],
+            native_hooks,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+
+    let settings_json =
+        std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&settings_json).expect("parse settings.json");
+
+    // PreToolUse also carries auto-registered guards (config-guard, read-once,
+    // throttle), so assert specifically on the guard.sh hook: it must appear
+    // exactly once despite being declared both typed and in native_hooks.
+    let pre_tool_use = parsed["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse event rendered");
+    let guard_count = pre_tool_use
+        .iter()
+        .filter(|e| {
+            e["hooks"][0]["command"]
+                .as_str()
+                .is_some_and(|c| c == "/bin/guard.sh")
+        })
+        .count();
+    assert_eq!(
+        guard_count, 1,
+        "typed + native duplicate of the same hook must render once, got: {pre_tool_use:?}"
+    );
+}
+
 // Issue #97: native_plugins["claude_code"] is a settings.json fragment that
 // deep-merges at the top level (e.g. extra plugin settings Claude understands
 // but llmenv has no neutral representation for).

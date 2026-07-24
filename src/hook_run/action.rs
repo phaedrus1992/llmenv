@@ -163,10 +163,16 @@ impl Action {
 /// through the hook-runner's `emit_hook_context` (issue #692).
 ///
 /// Only the specific advisory patterns are stripped — all other content passes
-/// through unchanged.
+/// through unchanged. Matching is case-insensitive so a wording/case variant
+/// from the ICM server (e.g. lowercase "consider saving", "No memories found."
+/// with trailing punctuation) is still stripped rather than leaking a
+/// "No memories found" block into every turn's context (#978).
 fn strip_advisory(text: &str) -> String {
     text.lines()
-        .filter(|line| !line.contains("Consider saving") && !line.contains("No memories found"))
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !lower.contains("consider saving") && !lower.contains("no memories found")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -491,6 +497,18 @@ mod tests {
         assert_eq!(
             strip_advisory(text),
             "## Project Context\n- Key configuration\n- Recent changes"
+        );
+    }
+
+    // #978: the server's wording/case may drift from the exact literals. A
+    // case/punctuation variant must still be stripped so an empty store injects
+    // nothing rather than a "No memories found" block on every turn.
+    #[test]
+    fn strip_advisory_is_case_insensitive() {
+        let text = "no memories found\n[icm: 5 tool calls since last store. consider saving important context.]";
+        assert!(
+            strip_advisory(text).is_empty(),
+            "lowercase advisory variants must still be stripped"
         );
     }
 }

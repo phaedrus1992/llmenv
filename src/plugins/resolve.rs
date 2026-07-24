@@ -277,6 +277,58 @@ mod tests {
         assert_eq!(resolved.marketplaces[0].name, "superpowers");
     }
 
+    // #979 (regression of #696): the host-cache resolution path must exclude a
+    // collection whose `when:` tags are only ever emitted by a project scope.
+    // #696 fixed this in build_manifest (resolve with non_project_tags) but only
+    // tested non_project_tags() in isolation — never that resolve_plugins,
+    // driven by those tags, actually drops the project-only collection. A new
+    // caller passing the full active.tags silently reintroduces the leak. This
+    // pins the scope → non_project_tags → resolve_plugins boundary.
+    #[test]
+    fn host_resolution_excludes_project_only_collection() {
+        use crate::scope::{ActiveScope, ActiveScopes};
+
+        let cfg = config_with(
+            vec![mkt("fullstack-dev-skills")],
+            vec![collection(
+                "fullstack-dev-skills",
+                &["lang-typescript", "web"],
+                &["fullstack-dev-skills:fullstack-dev-skills"],
+            )],
+        );
+        let scope = |id: &str, kind: &'static str, tags: &[&str]| ActiveScope {
+            id: id.into(),
+            kind,
+            tags: tags.iter().map(|s| (*s).into()).collect(),
+            project_root: None,
+            enable_bundles: Vec::new(),
+            disable_bundles: Vec::new(),
+            name: None,
+            description: None,
+            unknown_fields: Vec::new(),
+        };
+        let active = ActiveScopes {
+            scopes: vec![
+                scope("host", "host", &["os-macos"]),
+                scope("proj", "project", &["lang-typescript", "web"]),
+            ],
+            tags: tags(&["os-macos", "lang-typescript", "web"]),
+        };
+
+        // With the full active tag union, the project tags would select it —
+        // proves the tags are what gate the collection.
+        let with_all = resolve_plugins(&cfg, &active.tags).unwrap();
+        assert_eq!(with_all.plugins.len(), 1, "full tags should select it");
+
+        // The host-cache path resolves with non_project_tags and must drop it.
+        let host = resolve_plugins(&cfg, &active.non_project_tags()).unwrap();
+        assert!(
+            host.plugins.is_empty(),
+            "project-only collection leaked into host resolution: {:?}",
+            host.plugins
+        );
+    }
+
     #[test]
     fn unions_plugins_across_selected_collections() {
         let cfg = config_with(

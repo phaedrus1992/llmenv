@@ -360,7 +360,10 @@ pub(crate) fn resolve_command_paths_against_files(
 /// * `text` — the injected context, placed as `additionalContext`.
 #[must_use]
 pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
-    if text.is_empty() {
+    // Whitespace-only counts as empty: an all-advisory recall (stripped by
+    // strip_advisory) can leave blank lines behind, and wrapping those would
+    // inject an empty "[ICM MEMORY CONTEXT]" block on every turn (#978).
+    if text.trim().is_empty() {
         return String::new();
     }
     // Store-only events (SessionStart, SessionEnd) have no model turn to inject
@@ -437,10 +440,18 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        binary_on_path, engine_id, known_engine_ids, registered_adapters,
+        binary_on_path, emit_hook_context, engine_id, known_engine_ids, registered_adapters,
         remote_transport_type_str, resolve_bundle_relative_paths,
         resolve_command_paths_against_files,
     };
+
+    // #978: a recall stripped down to only blank lines must inject nothing, not
+    // an empty "[ICM MEMORY CONTEXT]" block.
+    #[test]
+    fn emit_hook_context_treats_whitespace_only_as_empty() {
+        assert!(emit_hook_context("UserPromptSubmit", "\n\n").is_empty());
+        assert!(emit_hook_context("UserPromptSubmit", "   ").is_empty());
+    }
 
     #[test]
     fn registered_adapters_are_expected() {

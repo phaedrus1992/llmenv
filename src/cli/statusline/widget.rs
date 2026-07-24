@@ -487,6 +487,15 @@ fn render_branch(
     cfg: Option<&llmenv_config::WidgetConfig>,
     use_color: bool,
 ) -> String {
+    render_branch_with(data, cfg, use_color, "gh")
+}
+
+fn render_branch_with(
+    data: &EngineData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    use_color: bool,
+    gh_cmd: &str,
+) -> String {
     let Some(name) = resolve_branch_name(data) else {
         return String::new();
     };
@@ -495,12 +504,11 @@ fn render_branch(
         .and_then(|c| c.format.as_deref())
         .unwrap_or("\u{1f33f} {name}"); // 🌿
     let label = format.replace("{name}", &name);
-    // Link the branch to its PR when the session carries one (OSC 8).
-    let pr_url = data
-        .pr
-        .as_ref()
-        .and_then(|p| p.url.as_deref())
-        .map(super::sanitize)
+    // Link the branch to its PR (OSC 8). Route through resolve_pr so the link
+    // derives the PR when the engine sends none (Claude Code), matching {pr}.
+    let pr_url = resolve_pr_with(data, gh_cmd)
+        .and_then(|p| p.url)
+        .map(|u| super::sanitize(&u))
         .unwrap_or_default();
     if use_color && super::valid_url(&pr_url) {
         super::hyperlink(&label, &pr_url)
@@ -1548,6 +1556,34 @@ mod tests {
         assert!(
             out.contains("\x1b]8;;https://github.com/o/r/pull/5"),
             "expected branch→PR link: {out:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn branch_hyperlink_derives_pr_when_engine_sends_none() {
+        // #973: engine sends no `pr` (Claude Code), branch widget must still
+        // link via the derived PR — the same self-resolve #950 gave `{pr}`.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo_dir.path().join(".git")).unwrap();
+        std::fs::write(
+            repo_dir.path().join(".git").join("HEAD"),
+            "ref: refs/heads/feat/x\n",
+        )
+        .unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\necho '{\"number\":973,\"url\":\"https://github.com/o/r/pull/973\",\"reviewDecision\":\"APPROVED\"}'\n",
+        );
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "workspace": { "current_dir": repo_dir.path().to_string_lossy() }
+        }))
+        .unwrap();
+        let out = render_branch_with(&data, None, true, &gh.to_string_lossy());
+        assert!(
+            out.contains("\x1b]8;;https://github.com/o/r/pull/973"),
+            "expected branch→derived-PR link: {out:?}"
         );
     }
 
