@@ -1198,6 +1198,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         ask: &mut ask,
         deny: &mut deny,
     };
+    // #972: same native deny/ask lookups the neutral-rule suppression above
+    // uses, reused here so a tiered MCP tool already covered by a more
+    // authoritative native rule doesn't also get a competing tier entry.
+    let native_cover = NativeCover {
+        deny: &native_deny,
+        ask: &native_ask,
+    };
 
     if manifest.plugins.iter().any(|p| {
         p.marketplace == crate::config::CONTEXT_MODE_MARKETPLACE
@@ -1218,6 +1225,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                 (CTX_DESTRUCTIVE, McpTier::Destructive),
             ],
             overrides,
+            &native_cover,
         );
     }
 
@@ -1231,6 +1239,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                 (ICM_DESTRUCTIVE, McpTier::Destructive),
             ],
             icm.mcp_permissions.as_ref(),
+            &native_cover,
         );
     }
 
@@ -1786,16 +1795,35 @@ struct PermBuckets<'a> {
     deny: &'a mut Vec<String>,
 }
 
+/// The native-authored deny/ask rule strings from `generate_settings_json`
+/// (its `native_deny`/`native_ask` sets), threaded into
+/// `apply_mcp_tier_permissions` so a tiered MCP tool already covered by a
+/// more authoritative user-authored native rule doesn't also get a competing
+/// tier-default entry (#972). Bundled into one struct — same reason as
+/// `PermBuckets` — so passing both sets still counts as a single positional
+/// param.
+struct NativeCover<'a> {
+    deny: &'a std::collections::BTreeSet<&'a str>,
+    ask: &'a std::collections::BTreeSet<&'a str>,
+}
+
 /// Render one feature-enabled MCP's tool tiers into `buckets`, applying the
 /// default tier policy or the feature's `mcp_permissions` override. Each tool
 /// lands in exactly one action bucket — unlike the #490 wildcard this
 /// replaces, there is no broader rule left to conflict with these specific
 /// ones.
+///
+/// A tool's *resolved* action (override else tier default) is suppressed —
+/// not pushed into its bucket at all — when a more authoritative native rule
+/// already covers that exact `{prefix}{tool}` string: deny > ask > allow,
+/// mirroring the `suppressors` closure's authority order above for neutral
+/// rules (#972). A resolved deny is never suppressed — nothing outranks it.
 fn apply_mcp_tier_permissions(
     buckets: &mut PermBuckets<'_>,
     prefix: &str,
     tiers: [(&[&str], McpTier); 3],
     overrides: Option<&crate::config::McpPermissions>,
+    native: &NativeCover<'_>,
 ) {
     for (tools, tier) in tiers {
         let configured = overrides.and_then(|o| match tier {
@@ -1814,7 +1842,20 @@ fn apply_mcp_tier_permissions(
             PermissionAction::Ask => &mut *buckets.ask,
             PermissionAction::Deny => &mut *buckets.deny,
         };
-        bucket.extend(tools.iter().map(|t| format!("{prefix}{t}")));
+        for t in tools {
+            let rendered = format!("{prefix}{t}");
+            let suppressed = match action {
+                PermissionAction::Allow => {
+                    native.deny.contains(rendered.as_str())
+                        || native.ask.contains(rendered.as_str())
+                }
+                PermissionAction::Ask => native.deny.contains(rendered.as_str()),
+                PermissionAction::Deny => false,
+            };
+            if !suppressed {
+                bucket.push(rendered);
+            }
+        }
     }
 }
 
@@ -2733,6 +2774,209 @@ mod tests {
             CTX_READ_ONLY[0]
         );
         assert!(allow.contains(&ctx_read.as_str()));
+    }
+
+    // ---- #972: native-wins suppression for tiered MCP tools ----
+    // Ports main's inline native-wins behavior onto release/3.x's helper
+    // structure: a tiered tool's *resolved* action (override else tier
+    // default) is suppressed by a more authoritative native rule on that
+    // exact tool string, same deny > ask > allow authority as the unrelated
+    // neutral-rule precedence already covered above.
+
+    #[test]
+    fn native_deny_suppresses_tier_allow_for_read_only_tool() {
+        let mut manifest = context_mode_plugin_manifest();
+        let rule = format!(
+            "{}{}",
+            crate::config::CONTEXT_MODE_MCP_PREFIX,
+            CTX_READ_ONLY[0]
+        );
+        let mut native_permissions = std::collections::BTreeMap::new();
+        native_permissions.insert(
+            "claude_code".to_string(),
+            crate::config::NativePermissionRules {
+                allow: Vec::new(),
+                ask: Vec::new(),
+                deny: vec![rule.clone()],
+            },
+        );
+        manifest.capabilities.native_permissions = native_permissions;
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let deny = perm_action(&settings, "deny");
+        assert!(
+            deny.contains(&rule.as_str()),
+            "expected {rule} in deny: {deny:?}"
+        );
+        assert!(
+            !allow.contains(&rule.as_str()),
+            "native deny must suppress the tier's resolved allow: {allow:?}"
+        );
+        // A sibling read-only tool with no native rule is unaffected.
+        let sibling = format!(
+            "{}{}",
+            crate::config::CONTEXT_MODE_MCP_PREFIX,
+            CTX_READ_ONLY[1]
+        );
+        assert!(
+            allow.contains(&sibling.as_str()),
+            "sibling tool must still get its tier default: {allow:?}"
+        );
+    }
+
+    #[test]
+    fn native_ask_suppresses_tier_allow_for_mutation_tool() {
+        let mut manifest = context_mode_plugin_manifest();
+        let rule = format!(
+            "{}{}",
+            crate::config::CONTEXT_MODE_MCP_PREFIX,
+            CTX_MUTATION[0]
+        );
+        let mut native_permissions = std::collections::BTreeMap::new();
+        native_permissions.insert(
+            "claude_code".to_string(),
+            crate::config::NativePermissionRules {
+                allow: Vec::new(),
+                ask: vec![rule.clone()],
+                deny: Vec::new(),
+            },
+        );
+        manifest.capabilities.native_permissions = native_permissions;
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let ask = perm_action(&settings, "ask");
+        assert!(
+            ask.contains(&rule.as_str()),
+            "expected {rule} in ask: {ask:?}"
+        );
+        assert!(
+            !allow.contains(&rule.as_str()),
+            "native ask must suppress the tier's resolved allow: {allow:?}"
+        );
+    }
+
+    #[test]
+    fn native_deny_on_destructive_tool_wins_and_is_not_double_listed() {
+        let mut manifest = context_mode_plugin_manifest();
+        let rule = format!(
+            "{}{}",
+            crate::config::CONTEXT_MODE_MCP_PREFIX,
+            CTX_DESTRUCTIVE[0]
+        );
+        let mut native_permissions = std::collections::BTreeMap::new();
+        native_permissions.insert(
+            "claude_code".to_string(),
+            crate::config::NativePermissionRules {
+                allow: Vec::new(),
+                ask: Vec::new(),
+                deny: vec![rule.clone()],
+            },
+        );
+        manifest.capabilities.native_permissions = native_permissions;
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let ask = perm_action(&settings, "ask");
+        let deny = perm_action(&settings, "deny");
+        assert_eq!(
+            deny.iter().filter(|d| **d == rule).count(),
+            1,
+            "expected exactly one deny entry, not double-listed: {deny:?}"
+        );
+        assert!(
+            !ask.contains(&rule.as_str()),
+            "destructive tool's default ask must not survive alongside deny: {ask:?}"
+        );
+        assert!(
+            !allow.contains(&rule.as_str()),
+            "must not also appear in allow: {allow:?}"
+        );
+    }
+
+    #[test]
+    fn native_deny_wins_over_config_override_for_one_mutation_tool() {
+        // `mcp_permissions` overrides mutation -> ask; a native deny on one
+        // specific mutation tool must still outrank that resolved ask, while
+        // its siblings (no native rule) follow the override.
+        let mut manifest = context_mode_plugin_manifest();
+        manifest.capabilities.features = Some(crate::config::Features {
+            context_mode: Some(crate::config::ContextMode {
+                enabled: true,
+                mcp_permissions: Some(crate::config::McpPermissions {
+                    read_only: None,
+                    mutation: Some(crate::config::McpPermissionAction::Ask),
+                    destructive: None,
+                }),
+            }),
+            ..Default::default()
+        });
+        let denied_rule = format!(
+            "{}{}",
+            crate::config::CONTEXT_MODE_MCP_PREFIX,
+            CTX_MUTATION[0]
+        );
+        let mut native_permissions = std::collections::BTreeMap::new();
+        native_permissions.insert(
+            "claude_code".to_string(),
+            crate::config::NativePermissionRules {
+                allow: Vec::new(),
+                ask: Vec::new(),
+                deny: vec![denied_rule.clone()],
+            },
+        );
+        manifest.capabilities.native_permissions = native_permissions;
+        let settings = render_settings_for_test(&manifest);
+        let ask = perm_action(&settings, "ask");
+        let deny = perm_action(&settings, "deny");
+        assert!(
+            deny.contains(&denied_rule.as_str()),
+            "expected {denied_rule} in deny: {deny:?}"
+        );
+        assert!(
+            !ask.contains(&denied_rule.as_str()),
+            "deny-covered tool must not also be in the overridden ask: {ask:?}"
+        );
+        for tool in CTX_MUTATION.iter().skip(1) {
+            let rule = format!("{}{tool}", crate::config::CONTEXT_MODE_MCP_PREFIX);
+            assert!(
+                ask.contains(&rule.as_str()),
+                "{rule} missing from overridden ask: {ask:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_without_native_rule_still_gets_tier_default() {
+        // A native rule naming an unrelated tool must not affect tiered tools
+        // it doesn't name — the common case, and a guard against an overeager
+        // suppression check matching more than the exact rendered string.
+        let mut manifest = context_mode_plugin_manifest();
+        let mut native_permissions = std::collections::BTreeMap::new();
+        native_permissions.insert(
+            "claude_code".to_string(),
+            crate::config::NativePermissionRules {
+                allow: Vec::new(),
+                ask: Vec::new(),
+                deny: vec!["Bash(rm *)".into()],
+            },
+        );
+        manifest.capabilities.native_permissions = native_permissions;
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let ask = perm_action(&settings, "ask");
+        for tool in CTX_READ_ONLY.iter().chain(CTX_MUTATION) {
+            let rule = format!("{}{tool}", crate::config::CONTEXT_MODE_MCP_PREFIX);
+            assert!(
+                allow.contains(&rule.as_str()),
+                "{rule} missing from allow: {allow:?}"
+            );
+        }
+        for tool in CTX_DESTRUCTIVE {
+            let rule = format!("{}{tool}", crate::config::CONTEXT_MODE_MCP_PREFIX);
+            assert!(
+                ask.contains(&rule.as_str()),
+                "{rule} missing from ask: {ask:?}"
+            );
+        }
     }
 
     #[test]
