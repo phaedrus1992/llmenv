@@ -661,6 +661,50 @@ fn fresh_render_dedups_typed_and_native_hook_duplicate() {
     );
 }
 
+// #985: the task-tool redirect PreToolUse hook is registered only when the
+// task tracker is enabled.
+fn task_tracker_matcher_present(enabled: bool) -> bool {
+    let m = llmenv::merge::MergedManifest {
+        capabilities: llmenv::config::Capabilities {
+            features: Some(llmenv::config::Features {
+                task_tracker: Some(llmenv::config::TaskTracker { enabled }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+    let parsed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json"),
+    )
+    .expect("parse settings.json");
+    parsed["hooks"]["PreToolUse"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|e| e["matcher"].as_str() == Some("^(TaskCreate|TaskList|TaskUpdate)$"))
+}
+
+#[test]
+fn task_tool_redirect_hook_registered_when_tracker_enabled() {
+    assert!(
+        task_tracker_matcher_present(true),
+        "task-tool redirect hook must be registered when the tracker is enabled"
+    );
+}
+
+#[test]
+fn task_tool_redirect_hook_absent_when_tracker_disabled() {
+    assert!(
+        !task_tracker_matcher_present(false),
+        "task-tool redirect hook must not be registered when the tracker is disabled"
+    );
+}
+
 // Issue #97: native_plugins["claude_code"] is a settings.json fragment that
 // deep-merges at the top level (e.g. extra plugin settings Claude understands
 // but llmenv has no neutral representation for).

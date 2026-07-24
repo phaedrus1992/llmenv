@@ -765,7 +765,7 @@ fn combine_reminders(parts: impl IntoIterator<Item = String>) -> String {
 }
 
 /// Render a bullet list of tasks (`- title (slug)`), one per line.
-fn render_task_list(tasks: &[&Task]) -> String {
+pub(crate) fn render_task_list(tasks: &[&Task]) -> String {
     tasks
         .iter()
         .map(|t| format!("- {} ({})", t.title, t.slug))

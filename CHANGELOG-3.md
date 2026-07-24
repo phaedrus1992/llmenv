@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
-A bug-fix and small-UX patch: grouped, filterable `task ls` output, task reminders that no longer leak across projects, and feature-enabled MCP permissions that stop self-conflicting under Claude Code's `deny > ask > allow` precedence. It also trims per-session context bloat — the statusline `{pr}` and `branch` widgets self-resolve their PR under engines that don't send one, rendered hooks no longer fire twice per event, and the ICM memory injection stays silent when the store is empty.
+A bug-fix and small-UX patch centered on the task tracker: Claude Code's built-in task tools now feed the `llmenv task` tracker instead of bypassing it, `task ls` output is grouped and filterable, and reminders no longer leak across projects. It also fixes feature-enabled MCP permission precedence on Claude Code and trims per-session context bloat — the statusline `{pr}` and `branch` widgets self-resolve their PR under engines that don't send one, rendered hooks no longer fire twice per event, and the ICM memory injection stays silent when the store is empty.
 
 ### Added
 
@@ -32,6 +32,7 @@ A bug-fix and small-UX patch: grouped, filterable `task ls` output, task reminde
 - The statusline `branch` widget's PR hyperlink no longer stays inert under engines (like Claude Code) that don't send a `pr` field — the branch text now links to the current branch's PR via the same self-resolving `gh pr view` lookup the `{pr}` widget uses (#950), sharing its short-lived cache. See [`statusline:`](https://phaedrus1992.github.io/llmenv/docs/configuration) (#973)
 - Rendered `settings.json` no longer lists each hook twice for the same event on a first or strict render — the freshly generated hooks doc is now deduped at generation time (the same strip-nulls-then-dedup pass `reconcile` already applied when a prior file existed), so each guard fires once per event instead of launching two (or, for dual-interpreter guards, four) processes per tool call (#977)
 - The ICM memory injection no longer adds a `No memories found` block or a "consider saving" nag to the context on every prompt when the store is empty — advisory-line stripping is now case-insensitive to server wording, and a recall left with only advisory/blank lines injects nothing (#978)
+- With the task tracker enabled, Claude Code's built-in `TaskCreate`/`TaskList`/`TaskUpdate` tools are now redirected into the `llmenv task` tracker instead of Claude's ephemeral task state — `TaskCreate` records a real task (auto-starting a session when none is open), `TaskList` returns the tracker's view, and `TaskUpdate` maps status to start/done/delete. Previously the agent's built-in task tools bypassed the tracker, so it sat mostly unused. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#985)
 
 ## [3.6.0] - 2026-07-22
 

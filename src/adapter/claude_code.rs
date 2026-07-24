@@ -1077,6 +1077,27 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
         }));
 
+    // #985: redirect Claude Code's built-in task tools to the `llmenv task`
+    // tracker so tasks actually land there instead of Claude's ephemeral state.
+    // Only registered when the task tracker is enabled; the `pre_tool_use`
+    // handler dispatches on tool_name (TaskCreate/TaskList/TaskUpdate) and denies
+    // the native tool with the equivalent `llmenv task` result.
+    if manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .is_some_and(|t| t.enabled)
+    {
+        hooks_by_event
+            .entry("PreToolUse".to_string())
+            .or_default()
+            .push(json!({
+                "matcher": "^(TaskCreate|TaskList|TaskUpdate)$",
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
+            }));
+    }
+
     // Throttle hooks: poll usage backend and sleep adaptive delay to avoid rate limits.
     if manifest.throttle.is_some() {
         hooks_by_event
