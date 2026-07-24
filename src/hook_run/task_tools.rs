@@ -95,24 +95,30 @@ fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
     }
     match task::add_task(state_dir, subject, None, None, project) {
         Ok(t) => {
-            if let Some(desc) = str_field(input, "description")
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-            {
-                // Best-effort: the task exists; a failed note shouldn't undo it.
-                let _ = task::note_task(state_dir, &t.slug, desc);
-            }
-            deny(&format!(
+            let mut msg = format!(
                 "Tracked in the llmenv task tracker as '{slug}'. Claude's built-in task tools are \
                  redirected here so tasks persist across /clear and new sessions — do NOT stop \
                  tracking and do NOT retry TaskCreate (it will keep being redirected). Update this \
                  task with `llmenv task start|note|done {slug}` and list tasks with `llmenv task ls`.",
                 slug = t.slug
-            ))
+            );
+            // Keep the task even if the note write fails, but surface the loss —
+            // reporting unqualified success while the description silently
+            // vanished would violate the "never swallow silent" rule.
+            if let Some(desc) = str_field(input, "description")
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                && let Err(e) = task::note_task(state_dir, &t.slug, desc)
+            {
+                tracing::warn!(error = %e, slug = %t.slug, "task redirect: description note not saved");
+                msg.push_str(&format!(" (note: the description wasn't saved — {e})"));
+            }
+            deny(&msg)
         }
-        Err(e) => deny(&format!(
-            "couldn't record the task ({e}); track it with `llmenv task add \"{subject}\"` manually."
-        )),
+        // `e` already carries actionable guidance (e.g. ">1 open sessions — pass
+        // --session <id>"), so surface it rather than re-suggesting a bare `add`
+        // that would hit the same error.
+        Err(e) => deny(&format!("couldn't record the task ({e}).")),
     }
 }
 
@@ -144,13 +150,17 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
     };
     let slug = match task::resolve_identifier(state_dir, id) {
         Ok(s) => s,
-        Err(_) => {
+        // Preserve the real reason (invalid id, no match, OR an ambiguous prefix
+        // that matched several tasks) — flattening all three to "no match" would
+        // misreport a too-many-matches case as zero.
+        Err(e) => {
             return deny(&format!(
-                "no llmenv task matches '{id}'; run `llmenv task ls` for the current ids."
+                "couldn't resolve task '{id}' ({e}); run `llmenv task ls` for the current ids."
             ));
         }
     };
-    let outcome = match str_field(input, "status") {
+    let status = str_field(input, "status");
+    let outcome = match status {
         Some("in_progress") => {
             task::start_task(state_dir, &slug).map(|_| format!("started '{slug}'"))
         }
@@ -158,23 +168,32 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
             task::done_task(state_dir, &slug).map(|_| format!("completed '{slug}'"))
         }
         Some("deleted") => task::delete_task(state_dir, &slug).map(|_| format!("deleted '{slug}'")),
-        _ => Ok(format!("left '{slug}' unchanged")),
+        // Name the unrecognized value rather than silently reporting "unchanged"
+        // as if the requested transition had been honored.
+        Some(other) => Ok(format!(
+            "left '{slug}' unchanged (status '{other}' not recognized)"
+        )),
+        None => Ok(format!("left '{slug}' unchanged")),
     };
-    // A description/subject on an update becomes a progress note.
-    if let Some(note) = str_field(input, "description")
-        .or_else(|| str_field(input, "subject"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    // A description/subject on an update becomes a progress note — but not on a
+    // delete (the task is gone). Surface a failed note rather than reporting
+    // silent success.
+    let mut note_warning = String::new();
+    if status != Some("deleted")
+        && let Some(note) = str_field(input, "description")
+            .or_else(|| str_field(input, "subject"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        && let Err(e) = task::note_task(state_dir, &slug, note)
     {
-        let _ = task::note_task(state_dir, &slug, note);
+        tracing::warn!(error = %e, slug = %slug, "task redirect: progress note not saved");
+        note_warning = format!(" (note not saved: {e})");
     }
     match outcome {
         Ok(msg) => deny(&format!(
-            "llmenv task tracker: {msg} (TaskUpdate redirected). Keep using `llmenv task`."
+            "llmenv task tracker: {msg}{note_warning} (TaskUpdate redirected). Keep using `llmenv task`."
         )),
-        Err(e) => deny(&format!(
-            "couldn't update '{slug}' ({e}); adjust it with `llmenv task` manually."
-        )),
+        Err(e) => deny(&format!("couldn't update '{slug}' ({e}).")),
     }
 }
 
@@ -260,6 +279,27 @@ mod tests {
             task::TaskState::Done,
             "state should be Done: {t:?}"
         );
+    }
+
+    #[test]
+    fn update_unrecognized_status_is_reported_not_swallowed() {
+        let dir = tmp();
+        handle_inner(
+            "TaskCreate",
+            Some(&json!({ "subject": "beta" })),
+            dir.path(),
+            PROJECT,
+        );
+        let slug = task::list_tasks(dir.path())[0].slug.clone();
+        // `pending` isn't a transition this handler maps — it must say so, not
+        // silently claim success.
+        let out = handle_inner(
+            "TaskUpdate",
+            Some(&json!({ "taskId": slug, "status": "pending" })),
+            dir.path(),
+            PROJECT,
+        );
+        assert!(out.contains("not recognized"), "{out}");
     }
 
     #[test]
