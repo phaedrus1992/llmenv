@@ -2,6 +2,7 @@
 source: tests/claude_code_adapter.rs
 expression: files
 ---
+- ".llmenv-hooks.json"
 - CLAUDE.md
 - settings.json
 - skills/clippy/SKILL.md
