@@ -50,11 +50,20 @@ the cross-listing rule below takes over.
 release branch. If it fails (conflict, skipped branch), resolve the conflict
 in the merge PR it opens — don't work around it by applying the change twice.
 
-**Docs-only edits on a `release/X.x` branch don't need a branch or PR.** The
-feature-branch + PR rule exists to gate *code* changes. A simple documentation
-update on a release branch — reconciling the changelog, editing `RELEASING.md`,
-`docs/`, or `README.md` — can be edited, committed, and pushed **directly** to
-the `release/X.x` branch. Code changes still go through a branch + PR.
+**Docs, changelog, and forward-merge commits don't need a branch or PR — on a
+`release/X.x` branch _or_ `main`.** The feature-branch + PR rule exists to gate
+_code_ changes. The following can be edited, committed, and pushed **directly**
+to `release/X.x` or `main`:
+
+- Documentation updates — `docs/`, `README.md`, `RELEASING.md`, `AGENTS.md`, and
+  the like.
+- Changelog reconciling and entry edits — `CHANGELOG-*.md` (including the
+  forward-merge cross-listing this file describes).
+- Resolving a forward-merge — the `forward-merge-release` merge commit and any
+  conflict resolution it needs (see below), which by definition lands on the
+  target branch directly.
+
+Code changes still go through a branch + PR.
 
 ### Forward-merged fixes appear in every release that ships them
 
@@ -67,10 +76,10 @@ shipped in it. So:
 > must appear under that release's version heading too — referencing the oldest
 > version it was first fixed in.
 
-This is *not* the duplicate-entry case the workflow avoids. Forward-merge keeps
+This is _not_ the duplicate-entry case the workflow avoids. Forward-merge keeps
 the entry flowing **while it sits in `[Unreleased]`**. The gap appears later:
 the older branch cuts its release first (entry freezes under, say, `[1.0.13]`),
-then weeks later the newer branch cuts *its* release — and the fix, long since
+then weeks later the newer branch cuts _its_ release — and the fix, long since
 merged into its code, is invisible in the new version's section because the
 entry froze on the older branch.
 
@@ -122,7 +131,7 @@ user-facing effect:
   that isn't reachable from llmenv's own code is still omitted; note it in the
   PR description, not the changelog
 
-When in doubt, ask: *would someone running the released binary notice or care?*
+When in doubt, ask: _would someone running the released binary notice or care?_
 If not, leave it out. This applies retroactively to `[Unreleased]` — strip such
 entries before cutting a release rather than freezing them under a version.
 
