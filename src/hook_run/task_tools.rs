@@ -96,9 +96,10 @@ fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
     match task::add_task(state_dir, subject, None, None, project) {
         Ok(t) => {
             let mut msg = format!(
-                "Tracked in the llmenv task tracker as '{slug}' — do NOT retry TaskCreate (it \
-                 will keep being redirected). Update with `llmenv task start|note|done|wait|block \
-                 {slug}`; list with `llmenv task ls`.",
+                "Tracked in the llmenv task tracker as '{slug}' — do NOT stop tracking and do \
+                 NOT retry TaskCreate (it will keep being redirected). Update with `llmenv task \
+                 start|note|done|wait {slug}`, block on another with `llmenv task block {slug} \
+                 --on <other>`, and list with `llmenv task ls`.",
                 slug = t.slug
             );
             // Keep the task even if the note write fails, but surface the loss —
@@ -143,8 +144,8 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
         .filter(|s| !s.is_empty())
     else {
         return deny(
-            "TaskUpdate carried no `taskId`; update via `llmenv task start|note|done|wait|block <id>` \
-             (see `llmenv task ls` for ids).",
+            "TaskUpdate carried no `taskId`; update via `llmenv task start|note|done|wait <id>` \
+             or `llmenv task block <id> --on <other>` (see `llmenv task ls` for ids).",
         );
     };
     let slug = match task::resolve_identifier(state_dir, id) {

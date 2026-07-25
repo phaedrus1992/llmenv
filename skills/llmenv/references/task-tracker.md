@@ -12,9 +12,10 @@ TODOs.
   parallel work).
 - `llmenv task add "<title>" [--session <id>]` — auto-tags to your one open
   session; pass `--session` if 2+ are open. Errors rather than guessing.
-- `llmenv task start|done|note|wait <slug> ["<text>"]` — claim, finish, log
-  progress, or mark blocked on external/human input. `wait`'s reason and
-  `note`'s text read from stdin if omitted.
+- `llmenv task start|done <slug>` — claim it, or mark it finished.
+- `llmenv task note|wait <slug> ["<text>"]` — log a progress note, or mark
+  blocked on external/human input; the text/reason reads from stdin if
+  omitted.
 - `llmenv task add "<title>" --parent <slug>` / `llmenv task block <slug>
   --on <other>` — link tasks liberally, not just for big epics: `parent`
   orders sub-tasks under a parent in `task ls`; `block` records a real
