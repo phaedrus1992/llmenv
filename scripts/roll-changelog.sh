@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Roll the appropriate CHANGELOG-N.md [Unreleased] section into a versioned
-# section. Called from release.toml's pre-release-hook.
+# Roll CHANGELOG-<major>.md's [Unreleased] section into a versioned section,
+# where <major> is VERSION's major version component. Called from
+# release.toml's pre-release-hook.
 #
-# Auto-discovers the active CHANGELOG by finding the highest-numbered
-# CHANGELOG-N.md that contains an [Unreleased] section. Handles both stable
-# (e.g. 3.3.0) and pre-release (e.g. 3.3.0-rc.1) versions identically.
+# Targets the file matching the release's own major version — NOT "whichever
+# CHANGELOG-N.md happens to have an [Unreleased] section" (the old heuristic;
+# see #1003). That broke as soon as two CHANGELOG-N.md files had open
+# [Unreleased] sections at once — e.g. release/X.x accumulating patch-line
+# work in CHANGELOG-X.md while main accumulates feature-line work in
+# CHANGELOG-(X+1).md for a future major bump — because it always picked the
+# higher-numbered file regardless of which one the release being cut actually
+# belongs to, silently leaving the other file's real, shipped changes
+# mislabeled "Unreleased" forever.
+#
+# Handles both stable (e.g. 3.3.0) and pre-release (e.g. 3.3.0-rc.1) versions
+# identically — the major version is the first dot-separated component either
+# way.
 #
 # Idempotent: if the version heading already exists, exits 0 without changes.
 #
@@ -18,11 +29,18 @@ VERSION="${1:?usage: roll-changelog.sh <version>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Find the highest-numbered CHANGELOG-N.md that has an [Unreleased] section.
-CHANGELOG=$(grep -l '## \[Unreleased\]' "$WORKSPACE_DIR"/CHANGELOG-*.md 2>/dev/null | sort -t- -k2 -n | tail -1)
+# Major version is the first dot-separated component: "3.6.2" -> "3",
+# "4.0.0-rc.1" -> "4".
+MAJOR="${VERSION%%.*}"
+CHANGELOG="$WORKSPACE_DIR/CHANGELOG-${MAJOR}.md"
 
-if [[ -z "$CHANGELOG" ]]; then
-  echo "roll-changelog: no CHANGELOG-*.md with [Unreleased] section found" >&2
+if [[ ! -f "$CHANGELOG" ]]; then
+  echo "roll-changelog: $CHANGELOG does not exist (version $VERSION -> major $MAJOR)" >&2
+  exit 1
+fi
+
+if ! grep -q '## \[Unreleased\]' "$CHANGELOG"; then
+  echo "roll-changelog: $CHANGELOG has no '## [Unreleased]' section to roll" >&2
   exit 1
 fi
 
