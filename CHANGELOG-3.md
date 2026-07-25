@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+- The task-tracker redirect messages for Claude Code's built-in `TaskCreate`/`TaskUpdate` now mention `llmenv task wait|block`, not just `start|note|done`, so the agent is pointed at the full command set instead of just the original three. Also trimmed the redirect and Stop-hook wording (`stop_hook_reminder`) to cut repeated boilerplate on every turn/call, and shrank `skills/llmenv/references/task-tracker.md` from 97 to 29 lines to match its sibling reference files. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#994, #995)
+
+### Fixed
+
+- Document `capabilities.model_providers`/`capabilities.default_models` in the configuration reference — the schema has supported custom model-provider endpoints and role-keyed default models for several releases with no user-facing docs. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#994)
+
+## [3.6.1] - 2026-07-24
+
 A bug-fix and small-UX patch centered on the task tracker: Claude Code's built-in task tools now feed the `llmenv task` tracker instead of bypassing it, `task ls` output is grouped and filterable, and reminders no longer leak across projects. It also fixes feature-enabled MCP permission precedence on Claude Code and trims per-session context bloat — the statusline `{pr}` and `branch` widgets self-resolve their PR under engines that don't send one, rendered hooks no longer fire twice per event, and the ICM memory injection stays silent when the store is empty.
 
 ### Added
@@ -614,7 +624,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.6.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...HEAD
+[3.6.1]: https://github.com/phaedrus1992/llmenv/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/phaedrus1992/llmenv/compare/v3.5.1...v3.6.0
 [3.5.1]: https://github.com/phaedrus1992/llmenv/compare/v3.5.0...v3.5.1
 [3.5.0]: https://github.com/phaedrus1992/llmenv/compare/v3.4.0...v3.5.0

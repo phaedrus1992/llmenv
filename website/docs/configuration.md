@@ -203,6 +203,51 @@ capabilities:
   the escape hatch for engine-specific rules with no neutral form. See
   [Engines](engines.md).
 
+### `model_providers` / `default_models`
+
+Custom or self-hosted model provider endpoints (Ollama, vLLM, LM Studio, a
+proxy, or an override of a built-in provider), and default-model selection by
+role. Only rendered for engines with a multi-provider concept
+(`supports_model_providers() == true` — currently Crush); other engines
+silently skip these entries, so declaring one in a shared bundle is safe.
+
+```yaml
+capabilities:
+  model_providers:
+    - id: ollama
+      name: Ollama (local)
+      when: ["home"]                     # tag-intersected against active scope tags
+      base_url: "http://localhost:11434/v1"
+      api_type: openai                   # wire format: openai | anthropic | google | ...
+      api_key: "$OLLAMA_API_KEY"         # passthrough — llmenv never resolves this
+      models:
+        - id: llama3.1:70b
+          name: "Llama 3.1 70B"
+          reasoning: false
+          context_window: 128000
+          max_tokens: 8192
+          cost: { input: 0, output: 0 }
+          modalities: ["text"]
+  default_models:
+    large: { provider: ollama, model: "llama3.1:70b" }
+    small: { provider: anthropic, model: "claude-haiku-4-5" }  # built-in provider id, unvalidated
+```
+
+- `model_providers[].id` is the stable identifier, used as the map key on
+  render and as the `default_models[].provider` target.
+- `when` intersects with active scope tags — same selection mechanism as
+  `mcp`/`lsp`/`skills`.
+- `api_key`/`headers` are passthrough strings the *target engine* resolves at
+  its own runtime (may be a literal or a `$VAR`/`!command` reference) — llmenv
+  never interprets them, so no plaintext secret is written into the
+  materialized cache directory.
+- `disabled: true` excludes the provider from the resolved set for all engines.
+- `default_models` is a role-keyed map (`large`, `small`, or any role name the
+  target engine recognizes) pointing at a `{ provider, model }` pair.
+  `provider` may reference a `model_providers[].id` declared alongside it, or
+  an engine builtin (e.g. Crush's built-in `anthropic`) that llmenv doesn't
+  validate against.
+
 ## `native:`
 
 A per-engine catch-all for top-level keys that **no modeled feature owns** (e.g.

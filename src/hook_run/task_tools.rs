@@ -96,10 +96,9 @@ fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
     match task::add_task(state_dir, subject, None, None, project) {
         Ok(t) => {
             let mut msg = format!(
-                "Tracked in the llmenv task tracker as '{slug}'. Claude's built-in task tools are \
-                 redirected here so tasks persist across /clear and new sessions — do NOT stop \
-                 tracking and do NOT retry TaskCreate (it will keep being redirected). Update this \
-                 task with `llmenv task start|note|done {slug}` and list tasks with `llmenv task ls`.",
+                "Tracked in the llmenv task tracker as '{slug}' — do NOT retry TaskCreate (it \
+                 will keep being redirected). Update with `llmenv task start|note|done|wait|block \
+                 {slug}`; list with `llmenv task ls`.",
                 slug = t.slug
             );
             // Keep the task even if the note write fails, but surface the loss —
@@ -144,7 +143,7 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
         .filter(|s| !s.is_empty())
     else {
         return deny(
-            "TaskUpdate carried no `taskId`; update via `llmenv task start|note|done <id>` \
+            "TaskUpdate carried no `taskId`; update via `llmenv task start|note|done|wait|block <id>` \
              (see `llmenv task ls` for ids).",
         );
     };

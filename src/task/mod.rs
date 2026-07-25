@@ -668,8 +668,13 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 /// was already wip when I woke up" without threading session_id through task
 /// state, and firing on every wip task each Stop is a reasonable, simpler
 /// starting behavior (advisory-only, never blocks).
-/// ponytail: add session-scoped mtime filtering if the blanket reminder
-/// proves too chatty in practice.
+///
+/// Re-evaluated during the #995 output audit: the mtime-filtered version
+/// would still need to fire *at least once* per Stop with a `wip` task, since
+/// there's no cheaper signal than "ask again" for whether the agent is still
+/// on it — so it wouldn't reduce the every-turn cost that #995 is about, only
+/// add tracking complexity for the same frequency. Kept blanket; trimmed the
+/// footer wording instead (below) since that's what actually repeats.
 ///
 /// Scoped to the current project (#949) via [`tasks_for_current_project`] — a
 /// `wip` task from a different project sharing this task store must never
@@ -680,11 +685,10 @@ pub fn stop_hook_reminder(state_dir: &Path) -> String {
         wip_reminder(
             &tasks,
             "You still have task(s) in progress",
-            "Run `llmenv task done <slug>` when finished. If still working, keep going — \
-             don't stop mid-task. If blocked, exhaust safe autonomous remediation first \
-             (retry, an alternate approach, a diagnostic command); only then ask the user, \
-             once, with a specific actionable question, and `llmenv task note <slug> \"...\"` \
-             the blocker instead of repeating the same status every turn.",
+            "Run `llmenv task done <slug>` when finished, or keep working — don't stop \
+             mid-task. If blocked, exhaust autonomous remediation first (retry, an alternate \
+             approach, a diagnostic); only then ask the user once, and `llmenv task note \
+             <slug> \"...\"` the blocker instead of repeating status.",
         ),
         session_finish_reminders(state_dir),
     ])
@@ -1312,7 +1316,7 @@ mod tests {
 
         let reminder = stop_hook_reminder(dir.path());
         assert!(reminder.contains(&wip.slug));
-        assert!(reminder.contains("exhaust safe autonomous remediation"));
+        assert!(reminder.contains("exhaust autonomous remediation"));
         // The waiting task and its FYI must stay silent on Stop.
         assert!(!reminder.contains(&waiting.slug));
         assert!(!reminder.contains("no action needed"));
@@ -1332,7 +1336,7 @@ mod tests {
         assert!(reminder.contains(&task.slug));
         assert!(reminder.contains("no action needed"));
         // Still a plain FYI, never the action-pushing wip footer.
-        assert!(!reminder.contains("exhaust safe autonomous remediation"));
+        assert!(!reminder.contains("exhaust autonomous remediation"));
     }
 
     #[test]
