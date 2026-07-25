@@ -19,33 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Document `capabilities.model_providers`/`capabilities.default_models` in the configuration reference — the schema has supported custom model-provider endpoints and role-keyed default models for several releases with no user-facing docs. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#994)
 
-## [3.6.1] - 2026-07-24
-
-A bug-fix and small-UX patch centered on the task tracker: Claude Code's built-in task tools now feed the `llmenv task` tracker instead of bypassing it, `task ls` output is grouped and filterable, and reminders no longer leak across projects. It also fixes feature-enabled MCP permission precedence on Claude Code and trims per-session context bloat — the statusline `{pr}` and `branch` widgets self-resolve their PR under engines that don't send one, rendered hooks no longer fire twice per event, and the ICM memory injection stays silent when the store is empty.
-
-### Added
-
-- `llmenv task ls` human output now groups tasks by session (current-project sessions first), indents subtasks under their parent, prefixes each row with a state glyph + label, and annotates blocked tasks with their `blocked_on` refs; new `--state <open|wip|waiting|done>` (repeatable) and `--hide-done`/`--active` filters compose with `--session` and apply to `--format json` too. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#926)
-- Feature-enabled MCPs (`features.context_mode`, `features.memory`) now take a `mcp_permissions` override to customize the read-only/mutation/destructive tier→action policy per feature. See [`mcp_permissions`](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmcp_permissions) (#946)
-
-### Changed
-
-- The bundled `llmenv` skill's task rules now guide agents to link tasks liberally with `--parent` (ordered decomposition) and `block --on` (real dependencies) and to record milestones, design rationale, and failures with `task note`. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#932)
-
-### Fixed
-
-- The task-tracker Stop hook no longer re-injects the `waiting`-task FYI every turn; `waiting` tasks are now silent on Stop and surface only in the SessionStart reminder. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#933)
-- `llmenv task add` no longer warns "you have N task(s) already in progress" for `waiting` tasks — only genuinely `wip` tasks count, since starting new work alongside a task paused on external input is legitimate (#933)
-- The statusline `{pr}` widget no longer renders empty under engines (like Claude Code) that don't send a `pr` field — it now self-resolves via `gh pr view` for the current branch, cached briefly so it doesn't shell out on every render. See [`statusline:`](https://phaedrus1992.github.io/llmenv/docs/configuration) (#950)
-- The task-tracker Stop hook's `wip` reminder and SessionStart's `waiting` reminder no longer leak across projects sharing the same task store — a `wip`/`waiting` task from one project no longer nags a hook running in another. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#949)
-- Feature-enabled MCP permissions (context-mode, ICM) no longer conflict between a wildcard allow and per-tool tier rules; Claude Code's `deny > ask > allow` precedence was silently shadowing the wildcard, so mutation tools prompted on every call and destructive tools were blocked outright even with the feature enabled. Default policy now allows read-only and mutation tools without prompting, and asks before destructive ones. An explicit `native_permissions` rule on a built-in MCP tool now takes precedence over the tier default for that tool (`deny > ask > allow`), rather than emitting a competing entry. See [`mcp_permissions`](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmcp_permissions) (#946, #972)
-- The statusline `branch` widget's PR hyperlink no longer stays inert under engines (like Claude Code) that don't send a `pr` field — the branch text now links to the current branch's PR via the same self-resolving `gh pr view` lookup the `{pr}` widget uses (#950), sharing its short-lived cache. See [`statusline:`](https://phaedrus1992.github.io/llmenv/docs/configuration) (#973)
-- Rendered `settings.json` no longer lists each hook twice for the same event on a first or strict render — the freshly generated hooks doc is now deduped at generation time (the same strip-nulls-then-dedup pass `reconcile` already applied when a prior file existed), so each guard fires once per event instead of launching two (or, for dual-interpreter guards, four) processes per tool call (#977)
-- The ICM memory injection no longer adds a `No memories found` block or a "consider saving" nag to the context on every prompt when the store is empty — advisory-line stripping is now case-insensitive to server wording, and a recall left with only advisory/blank lines injects nothing (#978)
-- With the task tracker enabled, Claude Code's built-in `TaskCreate`/`TaskList`/`TaskUpdate` tools are now redirected into the `llmenv task` tracker instead of Claude's ephemeral task state — `TaskCreate` records a real task (auto-starting a session when none is open), `TaskList` returns the tracker's view, and `TaskUpdate` maps status to start/done/delete. Previously the agent's built-in task tools bypassed the tracker, so it sat mostly unused. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#985)
-- Features set at the root of `config.yaml` (`features:`) are no longer silently dropped from the generated engine config. `build_manifest` only fed `merge()` the `capabilities:` block, so a root-level `task_tracker`, `slippage`, or `context_mode` (incl. its `mcp_permissions` override) never reached the manifest that renderers gate on — the task-tracker hooks, slippage guardrails, built-in skill reference docs, and MCP-permission overrides could all silently go missing. Root `features:` now folds into the merged manifest (root wins over bundle-contributed values) (#987)
-- A hook removed from your config no longer lingers in the generated `settings.json`. `reconcile` unions rendered hooks with what's already on disk (to preserve hooks a plugin self-registers at runtime), which meant a hook llmenv *used to* render but no longer does was kept forever. llmenv now records the hooks it renders and, on the next render, purges its own dropped hooks while still preserving genuinely-foreign ones (#991)
-
 ## [3.6.0] - 2026-07-22
 
 3.6.0 includes three new engine-facing pieces — an in-engine task tracker, a first-class `llmenv statusline` subcommand, and a third supported engine (opencode, alongside Claude Code and Crush) — plus a `codebase-memory-mcp` integration.
@@ -625,7 +598,6 @@ the rc.1 and rc.2 sections below.
 
 <!-- next-url -->
 [Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...HEAD
-[3.6.1]: https://github.com/phaedrus1992/llmenv/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/phaedrus1992/llmenv/compare/v3.5.1...v3.6.0
 [3.5.1]: https://github.com/phaedrus1992/llmenv/compare/v3.5.0...v3.5.1
 [3.5.0]: https://github.com/phaedrus1992/llmenv/compare/v3.4.0...v3.5.0
