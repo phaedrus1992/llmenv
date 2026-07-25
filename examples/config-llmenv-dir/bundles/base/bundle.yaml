@@ -12,7 +12,3 @@ hooks:
     handler:
       type: command
       command: "bash ${HOME}/git/my-llmenv/bundles/base/hooks/session-log.sh"
-
-# codebase-memory-mcp is configured via the first-class `features.codebase_memory`
-# block in config.yaml (not here) — it replaces this bundle's old manual `mcp:`
-# server entry. See config.yaml's `features:` section.
