@@ -191,7 +191,7 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
     }
     match outcome {
         Ok(msg) => deny(&format!(
-            "llmenv task tracker: {msg}{note_warning} (TaskUpdate redirected). Keep using `llmenv task`."
+            "{msg}{note_warning} — llmenv task tracker (TaskUpdate redirected)."
         )),
         Err(e) => deny(&format!("couldn't update '{slug}' ({e}).")),
     }
