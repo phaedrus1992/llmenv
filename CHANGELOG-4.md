@@ -45,10 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Breaking:** Remove the deprecated boolean `session_log` shape
-  (`file: bool`, `transcript: bool`, `verbose: bool`). Configs
-  using the old format must migrate to the per-sink mapping blocks
-  introduced in 3.3.0 ([#744](https://github.com/phaedrus1992/llmenv/issues/744))
 - The bundled `llmenv` skill's task rules now guide agents to link tasks liberally with `--parent` (ordered decomposition) and `block --on` (real dependencies) and to record milestones, design rationale, and failures with `task note`. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#932)
 
 ### Fixed
