@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Add model provider configuration rendering to the opencode adapter — `capabilities.model_providers`/`default_models` now render into `opencode.json`'s `provider`/`model`/`small_model` fields, matching the existing Crush support. `api_type` maps to the AI SDK package name opencode expects (e.g. `openai` → `@ai-sdk/openai-compatible`); `default_models`'s `large`/`small` roles map to opencode's two default-model slots. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#1004)
+
 ### Changed
 
 - The task-tracker redirect messages for Claude Code's built-in `TaskCreate`/`TaskUpdate` now mention `llmenv task wait|block`, not just `start|note|done`, so the agent is pointed at the full command set instead of just the original three. Also trimmed the redirect and Stop-hook wording (`stop_hook_reminder`) to cut repeated boilerplate on every turn/call, and shrank `skills/llmenv/references/task-tracker.md` from 97 to 29 lines to match its sibling reference files. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#994, #995)

@@ -42,6 +42,82 @@ struct OpencodeConfig {
     /// Permission rules — per-tool pattern→action maps.
     #[serde(skip_serializing_if = "Option::is_none")]
     permission: Option<BTreeMap<String, PermissionValue>>,
+    /// Custom/self-hosted model provider endpoints, keyed by provider id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<BTreeMap<String, OpencodeProviderEntry>>,
+    /// Default model, as `provider_id/model_id` — from `default_models.large`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// Lightweight-task model, as `provider_id/model_id` — from
+    /// `default_models.small`. opencode has no slot for any other role name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    small_model: Option<String>,
+}
+
+/// A `provider.<id>` entry in `opencode.json`, matching opencode's
+/// `ProviderConfig` schema (`packages/core/src/v1/config/provider.ts`).
+#[derive(serde::Serialize)]
+struct OpencodeProviderEntry {
+    /// AI SDK package, e.g. `@ai-sdk/openai-compatible`, `@ai-sdk/anthropic`.
+    npm: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    options: OpencodeProviderOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    models: Option<BTreeMap<String, OpencodeModelEntry>>,
+}
+
+/// `provider.<id>.options` — opencode allows extra keys beyond these named
+/// ones (`headers` included via `#[serde(flatten)]`), matching its
+/// `StructWithRest` schema.
+#[derive(serde::Serialize, Default)]
+struct OpencodeProviderOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "baseURL")]
+    base_url: Option<String>,
+    #[serde(rename = "apiKey", skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<BTreeMap<String, String>>,
+}
+
+/// A `provider.<id>.models.<model_id>` entry, matching opencode's `Model`
+/// config schema. Only the subset llmenv's `ModelSource` can populate.
+#[derive(serde::Serialize)]
+struct OpencodeModelEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<OpencodeModelLimit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost: Option<OpencodeModelCost>,
+    /// Only the input side — llmenv's `ModelSource.modalities` models input
+    /// modalities only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modalities: Option<OpencodeModalities>,
+}
+
+#[derive(serde::Serialize)]
+struct OpencodeModelLimit {
+    context: u32,
+    output: u32,
+}
+
+#[derive(serde::Serialize)]
+struct OpencodeModelCost {
+    input: f64,
+    output: f64,
+    #[serde(rename = "cache_read", skip_serializing_if = "Option::is_none")]
+    cache_read: Option<f64>,
+    #[serde(rename = "cache_write", skip_serializing_if = "Option::is_none")]
+    cache_write: Option<f64>,
+}
+
+#[derive(serde::Serialize)]
+struct OpencodeModalities {
+    input: Vec<String>,
 }
 
 /// An LSP server entry in opencode.json.
@@ -827,8 +903,24 @@ impl AgentAdapter for OpencodeAdapter {
             None
         };
 
+        // 9b. Model providers + default models.
+        let config_provider = {
+            let rendered = render_opencode_providers(&manifest.capabilities.model_providers);
+            (!rendered.is_empty()).then_some(rendered)
+        };
+        let (config_model, config_small_model) =
+            render_opencode_default_models(&manifest.capabilities.default_models);
+
         // 10. Native overlay — reject modeled keys, then deep-merge
-        const OPENCODE_MODELED_KEYS: &[&str] = &["instructions", "mcp", "lsp", "permission"];
+        const OPENCODE_MODELED_KEYS: &[&str] = &[
+            "instructions",
+            "mcp",
+            "lsp",
+            "permission",
+            "provider",
+            "model",
+            "small_model",
+        ];
         if let Some(native) = manifest.native.get("opencode") {
             super::reject_modeled_native_keys(native, OPENCODE_MODELED_KEYS, "opencode")?;
         }
@@ -839,6 +931,9 @@ impl AgentAdapter for OpencodeAdapter {
             schema: "https://opencode.ai/config.json".into(),
             instructions: config_instructions,
             permission: config_permission,
+            provider: config_provider,
+            model: config_model,
+            small_model: config_small_model,
         };
         let mut doc_value = serde_json::to_value(&config)?;
         super::overlay_native_json(
@@ -1100,6 +1195,95 @@ fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
     Ok(format!("---\n{}---\n{}", fm_yaml, body))
 }
 
+/// Map llmenv's `ModelProvider.api_type` (an open wire-format string) to the
+/// AI SDK npm package opencode's `provider.<id>.npm` field expects.
+///
+/// Known short forms expand to the common case; anything else (including a
+/// literal `@ai-sdk/...` package name) passes through unchanged, since a
+/// caller who already knows the exact package should be able to name it
+/// directly rather than being forced through a fixed enum.
+fn opencode_provider_npm(api_type: Option<&str>) -> String {
+    match api_type {
+        Some("openai") => "@ai-sdk/openai-compatible".to_string(),
+        Some("anthropic") => "@ai-sdk/anthropic".to_string(),
+        Some("google") => "@ai-sdk/google".to_string(),
+        Some(other) => other.to_string(),
+        // No documented default for opencode; openai-compatible covers the
+        // overwhelming majority of self-hosted/proxy providers this feature
+        // targets (Ollama, vLLM, LM Studio, most OpenAI-compatible proxies).
+        None => "@ai-sdk/openai-compatible".to_string(),
+    }
+}
+
+/// Render `capabilities.model_providers` into opencode's `provider.<id>` map.
+fn render_opencode_providers(
+    providers: &[llmenv_config::ModelProvider],
+) -> BTreeMap<String, OpencodeProviderEntry> {
+    providers
+        .iter()
+        .filter(|p| !p.disabled)
+        .map(|p| {
+            let models = if p.models.is_empty() {
+                None
+            } else {
+                Some(
+                    p.models
+                        .iter()
+                        .map(|m| (m.id.clone(), render_opencode_model(m)))
+                        .collect(),
+                )
+            };
+            let entry = OpencodeProviderEntry {
+                npm: opencode_provider_npm(p.api_type.as_deref()),
+                name: p.name.clone(),
+                options: OpencodeProviderOptions {
+                    base_url: p.base_url.clone(),
+                    api_key: p.api_key.clone(),
+                    headers: (!p.headers.is_empty()).then(|| p.headers.clone()),
+                },
+                models,
+            };
+            (p.id.clone(), entry)
+        })
+        .collect()
+}
+
+fn render_opencode_model(m: &llmenv_config::ModelSource) -> OpencodeModelEntry {
+    OpencodeModelEntry {
+        name: m.name.clone(),
+        reasoning: m.reasoning.then_some(true),
+        // opencode's schema requires both `context` and `output` when `limit`
+        // is present at all — only emit it when llmenv has both.
+        limit: match (m.context_window, m.max_tokens) {
+            (Some(context), Some(output)) => Some(OpencodeModelLimit { context, output }),
+            _ => None,
+        },
+        cost: m.cost.as_ref().map(|c| OpencodeModelCost {
+            input: c.input,
+            output: c.output,
+            cache_read: c.cache_read,
+            cache_write: c.cache_write,
+        }),
+        modalities: (!m.modalities.is_empty()).then(|| OpencodeModalities {
+            input: m.modalities.clone(),
+        }),
+    }
+}
+
+/// Render `default_models` into opencode's `model`/`small_model` top-level
+/// fields, as `provider_id/model_id` strings. opencode has exactly two
+/// default-model slots — `large` maps to `model`, `small` maps to
+/// `small_model` — so any other role name has no destination and is dropped.
+fn render_opencode_default_models(
+    models: &std::collections::BTreeMap<String, llmenv_config::ModelRef>,
+) -> (Option<String>, Option<String>) {
+    let render = |r#ref: &llmenv_config::ModelRef| format!("{}/{}", r#ref.provider, r#ref.model);
+    (
+        models.get("large").map(render),
+        models.get("small").map(render),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1353,6 +1537,173 @@ mod tests {
             srv.get("disabled_tools").is_none(),
             "opencode has no disabled_tools field"
         );
+    }
+
+    #[test]
+    fn materialize_model_provider_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .model_providers
+            .push(llmenv_config::ModelProvider {
+                id: "ollama".into(),
+                name: Some("Ollama (local)".into()),
+                base_url: Some("http://localhost:11434/v1".into()),
+                api_type: Some("openai".into()),
+                api_key: Some("$OLLAMA_API_KEY".into()),
+                headers: std::collections::BTreeMap::from([("X-Custom".into(), "value".into())]),
+                models: vec![llmenv_config::ModelSource {
+                    id: "llama3.1:70b".into(),
+                    name: Some("Llama 3.1 70B".into()),
+                    reasoning: true,
+                    context_window: Some(128_000),
+                    max_tokens: Some(8192),
+                    cost: Some(llmenv_config::ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: None,
+                        cache_write: None,
+                    }),
+                    modalities: vec!["text".into()],
+                }],
+                ..Default::default()
+            });
+        manifest.capabilities.default_models.insert(
+            "large".into(),
+            llmenv_config::ModelRef {
+                provider: "ollama".into(),
+                model: "llama3.1:70b".into(),
+            },
+        );
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        let provider = &doc["provider"]["ollama"];
+        assert_eq!(
+            provider["npm"],
+            serde_json::json!("@ai-sdk/openai-compatible")
+        );
+        assert_eq!(provider["name"], serde_json::json!("Ollama (local)"));
+        assert_eq!(
+            provider["options"]["baseURL"],
+            serde_json::json!("http://localhost:11434/v1")
+        );
+        assert_eq!(
+            provider["options"]["apiKey"],
+            serde_json::json!("$OLLAMA_API_KEY")
+        );
+        assert_eq!(
+            provider["options"]["headers"]["X-Custom"],
+            serde_json::json!("value")
+        );
+
+        let model = &provider["models"]["llama3.1:70b"];
+        assert_eq!(model["name"], serde_json::json!("Llama 3.1 70B"));
+        assert_eq!(model["reasoning"], serde_json::json!(true));
+        assert_eq!(model["limit"]["context"], serde_json::json!(128_000));
+        assert_eq!(model["limit"]["output"], serde_json::json!(8192));
+        assert_eq!(model["cost"]["input"], serde_json::json!(0.0));
+        assert_eq!(model["modalities"]["input"], serde_json::json!(["text"]));
+
+        assert_eq!(doc["model"], serde_json::json!("ollama/llama3.1:70b"));
+        assert!(doc.get("small_model").is_none());
+    }
+
+    #[test]
+    fn materialize_model_provider_disabled_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .model_providers
+            .push(llmenv_config::ModelProvider {
+                id: "disabled-provider".into(),
+                disabled: true,
+                ..Default::default()
+            });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("provider").is_none(),
+            "\"provider\" key must be absent when all providers are disabled"
+        );
+    }
+
+    #[test]
+    fn materialize_model_provider_empty_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest::default();
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(doc.get("provider").is_none());
+        assert!(doc.get("model").is_none());
+        assert!(doc.get("small_model").is_none());
+    }
+
+    #[test]
+    fn materialize_model_provider_limit_omitted_without_both_bounds() {
+        // opencode's schema requires both `context` and `output` when `limit`
+        // is present at all — a model with only one of the two must omit
+        // `limit` entirely rather than emit a half-populated object.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .model_providers
+            .push(llmenv_config::ModelProvider {
+                id: "p".into(),
+                models: vec![llmenv_config::ModelSource {
+                    id: "m".into(),
+                    context_window: Some(128_000),
+                    max_tokens: None,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(doc["provider"]["p"]["models"]["m"].get("limit").is_none());
+    }
+
+    #[test]
+    fn materialize_default_models_unknown_role_dropped() {
+        // opencode only has two default-model slots (model/small_model); a
+        // role name it doesn't recognize has nowhere to go and must not
+        // error or silently invent a field.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.default_models.insert(
+            "coding".into(),
+            llmenv_config::ModelRef {
+                provider: "anthropic".into(),
+                model: "claude-opus-4-5".into(),
+            },
+        );
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(doc.get("model").is_none());
+        assert!(doc.get("small_model").is_none());
+        assert!(doc.get("coding").is_none());
+    }
+
+    #[test]
+    fn materialize_native_opencode_rejects_provider_key() {
+        // `provider`/`model`/`small_model` are modeled keys — a
+        // `native.opencode` fragment must not be allowed to clobber them.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        let frag: serde_yaml::Value = serde_yaml::from_str("provider:\n  evil: {}\n").unwrap();
+        manifest.native.insert("opencode".into(), frag);
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("provider"), "{err}");
     }
 
     #[test]

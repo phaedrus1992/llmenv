@@ -207,8 +207,10 @@ capabilities:
 
 Custom or self-hosted model provider endpoints (Ollama, vLLM, LM Studio, a
 proxy, or an override of a built-in provider), and default-model selection by
-role. Currently only rendered by the Crush adapter; other engines silently
-skip these entries, so declaring one in a shared bundle is safe.
+role. Rendered by the Crush and opencode adapters (`api_type` maps to
+opencode's AI SDK package name, e.g. `openai` → `@ai-sdk/openai-compatible`);
+Claude Code has no multi-provider concept and silently skips these entries,
+so declaring one in a shared bundle is safe.
 
 ```yaml
 capabilities:
@@ -248,7 +250,9 @@ capabilities:
   target engine recognizes) pointing at a `{ provider, model }` pair.
   `provider` may reference a `model_providers[].id` declared alongside it, or
   an engine builtin (e.g. Crush's built-in `anthropic`) that llmenv doesn't
-  validate against.
+  validate against. opencode only has two default-model slots (`model` and
+  `small_model`), so only the `large` and `small` roles have a destination
+  there — any other role name is a no-op for that engine.
 
 ## `native:`
 
