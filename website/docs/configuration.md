@@ -207,9 +207,8 @@ capabilities:
 
 Custom or self-hosted model provider endpoints (Ollama, vLLM, LM Studio, a
 proxy, or an override of a built-in provider), and default-model selection by
-role. Only rendered for engines with a multi-provider concept
-(`supports_model_providers() == true` — currently Crush); other engines
-silently skip these entries, so declaring one in a shared bundle is safe.
+role. Currently only rendered by the Crush adapter; other engines silently
+skip these entries, so declaring one in a shared bundle is safe.
 
 ```yaml
 capabilities:
@@ -217,9 +216,10 @@ capabilities:
     - id: ollama
       name: Ollama (local)
       when: ["home"]                     # tag-intersected against active scope tags
-      base_url: "http://localhost:11434/v1"
+      base_url: "http://localhost:11434/v1" # loopback only — use https:// for any remote host
       api_type: openai                   # wire format: openai | anthropic | google | ...
-      api_key: "$OLLAMA_API_KEY"         # passthrough — llmenv never resolves this
+      api_key: "$OLLAMA_API_KEY"         # $VAR/!command reference resolved by the target
+                                          # engine at its own runtime — never a literal key
       models:
         - id: llama3.1:70b
           name: "Llama 3.1 70B"
@@ -237,10 +237,12 @@ capabilities:
   render and as the `default_models[].provider` target.
 - `when` intersects with active scope tags — same selection mechanism as
   `mcp`/`lsp`/`skills`.
-- `api_key`/`headers` are passthrough strings the *target engine* resolves at
-  its own runtime (may be a literal or a `$VAR`/`!command` reference) — llmenv
-  never interprets them, so no plaintext secret is written into the
-  materialized cache directory.
+- `api_key`/`headers` are passthrough strings — llmenv writes exactly what you
+  put here into the materialized config verbatim, with no resolution or
+  interpretation of its own. **Use a `$VAR` or `!command` reference, not a
+  literal key**, so the credential isn't committed to your config repo or
+  synced by `llmenv sync`; the *target engine* resolves the reference at its
+  own runtime.
 - `disabled: true` excludes the provider from the resolved set for all engines.
 - `default_models` is a role-keyed map (`large`, `small`, or any role name the
   target engine recognizes) pointing at a `{ provider, model }` pair.
