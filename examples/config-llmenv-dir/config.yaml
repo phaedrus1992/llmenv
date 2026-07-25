@@ -74,8 +74,9 @@ session_log:
 # That merge model is why host-specific tools (plexctl, security, etc.) live in
 # bundles/personal-laptop-host/bundle.yaml instead of here: they only make sense
 # on one machine. The base bundle (bundles/base/bundle.yaml) contributes the
-# session-log hook + codebase-memory MCP server for every session that selects the
-# user scope.
+# session-log hook for every session that selects the user scope. codebase-memory
+# is configured separately, via the first-class `features.codebase_memory` block
+# below.
 #
 # For the schema, see llmenv's crates/llmenv-config/src/schema.rs and the
 # engine-capabilities design doc in the main repo.
@@ -649,3 +650,19 @@ features:
   # resolve ${CLAUDE_PLUGIN_ROOT}.
   context_mode:
     enabled: true
+
+  # In-engine task tracker (#231): durable, cross-session "what am I working
+  # on" state, backed by one JSON file per task. Enabling this materializes the
+  # `llmenv` skill's task-tracker reference and the SessionStart/Stop lifecycle
+  # reminders, and redirects Claude Code's native TaskCreate/TaskList/TaskUpdate
+  # into the tracker so a skill reaching for the built-in tools still lands
+  # durable tasks here. See `llmenv task --help`.
+  task_tracker:
+    enabled: true
+
+  # First-class codebase-memory-mcp integration (#365): llmenv computes
+  # CBM_CACHE_DIR/CBM_ALLOWED_ROOT itself, fires an index on SessionStart, and
+  # `llmenv doctor` checks the binary is on PATH. Gated to the user-phaedrus
+  # tag so it's active for every session that selects the user scope.
+  codebase_memory:
+    - when: [user-phaedrus]

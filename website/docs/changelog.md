@@ -7,6 +7,8 @@ sidebar_label: Changelog
 
 {/* GENERATED FILE — do not edit by hand. Regenerate with `scripts/sync-changelog-doc.sh`. */}
 
+<!-- markdownlint-disable MD013 -- entries are one dense bullet per change, not wrapped prose -->
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
@@ -14,67 +16,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Version 4.x
-
-## [Unreleased] - ReleaseDate
-
-## [3.6.1] - 2026-07-24
-
-### Added
-
-- Add Opencode engine adapter (`src/adapter/opencode.rs`) — full
-  feature parity with the Claude Code adapter: renders
-  `opencode.json` (MCP, LSP, permissions, env vars), `AGENTS.md`
-  with frontmatter translation, rules, and a JS hook bridge shim
-  that maps Opencode plugin events to llmenv hook subprocess calls
-  with Claude-shaped stdin payloads. Plugin content (skills,
-  commands, agents, MCP) from Claude Code bundles is translated
-  into Opencode-native forms ([#657](https://github.com/phaedrus1992/llmenv/issues/657))
-- Add JSON Schema generation for materialized configs —
-  `llmenv materialize` now emits a `schema.json` sidecar alongside
-  the rendered engine config, describing the full type shape of the
-  output for validation and tooling ([#660](https://github.com/phaedrus1992/llmenv/issues/660))
-- Add model provider configuration rendering to Claude Code and
-  Crush adapters — `capabilities.model_providers` and
-  `capabilities.default_models` are now rendered into engine-native
-  config forms ([#682](https://github.com/phaedrus1992/llmenv/issues/682))
-- Add stale MCP server pruning to the Claude Code adapter — servers
-  previously owned by llmenv but absent from the resolved set are
-  removed from `.claude.json`, preserving user-added servers
-  ([#739](https://github.com/phaedrus1992/llmenv/issues/739))
-- Add tiered MCP permission rules for built-in servers (ICM,
-  context-mode) — read-only tools are auto-allowed, mutation tools
-  prompt the user, and destructive tools are denied, matching the
-  sensitivity tier of each tool
-  ([#694](https://github.com/phaedrus1992/llmenv/issues/694))
-
-### Changed
-
-- **Breaking:** Remove the deprecated boolean `session_log` shape
-  (`file: bool`, `transcript: bool`, `verbose: bool`). Configs
-  using the old format must migrate to the per-sink mapping blocks
-  introduced in 3.3.0 ([#744](https://github.com/phaedrus1992/llmenv/issues/744))
-
-### Fixed
-
-- Fix opencode hook shim generating misleading warning when bundle
-  path resolution fails — diagnostic now correctly describes stale
-  or restructured bundles ([#769](https://github.com/phaedrus1992/llmenv/issues/769))
-- Fix `split_frontmatter` crash on empty/single-delimiter input in
-  the opencode adapter ([#769](https://github.com/phaedrus1992/llmenv/issues/769))
-- Fix silent `remove_file` error discard in claude_code companion
-  file cleanup — now emits `tracing::warn!` on failure
-- Add `tracing::warn!` diagnostics to `read_owned_servers` I/O and
-  parse error paths
-
 ## Version 3.x
 
 ## [Unreleased] - ReleaseDate
 
-A bug-fix and small-UX patch centered on the task tracker: Claude Code's built-in task tools now feed the `llmenv task` tracker instead of bypassing it, `task ls` output is grouped and filterable, and reminders no longer leak across projects. It also fixes feature-enabled MCP permission precedence on Claude Code and trims per-session context bloat — the statusline `{pr}` and `branch` widgets self-resolve their PR under engines that don't send one, rendered hooks no longer fire twice per event, and the ICM memory injection stays silent when the store is empty.
+### Added
+
+- Add model provider configuration rendering to the opencode adapter — `capabilities.model_providers`/`default_models` now render into `opencode.json`'s `provider`/`model`/`small_model` fields, matching the existing Crush support. `api_type` maps to the AI SDK package name opencode expects (e.g. `openai` → `@ai-sdk/openai-compatible`); `default_models`'s `large`/`small` roles map to opencode's two default-model slots. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#1004)
+
+### Changed
+
+- The task-tracker redirect messages for Claude Code's built-in `TaskCreate`/`TaskUpdate` now mention `llmenv task wait|block`, not just `start|note|done`, so the agent is pointed at the full command set instead of just the original three. Also trimmed the redirect and Stop-hook wording (`stop_hook_reminder`) to cut repeated boilerplate on every turn/call, and shrank `skills/llmenv/references/task-tracker.md` from 97 to 29 lines to match its sibling reference files. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#994, #995)
+
+### Fixed
+
+- Document `capabilities.model_providers`/`capabilities.default_models` in the configuration reference — the schema has supported custom model-provider endpoints and role-keyed default models for several releases with no user-facing docs. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#994)
+
+## [3.6.1] - 2026-07-24
+
+A bug-fix and small-UX patch centered on the task tracker: Claude Code's built-in task tools now feed the `llmenv task` tracker instead of bypassing it, `task ls` output is grouped and filterable, and reminders no longer leak across projects. It also fixes feature-enabled MCP permission precedence on Claude Code and trims per-session context bloat — the statusline `{pr}` and `branch` widgets self-resolve their PR under engines that don't send one, rendered hooks no longer fire twice per event, and the ICM memory injection stays silent when the store is empty. Adds the opencode adapter, stale MCP server pruning, and tiered MCP permission rules for built-in servers.
 
 ### Added
 
+- Add Opencode engine adapter (`src/adapter/opencode.rs`) — full feature parity with the Claude Code adapter: renders `opencode.json` (MCP, LSP, permissions, env vars), `AGENTS.md` with frontmatter translation, rules, and a JS hook bridge shim that maps Opencode plugin events to llmenv hook subprocess calls with Claude-shaped stdin payloads. Plugin content (skills, commands, agents, MCP) from Claude Code bundles is translated into Opencode-native forms ([#657](https://github.com/phaedrus1992/llmenv/issues/657))
+- Add model provider configuration rendering to the Crush adapter — `capabilities.model_providers` and `capabilities.default_models` are now rendered into `crush.json` ([#682](https://github.com/phaedrus1992/llmenv/issues/682))
+- Add stale MCP server pruning to the Claude Code adapter — servers previously owned by llmenv but absent from the resolved set are removed from `.claude.json`, preserving user-added servers ([#739](https://github.com/phaedrus1992/llmenv/issues/739))
+- Add tiered MCP permission rules for built-in servers (ICM, context-mode) — read-only tools are auto-allowed, mutation tools prompt the user, and destructive tools are denied, matching the sensitivity tier of each tool ([#694](https://github.com/phaedrus1992/llmenv/issues/694))
 - `llmenv task ls` human output now groups tasks by session (current-project sessions first), indents subtasks under their parent, prefixes each row with a state glyph + label, and annotates blocked tasks with their `blocked_on` refs; new `--state <open|wip|waiting|done>` (repeatable) and `--hide-done`/`--active` filters compose with `--session` and apply to `--format json` too. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#926)
 - Feature-enabled MCPs (`features.context_mode`, `features.memory`) now take a `mcp_permissions` override to customize the read-only/mutation/destructive tier→action policy per feature. See [`mcp_permissions`](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmcp_permissions) (#946)
 
@@ -84,6 +51,10 @@ A bug-fix and small-UX patch centered on the task tracker: Claude Code's built-i
 
 ### Fixed
 
+- Fix opencode hook shim generating misleading warning when bundle path resolution fails — diagnostic now correctly describes stale or restructured bundles ([#769](https://github.com/phaedrus1992/llmenv/issues/769))
+- Fix `split_frontmatter` crash on empty/single-delimiter input in the opencode adapter ([#769](https://github.com/phaedrus1992/llmenv/issues/769))
+- Fix silent `remove_file` error discard in claude_code companion file cleanup — now emits `tracing::warn!` on failure
+- Add `tracing::warn!` diagnostics to `read_owned_servers` I/O and parse error paths
 - The task-tracker Stop hook no longer re-injects the `waiting`-task FYI every turn; `waiting` tasks are now silent on Stop and surface only in the SessionStart reminder. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands) (#933)
 - `llmenv task add` no longer warns "you have N task(s) already in progress" for `waiting` tasks — only genuinely `wip` tasks count, since starting new work alongside a task paused on external input is legitimate (#933)
 - The statusline `{pr}` widget no longer renders empty under engines (like Claude Code) that don't send a `pr` field — it now self-resolves via `gh pr view` for the current branch, cached briefly so it doesn't shell out on every render. See [`statusline:`](https://phaedrus1992.github.io/llmenv/docs/configuration) (#950)

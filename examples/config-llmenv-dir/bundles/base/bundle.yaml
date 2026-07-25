@@ -12,14 +12,3 @@ hooks:
     handler:
       type: command
       command: "bash ${HOME}/git/my-llmenv/bundles/base/hooks/session-log.sh"
-
-
-# codebase-memory-mcp backs the `source-code` skill: it indexes a repo into a
-# knowledge graph so the agent can search/trace code without re-reading whole
-# files. Defined here (not in a host bundle) so it is available in every session
-# — it's a per-repo cache, not a host-specific binary path. Install the binary
-# to ~/.local/bin/codebase-memory-mcp first; `llmenv doctor` flags it if missing.
-mcp:
-  - name: codebase-memory-mcp
-    type: stdio
-    command: "${HOME}/.local/bin/codebase-memory-mcp"

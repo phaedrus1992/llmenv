@@ -661,15 +661,11 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 /// every turn nags about a state that is meant to be quiet (they still show at
 /// session start via [`session_start_reminder`]).
 ///
-/// First cut: flags any remaining `wip` task. The design doc's fuller
-/// heuristic — only fire when *this session* touched the task store (via file
-/// mtimes within the session window) — is deliberately deferred: the current
-/// session has no cheap way to distinguish "I started this task" from "a task
-/// was already wip when I woke up" without threading session_id through task
-/// state, and firing on every wip task each Stop is a reasonable, simpler
-/// starting behavior (advisory-only, never blocks).
-/// ponytail: add session-scoped mtime filtering if the blanket reminder
-/// proves too chatty in practice.
+/// Fires on every Stop while a `wip` task remains (advisory-only, never
+/// blocks) — a session-scoped mtime filter (only fire if *this* session
+/// touched the store) was considered and rejected: it would still need to
+/// fire at least once per Stop to check, so it buys no frequency reduction
+/// for real tracking complexity (threading session_id through task state).
 ///
 /// Scoped to the current project (#949) via [`tasks_for_current_project`] — a
 /// `wip` task from a different project sharing this task store must never
@@ -680,11 +676,11 @@ pub fn stop_hook_reminder(state_dir: &Path) -> String {
         wip_reminder(
             &tasks,
             "You still have task(s) in progress",
-            "Run `llmenv task done <slug>` when finished. If still working, keep going — \
-             don't stop mid-task. If blocked, exhaust safe autonomous remediation first \
-             (retry, an alternate approach, a diagnostic command); only then ask the user, \
-             once, with a specific actionable question, and `llmenv task note <slug> \"...\"` \
-             the blocker instead of repeating the same status every turn.",
+            "Run `llmenv task done <slug>` when finished, or keep working — don't stop \
+             mid-task. If blocked, exhaust safe autonomous remediation first (retry, an \
+             alternate approach, a diagnostic); only then ask the user once with a specific \
+             actionable question, and `llmenv task note <slug> \"...\"` the blocker instead of \
+             repeating status.",
         ),
         session_finish_reminders(state_dir),
     ])

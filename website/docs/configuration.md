@@ -203,6 +203,57 @@ capabilities:
   the escape hatch for engine-specific rules with no neutral form. See
   [Engines](engines.md).
 
+### `model_providers` / `default_models`
+
+Custom or self-hosted model provider endpoints (Ollama, vLLM, LM Studio, a
+proxy, or an override of a built-in provider), and default-model selection by
+role. Rendered by the Crush and opencode adapters (`api_type` maps to
+opencode's AI SDK package name, e.g. `openai` → `@ai-sdk/openai-compatible`);
+Claude Code has no multi-provider concept and silently skips these entries,
+so declaring one in a shared bundle is safe.
+
+```yaml
+capabilities:
+  model_providers:
+    - id: ollama
+      name: Ollama (local)
+      when: ["home"]                     # tag-intersected against active scope tags
+      base_url: "http://localhost:11434/v1" # loopback only — use https:// for any remote host
+      api_type: openai                   # wire format: openai | anthropic | google | ...
+      api_key: "$OLLAMA_API_KEY"         # $VAR/!command reference resolved by the target
+                                          # engine at its own runtime — never a literal key
+      models:
+        - id: llama3.1:70b
+          name: "Llama 3.1 70B"
+          reasoning: false
+          context_window: 128000
+          max_tokens: 8192
+          cost: { input: 0, output: 0 }
+          modalities: ["text"]
+  default_models:
+    large: { provider: ollama, model: "llama3.1:70b" }
+    small: { provider: anthropic, model: "claude-haiku-4-5" }  # built-in provider id, unvalidated
+```
+
+- `model_providers[].id` is the stable identifier, used as the map key on
+  render and as the `default_models[].provider` target.
+- `when` intersects with active scope tags — same selection mechanism as
+  `mcp`/`lsp`/`skills`.
+- `api_key`/`headers` are passthrough strings — llmenv writes exactly what you
+  put here into the materialized config verbatim, with no resolution or
+  interpretation of its own. **Use a `$VAR` or `!command` reference, not a
+  literal key**, so the credential isn't committed to your config repo or
+  synced by `llmenv sync`; the *target engine* resolves the reference at its
+  own runtime.
+- `disabled: true` excludes the provider from the resolved set for all engines.
+- `default_models` is a role-keyed map (`large`, `small`, or any role name the
+  target engine recognizes) pointing at a `{ provider, model }` pair.
+  `provider` may reference a `model_providers[].id` declared alongside it, or
+  an engine builtin (e.g. Crush's built-in `anthropic`) that llmenv doesn't
+  validate against. opencode only has two default-model slots (`model` and
+  `small_model`), so only the `large` and `small` roles have a destination
+  there — any other role name is a no-op for that engine.
+
 ## `native:`
 
 A per-engine catch-all for top-level keys that **no modeled feature owns** (e.g.

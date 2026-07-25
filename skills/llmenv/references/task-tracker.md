@@ -3,95 +3,28 @@
 Durable, cross-session task state — use it instead of relying on in-session
 TODOs.
 
-## Sessions are mandatory
-
-Every task belongs to a session. Before your first `task add`:
-
-```text
-llmenv task session start "<name>" [--description "<text>"]
-```
-
-Pass `--description` whenever you have enough context to make one useful —
-a dev-sprint issue number, a brainstorming topic, whatever helps a human
-skimming `task session ls` tell your session apart from another one in the
-same project. `--description` is separate from `<name>`; keep the name short.
-
-**If one or more sessions are already open for this project**, `session
-start` errors and lists them (id, name, description, idle time). Pick one:
-
-- `--resume <id>` — this is your session from before (e.g. after a context
-  compaction wiped your memory of it). Adopts it, no new id.
-- `--replace` — the listed session(s) are stale/abandoned. Untags their
-  incomplete tasks (noting what happened) and starts fresh.
-- `--new` — you are deliberately running alongside another active session in
-  this same project (rare — two windows genuinely working in parallel).
-
-## Adding and working tasks
-
-```text
-llmenv task add "<title>"                # auto-tags to your one open session
-llmenv task add "<title>" --session <id> # explicit, if you have 2+ open
-llmenv task start <slug>                 # claim it
-llmenv task done <slug>                  # finish it
-llmenv task note <slug> "<text>"         # record progress before compaction
-llmenv task wait <slug> "<reason>"       # blocked on external/human input
-```
-
-`task add` errors if zero or 2+ sessions are open for this project and you
-didn't pass `--session` — it will not silently create one for you.
-
-## Surviving a context compaction
-
-If you no longer remember your session id, run `llmenv task session ls`. In
-the common case (one agent, one project) there's exactly one match — use it.
-If there are two or more matches for this project, that means real concurrency
-is in play and you need to have durably noted your specific session id
-somewhere in your own context before the compaction — there's no engine-level
-mechanism that preserves it for you across a compaction.
-
-## Link tasks liberally: `parent` and `blocked_on`
-
-Don't let tasks land flat and unrelated — the links are what let the tracker
-drive ordered work and stay legible after a compaction. Reach for them by
-default, not just for big epics.
-
-```text
-llmenv task add "<title>" --parent <slug>   # ordered sub-task
-llmenv task block <slug> --on <other-slug>  # real dependency
-```
-
-- **`--parent <slug>`** — decompose work into ordered sub-tasks. A parent
-  immediately followed by its children reads top-to-bottom in execution order
-  in `llmenv task ls`, so you (or another agent) can pick up mid-stream. Use it
-  whenever a task breaks into steps.
-- **`block <slug> --on <other>`** — record that `slug` can't proceed until
-  `other` is done. `task ls` marks blocked tasks with what they're waiting on,
-  so nothing gets started out of order.
-
-Prefer several small linked tasks over one vague umbrella task: the links are
-cheap and make the plan readable.
-
-## Notes: keep the record
-
-`task note` is the durable memory of *why*, not just *what* — and it's what the
-SessionStart/Stop reminders and any memory write draw on. Add a note when:
-
-- you hit a **milestone** worth marking (a phase finished, a decision reached);
-- you make a **design decision** — record the rationale and the alternatives
-  you rejected, so it isn't re-litigated later;
-- something **fails** — what you tried and why it didn't work, so the next
-  attempt (yours after a compaction, or another agent's) doesn't repeat it.
-
-```text
-llmenv task note <slug> "<what happened and why it matters>"
-```
-
-Notes survive `/clear`, `/compact`, and new sessions — the record that outlives
-your context window.
-
-## Closing out
-
-```text
-llmenv task session finish [<id>]   # auto-resolves if exactly one is open
-llmenv task session show [<id>]
-```
+- `llmenv task session start "<name>" [--description "<text>"]` — required
+  before your first `task add`. Add `--description` for a session ls hint
+  (issue number, topic) when you have one.
+- If a session is already open for this project, `session start` errors and
+  lists them: `--resume <id>` (this is yours, e.g. after a compaction),
+  `--replace` (stale, untag its tasks and start fresh), or `--new` (genuinely
+  parallel work).
+- `llmenv task add "<title>" [--session <id>]` — auto-tags to your one open
+  session; pass `--session` if 2+ are open. Errors rather than guessing.
+- `llmenv task start|done <slug>` — claim it, or mark it finished.
+- `llmenv task note|wait <slug> ["<text>"]` — log a progress note, or mark
+  blocked on external/human input; the text/reason reads from stdin if
+  omitted.
+- `llmenv task add "<title>" --parent <slug>` / `llmenv task block <slug>
+  --on <other>` — link tasks liberally, not just for big epics: `parent`
+  orders sub-tasks under a parent in `task ls`; `block` records a real
+  dependency and shows up as blocked in `task ls`.
+- `llmenv task note` is the durable *why*, not just *what* — record
+  milestones, design decisions (with rejected alternatives), and failures (so
+  a retry after compaction doesn't repeat them). SessionStart/Stop reminders
+  and memory writes draw on these notes.
+- Lost your session id after a compaction? `llmenv task session ls` — one
+  match for this project in the common case; use it.
+- `llmenv task session finish [<id>]` / `session show [<id>]` to close out —
+  `finish` auto-resolves if exactly one session is open.

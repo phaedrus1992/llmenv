@@ -138,6 +138,7 @@ coexist in a single shell session without conflict.
 | Skills (plugin-projected) | Supported | Plugin `skills/` subdirs are projected into Crush's skill paths |
 | Plugins / marketplace | **Hard error** | Crush has no plugin or marketplace concept; non-skill plugin content (custom `agents/`, `commands/`) produces an actionable error naming the plugin |
 | Custom agents | **Unsupported** | Crush hardcodes exactly two agent roles (coder/task); `agents/*.md` from plugins cannot be loaded |
+| Model providers (`model_providers`/`default_models`) | Supported | Rendered to `providers`/`models` using catwalk's field names; `api_type` passes through as `type` verbatim |
 
 ### The `native.crush` escape hatch
 
@@ -150,8 +151,10 @@ native:
     provider: anthropic
 ```
 
-This is the current home for provider/model configuration — first-class
-provider config is tracked in #508. The fragment is deep-merged verbatim into
+`capabilities.model_providers`/`default_models` (see
+[Configuration](configuration.md)) is the first-class, engine-agnostic home
+for provider/model config — use this escape hatch only for Crush-specific
+fields it doesn't cover. The fragment is deep-merged verbatim into
 `crush.json` at highest precedence.
 
 The `native_permissions.crush`, `native_hooks.crush`, and `native_mcp.crush`
@@ -198,6 +201,7 @@ Claude Code adapter.
 | Skills (first-class + plugin-projected) | Supported | Native `SKILL.md` format |
 | Plugins / marketplace | Supported | Plugin commands, agents, MCP, skills, and hooks are translated |
 | Custom agents | Supported | Plugin `agent/*.md` are emitted with `mode: subagent` |
+| Model providers (`model_providers`/`default_models`) | Supported | Rendered to `provider.<id>` / `model` / `small_model`; `api_type` maps to the AI SDK `npm` package (e.g. `openai` → `@ai-sdk/openai-compatible`). `default_models` only has `large`/`small` slots — other role names are a no-op |
 
 ### The `native.opencode` escape hatch
 
@@ -208,12 +212,13 @@ Keys that no modeled feature owns go under `native.opencode`, deep-merged into
 native:
   opencode:
     theme: opencode
-    model: anthropic/claude-opus-4-5
 ```
 
-The modeled keys `instructions`, `mcp`, `lsp`, and `permission` are **rejected**
-in the top-level `native.opencode` block — overlaying them last would clobber the
-security-rendered output. Route those through the `native_permissions.opencode`,
+The modeled keys `instructions`, `mcp`, `lsp`, `permission`, `provider`,
+`model`, and `small_model` are **rejected** in the top-level `native.opencode`
+block — overlaying them last would clobber the security-rendered output (use
+`capabilities.model_providers`/`default_models` for `provider`/`model`/
+`small_model`). Route the rest through the `native_permissions.opencode`,
 `native_hooks.opencode`, and `native_mcp.opencode` siblings instead, which merge
 in the safe direction.
 
