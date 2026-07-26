@@ -2120,9 +2120,32 @@ mod tests {
     use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
+    use crate::merge::MergedManifest;
     use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
     use proptest::prelude::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn materialize_emits_no_schema_sidecar_when_adapter_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest::default();
+        ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+        let has_schema_file = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".schema.json")
+            });
+        assert!(
+            !has_schema_file,
+            "ClaudeCodeAdapter has no config_schema() override — must emit no sidecar"
+        );
+    }
 
     fn marketplace(name: &str, source: &str, install: Option<&str>) -> ResolvedMarketplace {
         ResolvedMarketplace {
