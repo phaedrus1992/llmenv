@@ -148,6 +148,14 @@ pub trait AgentAdapter {
     /// * `text` — the injected memory context, placed as `additionalContext`
     ///   inside `hookSpecificOutput`.
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String;
+
+    /// JSON Schema describing this adapter's materialized output, derived
+    /// from the same typed structs that build it. `None` (the default)
+    /// means the adapter has no typed output structs yet and emits no
+    /// schema sidecar.
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Detect which adapter is running in the current process by checking each
@@ -440,13 +448,27 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        binary_on_path, emit_hook_context, engine_id, known_engine_ids, registered_adapters,
-        remote_transport_type_str, resolve_bundle_relative_paths,
+        AgentAdapter, binary_on_path, emit_hook_context, engine_id, known_engine_ids,
+        registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
         resolve_command_paths_against_files,
     };
 
     // #978: a recall stripped down to only blank lines must inject nothing, not
     // an empty "[ICM MEMORY CONTEXT]" block.
+    #[test]
+    fn config_schema_defaults_to_none_for_adapters_without_a_schema() {
+        assert!(
+            crate::adapter::claude_code::ClaudeCodeAdapter
+                .config_schema()
+                .is_none()
+        );
+        assert!(
+            crate::adapter::crush::CrushAdapter
+                .config_schema()
+                .is_none()
+        );
+    }
+
     #[test]
     fn emit_hook_context_treats_whitespace_only_as_empty() {
         assert!(emit_hook_context("UserPromptSubmit", "\n\n").is_empty());
