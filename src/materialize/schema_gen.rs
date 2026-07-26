@@ -96,4 +96,44 @@ mod tests {
         assert!(result["properties"]["name"].is_object());
         assert!(result["properties"]["count"].is_object());
     }
+
+    // -- property-based test: idempotence (#1012 task 1) --
+    //
+    // Follow-up from pre-pr-review of #1010 (opencode schema sidecar wiring,
+    // #1001). The doc comment promises `f(f(x)) == f(x)`; nothing enforced it.
+
+    use proptest::prelude::*;
+
+    /// Arbitrary JSON leaf value (no nested containers).
+    fn arb_json_leaf() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            proptest::bool::ANY.prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| json!(n)),
+            "[a-zA-Z0-9 ]{0,10}".prop_map(Value::String),
+        ]
+    }
+
+    /// Arbitrary JSON value: a leaf, a shallow array of leaves, or a shallow
+    /// object of leaves — enough shape variety to exercise the root-level
+    /// object/non-object branch `with_root_additional_properties` switches on.
+    fn arb_json_value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            arb_json_leaf(),
+            proptest::collection::vec(arb_json_leaf(), 0..3).prop_map(Value::Array),
+            proptest::collection::btree_map("[a-z]{1,6}", arb_json_leaf(), 0..3)
+                .prop_map(|m| Value::Object(m.into_iter().collect())),
+        ]
+    }
+
+    proptest! {
+        /// `with_root_additional_properties` is idempotent for any input
+        /// shape: applying it twice is the same as applying it once.
+        #[test]
+        fn with_root_additional_properties_is_idempotent(value in arb_json_value()) {
+            let once = with_root_additional_properties(value);
+            let twice = with_root_additional_properties(once.clone());
+            prop_assert_eq!(once, twice);
+        }
+    }
 }

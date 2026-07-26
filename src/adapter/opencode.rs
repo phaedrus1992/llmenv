@@ -26,7 +26,7 @@ const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
 /// — both the JSON output and the generated schema (via
 /// `#[schemars(with = ...)]` on `OpencodeConfig::mcp`) derive from it, so
 /// there is exactly one definition of what an MCP entry looks like.
-#[derive(serde::Serialize, JsonSchema)]
+#[derive(serde::Serialize, serde::Deserialize, JsonSchema, PartialEq, Debug)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum McpEntry {
     Local {
@@ -3357,5 +3357,176 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(doc["type"], serde_json::json!("object"));
         assert!(owned.contains(&PathBuf::from("opencode.schema.json")));
+    }
+
+    // -- property-based tests: McpEntry roundtrip + MCP assembly + schema drift --
+    //
+    // Follow-up from pre-pr-review of #1010 (opencode schema sidecar wiring,
+    // #1001): closes gaps flagged by property-test-gap-finder (#1011, #1012).
+
+    /// Strategy for a small string→string map, used for `environment`/`headers`.
+    fn arb_string_map() -> impl Strategy<Value = BTreeMap<String, String>> {
+        proptest::collection::btree_map("[a-zA-Z0-9_]{1,8}", "[a-zA-Z0-9_ ]{0,12}", 0..3)
+    }
+
+    fn arb_mcp_entry() -> impl Strategy<Value = McpEntry> {
+        let local = (
+            proptest::collection::vec("[a-zA-Z0-9_./-]{1,10}", 1..4),
+            arb_string_map(),
+            arb_string_map(),
+            proptest::option::of(0u32..10_000),
+        )
+            .prop_map(|(command, environment, headers, timeout)| McpEntry::Local {
+                command,
+                environment,
+                headers,
+                timeout,
+            });
+        let remote = (
+            "https?://[a-z0-9.]{3,20}",
+            arb_string_map(),
+            proptest::option::of(0u32..10_000),
+        )
+            .prop_map(|(url, headers, timeout)| McpEntry::Remote {
+                url,
+                headers,
+                timeout,
+            });
+        prop_oneof![local, remote]
+    }
+
+    proptest! {
+        /// #1011: `McpEntry` must roundtrip losslessly through JSON — the
+        /// type is only privately used inside `materialize`, so nothing else
+        /// exercises `Deserialize` today.
+        #[test]
+        fn mcp_entry_roundtrips_through_json(entry in arb_mcp_entry()) {
+            let value = serde_json::to_value(&entry).unwrap();
+            let parsed: McpEntry = serde_json::from_value(value).unwrap();
+            prop_assert_eq!(entry, parsed);
+        }
+    }
+
+    /// Strategy for one `ResolvedMcp`'s kind/headers/timeout, keyed separately
+    /// by name so callers can build a name-unique list (see `arb_mcp_list`).
+    fn arb_mcp_body() -> impl Strategy<
+        Value = (
+            crate::mcp::resolve::ResolvedKind,
+            BTreeMap<String, String>,
+            Option<u32>,
+        ),
+    > {
+        let stdio =
+            (
+                "[a-z]{1,8}",
+                proptest::collection::vec("[a-z]{1,6}", 0..3),
+                arb_string_map(),
+            )
+                .prop_map(|(command, args, env)| {
+                    crate::mcp::resolve::ResolvedKind::Stdio { command, args, env }
+                });
+        let remote = (
+            "https?://[a-z0-9.]{3,20}",
+            prop_oneof![
+                Just(crate::config::McpTransport::Http),
+                Just(crate::config::McpTransport::Sse),
+            ],
+        )
+            .prop_map(
+                |(url, transport)| crate::mcp::resolve::ResolvedKind::Remote { url, transport },
+            );
+        (
+            prop_oneof![stdio, remote],
+            arb_string_map(),
+            proptest::option::of(0u32..10_000),
+        )
+    }
+
+    /// A list of `ResolvedMcp` with distinct names — `materialize` keys the
+    /// `mcp` object by name, so duplicate names aren't a scenario the
+    /// MCP-assembly loop needs to handle.
+    fn arb_mcp_list() -> impl Strategy<Value = Vec<crate::mcp::resolve::ResolvedMcp>> {
+        proptest::collection::btree_map("[a-z]{1,6}", arb_mcp_body(), 0..5).prop_map(|map| {
+            map.into_iter()
+                .map(
+                    |(name, (kind, headers, timeout))| crate::mcp::resolve::ResolvedMcp {
+                        name,
+                        kind,
+                        headers,
+                        timeout,
+                        disabled_tools: vec![],
+                        mcp_permissions: None,
+                    },
+                )
+                .collect()
+        })
+    }
+
+    proptest! {
+        /// #1012 task 2: for any arbitrary combination of stdio/remote MCP
+        /// servers, `materialize`'s MCP-assembly loop emits exactly one
+        /// `mcp.<name>` entry per server, tagged with the type matching its
+        /// `ResolvedKind` — and never panics regardless of headers/timeout.
+        #[test]
+        fn mcp_assembly_produces_one_entry_per_server_with_correct_type(
+            mcps in arb_mcp_list()
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let manifest = MergedManifest {
+                mcps: mcps.clone(),
+                ..Default::default()
+            };
+            OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+            let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+            if mcps.is_empty() {
+                prop_assert!(doc.get("mcp").is_none());
+                return Ok(());
+            }
+            let mcp_obj = doc["mcp"].as_object().unwrap();
+            prop_assert_eq!(mcp_obj.len(), mcps.len());
+            for m in &mcps {
+                let expected_type = match &m.kind {
+                    crate::mcp::resolve::ResolvedKind::Stdio { .. } => "local",
+                    crate::mcp::resolve::ResolvedKind::Remote { .. } => "remote",
+                };
+                prop_assert_eq!(mcp_obj[&m.name]["type"].as_str().unwrap(), expected_type);
+            }
+        }
+
+        /// #1012 task 3: every top-level key `materialize` actually writes
+        /// into `opencode.json` must have a matching property in the
+        /// generated schema — otherwise `OpencodeConfig` and its schema have
+        /// silently drifted apart. No JSON Schema validator dependency
+        /// needed (none is a workspace dep yet, see #1012): this is a
+        /// structural key-presence check, not full schema validation.
+        #[test]
+        fn materialized_top_level_keys_are_declared_in_schema(
+            mcps in arb_mcp_list(),
+            allow in proptest::collection::vec(arb_permission_rule(), 0..3),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut caps = crate::config::Capabilities::default();
+            caps.permissions.allow = allow;
+            let manifest = MergedManifest {
+                mcps,
+                capabilities: caps,
+                ..Default::default()
+            };
+            OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+            let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let schema = OpencodeAdapter.config_schema().unwrap();
+            let props = schema["properties"].as_object().unwrap();
+
+            for key in doc.as_object().unwrap().keys() {
+                prop_assert!(
+                    props.contains_key(key),
+                    "materialized key '{key}' has no matching schema property — \
+                     OpencodeConfig struct and its schema have drifted"
+                );
+            }
+        }
     }
 }
