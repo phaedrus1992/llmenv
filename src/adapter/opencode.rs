@@ -957,7 +957,7 @@ impl AgentAdapter for OpencodeAdapter {
             plugin: config_plugin,
             mcp: config_mcp,
             lsp: config_lsp,
-            schema: "https://opencode.ai/config.json".into(),
+            schema: format!("./{OPENCODE_SCHEMA_FILE}"),
             instructions: config_instructions,
             permission: config_permission,
             provider: config_provider,
@@ -1347,6 +1347,19 @@ mod tests {
         assert!(
             owned.contains(&PathBuf::from(OPENCODE_JSON_FILE)),
             "owned must include opencode.json, got: {owned:?}"
+        );
+    }
+
+    #[test]
+    fn materialize_points_schema_field_at_the_local_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest::default();
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["$schema"],
+            serde_json::json!(format!("./{OPENCODE_SCHEMA_FILE}"))
         );
     }
 
