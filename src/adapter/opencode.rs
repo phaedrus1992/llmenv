@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
+
 use super::AgentAdapter;
 use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
@@ -15,20 +17,50 @@ use crate::merge::MergedManifest;
 pub struct OpencodeAdapter;
 
 const OPENCODE_JSON_FILE: &str = "opencode.json";
+const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
 
 // ── Typed output structs for opencode.json ──
+
+/// A single `mcp.<name>` entry in `opencode.json`. This is the type the
+/// MCP-assembly step in `materialize()` actually constructs and serializes
+/// — both the JSON output and the generated schema (via
+/// `#[schemars(with = ...)]` on `OpencodeConfig::mcp`) derive from it, so
+/// there is exactly one definition of what an MCP entry looks like.
+#[derive(serde::Serialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum McpEntry {
+    Local {
+        command: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        environment: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u32>,
+    },
+    Remote {
+        url: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u32>,
+    },
+}
 
 /// Top-level structure for the opencode.json config document.
 /// Constructed from the merged manifest, serialized to Value, then native
 /// overlay keys are deep-merged at the Value level.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 struct OpencodeConfig {
     /// Native opencode JS plugins (e.g. context-mode).
     #[serde(skip_serializing_if = "Option::is_none")]
     plugin: Option<Vec<String>>,
     /// MCP server configs — kept as Value because entries go through
-    /// per-server native_mcp overlay after construction.
+    /// per-server native_mcp overlay after construction; `#[schemars(with)]`
+    /// tells schemars to describe the field as if it were typed, without
+    /// changing what's actually serialized.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<BTreeMap<String, McpEntry>>")]
     mcp: Option<serde_json::Value>,
     /// LSP server configs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,7 +88,7 @@ struct OpencodeConfig {
 
 /// A `provider.<id>` entry in `opencode.json`, matching opencode's
 /// `ProviderConfig` schema (`packages/core/src/v1/config/provider.ts`).
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 struct OpencodeProviderEntry {
     /// AI SDK package, e.g. `@ai-sdk/openai-compatible`, `@ai-sdk/anthropic`.
     npm: String,
@@ -67,10 +99,10 @@ struct OpencodeProviderEntry {
     models: Option<BTreeMap<String, OpencodeModelEntry>>,
 }
 
-/// `provider.<id>.options` — opencode allows extra keys beyond these named
-/// ones (`headers` included via `#[serde(flatten)]`), matching its
-/// `StructWithRest` schema.
-#[derive(serde::Serialize, Default)]
+/// `provider.<id>.options` — the named keys opencode's `StructWithRest`
+/// schema recognizes; opencode itself tolerates arbitrary extra keys here,
+/// but this struct only renders what llmenv actually sets.
+#[derive(serde::Serialize, Default, JsonSchema)]
 struct OpencodeProviderOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "baseURL")]
@@ -83,7 +115,7 @@ struct OpencodeProviderOptions {
 
 /// A `provider.<id>.models.<model_id>` entry, matching opencode's `Model`
 /// config schema. Only the subset llmenv's `ModelSource` can populate.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 struct OpencodeModelEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -99,13 +131,13 @@ struct OpencodeModelEntry {
     modalities: Option<OpencodeModalities>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 struct OpencodeModelLimit {
     context: u32,
     output: u32,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 struct OpencodeModelCost {
     input: f64,
     output: f64,
@@ -115,13 +147,13 @@ struct OpencodeModelCost {
     cache_write: Option<f64>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 struct OpencodeModalities {
     input: Vec<String>,
 }
 
 /// An LSP server entry in opencode.json.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 struct LspServerEntry {
     /// Command with arguments.
     command: Vec<String>,
@@ -139,7 +171,7 @@ struct LspServerEntry {
 /// A permission value — either a bare action string (when the tool has only
 /// a wildcard pattern covering all inputs) or a pattern→action map (when the
 /// tool has specific input patterns with distinct actions).
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 #[serde(untagged)]
 enum PermissionValue {
     /// Single action covering all patterns (e.g. `"allow"`).
@@ -668,34 +700,31 @@ impl AgentAdapter for OpencodeAdapter {
             {
                 let mut mcp_obj = serde_json::Map::new();
                 for mcp in &manifest.mcps {
-                    let mut e = match &mcp.kind {
+                    let entry = match &mcp.kind {
                         ResolvedKind::Stdio { command, args, env } => {
-                            let mut cmd: Vec<serde_json::Value> =
-                                Vec::with_capacity(1 + args.len());
-                            cmd.push(serde_json::json!(command));
-                            cmd.extend(args.iter().map(|a| serde_json::json!(a)));
-                            let mut e = serde_json::Map::new();
-                            e.insert("type".into(), serde_json::json!("local"));
-                            e.insert("command".into(), serde_json::json!(cmd));
-                            if !env.is_empty() {
-                                e.insert("environment".into(), serde_json::json!(env));
+                            let cmd: Vec<String> = std::iter::once(command.clone())
+                                .chain(args.iter().cloned())
+                                .collect();
+                            McpEntry::Local {
+                                command: cmd,
+                                environment: env.clone(),
+                                headers: mcp.headers.clone(),
+                                timeout: mcp.timeout,
                             }
-                            e
                         }
-                        ResolvedKind::Remote { url, transport: _ } => {
-                            let mut e = serde_json::Map::new();
-                            e.insert("type".into(), serde_json::json!("remote"));
-                            e.insert("url".into(), serde_json::json!(url));
-                            e
-                        }
+                        ResolvedKind::Remote { url, transport: _ } => McpEntry::Remote {
+                            url: url.clone(),
+                            headers: mcp.headers.clone(),
+                            timeout: mcp.timeout,
+                        },
                     };
-                    if !mcp.headers.is_empty() {
-                        e.insert("headers".into(), serde_json::json!(mcp.headers));
-                    }
-                    if let Some(t) = mcp.timeout {
-                        e.insert("timeout".into(), serde_json::json!(t));
-                    }
-                    mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
+                    let value = serde_json::to_value(&entry).map_err(|err| {
+                        anyhow::anyhow!(
+                            "MCP server '{}': failed to serialize entry: {err}",
+                            mcp.name
+                        )
+                    })?;
+                    mcp_obj.insert(mcp.name.clone(), value);
                 }
                 // Merge plugin-provided MCP entries (from LLM_PROVIDER_MCP_JSON).
                 for (k, v) in &plugin_mcp_entries {
@@ -928,7 +957,7 @@ impl AgentAdapter for OpencodeAdapter {
             plugin: config_plugin,
             mcp: config_mcp,
             lsp: config_lsp,
-            schema: "https://opencode.ai/config.json".into(),
+            schema: format!("./{OPENCODE_SCHEMA_FILE}"),
             instructions: config_instructions,
             permission: config_permission,
             provider: config_provider,
@@ -945,6 +974,14 @@ impl AgentAdapter for OpencodeAdapter {
         let out_path = out.join(OPENCODE_JSON_FILE);
         crate::paths::write_owner_only(&out_path, &json_bytes)?;
         owned.push(PathBuf::from(OPENCODE_JSON_FILE));
+
+        // Write JSON Schema sidecar.
+        if let Some(schema) = self.config_schema() {
+            let schema_bytes = serde_json::to_vec_pretty(&schema)?;
+            let schema_path = out.join(OPENCODE_SCHEMA_FILE);
+            crate::paths::write_owner_only(&schema_path, &schema_bytes)?;
+            owned.push(PathBuf::from(OPENCODE_SCHEMA_FILE));
+        }
 
         // 11. Hook shim — merge manifest hooks + plugin hooks, generate JS plugin
         let mut all_hooks: Vec<crate::config::Hook> = manifest
@@ -1023,6 +1060,11 @@ impl AgentAdapter for OpencodeAdapter {
         }
 
         Ok(owned)
+    }
+
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        let value = schemars::schema_for!(OpencodeConfig).to_value();
+        Some(crate::materialize::schema_gen::with_root_additional_properties(value))
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
@@ -1305,6 +1347,19 @@ mod tests {
         assert!(
             owned.contains(&PathBuf::from(OPENCODE_JSON_FILE)),
             "owned must include opencode.json, got: {owned:?}"
+        );
+    }
+
+    #[test]
+    fn materialize_points_schema_field_at_the_local_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest::default();
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["$schema"],
+            serde_json::json!(format!("./{OPENCODE_SCHEMA_FILE}"))
         );
     }
 
@@ -3231,5 +3286,76 @@ mod tests {
             std::fs::write(&hooks_path, &content).unwrap();
             let _ = parse_plugin_hooks(&hooks_path, tmp.path(), "test-plugin");
         }
+    }
+
+    #[test]
+    fn config_schema_returns_a_schema_describing_the_authored_keys() {
+        let schema = OpencodeAdapter.config_schema().unwrap();
+        assert_eq!(
+            schema["$schema"],
+            serde_json::json!("https://json-schema.org/draft/2020-12/schema")
+        );
+        assert_eq!(schema["type"], serde_json::json!("object"));
+        assert_eq!(schema["additionalProperties"], serde_json::json!(true));
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("mcp"), "schema must describe 'mcp'");
+        assert!(props.contains_key("lsp"), "schema must describe 'lsp'");
+        assert!(
+            props.contains_key("permission"),
+            "schema must describe 'permission'"
+        );
+    }
+
+    #[test]
+    fn minimal_mcp_entries_satisfy_the_generated_schemas_required_fields() {
+        let schema = OpencodeAdapter.config_schema().unwrap();
+        let variants = schema["$defs"]["McpEntry"]["oneOf"].as_array().unwrap();
+
+        let local = serde_json::to_value(McpEntry::Local {
+            command: vec!["node".into()],
+            environment: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            timeout: None,
+        })
+        .unwrap();
+        let remote = serde_json::to_value(McpEntry::Remote {
+            url: "https://example.com".into(),
+            headers: BTreeMap::new(),
+            timeout: None,
+        })
+        .unwrap();
+
+        for (entry, type_tag) in [(&local, "local"), (&remote, "remote")] {
+            let variant_schema = variants
+                .iter()
+                .find(|v| v["properties"]["type"]["const"] == serde_json::json!(type_tag))
+                .unwrap();
+            for required_key in variant_schema["required"].as_array().unwrap() {
+                let key = required_key.as_str().unwrap();
+                assert!(
+                    entry.get(key).is_some(),
+                    "minimal '{type_tag}' entry {entry} is missing required key '{key}' \
+                     the schema demands — schemars marks a field required unless it's \
+                     Option or has #[serde(default)]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn materialize_writes_schema_sidecar_alongside_opencode_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest::default();
+        let owned = OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+
+        let sidecar_path = tmp.path().join("opencode.schema.json");
+        assert!(
+            sidecar_path.exists(),
+            "expected opencode.schema.json sidecar to be written"
+        );
+        let raw = std::fs::read_to_string(&sidecar_path).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["type"], serde_json::json!("object"));
+        assert!(owned.contains(&PathBuf::from("opencode.schema.json")));
     }
 }
