@@ -31,16 +31,16 @@ const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
 enum McpEntry {
     Local {
         command: Vec<String>,
-        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         environment: BTreeMap<String, String>,
-        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         timeout: Option<u32>,
     },
     Remote {
         url: String,
-        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         timeout: Option<u32>,
@@ -99,9 +99,9 @@ struct OpencodeProviderEntry {
     models: Option<BTreeMap<String, OpencodeModelEntry>>,
 }
 
-/// `provider.<id>.options` — opencode allows extra keys beyond these named
-/// ones (`headers` included via `#[serde(flatten)]`), matching its
-/// `StructWithRest` schema.
+/// `provider.<id>.options` — the named keys opencode's `StructWithRest`
+/// schema recognizes; opencode itself tolerates arbitrary extra keys here,
+/// but this struct only renders what llmenv actually sets.
 #[derive(serde::Serialize, Default, JsonSchema)]
 struct OpencodeProviderOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,9 +171,8 @@ struct LspServerEntry {
 /// A permission value — either a bare action string (when the tool has only
 /// a wildcard pattern covering all inputs) or a pattern→action map (when the
 /// tool has specific input patterns with distinct actions).
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, JsonSchema)]
 #[serde(untagged)]
-#[derive(JsonSchema)]
 enum PermissionValue {
     /// Single action covering all patterns (e.g. `"allow"`).
     Simple(String),
@@ -703,9 +702,9 @@ impl AgentAdapter for OpencodeAdapter {
                 for mcp in &manifest.mcps {
                     let entry = match &mcp.kind {
                         ResolvedKind::Stdio { command, args, env } => {
-                            let mut cmd: Vec<String> = Vec::with_capacity(1 + args.len());
-                            cmd.push(command.clone());
-                            cmd.extend(args.iter().cloned());
+                            let cmd: Vec<String> = std::iter::once(command.clone())
+                                .chain(args.iter().cloned())
+                                .collect();
                             McpEntry::Local {
                                 command: cmd,
                                 environment: env.clone(),
@@ -1064,8 +1063,7 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn config_schema(&self) -> Option<serde_json::Value> {
-        let schema = schemars::schema_for!(OpencodeConfig);
-        let value = serde_json::to_value(&schema).ok()?;
+        let value = schemars::schema_for!(OpencodeConfig).to_value();
         Some(crate::materialize::schema_gen::with_root_additional_properties(value))
     }
 
@@ -3293,6 +3291,42 @@ mod tests {
             props.contains_key("permission"),
             "schema must describe 'permission'"
         );
+    }
+
+    #[test]
+    fn minimal_mcp_entries_satisfy_the_generated_schemas_required_fields() {
+        let schema = OpencodeAdapter.config_schema().unwrap();
+        let variants = schema["$defs"]["McpEntry"]["oneOf"].as_array().unwrap();
+
+        let local = serde_json::to_value(McpEntry::Local {
+            command: vec!["node".into()],
+            environment: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            timeout: None,
+        })
+        .unwrap();
+        let remote = serde_json::to_value(McpEntry::Remote {
+            url: "https://example.com".into(),
+            headers: BTreeMap::new(),
+            timeout: None,
+        })
+        .unwrap();
+
+        for (entry, type_tag) in [(&local, "local"), (&remote, "remote")] {
+            let variant_schema = variants
+                .iter()
+                .find(|v| v["properties"]["type"]["const"] == serde_json::json!(type_tag))
+                .unwrap();
+            for required_key in variant_schema["required"].as_array().unwrap() {
+                let key = required_key.as_str().unwrap();
+                assert!(
+                    entry.get(key).is_some(),
+                    "minimal '{type_tag}' entry {entry} is missing required key '{key}' \
+                     the schema demands — schemars marks a field required unless it's \
+                     Option or has #[serde(default)]"
+                );
+            }
+        }
     }
 
     #[test]
