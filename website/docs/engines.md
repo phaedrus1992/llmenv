@@ -182,6 +182,7 @@ Claude Code adapter.
 | Output | Contents |
 | ------ | -------- |
 | `opencode.json` | `$schema`, `instructions`, `mcp`, `lsp`, `permission`, `plugin` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
+| `opencode.schema.json` | JSON Schema (draft 2020-12) generated from the same typed structs that render `opencode.json`, so it always matches what llmenv actually writes. Root allows `additionalProperties`, so passthrough/native-overlay keys never fail IDE validation. |
 | `AGENTS.md` | the merged rules document opencode loads as project instructions |
 | `rules/*.md` | rule files copied verbatim and listed in `instructions` |
 | skills (`SKILL.md`) | first-class and plugin-projected skills, in opencode's claude-compatible format |

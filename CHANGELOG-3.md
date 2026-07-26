@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Document `capabilities.model_providers`/`capabilities.default_models` in the configuration reference — the schema has supported custom model-provider endpoints and role-keyed default models for several releases with no user-facing docs. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#994)
+- `llmenv materialize`'s `opencode.schema.json` sidecar — documented as shipping back in 3.3.0 (#660) but never actually wired into the crate — now really gets written alongside `opencode.json`. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-opencode-adapter-emits) (#1001)
 
 ## [3.6.1] - 2026-07-24
 
