@@ -16,19 +16,45 @@ use crate::merge::MergedManifest;
 /// directly without an extra guard.
 ///
 /// # Errors
-/// Returns an error if the YAML fragment cannot be serialized to JSON
-/// (should not happen in practice with valid `serde_yaml::Value`).
+/// Returns an error if `fragment` is not a mapping, or if it cannot be
+/// serialized to JSON (should not happen with a valid `serde_yaml::Value`).
 pub(crate) fn overlay_native_json(
     dst: &mut serde_json::Value,
     fragment: Option<&serde_yaml::Value>,
     label: &str,
 ) -> anyhow::Result<()> {
-    if let Some(frag) = fragment {
-        let as_json = serde_json::to_value(frag)
-            .map_err(|e| anyhow::anyhow!("converting {label} fragment to JSON: {e}"))?;
-        llmenv_util::merge_json(dst, as_json);
-    }
+    let Some(frag) = fragment else {
+        return Ok(());
+    };
+    // A non-mapping fragment doesn't merge — `merge_json` replaces `dst` with it
+    // wholesale, which silently discards the whole rendered block (and callers
+    // then drop the key because it's no longer an object). Almost always a
+    // YAML indentation slip, so fail fast instead.
+    anyhow::ensure!(
+        frag.is_mapping(),
+        "`{label}` must be a mapping of keys to merge, got {}. \
+         A non-mapping value would replace the rendered block instead of merging \
+         into it — check the indentation of the entries under `{label}`.",
+        yaml_value_kind_name(frag)
+    );
+    let as_json = serde_json::to_value(frag)
+        .map_err(|e| anyhow::anyhow!("converting {label} fragment to JSON: {e}"))?;
+    llmenv_util::merge_json(dst, as_json);
     Ok(())
+}
+
+/// Human-readable YAML value kind, for error messages when a config value has
+/// the wrong shape (e.g. a native fragment that isn't a mapping).
+pub(crate) fn yaml_value_kind_name(value: &serde_yaml::Value) -> &'static str {
+    match value {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "a bool",
+        serde_yaml::Value::Number(_) => "a number",
+        serde_yaml::Value::String(_) => "a string",
+        serde_yaml::Value::Sequence(_) => "a sequence",
+        serde_yaml::Value::Mapping(_) => "a mapping",
+        serde_yaml::Value::Tagged(_) => "a tagged value",
+    }
 }
 
 /// Reject a native catch-all fragment that carries keys already fully modeled
@@ -40,7 +66,7 @@ pub(crate) fn overlay_native_json(
 ///
 /// # Errors
 /// Returns an error if `fragment` contains any key in `modeled_keys`, with a
-/// message naming the key and suggesting the safe merge channel.
+/// message naming the key and where to put it instead.
 pub(crate) fn reject_modeled_native_keys(
     fragment: &serde_yaml::Value,
     modeled_keys: &[&str],
@@ -53,14 +79,35 @@ pub(crate) fn reject_modeled_native_keys(
         if map.contains_key(serde_yaml::Value::String((*key).into())) {
             anyhow::bail!(
                 "top-level `native.{engine}` carries the modeled-feature key `{key}`, \
-                 which would silently clobber the rendered `{key}`. \
-                 Use `native_{key}.{engine}` (or `native_permissions.{engine}` / \
-                 `native_hooks.{engine}` / `native_mcp.{engine}`) instead, \
-                 which merges in the safe direction."
+                 which would silently clobber the rendered `{key}`. {}",
+                modeled_key_redirect(key, engine)
             );
         }
     }
     Ok(())
+}
+
+/// Where a rejected modeled key actually belongs. Not every modeled key has a
+/// `native_*` escape hatch, so this names the real destination per key rather
+/// than pointing at a `native_{key}.{engine}` field that may not exist (#1008).
+fn modeled_key_redirect(key: &str, engine: &str) -> String {
+    let hatch = match key {
+        "permission" | "permissions" => "native_permissions",
+        "hooks" => "native_hooks",
+        "mcp" => "native_mcp",
+        "provider" | "providers" => "native_model_providers",
+        "model" | "models" | "small_model" => return no_hatch(key, engine, "default_models"),
+        "instructions" => return no_hatch(key, engine, "rules"),
+        _ => return no_hatch(key, engine, key),
+    };
+    format!("Use `{hatch}.{engine}` instead, which merges in the safe direction.")
+}
+
+fn no_hatch(key: &str, engine: &str, neutral: &str) -> String {
+    format!(
+        "There is no `native_*.{engine}` escape hatch for `{key}` — declare it through \
+         `capabilities.{neutral}` instead."
+    )
 }
 
 /// Per-agent rules for translating a [`MergedManifest`] into an on-disk layout
@@ -444,14 +491,55 @@ pub(crate) fn remote_transport_type_str(transport: crate::config::McpTransport) 
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
         AgentAdapter, binary_on_path, emit_hook_context, engine_id, known_engine_ids,
-        registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
-        resolve_command_paths_against_files,
+        modeled_key_redirect, overlay_native_json, registered_adapters, remote_transport_type_str,
+        resolve_bundle_relative_paths, resolve_command_paths_against_files,
     };
+
+    /// #1008: the rejection message must never invent a `native_*` field. Keys
+    /// with a real hatch name it; keys without one are sent to the neutral field.
+    #[test]
+    fn modeled_key_redirect_only_names_hatches_that_exist() {
+        for (key, expected) in [
+            ("permission", "native_permissions.opencode"),
+            ("permissions", "native_permissions.crush"),
+            ("hooks", "native_hooks.crush"),
+            ("mcp", "native_mcp.opencode"),
+            ("provider", "native_model_providers.opencode"),
+            ("providers", "native_model_providers.crush"),
+        ] {
+            let engine = expected.rsplit('.').next().unwrap();
+            assert!(
+                modeled_key_redirect(key, engine).contains(expected),
+                "`{key}` must be redirected to `{expected}`"
+            );
+        }
+        for key in ["model", "models", "small_model", "lsp", "instructions"] {
+            let msg = modeled_key_redirect(key, "opencode");
+            assert!(
+                msg.contains("no `native_*.opencode` escape hatch"),
+                "`{key}` has no hatch — the message must say so, got: {msg}"
+            );
+        }
+    }
+
+    /// A non-mapping fragment replaces rather than merges, so it must be
+    /// rejected at the shared choke point for every `native_*` channel.
+    #[test]
+    fn overlay_native_json_rejects_non_mapping_fragment() {
+        for (yaml, kind) in [("oops", "a string"), ("~", "null"), ("[1]", "a sequence")] {
+            let mut dst = serde_json::json!({"kept": 1});
+            let frag: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            let err = overlay_native_json(&mut dst, Some(&frag), "native_mcp.crush").unwrap_err();
+            assert!(err.to_string().contains(kind), "got: {err}");
+            assert_eq!(dst["kept"], 1, "dst must be left untouched on error");
+        }
+    }
 
     // #978: a recall stripped down to only blank lines must inject nothing, not
     // an empty "[ICM MEMORY CONTEXT]" block.

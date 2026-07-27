@@ -169,6 +169,7 @@ const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
     "native_hooks",
     "native_plugins",
     "native_mcp",
+    "native_model_providers",
     "native",
     "features",
     "host",
