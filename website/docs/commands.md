@@ -345,9 +345,8 @@ project's hook.
   (e.g. `oauth-token-refresh`, `v3.6.1-task-tracker-fixes`), not a placeholder
   — an omitted or auto-numbered name (`session-2`, `session-3`) defeats the
   point of `session ls` as the recovery path after a compaction. If one or
-  more sessions are already open for
-  this project, the command **errors and lists them** (id, name, description,
-  idle time), requiring one of:
+  more sessions are already open for this project, the command **errors and
+  lists them** (id, name, description, idle time), requiring one of:
   - `--resume <id>` — adopt an existing open session instead of creating a
     new one (e.g. after a context compaction wiped the agent's memory of it);
     no new id is generated.
@@ -381,8 +380,9 @@ reminder is tagged with the session that started it; since a hook has no
 reliable way to tell whether that session is *this* conversation's own (two
 terminals in the same project is a normal pattern), the reminder never
 presumes ownership — it conditions resuming/finishing a task on the agent
-recognizing it as its own earlier work, and otherwise nudges to close out a
-fully-done session or add more work to it:
+recognizing it as its own earlier work. Separately, once every task in an
+open session is done, the reminder nudges to close out that session or add
+more work to it (see above), likewise conditioned on recognizing it:
 
 ```yaml
 features:

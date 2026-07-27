@@ -638,11 +638,8 @@ pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Tas
 ///
 /// Scoped to the current project (#949) via [`tasks_for_current_project`] — a
 /// `wip`/`waiting` task from a different project sharing this task store must
-/// never surface here. Within the project, a `wip` task may belong to a
-/// *different*, concurrently running session (there is no reliable way to
-/// tell whether it belongs to this very conversation, #1028) — the footer
-/// never asserts ownership; it conditions resuming a task on the agent
-/// actually recognizing it as its own earlier work.
+/// never surface here. See [`wip_reminder`] for why, within the project, the
+/// footer never presumes a listed task belongs to this conversation (#1028).
 pub fn session_start_reminder(state_dir: &Path) -> String {
     let tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
     combine_reminders([
@@ -676,13 +673,8 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 ///
 /// Scoped to the current project (#949) via [`tasks_for_current_project`] — a
 /// `wip` task from a different project sharing this task store must never
-/// surface here. Within the project, a `wip` task may belong to a
-/// *different*, concurrently running session — there is no signal available
-/// here (hooks and the `llmenv task` CLI are independent processes with no
-/// shared conversation identity) to tell whether it's this conversation's own
-/// task, so the footer never assumes ownership (#1028): it names the owning
-/// session on each task and conditions "keep working" on the agent
-/// recognizing the task as one it started.
+/// surface here. See [`wip_reminder`] for why, within the project, the
+/// footer never presumes a listed task belongs to this conversation (#1028).
 pub fn stop_hook_reminder(state_dir: &Path) -> String {
     let tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
     combine_reminders([
@@ -742,6 +734,12 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
 /// whose tasks are all done, build a reminder nudging the agent to close it
 /// out. Empty string if none qualify, or on any internal error (degrades
 /// silently — hooks must never block the agent).
+///
+/// Like [`wip_reminder`], this can't tell whether a fully-done session
+/// belongs to the current conversation or a different, concurrently running
+/// one (#1028) — closing out someone else's session is a real mutation of
+/// their bookkeeping, so the nudge is conditioned on recognizing the session
+/// rather than issued as a bare command.
 fn session_finish_reminders(state_dir: &Path) -> String {
     let project = match project::current_tag() {
         Ok(project) => project,
@@ -758,9 +756,10 @@ fn session_finish_reminders(state_dir: &Path) -> String {
         }
         let label = session.name.as_deref().unwrap_or(session.id.as_str());
         lines.push(format!(
-            "All {total} task(s) in session '{label}' ({id}) are done — run \
-             `llmenv task session finish {id}` to close it out, or \
-             `llmenv task add <title> --session {id}` to add more work to it.",
+            "All {total} task(s) in session '{label}' ({id}) are done. If you recognize this \
+             as your own session, run `llmenv task session finish {id}` to close it out, or \
+             `llmenv task add <title> --session {id}` to add more work to it. If you don't \
+             recognize it, it belongs to a different session — leave it alone.",
             id = session.id
         ));
     }
@@ -781,19 +780,26 @@ fn combine_reminders(parts: impl IntoIterator<Item = String>) -> String {
 pub(crate) fn render_task_list(tasks: &[&Task]) -> String {
     tasks
         .iter()
-        .map(|t| format!("- {} ({})", t.title, t.slug))
+        .map(|t| task_line(t))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The shared `- title (slug)` prefix every task-list line starts with.
+fn task_line(t: &Task) -> String {
+    format!("- {} ({})", t.title, t.slug)
 }
 
 /// Builds the `wip`-task reminder (`header`/`footer` customized per caller).
 /// Empty when no `wip` tasks exist. Takes the already-loaded task list so the
 /// caller reads the store once and shares it with [`waiting_reminder`].
 ///
-/// Each line names the owning session (`task.session`, unattributed as
-/// "unknown session" for a legacy task with none) — the reminder has no way
-/// to know whether that session is *this* conversation's own (#1028), so it
-/// surfaces the tag and leaves the ownership judgment to the caller's
+/// Callers reach this only via [`tasks_for_current_project`], which already
+/// drops any task with no `session` — so every line here does have one to
+/// show. There is no signal available (hooks and the `llmenv task` CLI are
+/// independent processes with no shared conversation identity) to tell
+/// whether that owning session is *this* conversation's own (#1028), so each
+/// line names it and leaves the ownership judgment to the caller's
 /// `header`/`footer` wording rather than baking in a bare title/slug list.
 fn wip_reminder(tasks: &[Task], header: &str, footer: &str) -> String {
     let wip: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Wip).collect();
@@ -803,8 +809,11 @@ fn wip_reminder(tasks: &[Task], header: &str, footer: &str) -> String {
     let list = wip
         .iter()
         .map(|t| {
+            // Defensive fallback only — never actually hit given the caller
+            // contract above, but `Task.session` stays `Option` for legacy
+            // tasks created before sessions were mandatory.
             let session = t.session.as_deref().unwrap_or("unknown session");
-            format!("- {} ({}) [session: {session}]", t.title, t.slug)
+            format!("{} [session: {session}]", task_line(t))
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1346,36 +1355,20 @@ mod tests {
     // --- cross-session ownership framing (#1028) ---
 
     #[test]
-    fn stop_hook_reminder_shows_session_tag_on_each_wip_task() {
-        let dir = TempDir::new().expect("test");
-        let project = current_project();
-        let session_id = session_for_project(dir.path(), &project);
-        let task =
-            add_task_for_session(dir.path(), "Someone's task", None, &session_id).expect("test");
-        start_task(dir.path(), &task.slug).expect("test");
-
-        let reminder = stop_hook_reminder(dir.path());
-        assert!(
-            reminder.contains(&session_id),
-            "reminder must name the owning session so the agent can tell whether it's its \
-             own: {reminder}"
-        );
-    }
-
-    #[test]
-    fn stop_hook_reminder_never_presumes_ownership_of_a_wip_task() {
+    fn stop_hook_reminder_shows_session_tag_and_never_presumes_ownership() {
         // The bug (#1028): a WIP task belonging to a *different*, concurrently
         // running session must never be framed as a command to resume it —
         // the reminder can't tell whose session started this conversation, so
-        // it must always let the agent judge for itself rather than asserting
-        // "you have tasks in progress."
+        // it must name the owning session and let the agent judge for itself
+        // rather than asserting "you have tasks in progress."
         let dir = TempDir::new().expect("test");
-        wip_task_in_project(dir.path(), "Someone else's task", &current_project());
+        let task = wip_task_in_project(dir.path(), "Someone's task", &current_project());
 
         let reminder = stop_hook_reminder(dir.path());
         assert!(
-            !reminder.contains("You still have task"),
-            "must not assert ownership of a task it can't attribute: {reminder}"
+            reminder.contains(task.session.as_deref().expect("test")),
+            "reminder must name the owning session so the agent can tell whether it's its \
+             own: {reminder}"
         );
         assert!(
             reminder.contains("recognize"),
@@ -1385,13 +1378,35 @@ mod tests {
     }
 
     #[test]
-    fn session_start_reminder_never_presumes_ownership_of_a_wip_task() {
+    fn session_start_reminder_shows_session_tag_and_never_presumes_ownership() {
+        let dir = TempDir::new().expect("test");
+        let task = wip_task_in_project(dir.path(), "Someone's task", &current_project());
+
+        let reminder = session_start_reminder(dir.path());
+        assert!(
+            reminder.contains(task.session.as_deref().expect("test")),
+            "reminder must name the owning session: {reminder}"
+        );
+        assert!(
+            reminder.contains("recognize"),
+            "must condition resuming the task on the agent recognizing it as its own: \
+             {reminder}"
+        );
+    }
+
+    #[test]
+    fn session_finish_reminder_never_presumes_ownership_of_a_done_session() {
+        // Variant of #1028: a fully-done session belonging to a different,
+        // concurrently running conversation must not be framed as a bare
+        // command to close it out — closing someone else's session mutates
+        // their bookkeeping.
         let dir = TempDir::new().expect("test");
         let project = current_project();
         let session_id = session_for_project(dir.path(), &project);
         let task =
             add_task_for_session(dir.path(), "Someone's task", None, &session_id).expect("test");
         start_task(dir.path(), &task.slug).expect("test");
+        done_task(dir.path(), &task.slug).expect("test");
 
         let reminder = session_start_reminder(dir.path());
         assert!(
@@ -1400,7 +1415,7 @@ mod tests {
         );
         assert!(
             reminder.contains("recognize"),
-            "must condition resuming the task on the agent recognizing it as its own: \
+            "must condition closing the session on the agent recognizing it as its own: \
              {reminder}"
         );
     }
