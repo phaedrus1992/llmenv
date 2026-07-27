@@ -141,85 +141,15 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     dedup(&mut throttle);
     dedup(&mut codebase_memory);
 
-    // #317: resolve feature scalars (slippage, context_mode, upgrade, read_once).
-    // Same highest-precedence-wins pattern as auto_memory_enabled.
-    let slippage = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .slippage
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let context_mode = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .context_mode
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let upgrade = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .upgrade
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let read_once = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .read_once
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let task_tracker = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .task_tracker
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let repeat_detect = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .repeat_detect
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
+    // #317: resolve feature scalars (slippage, context_mode, upgrade, read_once,
+    // task_tracker, repeat_detect) by highest-precedence-wins, via the shared
+    // `highest_precedence` helper (#1023 — these were 6 near-identical blocks).
+    let slippage = highest_precedence(contributors, |f| f.slippage.as_ref());
+    let context_mode = highest_precedence(contributors, |f| f.context_mode.as_ref());
+    let upgrade = highest_precedence(contributors, |f| f.upgrade.as_ref());
+    let read_once = highest_precedence(contributors, |f| f.read_once.as_ref());
+    let task_tracker = highest_precedence(contributors, |f| f.task_tracker.as_ref());
+    let repeat_detect = highest_precedence(contributors, |f| f.repeat_detect.as_ref());
 
     let features = if memory.is_empty()
         && throttle.is_empty()
@@ -304,6 +234,20 @@ fn merge_native_feature(
         }
     }
     merged
+}
+
+/// Resolve a scalar `features.*` field by highest-precedence-wins: the value
+/// from the contributor with the highest `precedence` that set it (#1023 —
+/// shared by the 6 scalar feature flags that all followed this same pattern).
+fn highest_precedence<T: Clone>(
+    contributors: &[CapabilityContributor],
+    pick: impl Fn(&Features) -> Option<&T>,
+) -> Option<T> {
+    contributors
+        .iter()
+        .filter_map(|c| pick(c.capabilities.features.as_ref()?).map(|v| (c.precedence, v.clone())))
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v)
 }
 
 /// Merge the flat `native:` map across all contributors.

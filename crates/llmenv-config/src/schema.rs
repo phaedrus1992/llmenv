@@ -595,6 +595,10 @@ impl Capabilities {
             && self.native.is_empty()
             && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
             && self.features.as_ref().is_none_or(|f| f.throttle.is_empty())
+            && self
+                .features
+                .as_ref()
+                .is_none_or(|f| f.codebase_memory.is_empty())
             && self.features.as_ref().is_none_or(|f| f.read_once.is_none())
             && self
                 .features
@@ -2537,6 +2541,27 @@ index_path: /custom/index/path
         assert!(
             !caps.is_empty(),
             "is_empty must be false when upgrade is set"
+        );
+    }
+
+    /// Same merge-gate bug class as task_tracker/throttle above: `is_empty()`
+    /// never checked `codebase_memory` (added in #365), so a fragment whose
+    /// only content is a codebase_memory entry was silently dropped.
+    #[test]
+    fn capabilities_is_empty_false_with_codebase_memory() {
+        let caps = Capabilities {
+            features: Some(Features {
+                codebase_memory: vec![CodebaseMemory {
+                    when: vec![],
+                    index_path: None,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !caps.is_empty(),
+            "is_empty must be false when codebase_memory is set"
         );
     }
 
