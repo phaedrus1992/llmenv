@@ -11,7 +11,7 @@ Infinite Context Memory) is deliberately hidden behind the `memory:` vocabulary.
 
 For the config-field reference, see
 [Configuration → `mcp:`](configuration.md#mcp) and
-[`memory:`](configuration.md#memory). This page covers the runtime model: the
+[`memory:`](configuration.md#featuresmemory). This page covers the runtime model: the
 selection mechanism, the memory topology, the security model, and the
 tag-scoped-memory env var contract.
 
