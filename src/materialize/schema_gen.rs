@@ -114,6 +114,13 @@ mod tests {
         ]
     }
 
+    /// Strategy for an object key, including the literal `"additionalProperties"`
+    /// so the overwrite-an-existing-value path is actually reachable — a
+    /// `[a-z]{1,6}` alphabet alone can never produce that 21-char key.
+    fn arb_object_key() -> impl Strategy<Value = String> {
+        prop_oneof![Just("additionalProperties".to_string()), "[a-z]{1,6}"]
+    }
+
     /// Arbitrary JSON value: a leaf, a shallow array of leaves, or a shallow
     /// object of leaves — enough shape variety to exercise the root-level
     /// object/non-object branch `with_root_additional_properties` switches on.
@@ -121,19 +128,28 @@ mod tests {
         prop_oneof![
             arb_json_leaf(),
             proptest::collection::vec(arb_json_leaf(), 0..3).prop_map(Value::Array),
-            proptest::collection::btree_map("[a-z]{1,6}", arb_json_leaf(), 0..3)
+            proptest::collection::btree_map(arb_object_key(), arb_json_leaf(), 0..3)
                 .prop_map(|m| Value::Object(m.into_iter().collect())),
         ]
     }
 
     proptest! {
-        /// `with_root_additional_properties` is idempotent for any input
-        /// shape: applying it twice is the same as applying it once.
+        /// `with_root_additional_properties` is idempotent — applying it
+        /// twice matches applying it once — and its actual postcondition
+        /// holds: an object root always ends up with `additionalProperties:
+        /// true`, regardless of any prior value that key held; a non-object
+        /// root is passed through unchanged.
         #[test]
         fn with_root_additional_properties_is_idempotent(value in arb_json_value()) {
-            let once = with_root_additional_properties(value);
+            let is_object = value.is_object();
+            let once = with_root_additional_properties(value.clone());
             let twice = with_root_additional_properties(once.clone());
-            prop_assert_eq!(once, twice);
+            prop_assert_eq!(&once, &twice);
+            if is_object {
+                prop_assert_eq!(&once["additionalProperties"], &json!(true));
+            } else {
+                prop_assert_eq!(&once, &value);
+            }
         }
     }
 }

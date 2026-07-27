@@ -26,7 +26,8 @@ const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
 /// — both the JSON output and the generated schema (via
 /// `#[schemars(with = ...)]` on `OpencodeConfig::mcp`) derive from it, so
 /// there is exactly one definition of what an MCP entry looks like.
-#[derive(serde::Serialize, serde::Deserialize, JsonSchema, PartialEq, Debug)]
+#[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum McpEntry {
     Local {
@@ -3409,22 +3410,14 @@ mod tests {
 
     /// Strategy for one `ResolvedMcp`'s kind/headers/timeout, keyed separately
     /// by name so callers can build a name-unique list (see `arb_mcp_list`).
-    fn arb_mcp_body() -> impl Strategy<
-        Value = (
-            crate::mcp::resolve::ResolvedKind,
-            BTreeMap<String, String>,
-            Option<u32>,
-        ),
-    > {
-        let stdio =
-            (
-                "[a-z]{1,8}",
-                proptest::collection::vec("[a-z]{1,6}", 0..3),
-                arb_string_map(),
-            )
-                .prop_map(|(command, args, env)| {
-                    crate::mcp::resolve::ResolvedKind::Stdio { command, args, env }
-                });
+    fn arb_mcp_body() -> impl Strategy<Value = (ResolvedKind, BTreeMap<String, String>, Option<u32>)>
+    {
+        let stdio = (
+            "[a-z]{1,8}",
+            proptest::collection::vec("[a-z]{1,6}", 0..3),
+            arb_string_map(),
+        )
+            .prop_map(|(command, args, env)| ResolvedKind::Stdio { command, args, env });
         let remote = (
             "https?://[a-z0-9.]{3,20}",
             prop_oneof![
@@ -3432,9 +3425,7 @@ mod tests {
                 Just(crate::config::McpTransport::Sse),
             ],
         )
-            .prop_map(
-                |(url, transport)| crate::mcp::resolve::ResolvedKind::Remote { url, transport },
-            );
+            .prop_map(|(url, transport)| ResolvedKind::Remote { url, transport });
         (
             prop_oneof![stdio, remote],
             arb_string_map(),
@@ -3445,19 +3436,17 @@ mod tests {
     /// A list of `ResolvedMcp` with distinct names — `materialize` keys the
     /// `mcp` object by name, so duplicate names aren't a scenario the
     /// MCP-assembly loop needs to handle.
-    fn arb_mcp_list() -> impl Strategy<Value = Vec<crate::mcp::resolve::ResolvedMcp>> {
+    fn arb_mcp_list() -> impl Strategy<Value = Vec<ResolvedMcp>> {
         proptest::collection::btree_map("[a-z]{1,6}", arb_mcp_body(), 0..5).prop_map(|map| {
             map.into_iter()
-                .map(
-                    |(name, (kind, headers, timeout))| crate::mcp::resolve::ResolvedMcp {
-                        name,
-                        kind,
-                        headers,
-                        timeout,
-                        disabled_tools: vec![],
-                        mcp_permissions: None,
-                    },
-                )
+                .map(|(name, (kind, headers, timeout))| ResolvedMcp {
+                    name,
+                    kind,
+                    headers,
+                    timeout,
+                    disabled_tools: vec![],
+                    mcp_permissions: None,
+                })
                 .collect()
         })
     }
@@ -3488,8 +3477,8 @@ mod tests {
             prop_assert_eq!(mcp_obj.len(), mcps.len());
             for m in &mcps {
                 let expected_type = match &m.kind {
-                    crate::mcp::resolve::ResolvedKind::Stdio { .. } => "local",
-                    crate::mcp::resolve::ResolvedKind::Remote { .. } => "remote",
+                    ResolvedKind::Stdio { .. } => "local",
+                    ResolvedKind::Remote { .. } => "remote",
                 };
                 prop_assert_eq!(mcp_obj[&m.name]["type"].as_str().unwrap(), expected_type);
             }
@@ -3501,14 +3490,29 @@ mod tests {
         /// silently drifted apart. No JSON Schema validator dependency
         /// needed (none is a workspace dep yet, see #1012): this is a
         /// structural key-presence check, not full schema validation.
+        ///
+        /// Covers `$schema`, `mcp`, `permission`, `model`, `small_model` —
+        /// the fields cheap to vary through `MergedManifest`. `plugin`,
+        /// `lsp`, `instructions`, `provider` aren't exercised here; a
+        /// follow-up can extend the strategy if those drift too.
         #[test]
         fn materialized_top_level_keys_are_declared_in_schema(
             mcps in arb_mcp_list(),
             allow in proptest::collection::vec(arb_permission_rule(), 0..3),
+            large_model in proptest::option::of(("[a-z]{2,6}", "[a-z]{2,6}")),
+            small_model in proptest::option::of(("[a-z]{2,6}", "[a-z]{2,6}")),
         ) {
             let tmp = tempfile::tempdir().unwrap();
             let mut caps = crate::config::Capabilities::default();
             caps.permissions.allow = allow;
+            if let Some((provider, model)) = large_model {
+                caps.default_models
+                    .insert("large".into(), crate::config::ModelRef { provider, model });
+            }
+            if let Some((provider, model)) = small_model {
+                caps.default_models
+                    .insert("small".into(), crate::config::ModelRef { provider, model });
+            }
             let manifest = MergedManifest {
                 mcps,
                 capabilities: caps,
