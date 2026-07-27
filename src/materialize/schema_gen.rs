@@ -121,13 +121,14 @@ mod tests {
         prop_oneof![Just("additionalProperties".to_string()), "[a-z]{1,6}"]
     }
 
-    /// Arbitrary JSON value: a leaf, a shallow array of leaves, or a shallow
-    /// object of leaves — enough shape variety to exercise the root-level
-    /// object/non-object branch `with_root_additional_properties` switches on.
+    /// Arbitrary JSON value: a leaf or a shallow object of leaves — enough
+    /// shape variety to exercise the root-level object/non-object branch
+    /// `with_root_additional_properties` switches on. No array arm: an array
+    /// root takes the same non-object code path as any leaf, so it would add
+    /// generator surface without adding coverage.
     fn arb_json_value() -> impl Strategy<Value = Value> {
         prop_oneof![
             arb_json_leaf(),
-            proptest::collection::vec(arb_json_leaf(), 0..3).prop_map(Value::Array),
             proptest::collection::btree_map(arb_object_key(), arb_json_leaf(), 0..3)
                 .prop_map(|m| Value::Object(m.into_iter().collect())),
         ]
