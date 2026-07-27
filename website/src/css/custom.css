@@ -155,7 +155,7 @@ hr {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  font-weight: bold;
+  font-weight: 900;
   /* White text needs a dim (not bright) gold stripe to clear 4.5:1 — see var comment above. */
   background: repeating-linear-gradient(45deg, var(--retro-gold-dim) 0 10px, #000 10px 20px);
   color: #fff;
