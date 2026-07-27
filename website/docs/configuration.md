@@ -22,7 +22,7 @@ The config directory is resolved in this order:
 | `bundle:` | list | Environment-variable + file bundles |
 | `mcp:` | list | MCP server declarations |
 | `lsp:` | list | LSP server declarations (Crush + Claude Code; no-op on engines without an LSP surface) |
-| `features:` | map | Feature flags; holds `memory:` (ICM backend topology), `throttle:` (usage throttling), and `upgrade:` (upgrade release track) |
+| `features:` | map | Feature flags; holds `memory:` (ICM backend topology), `codebase_memory:` (codebase-memory-mcp integration), `throttle:` (usage throttling), `upgrade:` (upgrade release track), `read_once:` (re-read deduplication), `task_tracker:` (in-engine task tracker), `slippage:` (behavior-drift guardrails), `repeat_detect:` (loop detection), and `context_mode:` (context-mode built-in) |
 | `session_log:` | map | Session-activity logging: local JSONL file and/or ICM transcript |
 | `statusline:` | map | Widget layout, formatting, and colour config for `llmenv statusline` |
 | `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
@@ -368,9 +368,11 @@ requires it and `filetypes` language ids don't reliably convert to file extensio
 ## `features:`
 
 Feature flags. Holds `memory:` (llmenv's ICM memory backend), `codebase_memory:`
-(codebase-memory-mcp integration), `throttle:` (usage throttling), and
-`upgrade:` (upgrade release track). Additional feature flags may be nested
-here in future versions.
+(codebase-memory-mcp integration), `throttle:` (usage throttling), `upgrade:`
+(upgrade release track), `read_once:` (re-read deduplication), `task_tracker:`
+(in-engine task tracker), `slippage:` (behavior-drift guardrails),
+`repeat_detect:` (loop detection), and `context_mode:` (context-mode
+built-in). Additional feature flags may be nested here in future versions.
 
 ### `features.memory:`
 
@@ -598,6 +600,77 @@ features:
 
 An unrecognized value (anything other than `allow`/`ask`/`deny`) is a config
 error at load time.
+
+### `features.read_once:`
+
+Reduces redundant context usage: tracks files read via the `Read` tool within a
+session and warns or denies re-reads of an unchanged file within a TTL window.
+Opt-in (disabled by default). Only the `Read` tool is tracked; other tools are
+unaffected. A `Read` call with an `offset` or `limit` (a partial read) always
+bypasses the cache — only whole-file reads are tracked and deduplicated.
+Fail-soft — any cache/IO error passes the read through silently rather than
+blocking.
+
+```yaml
+features:
+  read_once:
+    enabled: true
+    mode: warn        # "warn" (default) or "deny"
+    ttl_seconds: 1200 # cache TTL in seconds; default 1200 (20 min)
+```
+
+| Field         | Required | Notes                                                                        |
+|---------------|----------|------------------------------------------------------------------------------|
+| `enabled`     | no       | Default `false` (opt-in).                                                    |
+| `mode`        | no       | `"warn"` (default) — advisory only, or `"deny"` — blocks the re-read.        |
+| `ttl_seconds` | no       | Seconds a tracked read stays cached before it counts as new; default `1200`. |
+
+### `features.task_tracker:`
+
+In-engine task tracker (#231): durable, agent-native "what am I working on"
+state that survives compaction and session restarts. The `llmenv task` CLI
+subcommands always work regardless of this flag — it only gates the injected
+`llmenv` skill guidance and the SessionStart/Stop lifecycle reminders (nudging
+the agent to resume or close `wip` tasks, and to close out a fully-done
+session).
+
+```yaml
+features:
+  task_tracker:
+    enabled: true
+```
+
+| Field     | Required | Notes                                                                                                                                                                                           |
+|-----------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled` | no       | Default `false`. When `true`, also redirects Claude Code's built-in `TaskCreate`/`TaskList`/`TaskUpdate` tools into this tracker via an auto-injected `PreToolUse` hook (Claude-Code-specific). |
+
+See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
+
+### `features.slippage:`
+
+Guardrails against model behavior drift across long sessions (effort decay,
+forgetting rules after context compaction). The master switch `enabled` gates
+every sub-layer. Currently `effort_level`, `compact_survival`, and
+`diagnose_command` are wired to behavior; the remaining `SlippageControl`
+schema fields (`rule_reinjection`, `read_before_edit`, `self_critique`,
+`metrics`, `explain_before_act`, `answer_before_act`) are accepted for
+forward-compatibility with planned future layers but have no effect yet.
+
+```yaml
+features:
+  slippage:
+    enabled: true
+    effort_level: xhigh     # injected into generated engine settings; omit to leave untouched
+    compact_survival: true  # CLAUDE.md fragment: re-read rules after compaction
+    diagnose_command: true  # materializes a /diagnose skill (evidence-first debugging checklist)
+```
+
+| Field              | Required | Notes                                                                                                                                         |
+|--------------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`          | no       | Default `false` (opt-in master switch).                                                                                                       |
+| `effort_level`     | no       | Reasoning-effort value injected into generated engine settings (e.g. `"xhigh"`, `"high"`); omitted means untouched.                           |
+| `compact_survival` | no       | Default `true`. Merges a short rules fragment into the generated CLAUDE.md reminding the agent to re-read its rules after context compaction. |
+| `diagnose_command` | no       | Default `true`. Materializes a `/diagnose` skill: a structured symptoms → evidence → hypotheses → test → act checklist.                       |
 
 ## `session_log:`
 
