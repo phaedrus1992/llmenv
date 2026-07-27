@@ -51,13 +51,10 @@ body {
 .markdown h4,
 article h1 {
   font-family: Impact, 'Arial Black', sans-serif;
-  /* Kept within cream→gold→dark-gold-but-still->=8:1; the previous gradient dipped
-     into --retro-gold-dim (~3.4:1 on black) at the bottom of each glyph. */
-  background: linear-gradient(180deg, #fff4c2 0%, var(--retro-gold) 55%, #cca300 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.6);
+  /* Solid bright gold fill (~15:1 on black) with a dark-gold shadow for the bevel —
+     not the other way around, which buried part of each glyph in low-contrast gold. */
+  color: var(--retro-gold);
+  text-shadow: 2px 2px 0 var(--retro-gold-dim);
   letter-spacing: 0.03em;
 }
 
@@ -93,7 +90,10 @@ hr,
 
 @keyframes retro-marquee {
   from {
-    transform: translateX(100%);
+    /* 100vw (not 100%) — percent resolves against the text's own width, so on a
+       wide viewport with shorter text it wasn't clearing the track's right edge
+       and the text popped in already partway on-screen instead of sliding in. */
+    transform: translateX(100vw);
   }
   to {
     transform: translateX(-100%);
@@ -155,6 +155,7 @@ hr,
 
 .retro-hit-counter {
   font-family: 'Courier New', monospace;
+  font-weight: bold;
   background: #000;
   color: var(--retro-gold);
   padding: 0.2rem 0.4rem;
