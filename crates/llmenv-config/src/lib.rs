@@ -31,9 +31,9 @@ pub use schema::{
     McpPermissions, McpServer, McpTransport, Memory, MemoryType, ModelCost, ModelProvider,
     ModelRef, ModelSource, NativePermissionRules, NetworkMatch, NetworkScope,
     OFFICIAL_MARKETPLACE_OWNER, PermissionMode, PermissionRule, Permissions, PluginCollection,
-    RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, Scopes, SessionLog, SkillSource,
-    SlippageControl, StateConfig, StateTool, StatuslineConfig, StatuslineStyle, TaskTracker,
-    Throttle, TranscriptSinkConfig, UpgradeConfig, UpgradeTrack, UserMatch, UserScope,
+    RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, RepeatDetect, Scopes, SessionLog,
+    SkillSource, SlippageControl, StateConfig, StateTool, StatuslineConfig, StatuslineStyle,
+    TaskTracker, Throttle, TranscriptSinkConfig, UpgradeConfig, UpgradeTrack, UserMatch, UserScope,
     WidgetConfig, classify_source, github_owner_repo, is_reserved_official_marketplace,
     split_plugin_ref,
 };

@@ -44,6 +44,9 @@ pub struct Features {
     /// ReadOnce: avoid re-reading unchanged files within a TTL window.
     #[serde(default)]
     pub read_once: Option<ReadOnce>,
+    /// RepeatDetect (#1006): break identical-tool-call loops, off by default.
+    #[serde(default)]
+    pub repeat_detect: Option<RepeatDetect>,
     /// Slippage control: guardrails against model behavior drift.
     #[serde(default)]
     pub slippage: Option<SlippageControl>,
@@ -593,6 +596,10 @@ impl Capabilities {
             && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
             && self.features.as_ref().is_none_or(|f| f.throttle.is_empty())
             && self.features.as_ref().is_none_or(|f| f.read_once.is_none())
+            && self
+                .features
+                .as_ref()
+                .is_none_or(|f| f.repeat_detect.is_none())
             && self.features.as_ref().is_none_or(|f| f.slippage.is_none())
             && self
                 .features
@@ -984,6 +991,42 @@ pub struct ReadOnce {
 
 const fn default_read_once_ttl() -> u64 {
     1200
+}
+
+/// RepeatDetect: break identical-tool-call loops within a session (#1006).
+/// Engine-neutral (lives in `hook_run`, fires for any adapter/model). **On by
+/// default** — the biggest real-world trigger is a model stuck repeating
+/// llmenv's own task-tool redirect, which every session with the task
+/// tracker on can hit — so this is opt-*out*, not opt-in. Absent
+/// `features.repeat_detect` entirely resolves the same as `enabled: true`
+/// with defaults (see the call site in `hook_run::resolve_pre_tool_text`,
+/// which falls back to `RepeatDetect::default()` when the field is `None`).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RepeatDetect {
+    #[serde(default = "default_repeat_detect_enabled")]
+    pub enabled: bool,
+    /// Consecutive identical tool calls (same tool name + input) before a
+    /// warning is surfaced to the model (default 3).
+    #[serde(default = "default_repeat_detect_threshold")]
+    pub threshold: u32,
+}
+
+impl Default for RepeatDetect {
+    fn default() -> Self {
+        Self {
+            enabled: default_repeat_detect_enabled(),
+            threshold: default_repeat_detect_threshold(),
+        }
+    }
+}
+
+const fn default_repeat_detect_enabled() -> bool {
+    true
+}
+
+const fn default_repeat_detect_threshold() -> u32 {
+    3
 }
 
 /// SlippageControl: guardrails against model behavior drift.
@@ -2153,6 +2196,86 @@ index_path: /custom/index/path
         let json = serde_json::to_string(&original).unwrap();
         let parsed: Features = serde_json::from_str(&json).unwrap();
         assert_eq!(original, parsed);
+    }
+
+    // ===== RepeatDetect config tests =====
+
+    #[test]
+    fn repeat_detect_parses_enabled() {
+        let yaml = "features:\n  repeat_detect:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let rd = cfg.features.unwrap().repeat_detect.unwrap();
+        assert!(rd.enabled);
+        assert_eq!(rd.threshold, 3);
+    }
+
+    #[test]
+    fn repeat_detect_parses_threshold() {
+        let yaml = "features:\n  repeat_detect:\n    threshold: 5\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.features.unwrap().repeat_detect.unwrap().threshold, 5);
+    }
+
+    #[test]
+    fn repeat_detect_absent_is_none() {
+        // `None` here means "the block is absent" — the call site
+        // (`hook_run::resolve_pre_tool_text`) treats that the same as
+        // `RepeatDetect::default()` (enabled), not as disabled. See
+        // `repeat_detect_default_is_enabled` below for the on-by-default half
+        // of this contract.
+        let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
+        assert!(cfg.features.unwrap().repeat_detect.is_none());
+    }
+
+    #[test]
+    fn repeat_detect_default_is_enabled() {
+        // Opt-*out*, not opt-in (#1006) — an explicit but empty block still
+        // enables it with default settings.
+        let yaml = "features:\n  repeat_detect: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let rd = cfg.features.unwrap().repeat_detect.unwrap();
+        assert!(rd.enabled);
+        assert_eq!(rd.threshold, 3);
+    }
+
+    #[test]
+    fn repeat_detect_can_be_explicitly_disabled() {
+        let yaml = "features:\n  repeat_detect:\n    enabled: false\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.features.unwrap().repeat_detect.unwrap().enabled);
+    }
+
+    /// The manual `Default` impl must stay in sync with serde's empty-object
+    /// defaults — same rationale as `slippage_default_matches_serde_empty`.
+    #[test]
+    fn repeat_detect_default_matches_serde_empty() {
+        let from_serde: RepeatDetect =
+            serde_json::from_str("{}").expect("empty object should deserialize");
+        assert_eq!(RepeatDetect::default(), from_serde);
+    }
+
+    #[test]
+    fn features_roundtrip_repeat_detect() {
+        let original = Features {
+            repeat_detect: Some(RepeatDetect {
+                enabled: true,
+                threshold: 4,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Features = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_repeat_detect_json_roundtrip(enabled in proptest::bool::ANY, threshold in any::<u32>()) {
+            let original = RepeatDetect { enabled, threshold };
+            let json = serde_json::to_string(&original).unwrap();
+            let back: RepeatDetect = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(original, back);
+        }
     }
 
     // #505: MCP field parity — new optional fields

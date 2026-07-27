@@ -11,6 +11,8 @@ pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 pub(crate) mod read_once;
+pub(crate) mod repeat_detect;
+mod session_state;
 pub(crate) mod task_tools;
 
 use std::io::Write;
@@ -477,6 +479,114 @@ pub(crate) fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate
     crate::config::Config::load(path)
 }
 
+/// Decide the `PreToolUse` decision text, if any, from the three
+/// mutually-exclusive interceptors: the #985 task-tool redirect
+/// (TaskCreate/TaskList/TaskUpdate → `llmenv task`) and the #318/#864
+/// read-once dedup (Read) — plus the #1006 repeat-call detector, which is
+/// *not* mutually exclusive with the other two: it observes every
+/// `PreToolUse` call, including ones the primary interceptors already
+/// decided about.
+///
+/// This matters because the single biggest real-world trigger for a
+/// stuck-loop model isn't an uncovered tool like `Bash` — it's the model
+/// repeatedly retrying `TaskCreate`/`TaskList`/`TaskUpdate` after
+/// `task_tools` denies and redirects it each time. If `repeat_detect` only
+/// ran as a fallback *after* the primary arms (as it originally did), that
+/// exact case — llmenv's own redirect being ignored on repeat — would be
+/// invisible to it, since `task_tools` always wins the primary decision for
+/// those three tools. So `repeat_detect` is computed independently and its
+/// warning is appended to whatever the primary arms decided, not gated on
+/// them staying silent.
+///
+/// `read_once`'s handler returns `""` (empty) as its pass-through case, so a
+/// naive `if <enabled>` gate on it alone — with no check on the handler's
+/// own result — would take that arm on every call once the feature was on.
+/// `task_tools`'s handler avoids this by returning `Option` directly.
+///
+/// Combining order is safety-relevant: only `primary` can ever carry the
+/// `__DENY__:` sentinel (`repeat_detect` never denies, only warns — see its
+/// module doc), so `primary` must always come first in the concatenation.
+/// `append_read_once_result` further down treats the *entire* returned
+/// string as the deny reason once it detects that prefix at position 0;
+/// putting `repeat_detect`'s text first would still keep the prefix at 0 in
+/// practice (nothing precedes it), but ordering primary-first documents the
+/// invariant explicitly rather than relying on that coincidence.
+fn resolve_pre_tool_text(
+    stdin_payload: &serde_json::Value,
+    claude_session_id: Option<&str>,
+    config: &crate::config::Config,
+    task_tracker_enabled: bool,
+) -> Option<String> {
+    let primary = if task_tracker_enabled
+        && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
+    {
+        Some(t)
+    } else if let Some(ref features) = config.features
+        && let Some(ref read_once) = features.read_once
+        && read_once.enabled
+    {
+        let ro_text = crate::hook_run::read_once::handle_pre_tool_use(
+            stdin_payload,
+            claude_session_id,
+            read_once,
+        );
+        (!ro_text.is_empty()).then_some(ro_text)
+    } else {
+        None
+    };
+
+    // On by default (#1006): absent `features.repeat_detect` resolves the
+    // same as an explicit, empty block — see `RepeatDetect::default()`.
+    let repeat_detect_cfg = config
+        .features
+        .as_ref()
+        .and_then(|f| f.repeat_detect.clone())
+        .unwrap_or_default();
+    let repeat_detect_text = repeat_detect_cfg.enabled.then(|| {
+        crate::hook_run::repeat_detect::handle_pre_tool_use(
+            stdin_payload,
+            claude_session_id,
+            &repeat_detect_cfg,
+        )
+    });
+    let repeat_detect_text = repeat_detect_text.filter(|t| !t.is_empty());
+
+    match (primary, repeat_detect_text) {
+        (Some(p), Some(r)) => Some(format!("{p}\n\n{r}")),
+        (Some(p), None) => Some(p),
+        (None, Some(r)) => Some(r),
+        (None, None) => None,
+    }
+}
+
+/// The task-tracker's `Stop` reminder, with repeat-detection applied: once
+/// the identical reminder has fired `threshold` times in a row for this
+/// session, `repeat_detect::handle_stop` appends a pointer to `llmenv task
+/// wait` (see #1006 — this is the same on-by-default detector as
+/// `resolve_pre_tool_text`, applied to Stop-event nagging instead of
+/// `PreToolUse` tool-call repetition).
+fn resolve_stop_reminder(
+    state_dir: &std::path::Path,
+    claude_session_id: Option<&str>,
+    config: &crate::config::Config,
+) -> String {
+    let reminder = crate::task::stop_hook_reminder(state_dir);
+    let repeat_detect_cfg = config
+        .features
+        .as_ref()
+        .and_then(|f| f.repeat_detect.clone())
+        .unwrap_or_default();
+    if repeat_detect_cfg.enabled {
+        crate::hook_run::repeat_detect::handle_stop(
+            &reminder,
+            claude_session_id,
+            &repeat_detect_cfg,
+        )
+    } else {
+        reminder
+    }
+}
+
 fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
@@ -499,35 +609,27 @@ fn run_inner(
         .and_then(|f| f.task_tracker.as_ref())
         .is_some_and(|t| t.enabled);
 
-    // PreToolUse text decision, shared by two mutually-exclusive interceptors
-    // that key off distinct tool names: the #985 task-tool redirect
-    // (TaskCreate/TaskList/TaskUpdate → `llmenv task`) and the #318/#864
-    // read-once dedup (Read). Both are computed before scope/memory resolution
-    // (neither needs it) and folded into one `pre_tool_text`, so the shared
-    // session-log handling below applies to both: take the early-return fast
-    // path only when session-log has no interest in PreToolUse at Debug level
-    // (EventKind::ToolUse's level); otherwise fall through so `run_session_log`
-    // still runs and the decision text is appended to `out` further down. Never
-    // unconditionally short-circuit, or enabling either would silently drop
-    // Debug-level session logging for every PreToolUse event (the #231/#864
+    // PreToolUse text decision, shared by three mutually-exclusive
+    // interceptors, checked in order: the #985 task-tool redirect
+    // (TaskCreate/TaskList/TaskUpdate → `llmenv task`), the #318/#864
+    // read-once dedup (Read), and the #1006 repeat-call detector (any tool,
+    // fallback when neither of the above already fired). All are computed
+    // before scope/memory resolution (none need it) and folded into one
+    // `pre_tool_text`, so the shared session-log handling below applies to
+    // all three: take the early-return fast path only when session-log has
+    // no interest in PreToolUse at Debug level (EventKind::ToolUse's level);
+    // otherwise fall through so `run_session_log` still runs and the decision
+    // text is appended to `out` further down. Never unconditionally
+    // short-circuit, or enabling any of them would silently drop Debug-level
+    // session logging for every PreToolUse event (the #231/#864
     // early-return-drops-logging bug class).
     let pre_tool_text = if event == HookEvent::PreToolUse {
-        let text = if task_tracker_enabled
-            && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
-        {
-            Some(t)
-        } else if let Some(ref features) = config.features
-            && let Some(ref read_once) = features.read_once
-            && read_once.enabled
-        {
-            Some(crate::hook_run::read_once::handle_pre_tool_use(
-                stdin_payload,
-                claude_session_id,
-                read_once,
-            ))
-        } else {
-            None
-        };
+        let text = resolve_pre_tool_text(
+            stdin_payload,
+            claude_session_id,
+            &config,
+            task_tracker_enabled,
+        );
         match text {
             Some(t) => {
                 // Derived from the same `event_to_log_kind` mapping
@@ -555,7 +657,11 @@ fn run_inner(
     // (that early-return shape was tried and reverted; see the git history).
     if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
         let state_dir = crate::paths::state_dir()?;
-        return Ok(crate::task::stop_hook_reminder(&state_dir));
+        return Ok(resolve_stop_reminder(
+            &state_dir,
+            claude_session_id,
+            &config,
+        ));
     }
 
     // #867: the rest of the pipeline (scope evaluation, tag/bundle recall
@@ -803,7 +909,7 @@ fn run_inner(
             // this never displaces run_session_log, it just adds to `out`.
             if event == HookEvent::Stop && task_tracker_enabled {
                 let state_dir = crate::paths::state_dir()?;
-                let reminder = crate::task::stop_hook_reminder(&state_dir);
+                let reminder = resolve_stop_reminder(&state_dir, claude_session_id, &config);
                 if !reminder.is_empty() {
                     if !out.is_empty() {
                         out.push('\n');
@@ -1531,6 +1637,101 @@ fn post_session_consolidation() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// `resolve_pre_tool_text` calls the public `read_once`/`repeat_detect`
+    /// entry points, which resolve the real global state dir (not an
+    /// injectable one) — so these tests use a distinctly-named session id
+    /// and clean up after themselves rather than touching real session data.
+    fn test_session_id(label: &str) -> String {
+        format!("llmenv-test-{label}")
+    }
+
+    fn cleanup_test_session_state(session_id: &str) {
+        if let Ok(state_dir) = crate::paths::state_dir() {
+            let _ = std::fs::remove_file(
+                state_dir
+                    .join("read_once")
+                    .join(format!("{session_id}.json")),
+            );
+            let _ = std::fs::remove_file(
+                state_dir
+                    .join("repeat_detect")
+                    .join(format!("{session_id}.json")),
+            );
+        }
+    }
+
+    /// #1006: `resolve_pre_tool_text` must not let an enabled `read_once`
+    /// permanently mask `repeat_detect` for tool calls `read_once` doesn't
+    /// cover — regression test for the exact bug fp-check confirmed during
+    /// pre-pr-review (read_once's handler returning `""` for non-`Read`
+    /// tools used to still count as "a decision was made").
+    #[test]
+    fn repeat_detect_fires_even_when_read_once_is_also_enabled() {
+        let session_id = test_session_id("mask");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                read_once: Some(crate::config::ReadOnce {
+                    enabled: true,
+                    mode: crate::config::ReadOnceMode::Warn,
+                    ttl_seconds: 1200,
+                }),
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: true,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "echo hi" },
+        });
+        let text = resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
+        cleanup_test_session_state(&session_id);
+        assert!(
+            text.is_some_and(|t| !t.is_empty()),
+            "repeat_detect must still fire for a non-Read tool when read_once is also enabled"
+        );
+    }
+
+    #[test]
+    fn read_once_still_wins_for_read_tool_over_repeat_detect() {
+        // Both features want to say something about the 2nd identical Read
+        // (read_once: "already read"; repeat_detect, threshold 1: fires on
+        // every call). read_once is checked first, so its message must win.
+        let session_id = test_session_id("rw");
+        let dir = tempfile::tempdir().expect("test");
+        let file_path = dir.path().join("f.txt");
+        std::fs::write(&file_path, "hello").expect("test");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                read_once: Some(crate::config::ReadOnce {
+                    enabled: true,
+                    mode: crate::config::ReadOnceMode::Warn,
+                    ttl_seconds: 1200,
+                }),
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: true,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": file_path.to_str().unwrap() },
+        });
+        resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
+        let second = resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
+        cleanup_test_session_state(&session_id);
+        assert!(
+            second.is_some_and(|t| t.contains("already read")),
+            "read_once's advisory must win over repeat_detect for a Read tool call"
+        );
+    }
 
     #[test]
     fn index_repository_command_sets_env_and_args() {

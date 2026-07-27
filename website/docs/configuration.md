@@ -501,6 +501,48 @@ features:
 |---------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `track` | no       | `"release"` (default) or `"beta"`. `release` uses the GitHub latest-stable endpoint; `beta` uses the first non-draft release from the recent list. |
 
+### `features.repeat_detect:`
+
+Engine-neutral repeat-loop detection, **on by default** (opt-*out*, not
+opt-in — omitting `features.repeat_detect` entirely resolves the same as
+`enabled: true` with defaults). Some models — small/local ones especially —
+can get stuck re-issuing the exact same tool call turn after turn with no
+progress, or ignoring the task tracker's own "you still have a task in
+progress" reminder every single turn instead of pausing it. Two independent
+trackers share this one setting:
+
+- **Tool calls**: llmenv tracks the most recent tool name + input per
+  session and, once the same call repeats `threshold` times in a row,
+  injects an advisory nudging the model to stop and try a different
+  approach. This still fires even when another feature (e.g. `read_once`)
+  already had something to say about the same call — the two aren't
+  mutually exclusive, since a model can get stuck retrying a call the other
+  feature already denied or warned about.
+- **Task-tracker Stop reminder**: if `features.task_tracker` is on and the
+  task tracker's "you still have a task in progress" reminder fires
+  identically `threshold` times in a row, this appends a pointer to
+  `llmenv task wait <slug> "<reason>"` — the actual way to silence the
+  reminder while genuinely blocked — instead of just repeating the same
+  "keep working" imperative forever.
+
+Both are warnings, never blocks — llmenv never denies the repeated call or
+the reminder, so a deliberately re-run command (e.g. re-running `cargo test`
+after an unrelated fix) is never blocked. Fires for any adapter/model since
+the detector lives in the shared `hook_run` lifecycle layer, not per-adapter
+code.
+
+```yaml
+features:
+  repeat_detect:
+    enabled: false  # opt out entirely; omit the block (or `enabled: true`) to keep it on
+    threshold: 3    # consecutive identical calls/reminders before the warning fires
+```
+
+| Field       | Required | Notes                                                              |
+|-------------|----------|--------------------------------------------------------------------|
+| `enabled`   | no       | Default `true`.                                                    |
+| `threshold` | no       | Consecutive identical calls/reminders before warning; default `3`. |
+
 ### `features.context_mode:`
 
 Built-in context-saving support (#490). When enabled, llmenv wires the

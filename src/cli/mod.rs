@@ -1875,6 +1875,7 @@ fn fold_root_features(
         context_mode,
         upgrade,
         read_once,
+        repeat_detect,
         slippage,
         task_tracker,
     } = root.clone();
@@ -1888,6 +1889,7 @@ fn fold_root_features(
     out.context_mode = context_mode.or(out.context_mode);
     out.upgrade = upgrade.or(out.upgrade);
     out.read_once = read_once.or(out.read_once);
+    out.repeat_detect = repeat_detect.or(out.repeat_detect);
     out.slippage = slippage.or(out.slippage);
     out.task_tracker = task_tracker.or(out.task_tracker);
 
@@ -4892,6 +4894,7 @@ mod tests {
                 context_mode: None,
                 upgrade: None,
                 read_once: None,
+                repeat_detect: None,
                 slippage: None,
                 task_tracker: None,
                 codebase_memory: vec![],

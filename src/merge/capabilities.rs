@@ -208,6 +208,19 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         .max_by_key(|(p, _)| *p)
         .map(|(_, v)| v);
 
+    let repeat_detect = contributors
+        .iter()
+        .filter_map(|c| {
+            c.capabilities
+                .features
+                .as_ref()?
+                .repeat_detect
+                .as_ref()
+                .map(|v| (c.precedence, v.clone()))
+        })
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v);
+
     let features = if memory.is_empty()
         && throttle.is_empty()
         && codebase_memory.is_empty()
@@ -215,6 +228,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         && context_mode.is_none()
         && upgrade.is_none()
         && read_once.is_none()
+        && repeat_detect.is_none()
         && task_tracker.is_none()
     {
         None
@@ -225,6 +239,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             context_mode,
             upgrade,
             read_once,
+            repeat_detect,
             slippage,
             task_tracker,
             codebase_memory,
@@ -1646,6 +1661,7 @@ mod tests {
                     context_mode: None,
                     upgrade: None,
                     read_once: None,
+                    repeat_detect: None,
                     slippage: None,
                     task_tracker: None,
                     codebase_memory: vec![],
@@ -1685,6 +1701,7 @@ mod tests {
                     context_mode: None,
                     upgrade: None,
                     read_once: None,
+                    repeat_detect: None,
                     slippage: None,
                     task_tracker: None,
                     codebase_memory: vec![],
