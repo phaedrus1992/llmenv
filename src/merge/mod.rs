@@ -12,7 +12,7 @@ use crate::util::{merge_yaml, normalize_yaml};
 pub use capabilities::{CapabilityContributor, merge_capabilities};
 use rules::RuleFile;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BundleRef {
     pub name: String,
     pub path: PathBuf,
@@ -316,6 +316,16 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
+
+    // #1036: BundleRef derives Default so future fields don't require touching every
+    // struct-literal construction site.
+    #[test]
+    fn bundle_ref_default_is_zeroed() {
+        let bundle = BundleRef::default();
+        assert_eq!(bundle.name, "");
+        assert_eq!(bundle.path, PathBuf::new());
+        assert_eq!(bundle.precedence, 0);
+    }
 
     // #329: a bundle.yaml with an mcp: block must contribute to MergedManifest capabilities.mcp.
     #[test]
