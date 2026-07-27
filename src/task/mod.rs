@@ -1401,16 +1401,12 @@ mod tests {
         // command to close it out — closing someone else's session mutates
         // their bookkeeping.
         let dir = TempDir::new().expect("test");
-        let project = current_project();
-        let session_id = session_for_project(dir.path(), &project);
-        let task =
-            add_task_for_session(dir.path(), "Someone's task", None, &session_id).expect("test");
-        start_task(dir.path(), &task.slug).expect("test");
+        let task = wip_task_in_project(dir.path(), "Someone's task", &current_project());
         done_task(dir.path(), &task.slug).expect("test");
 
         let reminder = session_start_reminder(dir.path());
         assert!(
-            reminder.contains(&session_id),
+            reminder.contains(task.session.as_deref().expect("test")),
             "reminder must name the owning session: {reminder}"
         );
         assert!(
