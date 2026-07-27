@@ -189,6 +189,8 @@ capabilities:
     claude_code: { ... }
   native_mcp:
     claude_code: { ... }
+  native_model_providers:
+    opencode: { ... }                    # deep-merged onto the provider block
 ```
 
 - `permissions.default_mode` is a scalar (resolved by precedence);
