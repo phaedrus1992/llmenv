@@ -65,6 +65,38 @@ fn matches_project_from_llmenv_yaml() {
 }
 
 #[test]
+fn config_scope_tags_drop_invalid_charset() {
+    // #1035: a tag from config.yaml's host/user/network/content scopes hits
+    // the exact same silent ICM/session-log outage as .llmenv.yaml's tags —
+    // it must be sanitized at the same ingest boundary.
+    let cfg = Config {
+        scope: Scopes {
+            host: vec![HostScope {
+                id: "h".into(),
+                r#match: HostMatch {
+                    hostname: Some("fixed".into()),
+                },
+                tags: vec!["good-tag".into(), "bad tag".into(), "lang:rust".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        hostname: "fixed".into(),
+        user: "y".into(),
+        cwd: "/tmp".into(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg, &env);
+    assert!(active.tags.contains("good-tag"));
+    assert!(!active.tags.contains("bad tag"));
+    assert!(!active.tags.contains("lang:rust"));
+    let host_scope = active.scopes.iter().find(|s| s.kind == "host").unwrap();
+    assert_eq!(host_scope.tags, vec!["good-tag"]);
+}
+
+#[test]
 fn extra_tags_activate_without_llmenv_yaml() {
     // No .llmenv.yaml at all — the primary use case for LLMENV_EXTRA_TAGS.
     let tmp = tempfile::tempdir().expect("tempdir");

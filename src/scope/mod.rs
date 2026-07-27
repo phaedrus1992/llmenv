@@ -117,7 +117,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
                 kind: "network",
-                tags: s.tags.clone(),
+                tags: matcher::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
                 project_root: None,
                 enable_bundles: Vec::new(),
                 disable_bundles: Vec::new(),
@@ -132,7 +132,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
                 kind: "host",
-                tags: s.tags.clone(),
+                tags: matcher::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
                 project_root: None,
                 enable_bundles: Vec::new(),
                 disable_bundles: Vec::new(),
@@ -147,7 +147,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
                 kind: "user",
-                tags: s.tags.clone(),
+                tags: matcher::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
                 project_root: None,
                 enable_bundles: Vec::new(),
                 disable_bundles: Vec::new(),
@@ -165,7 +165,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 scopes.push(ActiveScope {
                     id: s.id.clone(),
                     kind: "content",
-                    tags: s.tags.clone(),
+                    tags: matcher::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
                     project_root: None,
                     enable_bundles: Vec::new(),
                     disable_bundles: Vec::new(),

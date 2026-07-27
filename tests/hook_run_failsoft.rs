@@ -515,12 +515,15 @@ fn pre_tool_use_read_twice_warn_with_debug_session_log_writes_log_and_advisory()
     );
 }
 
-/// Like `config_with_read_once_and_debug_session_log`, but the active scope
-/// assigns an invalid tag name (contains a space, rejected by
-/// `validate_tag`). Once `read_once` falls through into the scope/memory
-/// pipeline (because a Debug-level session-log sink is enabled), this forces
-/// `tag_recall_queries` to fail on every call that reaches it.
-fn config_with_read_once_debug_log_and_invalid_tag(mode: &str) -> String {
+/// Like `config_with_read_once_and_debug_session_log`, but the `memory:`
+/// backend points at an unresolvable host. `read_once` computes its
+/// decision first; the memory-client construction failure that follows
+/// (`McpHttpClient::new`, #187's "invalid memory backend URL" fail-soft
+/// path) is the "unrelated pipeline error" — independent of read_once,
+/// and independent of tag/bundle-name validation (#1035 sanitizes those
+/// at ingest, so an invalid tag/bundle name in config no longer reaches
+/// the recall-query pipeline to force a failure there).
+fn config_with_read_once_debug_log_and_broken_memory_backend(mode: &str) -> String {
     format!(
         r#"
 scope:
@@ -530,20 +533,28 @@ scope:
     - id: test-user
       match:
         user: {user}
-      tags: ["bad tag"]
+      tags: [test]
 
 tag:
-  "bad tag": ""
+  test: ""
+
+host:
+  memhost:
+    addr: "no-such-host.invalid"
 
 bundle:
   - name: test-bundle
-    when: ["bad tag"]
+    when: [test]
 
 features:
   read_once:
     enabled: true
     mode: {mode}
     ttl_seconds: 1200
+  memory:
+    - server_host: memhost
+      port: 9
+      when: [test]
 
 session_log:
   file:
@@ -564,13 +575,16 @@ adapter:
 }
 
 // #867: a read_once advisory/deny that's already been computed must not be
-// silently discarded if an unrelated pipeline error (e.g. invalid tag
-// config) fires before it's appended to `out` — the caller degrades any
-// `Err` from `run_inner` to "warn on stderr, nothing on stdout", which would
-// otherwise defeat the already-decided read_once result.
+// silently discarded if an unrelated pipeline error (e.g. an unresolvable
+// memory backend host) fires before it's appended to `out` — the caller
+// degrades any `Err` from `run_inner` to "warn on stderr, nothing on
+// stdout", which would otherwise defeat the already-decided read_once
+// result.
 #[test]
 fn pre_tool_use_read_twice_warn_survives_pipeline_error_after_decision() {
-    let (dir, config_path) = setup_config(&config_with_read_once_debug_log_and_invalid_tag("warn"));
+    let (dir, config_path) = setup_config(
+        &config_with_read_once_debug_log_and_broken_memory_backend("warn"),
+    );
 
     let test_file_dir = TempDir::new().unwrap();
     let file_path = test_file_dir.path().join("read_twice_pipeline_error.txt");
@@ -588,8 +602,9 @@ fn pre_tool_use_read_twice_warn_survives_pipeline_error_after_decision() {
         .success();
 
     // Second read — read_once computes a non-empty "already read" advisory,
-    // then the pipeline fails on the invalid tag. The advisory must still
-    // reach stdout instead of being swallowed by the pipeline error.
+    // then the pipeline fails constructing the memory client. The advisory
+    // must still reach stdout instead of being swallowed by the pipeline
+    // error.
     let output = hook_cmd(dir.path(), &config_path, "pre_tool_use")
         .write_stdin(payload.as_str())
         .timeout(Duration::from_secs(10))
