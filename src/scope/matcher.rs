@@ -166,13 +166,65 @@ impl Env {
 /// Parse `$LLMENV_EXTRA_TAGS`'s comma-separated format (matching
 /// `LLMENV_ACTIVE_TAGS`'s own output format). Empty segments (from a blank
 /// value, leading/trailing commas, or repeated commas) are dropped; each
-/// remaining tag is trimmed of surrounding whitespace.
+/// remaining tag is trimmed of surrounding whitespace, then run through
+/// [`sanitize_tags`] (#1035).
 fn parse_extra_tags(raw: &str) -> Vec<String> {
-    raw.split(',')
+    let tags = raw
+        .split(',')
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(String::from)
-        .collect()
+        .collect();
+    sanitize_tags(tags, "$LLMENV_EXTRA_TAGS")
+}
+
+/// Charset every tag must satisfy, regardless of source: non-empty,
+/// alphanumeric plus `-`/`_`. Matches `hook_run::validate_tag`'s recall-query
+/// charset — a tag outside it trips that validation at ICM-recall time, and
+/// the resulting error silently disables memory recall/store *and*
+/// session-log for the whole session (#1035), so untrusted sources are
+/// filtered here, at creation, rather than left to fail downstream.
+pub(crate) fn is_valid_tag_charset(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Max bytes for a single tag from an untrusted source. Charset alone
+/// doesn't bound length, and an oversized tag still bloats
+/// `LLMENV_ACTIVE_TAGS` and every ICM recall keyword built from it (#1035).
+const MAX_TAG_LEN: usize = 64;
+
+/// Max tags accepted from a single untrusted source in one ingest pass. A
+/// hand-written `.llmenv.yaml` never approaches this; a generated/scripted
+/// `$LLMENV_EXTRA_TAGS` trivially could, and every active tag becomes one
+/// `Action::RecallTag` per turn (#1035).
+const MAX_TAGS_PER_SOURCE: usize = 64;
+
+/// Drop tags that fail [`is_valid_tag_charset`] or exceed [`MAX_TAG_LEN`],
+/// then cap the remainder to [`MAX_TAGS_PER_SOURCE`] — logging a warning
+/// naming each rejected tag and any overflow. `source` labels the origin in
+/// the warning (e.g. `.llmenv.yaml` or `$LLMENV_EXTRA_TAGS`).
+fn sanitize_tags(raw: Vec<String>, source: &str) -> Vec<String> {
+    let mut valid = Vec::with_capacity(raw.len());
+    for tag in raw {
+        if !is_valid_tag_charset(&tag) {
+            tracing::warn!("{source}: dropping tag {tag:?} (only alphanumeric, -, _ allowed)");
+        } else if tag.len() > MAX_TAG_LEN {
+            tracing::warn!("{source}: dropping tag {tag:?} (exceeds {MAX_TAG_LEN}-byte limit)");
+        } else {
+            valid.push(tag);
+        }
+    }
+    if valid.len() > MAX_TAGS_PER_SOURCE {
+        tracing::warn!(
+            "{source}: {} tags exceeds cap of {MAX_TAGS_PER_SOURCE}; keeping the first {MAX_TAGS_PER_SOURCE}",
+            valid.len()
+        );
+        valid.truncate(MAX_TAGS_PER_SOURCE);
+    }
+    valid
 }
 
 fn detect_hostname() -> Option<String> {
@@ -386,7 +438,7 @@ pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
                 id,
                 name,
                 description: pf.description,
-                tags: pf.tags,
+                tags: sanitize_tags(pf.tags, ".llmenv.yaml tags"),
                 enable_bundles: pf.enable_bundles,
                 disable_bundles: pf.disable_bundles,
                 unknown_fields,
@@ -458,7 +510,8 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        ContentScope, Env, discover_project, glob_matches, matches_content_all, parse_extra_tags,
+        ContentScope, Env, MAX_TAGS_PER_SOURCE, discover_project, glob_matches,
+        is_valid_tag_charset, matches_content_all, parse_extra_tags,
     };
     use proptest::prelude::*;
     use std::path::Path;
@@ -488,6 +541,38 @@ mod tests {
         // Blank value, leading/trailing/repeated commas must not yield empty tags.
         assert_eq!(parse_extra_tags(",rust,,office,"), vec!["rust", "office"]);
         assert!(parse_extra_tags(",,").is_empty());
+    }
+
+    #[test]
+    fn parse_extra_tags_drops_invalid_charset_segments() {
+        // #1035: charset must be enforced at creation, not left to fail at
+        // ICM-recall query time (where the failure silently disables memory
+        // for the whole session).
+        assert_eq!(
+            parse_extra_tags("rust,my project,lang:rust,office"),
+            vec!["rust", "office"]
+        );
+    }
+
+    #[test]
+    fn parse_extra_tags_caps_tag_count() {
+        // #1035: a scripted/generated env var can trivially produce far more
+        // tags than a hand-written .llmenv.yaml ever would; each becomes one
+        // ICM recall query per turn, so the source must be capped.
+        let raw = (0..(MAX_TAGS_PER_SOURCE + 10))
+            .map(|i| format!("tag{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(parse_extra_tags(&raw).len(), MAX_TAGS_PER_SOURCE);
+    }
+
+    #[test]
+    fn is_valid_tag_charset_accepts_alphanumeric_hyphen_underscore() {
+        assert!(is_valid_tag_charset("rust-lang_123"));
+        assert!(!is_valid_tag_charset(""));
+        assert!(!is_valid_tag_charset("has space"));
+        assert!(!is_valid_tag_charset("lang:rust"));
+        assert!(!is_valid_tag_charset("tag.dot"));
     }
 
     fn content_scope(id: &str, glob: &str, depth: Option<usize>) -> ContentScope {
@@ -548,6 +633,21 @@ mod tests {
         assert_eq!(project.enable_bundles, vec!["github-issues"]);
         assert_eq!(project.disable_bundles, vec!["yaks"]);
         assert!(project.unknown_fields.is_empty());
+    }
+
+    #[test]
+    fn discover_project_drops_invalid_charset_tags() {
+        // #1035: a hand-edited .llmenv.yaml is just as untrusted an ingest
+        // point as $LLMENV_EXTRA_TAGS — an invalid tag here trips the same
+        // ICM-recall failure and must be filtered at creation.
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let yaml = "id: myapp\ntags: [good, \"bad tag\", \"lang:rust\", also-good_1]\n";
+        write_project_file(temp_dir.path(), yaml);
+
+        let env = env_in(temp_dir.path(), temp_dir.path());
+
+        let project = discover_project(&env).expect("discover");
+        assert_eq!(project.tags, vec!["good", "also-good_1"]);
     }
 
     #[test]

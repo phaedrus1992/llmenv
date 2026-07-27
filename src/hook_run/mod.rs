@@ -1458,10 +1458,7 @@ fn validate_tag(tag: &str) -> anyhow::Result<()> {
     if tag.is_empty() {
         return Err(anyhow::anyhow!("empty tag in recall query"));
     }
-    if !tag
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if !crate::scope::matcher::is_valid_tag_charset(tag) {
         return Err(anyhow::anyhow!(
             "tag '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
             tag

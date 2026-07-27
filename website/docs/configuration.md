@@ -1117,6 +1117,11 @@ appearing in both lists. Malformed YAML degrades to defaults derived from the
 folder basename. See [Concepts → Project markers](concepts.md#project-markers)
 for discovery rules.
 
+Each tag must be alphanumeric plus `-`/`_` and no longer than 64 bytes; tags
+outside that charset or length, and any tags beyond the first 64, are dropped
+with a warning rather than breaking the session (the same rule applies to
+`$LLMENV_EXTRA_TAGS` below).
+
 ### Activating tags without a committed marker
 
 `$LLMENV_EXTRA_TAGS` (comma-separated) unions additional tags into the active
