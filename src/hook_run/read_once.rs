@@ -97,50 +97,7 @@ impl SessionCache {
     /// Scan `state_dir/read_once/` and delete `.json` files older than
     /// `max_age_days`. Runs opportunistically during save().
     pub fn prune_stale_sessions(state_dir: &Path, max_age_days: u64) {
-        let max_age_secs = max_age_days * 86_400;
-        let now = unix_now();
-        let ro_dir = read_once_state_dir(state_dir);
-        let entries = match std::fs::read_dir(&ro_dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-            Err(e) => {
-                eprintln!("llmenv: failed to read read-once dir for pruning: {e}");
-                return;
-            }
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            if let Ok(meta) = std::fs::metadata(&path).inspect_err(|e| {
-                tracing::warn!(
-                    "prune_stale_sessions: stat failed for {}: {e}",
-                    path.display()
-                )
-            }) && let Ok(modified) = meta.modified().inspect_err(|e| {
-                tracing::warn!(
-                    "prune_stale_sessions: mtime failed for {}: {e}",
-                    path.display()
-                )
-            }) && let Ok(duration) =
-                modified
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            "prune_stale_sessions: duration_since failed for {}: {e}",
-                            path.display()
-                        )
-                    })
-            {
-                let age_secs = now.saturating_sub(duration.as_secs() as i64);
-                if age_secs > max_age_secs as i64
-                    && let Err(e) = std::fs::remove_file(&path)
-                {
-                    eprintln!("llmenv: failed to prune stale read-once cache: {e}");
-                }
-            }
-        }
+        super::session_state::prune_stale_json_files(&read_once_state_dir(state_dir), max_age_days);
     }
 }
 
@@ -254,6 +211,14 @@ pub(crate) fn handle_pre_tool_use_inner(
         Some(id) => id,
         None => return String::new(),
     };
+    // `session_id` comes straight from the hook's stdin JSON, unsanitized.
+    // Reject anything that isn't safe as a single path component before it
+    // reaches `session_cache_path`'s `state_dir.join(...)` — a `../` or
+    // absolute value would otherwise escape `state_dir` entirely (the
+    // latter because `Path::join` discards the base on an absolute RHS).
+    if !crate::paths::is_valid_short_name(session_id) {
+        return String::new();
+    }
     let canonical = std::fs::canonicalize(path)
         .inspect_err(|e| {
             eprintln!(
@@ -416,6 +381,24 @@ mod tests {
             &test_config_warn(),
         );
         assert!(result.is_empty(), "missing file should pass through");
+    }
+
+    #[test]
+    fn unsafe_session_id_passes_through_without_escaping_state_dir() {
+        let dir = TempDir::new().expect("test");
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, b"content").expect("test");
+        let payload = read_payload(file_path.to_str().expect("test"));
+
+        for evil in ["../../victim/pwn", "/tmp/llmenv-abs-escape", "..", "a/b"] {
+            let out =
+                handle_pre_tool_use_inner(&payload, Some(evil), &test_config_warn(), dir.path());
+            assert!(
+                out.is_empty(),
+                "unsafe session_id {evil:?} must pass through: {out}"
+            );
+        }
+        assert!(!std::path::Path::new("/tmp/llmenv-abs-escape").exists());
     }
 
     #[test]

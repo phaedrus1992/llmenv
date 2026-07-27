@@ -2227,6 +2227,16 @@ index_path: /custom/index/path
         assert_eq!(original, parsed);
     }
 
+    proptest! {
+        #[test]
+        fn prop_repeat_detect_json_roundtrip(enabled in proptest::bool::ANY, threshold in any::<u32>()) {
+            let original = RepeatDetect { enabled, threshold };
+            let json = serde_json::to_string(&original).unwrap();
+            let back: RepeatDetect = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(original, back);
+        }
+    }
+
     // #505: MCP field parity — new optional fields
 
     /// A McpServer with all new fields set survives YAML and JSON round-trips with

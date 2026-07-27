@@ -13,6 +13,12 @@
 //!
 //! Fail-soft: any cache/IO error logs to stderr and passes the call through
 //! silently — the detector must never block real work.
+//!
+//! Load-modify-save has no lock: this assumes `PreToolUse` hook invocations
+//! for a single session are never concurrent (each is a fresh subprocess
+//! dispatched sequentially by the calling adapter). If that ever stops
+//! holding, two concurrent calls could race and one increment could be
+//! silently lost — add per-session locking if a future adapter changes this.
 
 use std::path::{Path, PathBuf};
 
@@ -58,6 +64,10 @@ impl SessionState {
 
     fn save(&self, state_dir: &Path) -> anyhow::Result<()> {
         let rd_dir = repeat_detect_state_dir(state_dir);
+        // Same 7-day retention as `read_once`'s sibling cache — nothing here
+        // needs a longer memory than that (the counter resets on any
+        // different call, or expires with the session itself).
+        super::session_state::prune_stale_json_files(&rd_dir, 7);
         std::fs::create_dir_all(&rd_dir)?;
         let path = session_state_path(state_dir, &self.session_id);
         let json = serde_json::to_string(&self)?;
@@ -85,8 +95,12 @@ pub fn handle_pre_tool_use(
     session_id: Option<&str>,
     config: &RepeatDetectConfig,
 ) -> String {
+    // `eprintln!`, not `tracing::warn!` — the latter is filtered out under
+    // the default `EnvFilter` (ERROR-only when `RUST_LOG` is unset), which
+    // would silently disable this entire feature with zero visible output,
+    // contradicting the fail-soft-always-logs contract above.
     let Ok(state_dir) = crate::paths::state_dir().inspect_err(|e| {
-        tracing::warn!("failed to resolve state_dir for repeat-detect pre-tool-use: {e}")
+        eprintln!("llmenv: failed to resolve state_dir for repeat-detect pre-tool-use: {e}")
     }) else {
         return String::new();
     };
@@ -103,6 +117,14 @@ fn handle_pre_tool_use_inner(
     let Some(session_id) = session_id else {
         return String::new();
     };
+    // `session_id` comes straight from the hook's stdin JSON, unsanitized.
+    // Reject anything that isn't safe as a single path component before it
+    // ever reaches `session_state_path`'s `state_dir.join(...)` — a `../`
+    // or absolute value would otherwise escape `state_dir` entirely (the
+    // latter because `Path::join` discards the base on an absolute RHS).
+    if !crate::paths::is_valid_short_name(session_id) {
+        return String::new();
+    }
     let Some(tool_name) = stdin_payload.get("tool_name").and_then(|v| v.as_str()) else {
         return String::new();
     };
@@ -122,10 +144,14 @@ fn handle_pre_tool_use_inner(
     let consecutive = state.consecutive;
 
     if let Err(e) = state.save(state_dir) {
-        eprintln!("llmenv: failed to save repeat-detect state: {e}");
+        eprintln!("llmenv: failed to save repeat-detect state for session {session_id}: {e}");
     }
 
-    if consecutive >= config.threshold {
+    // `threshold: 0` isn't rejected at config-load time (no validation
+    // infrastructure exists for this kind of numeric feature field — same
+    // gap `read_once`'s `ttl_seconds` has), so clamp here rather than warn
+    // on literally every tool call.
+    if consecutive >= config.threshold.max(1) {
         format!(
             "You've called {tool_name} with identical input {consecutive} times in a row. \
              This is very likely a stuck loop, not progress — stop, re-read the actual error or \
@@ -156,10 +182,34 @@ mod tests {
 
     #[test]
     fn no_session_id_passes_through() {
-        let dir = TempDir::new().expect("test");
         let result = handle_pre_tool_use(&bash_payload("ls"), None, &config(3));
         assert!(result.is_empty());
-        drop(dir);
+    }
+
+    #[test]
+    fn zero_threshold_is_clamped_to_one_not_warn_every_call() {
+        let dir = TempDir::new().expect("test");
+        let out =
+            handle_pre_tool_use_inner(&bash_payload("ls"), Some("s1"), &config(0), dir.path());
+        assert!(
+            !out.is_empty(),
+            "threshold 0 must clamp to 1, warning on the very first call"
+        );
+    }
+
+    #[test]
+    fn unsafe_session_id_passes_through_without_escaping_state_dir() {
+        let dir = TempDir::new().expect("test");
+        for evil in ["../../victim/pwn", "/tmp/llmenv-abs-escape", "..", "a/b"] {
+            let out =
+                handle_pre_tool_use_inner(&bash_payload("ls"), Some(evil), &config(1), dir.path());
+            assert!(
+                out.is_empty(),
+                "unsafe session_id {evil:?} must pass through: {out}"
+            );
+        }
+        // Nothing should have been written outside the state dir's repeat_detect/ subdir.
+        assert!(!std::path::Path::new("/tmp/llmenv-abs-escape").exists());
     }
 
     #[test]
