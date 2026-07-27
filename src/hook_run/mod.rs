@@ -1473,10 +1473,7 @@ fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
     if bundle.is_empty() {
         return Err(anyhow::anyhow!("empty bundle name in recall query"));
     }
-    if !bundle
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if !crate::scope::matcher::is_valid_tag_charset(bundle) {
         return Err(anyhow::anyhow!(
             "bundle '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
             bundle

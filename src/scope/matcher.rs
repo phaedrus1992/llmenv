@@ -205,8 +205,11 @@ const MAX_TAGS_PER_SOURCE: usize = 64;
 /// Drop tags that fail [`is_valid_tag_charset`] or exceed [`MAX_TAG_LEN`],
 /// then cap the remainder to [`MAX_TAGS_PER_SOURCE`] — logging a warning
 /// naming each rejected tag and any overflow. `source` labels the origin in
-/// the warning (e.g. `.llmenv.yaml` or `$LLMENV_EXTRA_TAGS`).
-fn sanitize_tags(raw: Vec<String>, source: &str) -> Vec<String> {
+/// the warning (e.g. `.llmenv.yaml` or `$LLMENV_EXTRA_TAGS`). Also used for
+/// bundle names (`enable_bundles`/`disable_bundles`), which share the same
+/// charset rule and the same downstream `hook_run::validate_bundle` failure
+/// mode as tags.
+pub(crate) fn sanitize_tags(raw: Vec<String>, source: &str) -> Vec<String> {
     let mut valid = Vec::with_capacity(raw.len());
     for tag in raw {
         if !is_valid_tag_charset(&tag) {
@@ -438,9 +441,9 @@ pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
                 id,
                 name,
                 description: pf.description,
-                tags: sanitize_tags(pf.tags, ".llmenv.yaml tags"),
-                enable_bundles: pf.enable_bundles,
-                disable_bundles: pf.disable_bundles,
+                tags: sanitize_tags(pf.tags, ".llmenv.yaml"),
+                enable_bundles: sanitize_tags(pf.enable_bundles, ".llmenv.yaml enable_bundles"),
+                disable_bundles: sanitize_tags(pf.disable_bundles, ".llmenv.yaml disable_bundles"),
                 unknown_fields,
             });
         }
@@ -511,7 +514,7 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
 mod tests {
     use super::{
         ContentScope, Env, MAX_TAGS_PER_SOURCE, discover_project, glob_matches,
-        is_valid_tag_charset, matches_content_all, parse_extra_tags,
+        is_valid_tag_charset, matches_content_all, parse_extra_tags, sanitize_tags,
     };
     use proptest::prelude::*;
     use std::path::Path;
@@ -573,6 +576,17 @@ mod tests {
         assert!(!is_valid_tag_charset("has space"));
         assert!(!is_valid_tag_charset("lang:rust"));
         assert!(!is_valid_tag_charset("tag.dot"));
+    }
+
+    #[test]
+    fn sanitize_tags_drops_tag_over_max_len() {
+        // #1035: charset alone doesn't bound length.
+        let at_limit = "a".repeat(super::MAX_TAG_LEN);
+        let over_limit = "a".repeat(super::MAX_TAG_LEN + 1);
+        assert_eq!(
+            sanitize_tags(vec![at_limit.clone(), over_limit], "test"),
+            vec![at_limit]
+        );
     }
 
     fn content_scope(id: &str, glob: &str, depth: Option<usize>) -> ContentScope {
@@ -648,6 +662,22 @@ mod tests {
 
         let project = discover_project(&env).expect("discover");
         assert_eq!(project.tags, vec!["good", "also-good_1"]);
+    }
+
+    #[test]
+    fn discover_project_drops_invalid_charset_bundle_names() {
+        // #1035: enable_bundles/disable_bundles hit the exact same
+        // hook_run::validate_bundle failure mode as tags — same ingest
+        // boundary, same sanitizer.
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let yaml = "id: myapp\nenable_bundles: [good, \"bad bundle\"]\ndisable_bundles: [\"lang:rust\", ok]\n";
+        write_project_file(temp_dir.path(), yaml);
+
+        let env = env_in(temp_dir.path(), temp_dir.path());
+
+        let project = discover_project(&env).expect("discover");
+        assert_eq!(project.enable_bundles, vec!["good"]);
+        assert_eq!(project.disable_bundles, vec!["ok"]);
     }
 
     #[test]
