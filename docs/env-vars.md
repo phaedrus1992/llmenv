@@ -33,7 +33,7 @@ processes to read. These are read *by* llmenv as input.
 
 | Variable | Purpose | Read By | Scope |
 | ---------- | --------- | -------- | ------- |
-| `LLMENV_EXTRA_TAGS` | Comma-separated tags unioned into the active tag set, additive on top of `.llmenv.yaml`'s `tags` (or on top of nothing, if no `.llmenv.yaml` is present) — an escape hatch for activating tags without a committed project marker | llmenv scope matcher (`src/scope/matcher.rs`) | Session/process |
+| `LLMENV_EXTRA_TAGS` | Comma-separated tags unioned into the active tag set, additive on top of `.llmenv.yaml`'s `tags` (or on top of nothing, if no `.llmenv.yaml` is present) — an escape hatch for activating tags without a committed project marker. Each tag must be alphanumeric plus `-`/`_`, ≤64 bytes, and the source is capped at 64 tags; anything outside that is dropped (`tracing::warn!`, visible with `RUST_LOG=warn`) instead of silently disabling ICM memory/session-logging for the session (#1035) | llmenv scope matcher (`src/scope/matcher.rs`) | Session/process |
 
 **Rule:** Same `LLMENV_` prefix rule as category 1 — these are still llmenv-owned, just input
 rather than output.

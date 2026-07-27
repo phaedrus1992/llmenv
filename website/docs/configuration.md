@@ -1117,6 +1117,14 @@ appearing in both lists. Malformed YAML degrades to defaults derived from the
 folder basename. See [Concepts → Project markers](concepts.md#project-markers)
 for discovery rules.
 
+Each tag (and each `enable_bundles`/`disable_bundles` entry) must be
+alphanumeric plus `-`/`_` and no longer than 64 bytes; entries outside that
+charset or length, and any beyond the first 64 from a given source, are
+dropped (logged via `tracing::warn!`, visible with `RUST_LOG=warn`) rather
+than breaking the session. The same rule applies to `$LLMENV_EXTRA_TAGS`
+below and to tags declared on `config.yaml`'s network/host/user/content
+scopes.
+
 ### Activating tags without a committed marker
 
 `$LLMENV_EXTRA_TAGS` (comma-separated) unions additional tags into the active
