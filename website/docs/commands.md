@@ -341,7 +341,11 @@ project's hook.
   --replace | --new]` — start a session for the current project. Pass
   `--description` to attach free-text context (e.g. "dev-sprint issue 493"),
   shown in `session ls` and the checkpoint; it's separate from `name` and
-  never feeds id generation. If one or more sessions are already open for
+  never feeds id generation. **Name the session after the high-level work**
+  (e.g. `oauth-token-refresh`, `v3.6.1-task-tracker-fixes`), not a placeholder
+  — an omitted or auto-numbered name (`session-2`, `session-3`) defeats the
+  point of `session ls` as the recovery path after a compaction. If one or
+  more sessions are already open for
   this project, the command **errors and lists them** (id, name, description,
   idle time), requiring one of:
   - `--resume <id>` — adopt an existing open session instead of creating a
@@ -371,9 +375,14 @@ reminders (below) nudge the agent to run `task session finish` or add more
 work to the session instead.
 
 The CLI subcommands always work. The injected `llmenv` skill guidance and
-the SessionStart/Stop lifecycle reminders (nudging the agent to resume or
-close `wip` tasks, and to close out a fully-done session) are gated behind
-`features.task_tracker.enabled` (default `false`):
+the SessionStart/Stop lifecycle reminders are gated behind
+`features.task_tracker.enabled` (default `false`). Each `wip` task in a
+reminder is tagged with the session that started it; since a hook has no
+reliable way to tell whether that session is *this* conversation's own (two
+terminals in the same project is a normal pattern), the reminder never
+presumes ownership — it conditions resuming/finishing a task on the agent
+recognizing it as its own earlier work, and otherwise nudges to close out a
+fully-done session or add more work to it:
 
 ```yaml
 features:
