@@ -19,8 +19,9 @@ function useVisitorCount(): number | null {
       const next = Number.isFinite(previous) ? previous + 1 : VISITOR_COUNTER_START;
       window.localStorage.setItem(VISITOR_COUNTER_KEY, String(next));
       setCount(next);
-    } catch {
+    } catch (err: unknown) {
       // localStorage unavailable (private browsing, disabled storage) — show the starting count.
+      console.debug('llmenv-docs: visitor counter storage unavailable', err);
       setCount(VISITOR_COUNTER_START);
     }
   }, []);
