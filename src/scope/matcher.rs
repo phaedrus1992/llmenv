@@ -44,7 +44,7 @@ struct ProjectFile {
     extra: BTreeMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Env {
     pub hostname: String,
     pub user: String,
@@ -78,15 +78,7 @@ static ENV_CACHE: Mutex<Option<CachedEnv>> = Mutex::new(None);
 impl Env {
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            hostname: String::new(),
-            user: String::new(),
-            cwd: String::new(),
-            gateway_mac: None,
-            home: None,
-            os: String::new(),
-            extra_tags: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Detect environment, returning a cached result if fresher than 30 s.
@@ -159,10 +151,14 @@ impl Env {
                 .flatten(),
             home,
             os: std::env::consts::OS.to_string(),
-            extra_tags: std::env::var("LLMENV_EXTRA_TAGS")
-                .ok()
-                .map(|raw| parse_extra_tags(&raw))
-                .unwrap_or_default(),
+            extra_tags: match std::env::var("LLMENV_EXTRA_TAGS") {
+                Ok(raw) => parse_extra_tags(&raw),
+                Err(std::env::VarError::NotPresent) => Vec::new(),
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    tracing::warn!("$LLMENV_EXTRA_TAGS is not valid UTF-8; extra tags disabled");
+                    Vec::new()
+                }
+            },
         }
     }
 }
@@ -515,13 +511,9 @@ mod tests {
     /// upward as long as we're under the boundary).
     fn env_in(cwd: &Path, home: &Path) -> Env {
         Env {
-            hostname: String::new(),
-            user: String::new(),
             cwd: cwd.to_string_lossy().to_string(),
-            gateway_mac: None,
             home: Some(home.to_path_buf()),
-            os: String::new(),
-            extra_tags: Vec::new(),
+            ..Env::empty()
         }
     }
 
@@ -634,13 +626,8 @@ mod tests {
         write_project_file(root, "id: parent\n");
 
         let env = Env {
-            hostname: String::new(),
-            user: String::new(),
             cwd: subdir.to_string_lossy().to_string(),
-            gateway_mac: None,
-            home: None,
-            os: String::new(),
-            extra_tags: Vec::new(),
+            ..Env::empty()
         };
         assert!(
             discover_project(&env).is_none(),
@@ -865,13 +852,8 @@ mod tests {
         #[test]
         fn discover_arbitrary_path_never_panics(cwd in r"/[a-z/]*") {
             let env = Env {
-                hostname: String::new(),
-                user: String::new(),
                 cwd,
-                gateway_mac: None,
-                home: None,
-                os: String::new(),
-                extra_tags: Vec::new(),
+                ..Env::empty()
             };
             let _ = discover_project(&env);
         }
