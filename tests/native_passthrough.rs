@@ -161,3 +161,39 @@ native_mcp:
         "native_mcp should have claude_code key"
     );
 }
+
+/// Issue #1008: `native_model_providers` is a `bundle.yaml`-declarable capability,
+/// so it must be in `BUNDLE_YAML_KNOWN_KEYS` (unknown keys are a hard error) and
+/// must survive the merge into the resolved capabilities.
+#[test]
+fn bundle_native_model_providers_is_accepted_and_merged() {
+    use std::collections::BTreeMap;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle_dir = tmp.path().join("provider-bundle");
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+    std::fs::write(
+        bundle_dir.join("bundle.yaml"),
+        "native_model_providers:\n  opencode:\n    mtplx:\n      npm: '@ai-sdk/openai-compatible'\n",
+    )
+    .unwrap();
+
+    let bundle = BundleRef {
+        name: "provider-bundle".into(),
+        path: bundle_dir,
+        precedence: 1,
+    };
+
+    let merged = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle])
+        .expect("bundle.yaml with native_model_providers must not be rejected");
+
+    let frag = merged
+        .capabilities
+        .native_model_providers
+        .get("opencode")
+        .expect("bundle-contributed native_model_providers must reach the merged capabilities");
+    assert_eq!(
+        frag["mtplx"]["npm"],
+        serde_yaml::Value::String("@ai-sdk/openai-compatible".into())
+    );
+}

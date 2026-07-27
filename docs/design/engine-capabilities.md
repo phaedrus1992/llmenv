@@ -313,9 +313,11 @@ Tracking the two-layer invariant (generic + per-engine `native`) per feature:
 | MCP servers | done | done (`native_mcp.<engine>`) | `mcpServers` deep-merged into `.claude.json` (read-merge-write); merge runs when resolved servers *or* a fragment exist; native `enabledMcpjsonServers` dropped (#244) |
 | Top-level `native` (catch-all) | n/a | done | `Config.native` threads through `merge()` → `MergedManifest.native` |
 | Model providers | done | done (`native_model_providers.<engine>`) | fragment deep-merged onto the rendered provider block — `providers` in `crush.json`, `provider` in `opencode.json`; merge runs when providers *or* a fragment exist (#1008); `ClaudeCodeAdapter` is true no-op |
-| Default models | done | n/a | rendered into `crush.json` `models` and opencode's `model`/`small_model`. opencode's slots are plain `provider_id/model_id` strings with no engine-specific extras; Crush's per-role entries do accept extras (`reasoning_effort`, `think`) that `ModelRef` does not model — tracked separately, not covered by `native_model_providers` |
+| Default models | done | **missing** (#1031) | rendered into `crush.json` `models` and opencode's `model`/`small_model`. opencode's slots are plain `provider_id/model_id` strings with no engine-specific extras; Crush's per-role entries accept extras (`reasoning_effort`, `think`) that `ModelRef` does not model and `native_model_providers` cannot reach (it merges onto `providers`, not `models`) |
 
 Permissions, hooks, plugins, MCP servers, and model providers all satisfy both
 layers via the uniform `native_<feature>` sibling shape (#97, #1008), and the
-top-level `native` catch-all is wired through (#96). Cross-bundle merge of the opaque fragments uses the
+top-level `native` catch-all is wired through (#96). Default models is the one
+feature still missing layer (b) — tracked in #1031. The engine key of every
+`native_*` map is itself unvalidated (#1032). Cross-bundle merge of the opaque fragments uses the
 value-shape rule (`util::merge_yaml`); adapter overlay uses `util::merge_json`.

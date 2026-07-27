@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn native_feature_maps_merge_per_engine() {
-        // native_hooks/native_plugins/native_mcp are per-engine opaque YAML
+        // The native_* maps are per-engine opaque YAML
         // fragments. Across contributors, the same engine's mapping deep-merges
         // (keys union, sequences concat).
         fn caps_with_native_hooks(engine: &str, yaml: &str) -> Capabilities {

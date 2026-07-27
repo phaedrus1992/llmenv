@@ -173,7 +173,22 @@ higher-precedence layer, so a key it sets wins over the one rendered from
 
 It also works on its own — with no `model_providers` entries at all, the
 fragment alone renders the provider block, so a hand-written provider survives
-`llmenv regenerate`.
+`llmenv regenerate`. The fragment must be a mapping; a scalar or list is
+rejected with an error rather than replacing the whole rendered block.
+
+Because it is the higher-precedence layer, a fragment keyed to a provider that
+`model_providers` marks `disabled: true` still renders — the disabled entry is
+skipped, then the fragment is added on its own. Don't declare both for the same
+provider id.
+
+:::caution Per-model keys: opencode only
+opencode renders `provider.<id>.models` as an **object** keyed by model id, so a
+fragment can patch a single field on a single model. Crush renders
+`providers.<id>.models` as a **list**, and merging lists concatenates them — a
+fragment's model entry is *appended*, giving you two entries with the same `id`
+rather than a patched one. On Crush, use `model_providers[].models` for
+per-model config and reserve the fragment for provider-level keys.
+:::
 
 ```yaml
 capabilities:

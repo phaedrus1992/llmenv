@@ -329,18 +329,14 @@ impl AgentAdapter for CrushAdapter {
         // Model providers (fix 1 pattern): skip disabled providers; omit
         // "providers" key if none remain. The JSON tags here match catwalk's
         // Provider/Model struct tags (confirmed in Task 5 of the spec).
-        let native_providers = manifest.capabilities.native_model_providers.get("crush");
-        if !manifest.capabilities.model_providers.is_empty() || native_providers.is_some() {
-            let mut providers_value =
-                render_model_providers(&manifest.capabilities.model_providers)?;
-            super::overlay_native_json(
-                &mut providers_value,
-                native_providers,
-                "native_model_providers.crush",
-            )?;
-            if providers_value.as_object().is_some_and(|o| !o.is_empty()) {
-                doc.insert("providers".into(), providers_value);
-            }
+        let mut providers_value = render_model_providers(&manifest.capabilities.model_providers)?;
+        super::overlay_native_json(
+            &mut providers_value,
+            manifest.capabilities.native_model_providers.get("crush"),
+            "native_model_providers.crush",
+        )?;
+        if providers_value.as_object().is_some_and(|o| !o.is_empty()) {
+            doc.insert("providers".into(), providers_value);
         }
 
         // Default models (fix 1 pattern): omit "models" key if none.
@@ -1867,14 +1863,15 @@ mod tests {
     }
 
     fn caps_with_mtplx_provider() -> Capabilities {
-        let mut caps = Capabilities::default();
-        caps.model_providers.push(llmenv_config::ModelProvider {
-            id: "mtplx".into(),
-            name: Some("modeled".into()),
-            base_url: Some("http://localhost:8080/v1".into()),
-            ..Default::default()
-        });
-        caps
+        Capabilities {
+            model_providers: vec![llmenv_config::ModelProvider {
+                id: "mtplx".into(),
+                name: Some("modeled".into()),
+                base_url: Some("http://localhost:8080/v1".into()),
+                ..Default::default()
+            }],
+            ..Capabilities::default()
+        }
     }
 
     #[test]
@@ -1926,6 +1923,52 @@ mod tests {
         assert!(
             doc.get("providers").is_none(),
             "an empty fragment must not emit an empty \"providers\" object"
+        );
+    }
+
+    /// A non-mapping fragment must be rejected, not silently swallow the whole
+    /// rendered providers block (which is what `merge_json` would do).
+    #[test]
+    fn materialize_native_model_providers_non_mapping_errors() {
+        for (yaml, kind) in [
+            ("oops", "a string"),
+            ("~", "null"),
+            ("[a, b]", "a sequence"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut caps = caps_with_mtplx_provider();
+            caps.native_model_providers
+                .insert("crush".into(), serde_yaml::from_str(yaml).unwrap());
+            let err = CrushAdapter
+                .materialize(&manifest_with_caps(caps), tmp.path())
+                .expect_err("a non-mapping fragment must be an error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("native_model_providers.crush") && msg.contains(kind),
+                "error must name the field and the actual shape, got: {msg}"
+            );
+        }
+    }
+
+    /// `models` is a JSON *array* in crush's provider schema, so a fragment's
+    /// `models` entries append rather than patch (see the caveat in the docs).
+    #[test]
+    fn materialize_native_model_providers_crush_models_append_not_patch() {
+        let mut caps = caps_with_mtplx_provider();
+        caps.model_providers[0].models = vec![llmenv_config::ModelSource {
+            id: "gpt-oss".into(),
+            ..Default::default()
+        }];
+        let doc = crush_doc_with_native_providers(
+            caps,
+            "mtplx:\n  models:\n    - id: gpt-oss\n      can_reason: true\n",
+        );
+        let models = doc["providers"]["mtplx"]["models"].as_array().unwrap();
+        assert_eq!(
+            models.len(),
+            2,
+            "crush's models is a list — merge_json concatenates instead of \
+             patching by id; docs must not promise per-model override here"
         );
     }
 
