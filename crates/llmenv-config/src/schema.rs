@@ -593,30 +593,29 @@ impl Capabilities {
             && self.native_plugins.is_empty()
             && self.native_mcp.is_empty()
             && self.native.is_empty()
-            && self.features.as_ref().is_none_or(|f| f.memory.is_empty())
-            && self.features.as_ref().is_none_or(|f| f.throttle.is_empty())
-            && self
-                .features
-                .as_ref()
-                .is_none_or(|f| f.codebase_memory.is_empty())
-            && self.features.as_ref().is_none_or(|f| f.read_once.is_none())
-            && self
-                .features
-                .as_ref()
-                .is_none_or(|f| f.repeat_detect.is_none())
-            && self.features.as_ref().is_none_or(|f| f.slippage.is_none())
-            && self
-                .features
-                .as_ref()
-                .is_none_or(|f| f.context_mode.is_none())
-            && self.features.as_ref().is_none_or(|f| f.upgrade.is_none())
-            && self
-                .features
-                .as_ref()
-                .is_none_or(|f| f.task_tracker.is_none())
+            && self.features.as_ref().is_none_or(Features::is_empty)
             && self.host.is_empty()
             && self.model_providers.is_empty()
             && self.default_models.is_empty()
+    }
+}
+
+impl Features {
+    /// True when no feature flag is set — the single source of truth for
+    /// which fields count, shared by `Capabilities::is_empty()` and
+    /// `merge_capabilities`'s features-gate so the two can't drift out of
+    /// sync (#1025 — this bug class had already bitten three times:
+    /// `throttle`, `task_tracker`, `codebase_memory`).
+    pub fn is_empty(&self) -> bool {
+        self.memory.is_empty()
+            && self.throttle.is_empty()
+            && self.codebase_memory.is_empty()
+            && self.read_once.is_none()
+            && self.repeat_detect.is_none()
+            && self.slippage.is_none()
+            && self.context_mode.is_none()
+            && self.upgrade.is_none()
+            && self.task_tracker.is_none()
     }
 }
 

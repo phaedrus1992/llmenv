@@ -606,8 +606,10 @@ error at load time.
 Reduces redundant context usage: tracks files read via the `Read` tool within a
 session and warns or denies re-reads of an unchanged file within a TTL window.
 Opt-in (disabled by default). Only the `Read` tool is tracked; other tools are
-unaffected. Fail-soft — any cache/IO error passes the read through silently
-rather than blocking.
+unaffected. A `Read` call with an `offset` or `limit` (a partial read) always
+bypasses the cache — only whole-file reads are tracked and deduplicated.
+Fail-soft — any cache/IO error passes the read through silently rather than
+blocking.
 
 ```yaml
 features:
