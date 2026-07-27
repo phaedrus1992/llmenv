@@ -12,6 +12,7 @@ pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 pub(crate) mod read_once;
 pub(crate) mod repeat_detect;
+mod session_state;
 pub(crate) mod task_tools;
 
 use std::io::Write;
@@ -478,6 +479,56 @@ pub(crate) fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate
     crate::config::Config::load(path)
 }
 
+/// Decide the `PreToolUse` decision text, if any, from the three
+/// mutually-exclusive interceptors: the #985 task-tool redirect
+/// (TaskCreate/TaskList/TaskUpdate → `llmenv task`), the #318/#864
+/// read-once dedup (Read), and the #1006 repeat-call detector (any tool,
+/// fallback when neither of the above already fired).
+///
+/// Each arm is only taken when its handler actually produced a real
+/// decision. `read_once`/`repeat_detect`'s handlers return `""` (empty) as
+/// their pass-through case, so a naive `if <enabled>` gate — with no check
+/// on the handler's own result — would take that arm on *every* call once
+/// the feature was on, permanently masking any interceptor listed after it.
+/// `task_tools`'s handler avoids this by returning `Option` directly; the
+/// other two are checked explicitly here instead.
+fn resolve_pre_tool_text(
+    stdin_payload: &serde_json::Value,
+    claude_session_id: Option<&str>,
+    config: &crate::config::Config,
+    task_tracker_enabled: bool,
+) -> Option<String> {
+    if task_tracker_enabled
+        && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
+    {
+        return Some(t);
+    }
+    if let Some(ref features) = config.features
+        && let Some(ref read_once) = features.read_once
+        && read_once.enabled
+    {
+        let ro_text = crate::hook_run::read_once::handle_pre_tool_use(
+            stdin_payload,
+            claude_session_id,
+            read_once,
+        );
+        if !ro_text.is_empty() {
+            return Some(ro_text);
+        }
+    }
+    if let Some(ref features) = config.features
+        && let Some(ref repeat_detect) = features.repeat_detect
+        && repeat_detect.enabled
+    {
+        return Some(crate::hook_run::repeat_detect::handle_pre_tool_use(
+            stdin_payload,
+            claude_session_id,
+            repeat_detect,
+        ));
+    }
+    None
+}
+
 fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
@@ -515,31 +566,12 @@ fn run_inner(
     // session logging for every PreToolUse event (the #231/#864
     // early-return-drops-logging bug class).
     let pre_tool_text = if event == HookEvent::PreToolUse {
-        let text = if task_tracker_enabled
-            && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
-        {
-            Some(t)
-        } else if let Some(ref features) = config.features
-            && let Some(ref read_once) = features.read_once
-            && read_once.enabled
-        {
-            Some(crate::hook_run::read_once::handle_pre_tool_use(
-                stdin_payload,
-                claude_session_id,
-                read_once,
-            ))
-        } else if let Some(ref features) = config.features
-            && let Some(ref repeat_detect) = features.repeat_detect
-            && repeat_detect.enabled
-        {
-            Some(crate::hook_run::repeat_detect::handle_pre_tool_use(
-                stdin_payload,
-                claude_session_id,
-                repeat_detect,
-            ))
-        } else {
-            None
-        };
+        let text = resolve_pre_tool_text(
+            stdin_payload,
+            claude_session_id,
+            &config,
+            task_tracker_enabled,
+        );
         match text {
             Some(t) => {
                 // Derived from the same `event_to_log_kind` mapping
@@ -1543,6 +1575,108 @@ fn post_session_consolidation() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Unique per-call session id so these tests' real (unmocked) state-dir
+    /// writes — `resolve_pre_tool_text` calls the public `read_once`/
+    /// `repeat_detect` entry points, which resolve the real global state dir,
+    /// not an injectable one — can't collide with real session data or with
+    /// each other under parallel test execution. Cleaned up after use.
+    fn unique_test_session_id(label: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "llmenv-test-{label}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn cleanup_test_session_state(session_id: &str) {
+        if let Ok(state_dir) = crate::paths::state_dir() {
+            let _ = std::fs::remove_file(
+                state_dir
+                    .join("read_once")
+                    .join(format!("{session_id}.json")),
+            );
+            let _ = std::fs::remove_file(
+                state_dir
+                    .join("repeat_detect")
+                    .join(format!("{session_id}.json")),
+            );
+        }
+    }
+
+    /// #1006: `resolve_pre_tool_text` must not let an enabled `read_once`
+    /// permanently mask `repeat_detect` for tool calls `read_once` doesn't
+    /// cover — regression test for the exact bug fp-check confirmed during
+    /// pre-pr-review (read_once's handler returning `""` for non-`Read`
+    /// tools used to still count as "a decision was made").
+    #[test]
+    fn repeat_detect_fires_even_when_read_once_is_also_enabled() {
+        let session_id = unique_test_session_id("mask");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                read_once: Some(crate::config::ReadOnce {
+                    enabled: true,
+                    mode: crate::config::ReadOnceMode::Warn,
+                    ttl_seconds: 1200,
+                }),
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: true,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "echo hi" },
+        });
+        let text = resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
+        cleanup_test_session_state(&session_id);
+        assert!(
+            text.is_some_and(|t| !t.is_empty()),
+            "repeat_detect must still fire for a non-Read tool when read_once is also enabled"
+        );
+    }
+
+    #[test]
+    fn read_once_still_wins_for_read_tool_over_repeat_detect() {
+        // Both features want to say something about the 2nd identical Read
+        // (read_once: "already read"; repeat_detect, threshold 1: fires on
+        // every call). read_once is checked first, so its message must win.
+        let session_id = unique_test_session_id("rw");
+        let dir = tempfile::tempdir().expect("test");
+        let file_path = dir.path().join("f.txt");
+        std::fs::write(&file_path, "hello").expect("test");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                read_once: Some(crate::config::ReadOnce {
+                    enabled: true,
+                    mode: crate::config::ReadOnceMode::Warn,
+                    ttl_seconds: 1200,
+                }),
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: true,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": file_path.to_str().unwrap() },
+        });
+        resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
+        let second = resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
+        cleanup_test_session_state(&session_id);
+        assert!(
+            second.is_some_and(|t| t.contains("already read")),
+            "read_once's advisory must win over repeat_detect for a Read tool call"
+        );
+    }
 
     #[test]
     fn index_repository_command_sets_env_and_args() {
