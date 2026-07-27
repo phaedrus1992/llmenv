@@ -4,6 +4,10 @@
    background pair below is WCAG AA (>=4.5:1 normal text) or better against black. */
 
 :root {
+  /* +10% over Infima's 100% base — scales every rem-based size on the site
+     (menus, breadcrumbs, TOC included) without per-component overrides. */
+  --ifm-font-size-base: 110%;
+
   --ifm-color-primary: #ffd700;
   --ifm-color-primary-dark: #e6c200;
   --ifm-color-primary-darker: #d9b700;
@@ -25,15 +29,19 @@
   --retro-tile-b: #0d0900;
 }
 
-/* Tiled background lives on `body`; article/card surfaces stay Infima's own dark
-   background so text keeps its already-vetted contrast (constraint: skin only,
-   don't tank contrast). */
-body {
+/* Tiled background goes on `html`, not `body` — `body`'s own box only covers one
+   viewport tall, so a background there stops repeating and shows plain grey below
+   the fold on any page taller than the screen. `html` is the canvas element and
+   always extends across the full scrollable page. */
+html {
   background-image: repeating-conic-gradient(
     var(--retro-tile-a) 0% 25%,
     var(--retro-tile-b) 0% 50%
   );
   background-size: 40px 40px;
+}
+
+body {
   font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
 }
 
@@ -43,7 +51,9 @@ body {
 .markdown h4,
 article h1 {
   font-family: Impact, 'Arial Black', sans-serif;
-  background: linear-gradient(180deg, #fff4c2 0%, var(--retro-gold) 45%, var(--retro-gold-dim) 100%);
+  /* Kept within cream→gold→dark-gold-but-still->=8:1; the previous gradient dipped
+     into --retro-gold-dim (~3.4:1 on black) at the bottom of each glyph. */
+  background: linear-gradient(180deg, #fff4c2 0%, var(--retro-gold) 55%, #cca300 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -114,17 +124,21 @@ hr,
   animation: retro-blink 1s step-start infinite;
 }
 
-.retro-status-bar {
+/* Lives inside the navbar (see src/theme/NavbarItem/ComponentTypes.tsx) so it
+   collapses with the rest of the nav items on narrow screens instead of being
+   a separate fixed banner. */
+.retro-navbar-status {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.5rem 1rem;
-  background: var(--ifm-background-surface-color);
-  border-top: 3px dashed var(--retro-gold);
-  border-bottom: 3px dashed var(--retro-gold);
+  gap: 0.5rem;
   font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 996px) {
+  .retro-navbar-status {
+    display: none;
+  }
 }
 
 .retro-construction {
@@ -135,7 +149,7 @@ hr,
   /* White text needs a dim (not bright) gold stripe to clear 4.5:1 — see var comment above. */
   background: repeating-linear-gradient(45deg, var(--retro-gold-dim) 0 10px, #000 10px 20px);
   color: #fff;
-  padding: 0.25rem 0.6rem;
+  padding: 0.25rem 0.5rem;
   border: 2px solid #000;
 }
 
@@ -143,9 +157,10 @@ hr,
   font-family: 'Courier New', monospace;
   background: #000;
   color: var(--retro-gold);
-  padding: 0.2rem 0.5rem;
+  padding: 0.2rem 0.4rem;
   border: 2px inset #888;
-  letter-spacing: 0.15em;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
