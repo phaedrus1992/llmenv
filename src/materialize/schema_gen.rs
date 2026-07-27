@@ -96,4 +96,61 @@ mod tests {
         assert!(result["properties"]["name"].is_object());
         assert!(result["properties"]["count"].is_object());
     }
+
+    // -- property-based test: idempotence (#1012 task 1) --
+    //
+    // Follow-up from pre-pr-review of #1010 (opencode schema sidecar wiring,
+    // #1001). The doc comment promises `f(f(x)) == f(x)`; nothing enforced it.
+
+    use proptest::prelude::*;
+
+    /// Arbitrary JSON leaf value (no nested containers).
+    fn arb_json_leaf() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            proptest::bool::ANY.prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| json!(n)),
+            "[a-zA-Z0-9 ]{0,10}".prop_map(Value::String),
+        ]
+    }
+
+    /// Strategy for an object key, including the literal `"additionalProperties"`
+    /// so the overwrite-an-existing-value path is actually reachable — a
+    /// `[a-z]{1,6}` alphabet alone can never produce that 21-char key.
+    fn arb_object_key() -> impl Strategy<Value = String> {
+        prop_oneof![Just("additionalProperties".to_string()), "[a-z]{1,6}"]
+    }
+
+    /// Arbitrary JSON value: a leaf or a shallow object of leaves — enough
+    /// shape variety to exercise the root-level object/non-object branch
+    /// `with_root_additional_properties` switches on. No array arm: an array
+    /// root takes the same non-object code path as any leaf, so it would add
+    /// generator surface without adding coverage.
+    fn arb_json_value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            arb_json_leaf(),
+            proptest::collection::btree_map(arb_object_key(), arb_json_leaf(), 0..3)
+                .prop_map(|m| Value::Object(m.into_iter().collect())),
+        ]
+    }
+
+    proptest! {
+        /// `with_root_additional_properties` is idempotent — applying it
+        /// twice matches applying it once — and its actual postcondition
+        /// holds: an object root always ends up with `additionalProperties:
+        /// true`, regardless of any prior value that key held; a non-object
+        /// root is passed through unchanged.
+        #[test]
+        fn with_root_additional_properties_is_idempotent(value in arb_json_value()) {
+            let is_object = value.is_object();
+            let once = with_root_additional_properties(value.clone());
+            let twice = with_root_additional_properties(once.clone());
+            prop_assert_eq!(&once, &twice);
+            if is_object {
+                prop_assert_eq!(&once["additionalProperties"], &json!(true));
+            } else {
+                prop_assert_eq!(&once, &value);
+            }
+        }
+    }
 }
