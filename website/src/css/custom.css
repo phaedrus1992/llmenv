@@ -1,22 +1,163 @@
+/* ponytail: 1997 GeoCities skin (#1027). CSS/theme only — no content or nav changes. */
+
 :root {
-  --ifm-color-primary: #2e6fdb;
-  --ifm-color-primary-dark: #285fc6;
-  --ifm-color-primary-darker: #2559bb;
-  --ifm-color-primary-darkest: #1e499a;
-  --ifm-color-primary-light: #3d7ee0;
-  --ifm-color-primary-lighter: #4a87e2;
-  --ifm-color-primary-lightest: #6a9fe8;
+  --ifm-color-primary: #cc00cc;
+  --ifm-color-primary-dark: #b800b8;
+  --ifm-color-primary-darker: #ad00ad;
+  --ifm-color-primary-darkest: #8f008f;
+  --ifm-color-primary-light: #e000e0;
+  --ifm-color-primary-lighter: #e619e6;
+  --ifm-color-primary-lightest: #f04df0;
   --ifm-code-font-size: 95%;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 0, 0.35);
+
+  --retro-link: #0000ee;
+  --retro-link-visited: #551a8b;
+  --retro-link-active: #ff0000;
+  --retro-tile-a: #ff9df2;
+  --retro-tile-b: #7df9ff;
 }
 
 [data-theme='dark'] {
-  --ifm-color-primary: #5a9cf5;
-  --ifm-color-primary-dark: #3e8df3;
-  --ifm-color-primary-darker: #3086f2;
-  --ifm-color-primary-darkest: #0e6be5;
-  --ifm-color-primary-light: #76abf7;
-  --ifm-color-primary-lighter: #84b3f8;
-  --ifm-color-primary-lightest: #aecbfb;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+  --ifm-color-primary: #39ff14;
+  --ifm-color-primary-dark: #33e612;
+  --ifm-color-primary-darker: #30d911;
+  --ifm-color-primary-darkest: #27b30e;
+  --ifm-color-primary-light: #52ff34;
+  --ifm-color-primary-lighter: #5eff43;
+  --ifm-color-primary-lightest: #85ff70;
+  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 0, 0.2);
+
+  --retro-link: #66ccff;
+  --retro-link-visited: #cc99ff;
+  --retro-link-active: #ff5555;
+  --retro-tile-a: #2a0a3d;
+  --retro-tile-b: #0a2a3d;
+}
+
+/* Tiled background lives on `body`; article/card surfaces stay solid so
+   text keeps readable contrast (constraint: skin only, don't tank contrast). */
+body {
+  background-image: repeating-conic-gradient(
+    var(--retro-tile-a) 0% 25%,
+    var(--retro-tile-b) 0% 50%
+  );
+  background-size: 40px 40px;
+  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+article h1 {
+  font-family: Impact, 'Arial Black', sans-serif;
+  background: linear-gradient(90deg, #ff0000, #ff9900, #ffee00, #33ff00, #0099ff, #cc00ff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.25);
+  letter-spacing: 0.03em;
+}
+
+a:not(.button) {
+  color: var(--retro-link);
+  text-decoration: underline;
+}
+
+a:not(.button):visited {
+  color: var(--retro-link-visited);
+}
+
+a:not(.button):active {
+  color: var(--retro-link-active);
+}
+
+hr,
+.retro-divider {
+  height: 8px;
+  border: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    #ff0000 0 20px,
+    #ff9900 20px 40px,
+    #ffee00 40px 60px,
+    #33ff00 60px 80px,
+    #0099ff 80px 100px,
+    #cc00ff 100px 120px
+  );
+  margin: 1.5rem 0;
+}
+
+@keyframes retro-marquee {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes retro-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.retro-marquee-track {
+  overflow: hidden;
+  white-space: nowrap;
+  background: #000;
+  color: #ffee00;
+  font-weight: bold;
+  padding: 0.35rem 0;
+}
+
+.retro-marquee-text {
+  display: inline-block;
+  animation: retro-marquee 14s linear infinite;
+}
+
+.retro-blink {
+  animation: retro-blink 1s step-start infinite;
+}
+
+.retro-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  background: var(--ifm-background-surface-color);
+  border-top: 3px dashed var(--ifm-color-primary);
+  border-bottom: 3px dashed var(--ifm-color-primary);
+  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
+}
+
+.retro-construction {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: bold;
+  background: repeating-linear-gradient(45deg, #ffee00 0 10px, #000 10px 20px);
+  color: #000;
+  padding: 0.25rem 0.6rem;
+  border: 2px solid #000;
+}
+
+.retro-hit-counter {
+  font-family: 'Courier New', monospace;
+  background: #000;
+  color: #33ff00;
+  padding: 0.2rem 0.5rem;
+  border: 2px inset #888;
+  letter-spacing: 0.15em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .retro-marquee-text,
+  .retro-blink {
+    animation: none;
+  }
 }
