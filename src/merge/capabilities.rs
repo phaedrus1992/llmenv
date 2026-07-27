@@ -100,29 +100,11 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let native = merge_native_flat(contributors);
     let host = resolve_host_map(contributors)?;
 
-    // Scalar resolution: highest precedence wins (not positional order).
-    // #227: resolve by explicit precedence comparison, matching resolve_default_mode.
-    let auto_memory_enabled = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .auto_memory_enabled
-                .map(|v| (c.precedence, v))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    // #317: effort_level scalar resolution — same pattern as auto_memory_enabled.
-    let effort_level = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .effort_level
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
+    // Scalar resolution: highest precedence wins (not positional order), via
+    // the shared `highest_precedence` helper (#1023/#1025).
+    let auto_memory_enabled = highest_precedence(contributors, |c| c.auto_memory_enabled.as_ref());
+    let effort_level = highest_precedence(contributors, |c| c.effort_level.as_ref());
+    let advisor_size = highest_precedence(contributors, |c| c.advisor_size.as_ref());
 
     // Collect memory, throttle, and codebase_memory entries from all
     // contributors: concat + dedup (same list model as hooks, plugins, mcp).
@@ -141,110 +123,32 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     dedup(&mut throttle);
     dedup(&mut codebase_memory);
 
-    // #317: resolve feature scalars (slippage, context_mode, upgrade, read_once).
-    // Same highest-precedence-wins pattern as auto_memory_enabled.
-    let slippage = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .slippage
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
+    // #317: resolve feature scalars (slippage, context_mode, upgrade, read_once,
+    // task_tracker, repeat_detect) by highest-precedence-wins, via the shared
+    // `highest_precedence` helper (#1023 — these were 6 near-identical blocks).
+    let slippage = highest_precedence(contributors, |c| c.features.as_ref()?.slippage.as_ref());
+    let context_mode =
+        highest_precedence(contributors, |c| c.features.as_ref()?.context_mode.as_ref());
+    let upgrade = highest_precedence(contributors, |c| c.features.as_ref()?.upgrade.as_ref());
+    let read_once = highest_precedence(contributors, |c| c.features.as_ref()?.read_once.as_ref());
+    let task_tracker =
+        highest_precedence(contributors, |c| c.features.as_ref()?.task_tracker.as_ref());
+    let repeat_detect = highest_precedence(contributors, |c| {
+        c.features.as_ref()?.repeat_detect.as_ref()
+    });
 
-    let context_mode = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .context_mode
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let upgrade = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .upgrade
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let read_once = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .read_once
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let task_tracker = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .task_tracker
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let repeat_detect = contributors
-        .iter()
-        .filter_map(|c| {
-            c.capabilities
-                .features
-                .as_ref()?
-                .repeat_detect
-                .as_ref()
-                .map(|v| (c.precedence, v.clone()))
-        })
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v);
-
-    let features = if memory.is_empty()
-        && throttle.is_empty()
-        && codebase_memory.is_empty()
-        && slippage.is_none()
-        && context_mode.is_none()
-        && upgrade.is_none()
-        && read_once.is_none()
-        && repeat_detect.is_none()
-        && task_tracker.is_none()
-    {
-        None
-    } else {
-        Some(Features {
-            memory,
-            throttle,
-            context_mode,
-            upgrade,
-            read_once,
-            repeat_detect,
-            slippage,
-            task_tracker,
-            codebase_memory,
-        })
-    };
+    let features = Some(Features {
+        memory,
+        throttle,
+        context_mode,
+        upgrade,
+        read_once,
+        repeat_detect,
+        slippage,
+        task_tracker,
+        codebase_memory,
+    })
+    .filter(|f| !f.is_empty());
 
     Ok(Capabilities {
         permissions: Permissions {
@@ -261,7 +165,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         env,
         auto_memory_enabled,
         effort_level,
-        advisor_size: None,
+        advisor_size,
         native_permissions,
         native_hooks,
         native_plugins,
@@ -304,6 +208,21 @@ fn merge_native_feature(
         }
     }
     merged
+}
+
+/// Resolve a scalar `Capabilities`/`features.*` field by highest-precedence-wins:
+/// the value from the contributor with the highest `precedence` that set it
+/// (#1023/#1025 — shared by the scalar fields that all followed this same
+/// filter_map/max_by_key pattern, at both the `Capabilities` and `Features` level).
+fn highest_precedence<T: Clone>(
+    contributors: &[CapabilityContributor],
+    pick: impl Fn(&Capabilities) -> Option<&T>,
+) -> Option<T> {
+    contributors
+        .iter()
+        .filter_map(|c| pick(&c.capabilities).map(|v| (c.precedence, v.clone())))
+        .max_by_key(|(p, _)| *p)
+        .map(|(_, v)| v)
 }
 
 /// Merge the flat `native:` map across all contributors.
@@ -1614,6 +1533,31 @@ mod tests {
         let a = contributor("a", 1, Capabilities::default());
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.effort_level, None);
+    }
+
+    /// `advisor_size` was hardcoded to `None` in `merge_capabilities` — checked
+    /// by `Capabilities::is_empty()` and consumed downstream, but never actually
+    /// resolved from any contributor. Found during pre-pr-review of #1025.
+    #[test]
+    fn advisor_size_scalar_resolution() {
+        let low = contributor(
+            "low",
+            1,
+            Capabilities {
+                advisor_size: Some("small".into()),
+                ..Default::default()
+            },
+        );
+        let high = contributor(
+            "high",
+            5,
+            Capabilities {
+                advisor_size: Some("large".into()),
+                ..Default::default()
+            },
+        );
+        let out = merge_capabilities(&[low, high]).unwrap();
+        assert_eq!(out.advisor_size.as_deref(), Some("large"));
     }
 
     // #317: features created when any non-memory/non-throttle field is populated.
