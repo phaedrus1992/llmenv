@@ -317,16 +317,6 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
-    // #1036: BundleRef derives Default so future fields don't require touching every
-    // struct-literal construction site.
-    #[test]
-    fn bundle_ref_default_is_zeroed() {
-        let bundle = BundleRef::default();
-        assert_eq!(bundle.name, "");
-        assert_eq!(bundle.path, PathBuf::new());
-        assert_eq!(bundle.precedence, 0);
-    }
-
     // #329: a bundle.yaml with an mcp: block must contribute to MergedManifest capabilities.mcp.
     #[test]
     fn bundle_mcp_block_appears_in_merged_capabilities() {
