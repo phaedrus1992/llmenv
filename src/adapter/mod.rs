@@ -54,9 +54,10 @@ pub(crate) fn reject_modeled_native_keys(
             anyhow::bail!(
                 "top-level `native.{engine}` carries the modeled-feature key `{key}`, \
                  which would silently clobber the rendered `{key}`. \
-                 Use `native_{key}.{engine}` (or `native_permissions.{engine}` / \
-                 `native_hooks.{engine}` / `native_mcp.{engine}`) instead, \
-                 which merges in the safe direction."
+                 Use the dedicated escape hatch for that feature instead — \
+                 `native_permissions.{engine}`, `native_hooks.{engine}`, \
+                 `native_plugins.{engine}`, `native_mcp.{engine}`, or \
+                 `native_model_providers.{engine}` — which merges in the safe direction."
             );
         }
     }

@@ -75,9 +75,12 @@ struct OpencodeConfig {
     /// Permission rules — per-tool pattern→action maps.
     #[serde(skip_serializing_if = "Option::is_none")]
     permission: Option<BTreeMap<String, PermissionValue>>,
-    /// Custom/self-hosted model provider endpoints, keyed by provider id.
+    /// Custom/self-hosted model provider endpoints, keyed by provider id. Kept
+    /// as Value because the block goes through a `native_model_providers`
+    /// overlay after construction (same reason as `mcp`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<BTreeMap<String, OpencodeProviderEntry>>,
+    #[schemars(with = "Option<BTreeMap<String, OpencodeProviderEntry>>")]
+    provider: Option<serde_json::Value>,
     /// Default model, as `provider_id/model_id` — from `default_models.large`.
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
@@ -936,7 +939,14 @@ impl AgentAdapter for OpencodeAdapter {
         // 9b. Model providers + default models.
         let config_provider = {
             let rendered = render_opencode_providers(&manifest.capabilities.model_providers);
-            (!rendered.is_empty()).then_some(rendered)
+            let native = manifest.capabilities.native_model_providers.get("opencode");
+            if rendered.is_empty() && native.is_none() {
+                None
+            } else {
+                let mut value = serde_json::to_value(&rendered)?;
+                super::overlay_native_json(&mut value, native, "native_model_providers.opencode")?;
+                (!value.as_object().is_none_or(serde_json::Map::is_empty)).then_some(value)
+            }
         };
         let (config_model, config_small_model) =
             render_opencode_default_models(&manifest.capabilities.default_models);
@@ -1685,6 +1695,105 @@ mod tests {
         assert!(
             doc.get("provider").is_none(),
             "\"provider\" key must be absent when all providers are disabled"
+        );
+    }
+
+    // ── materialize: native_model_providers.opencode merged into provider (#1008) ──
+
+    /// Build a manifest carrying only a `native_model_providers.opencode` fragment.
+    fn manifest_with_native_providers(yaml: &str) -> MergedManifest {
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.native_model_providers.insert(
+            "opencode".into(),
+            serde_yaml::from_str(yaml).expect("test fragment must be valid YAML"),
+        );
+        manifest
+    }
+
+    fn materialized_opencode_doc(manifest: &MergedManifest) -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        OpencodeAdapter.materialize(manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn materialize_native_model_providers_without_modeled_providers() {
+        // No `model_providers` at all: the fragment alone must still render a
+        // `provider` block — otherwise the escape hatch is unusable on its own.
+        let doc = materialized_opencode_doc(&manifest_with_native_providers(
+            "mtplx:\n  npm: '@ai-sdk/openai-compatible'\n  \
+             options:\n    baseURL: http://localhost:8080/v1\n",
+        ));
+        assert_eq!(
+            doc["provider"]["mtplx"]["options"]["baseURL"],
+            serde_json::json!("http://localhost:8080/v1")
+        );
+    }
+
+    #[test]
+    fn materialize_native_model_providers_deep_merges_onto_rendered_provider() {
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .model_providers
+            .push(llmenv_config::ModelProvider {
+                id: "mtplx".into(),
+                base_url: Some("http://localhost:8080/v1".into()),
+                models: vec![llmenv_config::ModelSource {
+                    id: "gpt-oss".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        manifest.capabilities.native_model_providers.insert(
+            "opencode".into(),
+            serde_yaml::from_str("mtplx:\n  models:\n    gpt-oss:\n      reasoningEffort: high\n")
+                .unwrap(),
+        );
+        let doc = materialized_opencode_doc(&manifest);
+        let model = &doc["provider"]["mtplx"]["models"]["gpt-oss"];
+        assert_eq!(
+            model["reasoningEffort"],
+            serde_json::json!("high"),
+            "unmodeled per-model key must be injected"
+        );
+        assert_eq!(
+            doc["provider"]["mtplx"]["options"]["baseURL"],
+            serde_json::json!("http://localhost:8080/v1"),
+            "deep merge must preserve sibling keys rendered from model_providers"
+        );
+    }
+
+    #[test]
+    fn materialize_native_model_providers_overrides_on_collision() {
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .model_providers
+            .push(llmenv_config::ModelProvider {
+                id: "mtplx".into(),
+                name: Some("modeled".into()),
+                ..Default::default()
+            });
+        manifest.capabilities.native_model_providers.insert(
+            "opencode".into(),
+            serde_yaml::from_str("mtplx:\n  name: native\n").unwrap(),
+        );
+        let doc = materialized_opencode_doc(&manifest);
+        assert_eq!(
+            doc["provider"]["mtplx"]["name"],
+            serde_json::json!("native"),
+            "the native fragment is the higher-precedence layer on collision"
+        );
+    }
+
+    #[test]
+    fn materialize_native_model_providers_empty_mapping_omits_provider_key() {
+        let doc = materialized_opencode_doc(&manifest_with_native_providers("{}"));
+        assert!(
+            doc.get("provider").is_none(),
+            "an empty fragment must not emit an empty \"provider\" object"
         );
     }
 

@@ -543,6 +543,13 @@ pub struct Capabilities {
     /// Opaque to llmenv.
     #[serde(default)]
     pub native_mcp: std::collections::BTreeMap<String, serde_yaml::Value>,
+    /// Per-engine native model-provider fragments, keyed by engine name. The
+    /// engine-only override for model providers — deep-merged onto the rendered
+    /// provider block (`provider` for opencode, `providers` for crush) so
+    /// engine-specific provider and per-model options that `model_providers`
+    /// has no field for can still be set. Opaque to llmenv.
+    #[serde(default)]
+    pub native_model_providers: std::collections::BTreeMap<String, serde_yaml::Value>,
     /// Per-engine opaque passthrough values merged verbatim into the engine's
     /// native config by adapters. Identical shape to the top-level `native:`
     /// block in `config.yaml`; bundle contributions deep-merge with it.
@@ -592,6 +599,7 @@ impl Capabilities {
             && self.native_hooks.is_empty()
             && self.native_plugins.is_empty()
             && self.native_mcp.is_empty()
+            && self.native_model_providers.is_empty()
             && self.native.is_empty()
             && self.features.as_ref().is_none_or(Features::is_empty)
             && self.host.is_empty()

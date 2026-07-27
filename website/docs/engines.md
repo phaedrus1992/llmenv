@@ -31,7 +31,7 @@ Every modeled feature has **both** of these:
 2. **Per-engine `native_<feature>` override** — a raw fragment in the engine's
    own language, emitted verbatim. Named as a top-level sibling under
    `capabilities:`: `native_permissions`, `native_hooks`, `native_plugins`,
-   `native_mcp`.
+   `native_mcp`, `native_model_providers`.
 
 A feature with only layer 1 is considered incomplete — there is always some
 platform-specific need (a Claude-only permission grammar, a Codex-only hook
@@ -157,8 +157,43 @@ for provider/model config — use this escape hatch only for Crush-specific
 fields it doesn't cover. The fragment is deep-merged verbatim into
 `crush.json` at highest precedence.
 
-The `native_permissions.crush`, `native_hooks.crush`, and `native_mcp.crush`
-siblings work the same way for their respective domains.
+The `native_permissions.crush`, `native_hooks.crush`, `native_mcp.crush`, and
+`native_model_providers.crush` siblings work the same way for their respective
+domains.
+
+### `native_model_providers.<engine>`
+
+`capabilities.model_providers` models the fields every engine has in common,
+but Crush and opencode each accept provider and per-model keys it has no field
+for. `native_model_providers.<engine>` is the escape hatch: a raw fragment,
+keyed by provider id, deep-merged onto the rendered provider block —
+`providers` in `crush.json`, `provider` in `opencode.json`. The fragment is the
+higher-precedence layer, so a key it sets wins over the one rendered from
+`model_providers`; sibling keys are preserved.
+
+It also works on its own — with no `model_providers` entries at all, the
+fragment alone renders the provider block, so a hand-written provider survives
+`llmenv regenerate`.
+
+```yaml
+capabilities:
+  model_providers:
+    - id: mtplx
+      base_url: http://localhost:8080/v1
+      api_type: openai
+      models:
+        - { id: gpt-oss }
+  native_model_providers:
+    opencode:
+      mtplx:
+        models:
+          gpt-oss:
+            reasoningEffort: high   # no neutral equivalent — opencode-only
+```
+
+That renders `provider.mtplx.models.gpt-oss.reasoningEffort` in
+`opencode.json` while leaving `provider.mtplx.options.baseURL` (from
+`model_providers`) intact.
 
 ## The opencode adapter
 
@@ -217,11 +252,13 @@ native:
 
 The modeled keys `instructions`, `mcp`, `lsp`, `permission`, `provider`,
 `model`, and `small_model` are **rejected** in the top-level `native.opencode`
-block — overlaying them last would clobber the security-rendered output (use
-`capabilities.model_providers`/`default_models` for `provider`/`model`/
-`small_model`). Route the rest through the `native_permissions.opencode`,
-`native_hooks.opencode`, and `native_mcp.opencode` siblings instead, which merge
-in the safe direction.
+block — overlaying them last would clobber the security-rendered output. Route
+them through the sibling that merges in the safe direction instead:
+`native_permissions.opencode`, `native_hooks.opencode`,
+`native_mcp.opencode`, or
+[`native_model_providers.opencode`](#native_model_providersengine) for
+`provider`. `model` and `small_model` are plain `provider_id/model_id` strings
+with no engine-specific extras — use `capabilities.default_models` for those.
 
 ## Other engines
 

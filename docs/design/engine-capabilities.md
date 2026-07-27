@@ -63,7 +63,8 @@ schema MUST offer:
 
 The override is a **top-level sibling** of the feature it overrides, named
 `native_<feature>`: `native_permissions` for permission rules, `native_hooks`
-for hook registrations, `native_plugins`, `native_mcp`. Each is a per-engine map
+for hook registrations, `native_plugins`, `native_mcp`,
+`native_model_providers`. Each is a per-engine map
 (`{ <engine>: <fragment> }`). This uniform `native_<feature>` shape is used for
 every feature — no feature nests a `native:` key inside itself. The top-level
 `native.<engine>` block (D3) is the separate catch-all for keys that belong to
@@ -311,9 +312,10 @@ Tracking the two-layer invariant (generic + per-engine `native`) per feature:
 | Plugins | done | done (`native_plugins.<engine>`) | fragment deep-merged onto settings top-level |
 | MCP servers | done | done (`native_mcp.<engine>`) | `mcpServers` deep-merged into `.claude.json` (read-merge-write); merge runs when resolved servers *or* a fragment exist; native `enabledMcpjsonServers` dropped (#244) |
 | Top-level `native` (catch-all) | n/a | done | `Config.native` threads through `merge()` → `MergedManifest.native` |
-| Model providers + defaults | done | n/a (Crush-only; no native override shape yet) | rendered into `crush.json` (`providers`/`models`) via `CrushAdapter`; `ClaudeCodeAdapter` is true no-op |
+| Model providers | done | done (`native_model_providers.<engine>`) | fragment deep-merged onto the rendered provider block — `providers` in `crush.json`, `provider` in `opencode.json`; merge runs when providers *or* a fragment exist (#1008); `ClaudeCodeAdapter` is true no-op |
+| Default models | done | n/a | rendered into `crush.json` `models` and opencode's `model`/`small_model`. opencode's slots are plain `provider_id/model_id` strings with no engine-specific extras; Crush's per-role entries do accept extras (`reasoning_effort`, `think`) that `ModelRef` does not model — tracked separately, not covered by `native_model_providers` |
 
-All four modeled features now satisfy both layers via the uniform
-`native_<feature>` sibling shape (#97), and the top-level `native` catch-all is
-wired through (#96). Cross-bundle merge of the opaque fragments uses the
+Permissions, hooks, plugins, MCP servers, and model providers all satisfy both
+layers via the uniform `native_<feature>` sibling shape (#97, #1008), and the
+top-level `native` catch-all is wired through (#96). Cross-bundle merge of the opaque fragments uses the
 value-shape rule (`util::merge_yaml`); adapter overlay uses `util::merge_json`.

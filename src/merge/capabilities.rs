@@ -97,6 +97,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let native_hooks = merge_native_feature(contributors, |c| &c.native_hooks);
     let native_plugins = merge_native_feature(contributors, |c| &c.native_plugins);
     let native_mcp = merge_native_feature(contributors, |c| &c.native_mcp);
+    let native_model_providers = merge_native_feature(contributors, |c| &c.native_model_providers);
     let native = merge_native_flat(contributors);
     let host = resolve_host_map(contributors)?;
 
@@ -170,6 +171,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         native_hooks,
         native_plugins,
         native_mcp,
+        native_model_providers,
         native,
         features,
         host,

@@ -180,11 +180,13 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
         update_len_prefixed(&mut h, serialized.as_bytes());
     }
     // Mix in capability-native fragments rendered by adapters but previously
-    // unhashed: native_hooks, native_plugins, native_mcp. Same encoding as
+    // unhashed: native_hooks, native_plugins, native_mcp,
+    // native_model_providers. Same encoding as
     // m.native above — engine key + serialized YAML fragment.
     hash_native_capability_map(&mut h, &m.capabilities.native_hooks)?;
     hash_native_capability_map(&mut h, &m.capabilities.native_plugins)?;
     hash_native_capability_map(&mut h, &m.capabilities.native_mcp)?;
+    hash_native_capability_map(&mut h, &m.capabilities.native_model_providers)?;
     Ok(hex::encode(h.finalize()))
 }
 
@@ -1392,6 +1394,31 @@ mod tests {
             hash_manifest(&manifest_a).unwrap(),
             hash_manifest(&manifest_b).unwrap(),
             "changing a capabilities.native_mcp value must produce a different hash"
+        );
+    }
+
+    // Editing a capabilities.native_model_providers key must invalidate the hash.
+    #[test]
+    fn hash_manifest_changes_when_native_model_providers_changes() {
+        use crate::config::Capabilities;
+        use std::collections::BTreeMap;
+
+        let caps = |value: &str| Capabilities {
+            native_model_providers: BTreeMap::from([(
+                "opencode".to_string(),
+                serde_yaml::from_str(value).unwrap(),
+            )]),
+            ..Capabilities::default()
+        };
+        let manifest = |value: &str| MergedManifest {
+            capabilities: caps(value),
+            ..MergedManifest::default()
+        };
+
+        assert_ne!(
+            hash_manifest(&manifest("key: value-a")).unwrap(),
+            hash_manifest(&manifest("key: value-b")).unwrap(),
+            "changing a capabilities.native_model_providers value must produce a different hash"
         );
     }
 

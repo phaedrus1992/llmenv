@@ -329,8 +329,15 @@ impl AgentAdapter for CrushAdapter {
         // Model providers (fix 1 pattern): skip disabled providers; omit
         // "providers" key if none remain. The JSON tags here match catwalk's
         // Provider/Model struct tags (confirmed in Task 5 of the spec).
-        if !manifest.capabilities.model_providers.is_empty() {
-            let providers_value = render_model_providers(&manifest.capabilities.model_providers)?;
+        let native_providers = manifest.capabilities.native_model_providers.get("crush");
+        if !manifest.capabilities.model_providers.is_empty() || native_providers.is_some() {
+            let mut providers_value =
+                render_model_providers(&manifest.capabilities.model_providers)?;
+            super::overlay_native_json(
+                &mut providers_value,
+                native_providers,
+                "native_model_providers.crush",
+            )?;
             if providers_value.as_object().is_some_and(|o| !o.is_empty()) {
                 doc.insert("providers".into(), providers_value);
             }
@@ -368,7 +375,8 @@ impl AgentAdapter for CrushAdapter {
         // 6. native.crush passthrough — highest-precedence layer
         // P1-3: reject modeled keys in the catch-all fragment before overlaying — these
         // keys have dedicated rendering paths and must not clobber the security output.
-        // Use native_permissions.crush / native_hooks.crush / native_mcp.crush instead.
+        // Use native_permissions.crush / native_hooks.crush / native_mcp.crush /
+        // native_model_providers.crush instead.
         if let Some(native) = manifest.native.get("crush") {
             super::reject_modeled_native_keys(native, CRUSH_MODELED_KEYS, "crush")?;
         }
@@ -535,8 +543,8 @@ fn render_default_models(
 /// catch-all fragment. Overlaying them last would silently clobber the security-rendered
 /// output (permissions, hooks) or the structured rendering (mcp, lsp, providers, models).
 ///
-/// Use the dedicated `native_permissions.crush` / `native_hooks.crush` / `native_mcp.crush`
-/// channels instead, which merge in the safe direction.
+/// Use the dedicated `native_permissions.crush` / `native_hooks.crush` / `native_mcp.crush` /
+/// `native_model_providers.crush` channels instead, which merge in the safe direction.
 const CRUSH_MODELED_KEYS: &[&str] = &["permissions", "hooks", "mcp", "lsp", "providers", "models"];
 
 fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
@@ -1840,6 +1848,84 @@ mod tests {
             doc["mcp"]["injected-srv"]["command"],
             serde_json::json!("injected"),
             "native_mcp.crush must be merged into the mcp section"
+        );
+    }
+
+    // ── materialize: native_model_providers.crush merged into providers (#1008) ──
+
+    fn crush_doc_with_native_providers(mut caps: Capabilities, yaml: &str) -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        caps.native_model_providers.insert(
+            "crush".into(),
+            serde_yaml::from_str(yaml).expect("test fragment must be valid YAML"),
+        );
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    fn caps_with_mtplx_provider() -> Capabilities {
+        let mut caps = Capabilities::default();
+        caps.model_providers.push(llmenv_config::ModelProvider {
+            id: "mtplx".into(),
+            name: Some("modeled".into()),
+            base_url: Some("http://localhost:8080/v1".into()),
+            ..Default::default()
+        });
+        caps
+    }
+
+    #[test]
+    fn materialize_native_model_providers_without_modeled_providers() {
+        // No `model_providers` at all: the fragment alone must still render a
+        // `providers` block — otherwise the escape hatch is unusable on its own.
+        let doc = crush_doc_with_native_providers(
+            Capabilities::default(),
+            "mtplx:\n  id: mtplx\n  api_endpoint: http://localhost:8080/v1\n",
+        );
+        assert_eq!(
+            doc["providers"]["mtplx"]["api_endpoint"],
+            serde_json::json!("http://localhost:8080/v1")
+        );
+    }
+
+    #[test]
+    fn materialize_native_model_providers_deep_merges_onto_rendered_providers() {
+        let doc = crush_doc_with_native_providers(
+            caps_with_mtplx_provider(),
+            "mtplx:\n  extra_headers:\n    X-Tenant: acme\n",
+        );
+        assert_eq!(
+            doc["providers"]["mtplx"]["extra_headers"]["X-Tenant"],
+            serde_json::json!("acme"),
+            "unmodeled provider key must be injected"
+        );
+        assert_eq!(
+            doc["providers"]["mtplx"]["api_endpoint"],
+            serde_json::json!("http://localhost:8080/v1"),
+            "deep merge must preserve sibling keys rendered from model_providers"
+        );
+    }
+
+    #[test]
+    fn materialize_native_model_providers_overrides_on_collision() {
+        let doc =
+            crush_doc_with_native_providers(caps_with_mtplx_provider(), "mtplx:\n  name: native\n");
+        assert_eq!(
+            doc["providers"]["mtplx"]["name"],
+            serde_json::json!("native"),
+            "the native fragment is the higher-precedence layer on collision"
+        );
+    }
+
+    #[test]
+    fn materialize_native_model_providers_empty_mapping_omits_providers_key() {
+        let doc = crush_doc_with_native_providers(Capabilities::default(), "{}");
+        assert!(
+            doc.get("providers").is_none(),
+            "an empty fragment must not emit an empty \"providers\" object"
         );
     }
 
