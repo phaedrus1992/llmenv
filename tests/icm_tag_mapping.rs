@@ -15,6 +15,7 @@ fn test_icm_context_chunk_generation() {
     let active = llmenv::scope::ActiveScopes {
         scopes: vec![],
         tags,
+        ..Default::default()
     };
 
     // Generate the ICM context chunk with no bundles
@@ -52,6 +53,7 @@ fn test_icm_context_chunk_exports_to_env() {
     let active = ActiveScopes {
         scopes: vec![],
         tags,
+        ..Default::default()
     };
 
     let bundles = vec!["bundle1".to_string()];
@@ -83,6 +85,7 @@ fn test_icm_context_chunk_exported_by_cli() {
     let active = ActiveScopes {
         scopes: vec![],
         tags,
+        ..Default::default()
     };
 
     // Generate the chunk as the export command would

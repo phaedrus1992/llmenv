@@ -66,6 +66,11 @@ pub struct ActiveScope {
 pub struct ActiveScopes {
     pub scopes: Vec<ActiveScope>,
     pub tags: BTreeSet<String>,
+    /// Tags from `$LLMENV_EXTRA_TAGS`. Not attached to any scope, so tracked
+    /// separately from `tags` — `non_project_tags()` excludes them from
+    /// host-level plugin/MCP resolution, matching the trust level of the
+    /// `.llmenv.yaml` project tags they're the escape hatch for (#696, #1020).
+    pub extra_tags: BTreeSet<String>,
 }
 
 impl ActiveScopes {
@@ -75,7 +80,10 @@ impl ActiveScopes {
     /// `lang-typescript`, `agent-coding`) and must not leak into host-level
     /// plugin collection selection — a project's `.llmenv.yaml` should not
     /// cause plugins like `fullstack-dev-skills` to appear in the generated
-    /// host `settings.json` (#696).
+    /// host `settings.json` (#696). `$LLMENV_EXTRA_TAGS` tags get the same
+    /// treatment: they're the documented substitute for a committed
+    /// `.llmenv.yaml`, so they must not reach a more privileged surface than
+    /// the project tags they stand in for.
     ///
     /// Non-project tags (network, host, user, content) describe the
     /// *environment*, which is the correct scope for host plugin decisions.
@@ -88,11 +96,14 @@ impl ActiveScopes {
             .flat_map(|s| s.tags.iter().cloned())
             .collect();
         // Preserve tags in the union that no scope contributed (e.g. OS
-        // tag added by evaluate()). These are never project-scoped.
+        // tag added by evaluate()) and that aren't extra_tags. These are
+        // never project-scoped.
         result.extend(
             self.tags
                 .iter()
-                .filter(|t| !self.scopes.iter().any(|s| s.tags.contains(t)))
+                .filter(|t| {
+                    !self.scopes.iter().any(|s| s.tags.contains(t)) && !self.extra_tags.contains(*t)
+                })
                 .cloned(),
         );
         result
@@ -182,8 +193,13 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     if !env.os.is_empty() {
         tags.insert(env.os.clone());
     }
-    tags.extend(env.extra_tags.iter().cloned());
-    ActiveScopes { scopes, tags }
+    let extra_tags: BTreeSet<String> = env.extra_tags.iter().cloned().collect();
+    tags.extend(extra_tags.iter().cloned());
+    ActiveScopes {
+        scopes,
+        tags,
+        extra_tags,
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +240,7 @@ mod tests {
                 "lang-typescript".into(),
                 "agent-coding".into(),
             ]),
+            ..Default::default()
         };
 
         let host_tags = active.non_project_tags();
@@ -248,6 +265,7 @@ mod tests {
                 unknown_fields: Vec::new(),
             }],
             tags: BTreeSet::from(["infra".into(), "web".into()]),
+            ..Default::default()
         };
 
         let host_tags = active.non_project_tags();
@@ -272,6 +290,7 @@ mod tests {
             }],
             // OS tag added by evaluate(), not from any scope
             tags: BTreeSet::from(["lang-typescript".into(), "macos".into()]),
+            ..Default::default()
         };
 
         let host_tags = active.non_project_tags();
@@ -318,6 +337,7 @@ mod tests {
                 },
             ],
             tags: BTreeSet::from(["tag-a".into(), "tag-b".into(), "shared-tag".into()]),
+            ..Default::default()
         };
 
         let host_tags = active.non_project_tags();
@@ -345,6 +365,7 @@ mod tests {
                 "agent-coding".into(),
                 "macos".into(),
             ]),
+            ..Default::default()
         };
 
         let host_tags = active.non_project_tags();
@@ -359,6 +380,7 @@ mod tests {
         let active = ActiveScopes {
             scopes: Vec::new(),
             tags: BTreeSet::new(),
+            ..Default::default()
         };
 
         let host_tags = active.non_project_tags();
@@ -397,6 +419,7 @@ mod tests {
                 },
             ],
             tags: BTreeSet::from(["infra".into(), "web".into(), "lang-typescript".into()]),
+            ..Default::default()
         };
 
         let host_tags = active.non_project_tags();
@@ -405,5 +428,36 @@ mod tests {
         assert!(host_tags.contains("web"));
         // "lang-typescript" is project-only — excluded
         assert!(!host_tags.contains("lang-typescript"));
+    }
+
+    #[test]
+    fn non_project_tags_excludes_extra_tags() {
+        // $LLMENV_EXTRA_TAGS substitutes for a committed .llmenv.yaml, so it
+        // must be excluded from host-level resolution just like project
+        // tags are (#696, #1020) — not treated as an environment tag like
+        // the OS tag.
+        let active = ActiveScopes {
+            scopes: vec![ActiveScope {
+                id: "h1".into(),
+                kind: "host",
+                tags: vec!["infra".into()],
+                project_root: None,
+                enable_bundles: Vec::new(),
+                disable_bundles: Vec::new(),
+                name: None,
+                description: None,
+                unknown_fields: Vec::new(),
+            }],
+            tags: BTreeSet::from(["infra".into(), "extra-tag".into(), "macos".into()]),
+            extra_tags: BTreeSet::from(["extra-tag".into()]),
+        };
+
+        let host_tags = active.non_project_tags();
+        assert!(host_tags.contains("infra"));
+        assert!(host_tags.contains("macos"), "OS tag still preserved");
+        assert!(
+            !host_tags.contains("extra-tag"),
+            "extra_tags must not reach host-level resolution"
+        );
     }
 }
