@@ -182,6 +182,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     if !env.os.is_empty() {
         tags.insert(env.os.clone());
     }
+    tags.extend(env.extra_tags.iter().cloned());
     ActiveScopes { scopes, tags }
 }
 

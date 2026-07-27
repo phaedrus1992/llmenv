@@ -54,6 +54,7 @@ pub fn resolve_project_tag(cwd: &Path, home: Option<&Path>) -> String {
                 gateway_mac: None,
                 home: home.map(Path::to_path_buf),
                 os: String::new(),
+                extra_tags: Vec::new(),
             };
             crate::scope::matcher::discover_project(&env).map(|p| (p.root, p.id))
         })

@@ -58,6 +58,11 @@ pub struct Env {
     /// auto-activate the OS as a tag (`linux`, `macos`, `windows`, etc.).
     /// Empty string when not set (tests, fallback).
     pub os: String,
+    /// Tags from `$LLMENV_EXTRA_TAGS` (comma-separated), unioned into the
+    /// active tag set regardless of whether a `.llmenv.yaml` is present —
+    /// the escape hatch for activating tags without a committed project
+    /// marker (#1020).
+    pub extra_tags: Vec<String>,
 }
 
 /// 30-second TTL cache for [`Env::detect`]. Hostname, user, OS never change
@@ -80,6 +85,7 @@ impl Env {
             gateway_mac: None,
             home: None,
             os: String::new(),
+            extra_tags: Vec::new(),
         }
     }
 
@@ -153,8 +159,24 @@ impl Env {
                 .flatten(),
             home,
             os: std::env::consts::OS.to_string(),
+            extra_tags: std::env::var("LLMENV_EXTRA_TAGS")
+                .ok()
+                .map(|raw| parse_extra_tags(&raw))
+                .unwrap_or_default(),
         }
     }
+}
+
+/// Parse `$LLMENV_EXTRA_TAGS`'s comma-separated format (matching
+/// `LLMENV_ACTIVE_TAGS`'s own output format). Empty segments (from a blank
+/// value, leading/trailing commas, or repeated commas) are dropped; each
+/// remaining tag is trimmed of surrounding whitespace.
+fn parse_extra_tags(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 fn detect_hostname() -> Option<String> {
@@ -439,9 +461,38 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{ContentScope, Env, discover_project, glob_matches, matches_content_all};
+    use super::{
+        ContentScope, Env, discover_project, glob_matches, matches_content_all, parse_extra_tags,
+    };
     use proptest::prelude::*;
     use std::path::Path;
+
+    #[test]
+    fn parse_extra_tags_empty_string_yields_no_tags() {
+        assert!(parse_extra_tags("").is_empty());
+    }
+
+    #[test]
+    fn parse_extra_tags_single_tag() {
+        assert_eq!(parse_extra_tags("rust"), vec!["rust"]);
+    }
+
+    #[test]
+    fn parse_extra_tags_multiple_tags() {
+        assert_eq!(parse_extra_tags("rust,office"), vec!["rust", "office"]);
+    }
+
+    #[test]
+    fn parse_extra_tags_trims_whitespace() {
+        assert_eq!(parse_extra_tags(" rust , office "), vec!["rust", "office"]);
+    }
+
+    #[test]
+    fn parse_extra_tags_drops_empty_segments() {
+        // Blank value, leading/trailing/repeated commas must not yield empty tags.
+        assert_eq!(parse_extra_tags(",rust,,office,"), vec!["rust", "office"]);
+        assert!(parse_extra_tags(",,").is_empty());
+    }
 
     fn content_scope(id: &str, glob: &str, depth: Option<usize>) -> ContentScope {
         ContentScope {
@@ -470,6 +521,7 @@ mod tests {
             gateway_mac: None,
             home: Some(home.to_path_buf()),
             os: String::new(),
+            extra_tags: Vec::new(),
         }
     }
 
@@ -588,6 +640,7 @@ mod tests {
             gateway_mac: None,
             home: None,
             os: String::new(),
+            extra_tags: Vec::new(),
         };
         assert!(
             discover_project(&env).is_none(),
@@ -792,6 +845,22 @@ mod tests {
     }
 
     proptest! {
+        // parse_extra_tags never panics on arbitrary input.
+        #[test]
+        fn parse_extra_tags_never_panics(raw in r"\PC*") {
+            let _ = parse_extra_tags(&raw);
+        }
+
+        // Every non-empty, whitespace-trimmed segment from a comma-joined
+        // input round-trips through parse_extra_tags.
+        #[test]
+        fn parse_extra_tags_roundtrips_nonempty_segments(
+            tags in prop::collection::vec("[a-z][a-z0-9-]{0,10}", 1..5)
+        ) {
+            let raw = tags.join(",");
+            prop_assert_eq!(parse_extra_tags(&raw), tags);
+        }
+
         // discover_project never panics on arbitrary cwd paths.
         #[test]
         fn discover_arbitrary_path_never_panics(cwd in r"/[a-z/]*") {
@@ -802,6 +871,7 @@ mod tests {
                 gateway_mac: None,
                 home: None,
                 os: String::new(),
+                extra_tags: Vec::new(),
             };
             let _ = discover_project(&env);
         }
