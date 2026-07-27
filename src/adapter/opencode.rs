@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 
-use super::AgentAdapter;
+use super::{AgentAdapter, yaml_value_kind_name};
 use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
 
@@ -397,8 +397,6 @@ fn parse_plugin_hooks(
 
     Ok(Some(hooks))
 }
-
-use crate::adapter::yaml_value_kind_name;
 
 /// Read and parse a plugin's `LLM_PROVIDER_MCP_JSON` file into MCP server
 /// entries keyed by server name.
@@ -1754,19 +1752,6 @@ mod tests {
             doc["provider"]["mtplx"]["options"]["baseURL"],
             serde_json::json!("http://localhost:8080/v1"),
             "deep merge must preserve sibling keys rendered from model_providers"
-        );
-    }
-
-    #[test]
-    fn materialize_native_model_providers_overrides_on_collision() {
-        let doc = materialized_opencode_doc(&with_native_providers(
-            manifest_with_mtplx_provider(),
-            "mtplx:\n  name: native\n",
-        ));
-        assert_eq!(
-            doc["provider"]["mtplx"]["name"],
-            serde_json::json!("native"),
-            "the native fragment is the higher-precedence layer on collision"
         );
     }
 

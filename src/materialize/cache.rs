@@ -1280,146 +1280,45 @@ mod tests {
         );
     }
 
-    // Editing a capabilities.native_hooks key must invalidate the hash.
+    // Editing any capabilities.native_* fragment must invalidate the hash —
+    // these are rendered by adapters, so a stale hash serves a stale config.
     #[test]
-    fn hash_manifest_changes_when_native_hooks_changes() {
+    fn hash_manifest_changes_when_a_native_capability_map_changes() {
         use crate::config::Capabilities;
         use std::collections::BTreeMap;
 
-        let mut hooks_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
-        hooks_a.insert(
-            "claude_code".to_string(),
-            serde_yaml::from_str("key: value-a").unwrap(),
-        );
-        let mut hooks_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
-        hooks_b.insert(
-            "claude_code".to_string(),
-            serde_yaml::from_str("key: value-b").unwrap(),
-        );
+        type Field = fn(&mut Capabilities, BTreeMap<String, serde_yaml::Value>);
+        let fields: [(&str, Field); 4] = [
+            ("native_hooks", |c, m| c.native_hooks = m),
+            ("native_plugins", |c, m| c.native_plugins = m),
+            ("native_mcp", |c, m| c.native_mcp = m),
+            ("native_model_providers", |c, m| {
+                c.native_model_providers = m;
+            }),
+        ];
 
-        let manifest_a = MergedManifest {
-            capabilities: Capabilities {
-                native_hooks: hooks_a,
-                ..Capabilities::default()
-            },
-            ..MergedManifest::default()
-        };
-        let manifest_b = MergedManifest {
-            capabilities: Capabilities {
-                native_hooks: hooks_b,
-                ..Capabilities::default()
-            },
-            ..MergedManifest::default()
-        };
-
-        assert_ne!(
-            hash_manifest(&manifest_a).unwrap(),
-            hash_manifest(&manifest_b).unwrap(),
-            "changing a capabilities.native_hooks value must produce a different hash"
-        );
-    }
-
-    // Editing a capabilities.native_plugins key must invalidate the hash.
-    #[test]
-    fn hash_manifest_changes_when_native_plugins_changes() {
-        use crate::config::Capabilities;
-        use std::collections::BTreeMap;
-
-        let mut plugins_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
-        plugins_a.insert(
-            "claude_code".to_string(),
-            serde_yaml::from_str("key: value-a").unwrap(),
-        );
-        let mut plugins_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
-        plugins_b.insert(
-            "claude_code".to_string(),
-            serde_yaml::from_str("key: value-b").unwrap(),
-        );
-
-        let manifest_a = MergedManifest {
-            capabilities: Capabilities {
-                native_plugins: plugins_a,
-                ..Capabilities::default()
-            },
-            ..MergedManifest::default()
-        };
-        let manifest_b = MergedManifest {
-            capabilities: Capabilities {
-                native_plugins: plugins_b,
-                ..Capabilities::default()
-            },
-            ..MergedManifest::default()
-        };
-
-        assert_ne!(
-            hash_manifest(&manifest_a).unwrap(),
-            hash_manifest(&manifest_b).unwrap(),
-            "changing a capabilities.native_plugins value must produce a different hash"
-        );
-    }
-
-    // Editing a capabilities.native_mcp key must invalidate the hash.
-    #[test]
-    fn hash_manifest_changes_when_native_mcp_changes() {
-        use crate::config::Capabilities;
-        use std::collections::BTreeMap;
-
-        let mut mcp_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
-        mcp_a.insert(
-            "claude_code".to_string(),
-            serde_yaml::from_str("key: value-a").unwrap(),
-        );
-        let mut mcp_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
-        mcp_b.insert(
-            "claude_code".to_string(),
-            serde_yaml::from_str("key: value-b").unwrap(),
-        );
-
-        let manifest_a = MergedManifest {
-            capabilities: Capabilities {
-                native_mcp: mcp_a,
-                ..Capabilities::default()
-            },
-            ..MergedManifest::default()
-        };
-        let manifest_b = MergedManifest {
-            capabilities: Capabilities {
-                native_mcp: mcp_b,
-                ..Capabilities::default()
-            },
-            ..MergedManifest::default()
-        };
-
-        assert_ne!(
-            hash_manifest(&manifest_a).unwrap(),
-            hash_manifest(&manifest_b).unwrap(),
-            "changing a capabilities.native_mcp value must produce a different hash"
-        );
-    }
-
-    // Editing a capabilities.native_model_providers key must invalidate the hash.
-    #[test]
-    fn hash_manifest_changes_when_native_model_providers_changes() {
-        use crate::config::Capabilities;
-        use std::collections::BTreeMap;
-
-        let caps = |value: &str| Capabilities {
-            native_model_providers: BTreeMap::from([(
-                "opencode".to_string(),
-                serde_yaml::from_str(value).unwrap(),
-            )]),
-            ..Capabilities::default()
-        };
-        let manifest = |value: &str| MergedManifest {
-            capabilities: caps(value),
-            ..MergedManifest::default()
-        };
-
-        assert_ne!(
-            hash_manifest(&manifest("key: value-a")).unwrap(),
-            hash_manifest(&manifest("key: value-b")).unwrap(),
-            "changing a capabilities.native_model_providers value must produce a different hash"
-        );
+        for (name, set) in fields {
+            let hash_of = |value: &str| {
+                let mut caps = Capabilities::default();
+                set(
+                    &mut caps,
+                    BTreeMap::from([(
+                        "claude_code".to_string(),
+                        serde_yaml::from_str(value).unwrap(),
+                    )]),
+                );
+                hash_manifest(&MergedManifest {
+                    capabilities: caps,
+                    ..MergedManifest::default()
+                })
+                .unwrap()
+            };
+            assert_ne!(
+                hash_of("key: value-a"),
+                hash_of("key: value-b"),
+                "changing a capabilities.{name} value must produce a different hash"
+            );
+        }
     }
 
     // Hashing is stable: the same manifest always produces the same hash.

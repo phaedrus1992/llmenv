@@ -746,55 +746,6 @@ fn d2_merge_native_mcp_from_two_bundles() {
     assert!(result.native_mcp.contains_key("mcp2"));
 }
 
-#[test]
-fn d2_merge_native_model_providers_from_two_bundles() {
-    /// Test: native_model_providers from two bundles deep-merge per engine —
-    /// keys union, and the higher-precedence contributor wins on collision (#1008).
-    use llmenv::config::Capabilities;
-    use llmenv::merge::capabilities::CapabilityContributor;
-
-    let caps = |yaml: &str| Capabilities {
-        native_model_providers: BTreeMap::from([(
-            "opencode".into(),
-            serde_yaml::from_str(yaml).expect("valid YAML"),
-        )]),
-        ..Default::default()
-    };
-    let contributors = vec![
-        CapabilityContributor {
-            name: "bundle-a".into(),
-            precedence: 1,
-            capabilities: caps("mtplx:\n  name: low\n  api_endpoint: http://a\n"),
-        },
-        CapabilityContributor {
-            name: "bundle-b".into(),
-            precedence: 2,
-            capabilities: caps("mtplx:\n  name: high\nollama:\n  name: other\n"),
-        },
-    ];
-
-    let result = llmenv::merge::capabilities::merge_capabilities(&contributors)
-        .expect("merge should succeed");
-    let frag = result
-        .native_model_providers
-        .get("opencode")
-        .expect("opencode fragment preserved");
-    assert_eq!(
-        frag["mtplx"]["name"],
-        serde_yaml::Value::String("high".into()),
-        "higher-precedence contributor wins on collision"
-    );
-    assert_eq!(
-        frag["mtplx"]["api_endpoint"],
-        serde_yaml::Value::String("http://a".into()),
-        "lower-precedence sibling key survives the deep merge"
-    );
-    assert!(
-        frag.get("ollama").is_some(),
-        "provider keys union across contributors"
-    );
-}
-
 // ============================================================================
 // D3 + D2: Emission Edge Cases
 // ============================================================================

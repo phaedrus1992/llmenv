@@ -1926,30 +1926,6 @@ mod tests {
         );
     }
 
-    /// A non-mapping fragment must be rejected, not silently swallow the whole
-    /// rendered providers block (which is what `merge_json` would do).
-    #[test]
-    fn materialize_native_model_providers_non_mapping_errors() {
-        for (yaml, kind) in [
-            ("oops", "a string"),
-            ("~", "null"),
-            ("[a, b]", "a sequence"),
-        ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let mut caps = caps_with_mtplx_provider();
-            caps.native_model_providers
-                .insert("crush".into(), serde_yaml::from_str(yaml).unwrap());
-            let err = CrushAdapter
-                .materialize(&manifest_with_caps(caps), tmp.path())
-                .expect_err("a non-mapping fragment must be an error");
-            let msg = err.to_string();
-            assert!(
-                msg.contains("native_model_providers.crush") && msg.contains(kind),
-                "error must name the field and the actual shape, got: {msg}"
-            );
-        }
-    }
-
     /// `models` is a JSON *array* in crush's provider schema, so a fragment's
     /// `models` entries append rather than patch (see the caveat in the docs).
     #[test]

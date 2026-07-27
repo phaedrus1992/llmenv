@@ -96,20 +96,18 @@ fn modeled_key_redirect(key: &str, engine: &str) -> String {
         "hooks" => "native_hooks",
         "mcp" => "native_mcp",
         "provider" | "providers" => "native_model_providers",
-        _ => {
-            let neutral = match key {
-                "model" | "models" | "small_model" => "capabilities.default_models",
-                "lsp" => "capabilities.lsp",
-                "instructions" => "the bundle's rules and AGENTS.md files",
-                _ => "the matching `capabilities` field",
-            };
-            return format!(
-                "There is no `native_*.{engine}` escape hatch for `{key}` — declare it \
-                 through {neutral} instead."
-            );
-        }
+        "model" | "models" | "small_model" => return no_hatch(key, engine, "default_models"),
+        "instructions" => return no_hatch(key, engine, "rules"),
+        _ => return no_hatch(key, engine, key),
     };
     format!("Use `{hatch}.{engine}` instead, which merges in the safe direction.")
+}
+
+fn no_hatch(key: &str, engine: &str, neutral: &str) -> String {
+    format!(
+        "There is no `native_*.{engine}` escape hatch for `{key}` — declare it through \
+         `capabilities.{neutral}` instead."
+    )
 }
 
 /// Per-agent rules for translating a [`MergedManifest`] into an on-disk layout
