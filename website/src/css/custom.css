@@ -1,42 +1,33 @@
-/* ponytail: 1997 GeoCities skin (#1027). CSS/theme only — no content or nav changes. */
+/* ponytail: 1997 GeoCities skin (#1027). CSS/theme only — no content or nav changes.
+   Dark mode is forced site-wide (see docusaurus.config.ts colorMode), so all colors
+   here only need to be checked against Infima's dark surfaces — every foreground/
+   background pair below is WCAG AA (>=4.5:1 normal text) or better against black. */
 
 :root {
-  --ifm-color-primary: #cc00cc;
-  --ifm-color-primary-dark: #b800b8;
-  --ifm-color-primary-darker: #ad00ad;
-  --ifm-color-primary-darkest: #8f008f;
-  --ifm-color-primary-light: #e000e0;
-  --ifm-color-primary-lighter: #e619e6;
-  --ifm-color-primary-lightest: #f04df0;
+  --ifm-color-primary: #ffd700;
+  --ifm-color-primary-dark: #e6c200;
+  --ifm-color-primary-darker: #d9b700;
+  --ifm-color-primary-darkest: #b39700;
+  --ifm-color-primary-light: #ffdc1a;
+  --ifm-color-primary-lighter: #ffe033;
+  --ifm-color-primary-lightest: #ffe866;
   --ifm-code-font-size: 95%;
-  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 0, 0.35);
+  --docusaurus-highlighted-code-line-bg: rgba(255, 215, 0, 0.25);
 
-  --retro-link: #0000ee;
-  --retro-link-visited: #551a8b;
-  --retro-link-active: #ff0000;
-  --retro-tile-a: #ff9df2;
-  --retro-tile-b: #7df9ff;
-}
-
-[data-theme='dark'] {
-  --ifm-color-primary: #39ff14;
-  --ifm-color-primary-dark: #33e612;
-  --ifm-color-primary-darker: #30d911;
-  --ifm-color-primary-darkest: #27b30e;
-  --ifm-color-primary-light: #52ff34;
-  --ifm-color-primary-lighter: #5eff43;
-  --ifm-color-primary-lightest: #85ff70;
-  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 0, 0.2);
-
+  /* Bright gold: solid black backdrops only (headings, links, hr). ~15:1 contrast. */
+  --retro-gold: #ffd700;
+  /* Dim gold: backdrop for white text (construction banner stripe). ~6.2:1 contrast. */
+  --retro-gold-dim: #7a5c00;
   --retro-link: #66ccff;
   --retro-link-visited: #cc99ff;
   --retro-link-active: #ff5555;
-  --retro-tile-a: #2a0a3d;
-  --retro-tile-b: #0a2a3d;
+  --retro-tile-a: #000000;
+  --retro-tile-b: #0d0900;
 }
 
-/* Tiled background lives on `body`; article/card surfaces stay solid so
-   text keeps readable contrast (constraint: skin only, don't tank contrast). */
+/* Tiled background lives on `body`; article/card surfaces stay Infima's own dark
+   background so text keeps its already-vetted contrast (constraint: skin only,
+   don't tank contrast). */
 body {
   background-image: repeating-conic-gradient(
     var(--retro-tile-a) 0% 25%,
@@ -52,11 +43,11 @@ body {
 .markdown h4,
 article h1 {
   font-family: Impact, 'Arial Black', sans-serif;
-  background: linear-gradient(90deg, #ff0000, #ff9900, #ffee00, #33ff00, #0099ff, #cc00ff);
+  background: linear-gradient(180deg, #fff4c2 0%, var(--retro-gold) 45%, var(--retro-gold-dim) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.25);
+  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.6);
   letter-spacing: 0.03em;
 }
 
@@ -73,18 +64,19 @@ a:not(.button):active {
   color: var(--retro-link-active);
 }
 
+.button--primary {
+  /* Gold is a light background — black text keeps ~15:1 contrast (white would fail). */
+  color: #000;
+}
+
 hr,
 .retro-divider {
   height: 8px;
   border: 0;
   background: repeating-linear-gradient(
     90deg,
-    #ff0000 0 20px,
-    #ff9900 20px 40px,
-    #ffee00 40px 60px,
-    #33ff00 60px 80px,
-    #0099ff 80px 100px,
-    #cc00ff 100px 120px
+    var(--retro-gold) 0 20px,
+    #000 20px 40px
   );
   margin: 1.5rem 0;
 }
@@ -108,7 +100,7 @@ hr,
   overflow: hidden;
   white-space: nowrap;
   background: #000;
-  color: #ffee00;
+  color: var(--retro-gold);
   font-weight: bold;
   padding: 0.35rem 0;
 }
@@ -130,8 +122,8 @@ hr,
   gap: 0.75rem;
   padding: 0.5rem 1rem;
   background: var(--ifm-background-surface-color);
-  border-top: 3px dashed var(--ifm-color-primary);
-  border-bottom: 3px dashed var(--ifm-color-primary);
+  border-top: 3px dashed var(--retro-gold);
+  border-bottom: 3px dashed var(--retro-gold);
   font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
 }
 
@@ -140,8 +132,9 @@ hr,
   align-items: center;
   gap: 0.4rem;
   font-weight: bold;
-  background: repeating-linear-gradient(45deg, #ffee00 0 10px, #000 10px 20px);
-  color: #000;
+  /* White text needs a dim (not bright) gold stripe to clear 4.5:1 — see var comment above. */
+  background: repeating-linear-gradient(45deg, var(--retro-gold-dim) 0 10px, #000 10px 20px);
+  color: #fff;
   padding: 0.25rem 0.6rem;
   border: 2px solid #000;
 }
@@ -149,7 +142,7 @@ hr,
 .retro-hit-counter {
   font-family: 'Courier New', monospace;
   background: #000;
-  color: #33ff00;
+  color: var(--retro-gold);
   padding: 0.2rem 0.5rem;
   border: 2px inset #888;
   letter-spacing: 0.15em;

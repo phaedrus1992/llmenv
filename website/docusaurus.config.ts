@@ -57,6 +57,13 @@ const config: Config = {
   ],
 
   themeConfig: {
+    // ponytail: locked to dark mode for #1027's black-and-gold skin — reuses Infima's
+    // already-vetted dark contrast scale instead of hand-tuning a light-mode variant too.
+    colorMode: {
+      defaultMode: 'dark',
+      disableSwitch: true,
+      respectPrefersColorScheme: false,
+    },
     navbar: {
       title: 'llmenv',
       items: [
