@@ -1576,19 +1576,12 @@ fn post_session_consolidation() {
 mod tests {
     use super::*;
 
-    /// Unique per-call session id so these tests' real (unmocked) state-dir
-    /// writes — `resolve_pre_tool_text` calls the public `read_once`/
-    /// `repeat_detect` entry points, which resolve the real global state dir,
-    /// not an injectable one — can't collide with real session data or with
-    /// each other under parallel test execution. Cleaned up after use.
-    fn unique_test_session_id(label: &str) -> String {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        format!(
-            "llmenv-test-{label}-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        )
+    /// `resolve_pre_tool_text` calls the public `read_once`/`repeat_detect`
+    /// entry points, which resolve the real global state dir (not an
+    /// injectable one) — so these tests use a distinctly-named session id
+    /// and clean up after themselves rather than touching real session data.
+    fn test_session_id(label: &str) -> String {
+        format!("llmenv-test-{label}")
     }
 
     fn cleanup_test_session_state(session_id: &str) {
@@ -1613,7 +1606,7 @@ mod tests {
     /// tools used to still count as "a decision was made").
     #[test]
     fn repeat_detect_fires_even_when_read_once_is_also_enabled() {
-        let session_id = unique_test_session_id("mask");
+        let session_id = test_session_id("mask");
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 read_once: Some(crate::config::ReadOnce {
@@ -1646,7 +1639,7 @@ mod tests {
         // Both features want to say something about the 2nd identical Read
         // (read_once: "already read"; repeat_detect, threshold 1: fires on
         // every call). read_once is checked first, so its message must win.
-        let session_id = unique_test_session_id("rw");
+        let session_id = test_session_id("rw");
         let dir = tempfile::tempdir().expect("test");
         let file_path = dir.path().join("f.txt");
         std::fs::write(&file_path, "hello").expect("test");
