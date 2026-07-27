@@ -6,6 +6,11 @@ TODOs.
 - `llmenv task session start "<name>" [--description "<text>"]` — required
   before your first `task add`. Add `--description` for a session ls hint
   (issue number, topic) when you have one.
+- Name it after the high-level work, not a placeholder — `session ls` is the
+  recovery path after a compaction, and an unnamed or auto-numbered session
+  (`session-2`, `session-3`) tells a future read of that list nothing. Good:
+  `oauth-token-refresh`, `v3.6.1-task-tracker-fixes`. Bad: leaving `<name>`
+  empty, or `session-4`.
 - If a session is already open for this project, `session start` errors and
   lists them: `--resume <id>` (this is yours, e.g. after a compaction),
   `--replace` (stale, untag its tasks and start fresh), or `--new` (genuinely

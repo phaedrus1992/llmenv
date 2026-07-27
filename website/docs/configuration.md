@@ -630,9 +630,12 @@ features:
 In-engine task tracker (#231): durable, agent-native "what am I working on"
 state that survives compaction and session restarts. The `llmenv task` CLI
 subcommands always work regardless of this flag — it only gates the injected
-`llmenv` skill guidance and the SessionStart/Stop lifecycle reminders (nudging
-the agent to resume or close `wip` tasks, and to close out a fully-done
-session).
+`llmenv` skill guidance and the SessionStart/Stop lifecycle reminders. Each
+`wip` task in a reminder is tagged with the session that started it, and
+resuming/finishing it (or closing out a fully-done session) is conditioned on
+the agent recognizing that session as its own — a hook can't tell whether a
+listed task belongs to this conversation or a different, concurrently running
+one.
 
 ```yaml
 features:

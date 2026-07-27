@@ -236,9 +236,12 @@ fn handle_stop_inner(
     if consecutive >= config.threshold.max(1) {
         format!(
             "{reminder}\n\nThis exact reminder has repeated {consecutive} times in a row with no \
-             progress. If you're genuinely blocked on something outside your control, run \
-             `llmenv task wait <slug> \"<reason>\"` — that silences this nag until the blocker \
-             clears, instead of being told to \"keep working\" every single turn."
+             progress. If one of the listed tasks is your own and you're genuinely blocked on \
+             something outside your control, run `llmenv task wait <slug> \"<reason>\"` — that \
+             silences this nag until the blocker clears, instead of being told to \"keep \
+             working\" every single turn. If none of the listed tasks are yours (a different, \
+             possibly still-active session owns them), this repeat is expected and needs no \
+             action from you — it clears on its own once that session updates or closes them."
         )
     } else {
         reminder.to_string()
