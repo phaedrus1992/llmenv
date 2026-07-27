@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Add model provider configuration rendering to the opencode adapter — `capabilities.model_providers`/`default_models` now render into `opencode.json`'s `provider`/`model`/`small_model` fields, matching the existing Crush support. `api_type` maps to the AI SDK package name opencode expects (e.g. `openai` → `@ai-sdk/openai-compatible`); `default_models`'s `large`/`small` roles map to opencode's two default-model slots. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#1004)
+- Add `features.repeat_detect`, an engine-neutral guard against identical-tool-call loops — when the same tool call repeats `threshold` times in a row (default 3) in a session, llmenv surfaces an advisory nudging the model to stop and try something else instead of silently re-running the same call. It's a warning, not a block, and fires for any adapter/model since it lives in the shared lifecycle-hook layer rather than per-adapter code. Off by default. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresrepeat_detect) (#1006)
 
 ### Changed
 
