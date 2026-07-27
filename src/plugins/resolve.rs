@@ -313,6 +313,7 @@ mod tests {
                 scope("proj", "project", &["lang-typescript", "web"]),
             ],
             tags: tags(&["os-macos", "lang-typescript", "web"]),
+            ..Default::default()
         };
 
         // With the full active tag union, the project tags would select it —

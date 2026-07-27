@@ -1117,6 +1117,22 @@ appearing in both lists. Malformed YAML degrades to defaults derived from the
 folder basename. See [Concepts → Project markers](concepts.md#project-markers)
 for discovery rules.
 
+### Activating tags without a committed marker
+
+`$LLMENV_EXTRA_TAGS` (comma-separated) unions additional tags into the active
+set without requiring a `.llmenv.yaml` at all — useful for a client repo you
+can't add config files to, a throwaway clone, or a personal preference you
+don't want to share with collaborators via a checked-in file:
+
+```bash
+export LLMENV_EXTRA_TAGS="rust,personal"
+```
+
+These tags are additive on top of whatever `.llmenv.yaml` already contributes
+(or on top of nothing, if there's no marker file present). See
+[`docs/env-vars.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/env-vars.md)
+for the full variable reference.
+
 ## YAML gotchas
 
 YAML coerces unquoted scalars. Quote values that could be misread:
