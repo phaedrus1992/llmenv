@@ -491,6 +491,7 @@ pub(crate) fn remote_transport_type_str(transport: crate::config::McpTransport) 
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use std::path::{Path, PathBuf};
 
@@ -534,8 +535,7 @@ mod tests {
         for (yaml, kind) in [("oops", "a string"), ("~", "null"), ("[1]", "a sequence")] {
             let mut dst = serde_json::json!({"kept": 1});
             let frag: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-            let err = overlay_native_json(&mut dst, Some(&frag), "native_mcp.crush")
-                .expect_err("a non-mapping fragment must be an error");
+            let err = overlay_native_json(&mut dst, Some(&frag), "native_mcp.crush").unwrap_err();
             assert!(err.to_string().contains(kind), "got: {err}");
             assert_eq!(dst["kept"], 1, "dst must be left untouched on error");
         }

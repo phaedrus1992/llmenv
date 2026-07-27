@@ -1778,7 +1778,7 @@ mod tests {
             let manifest = with_native_providers(manifest_with_mtplx_provider(), yaml);
             let err = OpencodeAdapter
                 .materialize(&manifest, tmp.path())
-                .expect_err("a non-mapping fragment must be an error");
+                .unwrap_err();
             let msg = err.to_string();
             assert!(
                 msg.contains("native_model_providers.opencode") && msg.contains(kind),
