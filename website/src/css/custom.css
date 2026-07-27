@@ -85,7 +85,17 @@ hr,
     var(--retro-gold) 0 20px,
     #000 20px 40px
   );
+}
+
+hr {
   margin: 1.5rem 0;
+}
+
+.retro-divider {
+  /* Top margin matches .retro-marquee-track's own 0.35rem padding above the text,
+     so the gap below the marquee text mirrors the gap above it. Bottom margin
+     stays small — this divider sits just above the navbar, not mid-content. */
+  margin: 0.35rem 0 0.25rem;
 }
 
 @keyframes retro-marquee {
