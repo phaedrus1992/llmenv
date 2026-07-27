@@ -481,29 +481,47 @@ pub(crate) fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate
 
 /// Decide the `PreToolUse` decision text, if any, from the three
 /// mutually-exclusive interceptors: the #985 task-tool redirect
-/// (TaskCreate/TaskList/TaskUpdate → `llmenv task`), the #318/#864
-/// read-once dedup (Read), and the #1006 repeat-call detector (any tool,
-/// fallback when neither of the above already fired).
+/// (TaskCreate/TaskList/TaskUpdate → `llmenv task`) and the #318/#864
+/// read-once dedup (Read) — plus the #1006 repeat-call detector, which is
+/// *not* mutually exclusive with the other two: it observes every
+/// `PreToolUse` call, including ones the primary interceptors already
+/// decided about.
 ///
-/// Each arm is only taken when its handler actually produced a real
-/// decision. `read_once`/`repeat_detect`'s handlers return `""` (empty) as
-/// their pass-through case, so a naive `if <enabled>` gate — with no check
-/// on the handler's own result — would take that arm on *every* call once
-/// the feature was on, permanently masking any interceptor listed after it.
-/// `task_tools`'s handler avoids this by returning `Option` directly; the
-/// other two are checked explicitly here instead.
+/// This matters because the single biggest real-world trigger for a
+/// stuck-loop model isn't an uncovered tool like `Bash` — it's the model
+/// repeatedly retrying `TaskCreate`/`TaskList`/`TaskUpdate` after
+/// `task_tools` denies and redirects it each time. If `repeat_detect` only
+/// ran as a fallback *after* the primary arms (as it originally did), that
+/// exact case — llmenv's own redirect being ignored on repeat — would be
+/// invisible to it, since `task_tools` always wins the primary decision for
+/// those three tools. So `repeat_detect` is computed independently and its
+/// warning is appended to whatever the primary arms decided, not gated on
+/// them staying silent.
+///
+/// `read_once`'s handler returns `""` (empty) as its pass-through case, so a
+/// naive `if <enabled>` gate on it alone — with no check on the handler's
+/// own result — would take that arm on every call once the feature was on.
+/// `task_tools`'s handler avoids this by returning `Option` directly.
+///
+/// Combining order is safety-relevant: only `primary` can ever carry the
+/// `__DENY__:` sentinel (`repeat_detect` never denies, only warns — see its
+/// module doc), so `primary` must always come first in the concatenation.
+/// `append_read_once_result` further down treats the *entire* returned
+/// string as the deny reason once it detects that prefix at position 0;
+/// putting `repeat_detect`'s text first would still keep the prefix at 0 in
+/// practice (nothing precedes it), but ordering primary-first documents the
+/// invariant explicitly rather than relying on that coincidence.
 fn resolve_pre_tool_text(
     stdin_payload: &serde_json::Value,
     claude_session_id: Option<&str>,
     config: &crate::config::Config,
     task_tracker_enabled: bool,
 ) -> Option<String> {
-    if task_tracker_enabled
+    let primary = if task_tracker_enabled
         && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
     {
-        return Some(t);
-    }
-    if let Some(ref features) = config.features
+        Some(t)
+    } else if let Some(ref features) = config.features
         && let Some(ref read_once) = features.read_once
         && read_once.enabled
     {
@@ -512,21 +530,61 @@ fn resolve_pre_tool_text(
             claude_session_id,
             read_once,
         );
-        if !ro_text.is_empty() {
-            return Some(ro_text);
-        }
-    }
-    if let Some(ref features) = config.features
-        && let Some(ref repeat_detect) = features.repeat_detect
-        && repeat_detect.enabled
-    {
-        return Some(crate::hook_run::repeat_detect::handle_pre_tool_use(
+        (!ro_text.is_empty()).then_some(ro_text)
+    } else {
+        None
+    };
+
+    // On by default (#1006): absent `features.repeat_detect` resolves the
+    // same as an explicit, empty block — see `RepeatDetect::default()`.
+    let repeat_detect_cfg = config
+        .features
+        .as_ref()
+        .and_then(|f| f.repeat_detect.clone())
+        .unwrap_or_default();
+    let repeat_detect_text = repeat_detect_cfg.enabled.then(|| {
+        crate::hook_run::repeat_detect::handle_pre_tool_use(
             stdin_payload,
             claude_session_id,
-            repeat_detect,
-        ));
+            &repeat_detect_cfg,
+        )
+    });
+    let repeat_detect_text = repeat_detect_text.filter(|t| !t.is_empty());
+
+    match (primary, repeat_detect_text) {
+        (Some(p), Some(r)) => Some(format!("{p}\n\n{r}")),
+        (Some(p), None) => Some(p),
+        (None, Some(r)) => Some(r),
+        (None, None) => None,
     }
-    None
+}
+
+/// The task-tracker's `Stop` reminder, with repeat-detection applied: once
+/// the identical reminder has fired `threshold` times in a row for this
+/// session, `repeat_detect::handle_stop` appends a pointer to `llmenv task
+/// wait` (see #1006 — this is the same on-by-default detector as
+/// `resolve_pre_tool_text`, applied to Stop-event nagging instead of
+/// `PreToolUse` tool-call repetition).
+fn resolve_stop_reminder(
+    state_dir: &std::path::Path,
+    claude_session_id: Option<&str>,
+    config: &crate::config::Config,
+) -> String {
+    let reminder = crate::task::stop_hook_reminder(state_dir);
+    let repeat_detect_cfg = config
+        .features
+        .as_ref()
+        .and_then(|f| f.repeat_detect.clone())
+        .unwrap_or_default();
+    if repeat_detect_cfg.enabled {
+        crate::hook_run::repeat_detect::handle_stop(
+            &reminder,
+            claude_session_id,
+            &repeat_detect_cfg,
+        )
+    } else {
+        reminder
+    }
 }
 
 fn run_inner(
@@ -599,7 +657,11 @@ fn run_inner(
     // (that early-return shape was tried and reverted; see the git history).
     if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
         let state_dir = crate::paths::state_dir()?;
-        return Ok(crate::task::stop_hook_reminder(&state_dir));
+        return Ok(resolve_stop_reminder(
+            &state_dir,
+            claude_session_id,
+            &config,
+        ));
     }
 
     // #867: the rest of the pipeline (scope evaluation, tag/bundle recall
@@ -847,7 +909,7 @@ fn run_inner(
             // this never displaces run_session_log, it just adds to `out`.
             if event == HookEvent::Stop && task_tracker_enabled {
                 let state_dir = crate::paths::state_dir()?;
-                let reminder = crate::task::stop_hook_reminder(&state_dir);
+                let reminder = resolve_stop_reminder(&state_dir, claude_session_id, &config);
                 if !reminder.is_empty() {
                     if !out.is_empty() {
                         out.push('\n');

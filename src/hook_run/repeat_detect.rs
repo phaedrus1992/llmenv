@@ -1,11 +1,23 @@
-//! Repeat-tool-call loop detection (#1006), engine-neutral.
+//! Repeat-loop detection (#1006), engine-neutral.
 //!
-//! Tracks the most recent `PreToolUse` tool name + input per session, cached
-//! under `state_dir/repeat_detect/{session_id}.json`. When N consecutive
-//! calls carry an identical signature, surfaces a warning telling the model
-//! to stop and reassess instead of letting it silently re-issue the same
-//! call forever — the failure mode observed on a small/local model (#1006)
-//! that re-read the same file range for 5 turns with zero reasoning tokens.
+//! Two independent trackers share one per-session state file
+//! (`state_dir/repeat_detect/{session_id}.json`):
+//!
+//! - **`PreToolUse`**: tracks the most recent tool name + input per session.
+//!   When N consecutive calls carry an identical signature, surfaces a
+//!   warning telling the model to stop and reassess instead of letting it
+//!   silently re-issue the same call forever — the failure mode observed on
+//!   a small/local model that re-read the same file range for 5 turns with
+//!   zero reasoning tokens.
+//! - **`Stop`**: tracks the task-tracker's Stop-hook reminder text. The
+//!   single most common real-world trigger for #1006 isn't an uncovered
+//!   tool like `Bash` — it's the reminder itself re-firing identically every
+//!   turn while a model reports (in prose, not via `llmenv task wait`) that
+//!   it's blocked on something external. The reminder's own "don't stop
+//!   mid-task" wording then forces action on every turn with no escape
+//!   hatch, which is its own stuck loop. When the identical reminder repeats
+//!   N times in a row, this appends a pointer to `llmenv task wait` instead
+//!   of just repeating the same imperative forever.
 //!
 //! This lives in `hook_run` (not per-adapter) so it fires for any
 //! adapter/model, mirroring how `task_tools.rs`'s redirect is shared by
@@ -26,13 +38,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::RepeatDetect as RepeatDetectConfig;
 
-/// Per-session state: only the most recent call signature and how many
-/// consecutive times it's repeated need to survive across hook invocations.
+/// Per-session state: the two trackers (`PreToolUse` and `Stop`) are
+/// independent — a tool call between two Stop events must not reset the
+/// Stop streak, and vice versa — so each gets its own signature/counter
+/// pair in the same file. `#[serde(default)]` on the `stop_*` fields keeps
+/// state files written before Stop-tracking existed loading cleanly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SessionState {
     session_id: String,
     last_signature: Option<String>,
     consecutive: u32,
+    #[serde(default)]
+    last_stop_signature: Option<String>,
+    #[serde(default)]
+    stop_consecutive: u32,
 }
 
 impl SessionState {
@@ -41,6 +60,8 @@ impl SessionState {
             session_id: session_id.to_string(),
             last_signature: None,
             consecutive: 0,
+            last_stop_signature: None,
+            stop_consecutive: 0,
         }
     }
 
@@ -162,6 +183,68 @@ fn handle_pre_tool_use_inner(
     }
 }
 
+/// Handle a `Stop` event's task-tracker reminder text.
+///
+/// Returns `reminder` unchanged below `config.threshold` repeats; once the
+/// identical reminder has fired that many times in a row for this session,
+/// appends a pointer to `llmenv task wait` instead of just repeating the
+/// same "keep working" imperative forever. Empty `reminder` passes through
+/// untouched — nothing to track when there's no nag to begin with.
+pub fn handle_stop(
+    reminder: &str,
+    session_id: Option<&str>,
+    config: &RepeatDetectConfig,
+) -> String {
+    if reminder.is_empty() {
+        return String::new();
+    }
+    let Ok(state_dir) = crate::paths::state_dir().inspect_err(|e| {
+        eprintln!("llmenv: failed to resolve state_dir for repeat-detect stop event: {e}")
+    }) else {
+        return reminder.to_string();
+    };
+    handle_stop_inner(reminder, session_id, config, &state_dir)
+}
+
+/// Like [`handle_stop`] but with an injectable `state_dir` for testing.
+fn handle_stop_inner(
+    reminder: &str,
+    session_id: Option<&str>,
+    config: &RepeatDetectConfig,
+    state_dir: &Path,
+) -> String {
+    let Some(session_id) = session_id else {
+        return reminder.to_string();
+    };
+    if !crate::paths::is_valid_short_name(session_id) {
+        return reminder.to_string();
+    }
+
+    let mut state = SessionState::load(state_dir, session_id);
+    if state.last_stop_signature.as_deref() == Some(reminder) {
+        state.stop_consecutive = state.stop_consecutive.saturating_add(1);
+    } else {
+        state.last_stop_signature = Some(reminder.to_string());
+        state.stop_consecutive = 1;
+    }
+    let consecutive = state.stop_consecutive;
+
+    if let Err(e) = state.save(state_dir) {
+        eprintln!("llmenv: failed to save repeat-detect state for session {session_id}: {e}");
+    }
+
+    if consecutive >= config.threshold.max(1) {
+        format!(
+            "{reminder}\n\nThis exact reminder has repeated {consecutive} times in a row with no \
+             progress. If you're genuinely blocked on something outside your control, run \
+             `llmenv task wait <slug> \"<reason>\"` — that silences this nag until the blocker \
+             clears, instead of being told to \"keep working\" every single turn."
+        )
+    } else {
+        reminder.to_string()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -194,6 +277,79 @@ mod tests {
         assert!(
             !out.is_empty(),
             "threshold 0 must clamp to 1, warning on the very first call"
+        );
+    }
+
+    // ===== handle_stop tests =====
+
+    const WIP_REMINDER: &str = "You still have task(s) in progress:\n- foo\nkeep working";
+
+    #[test]
+    fn empty_reminder_passes_through() {
+        let dir = TempDir::new().expect("test");
+        let out = handle_stop_inner("", Some("s1"), &config(3), dir.path());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn no_session_id_passes_reminder_through_unchanged() {
+        let dir = TempDir::new().expect("test");
+        let out = handle_stop_inner(WIP_REMINDER, None, &config(3), dir.path());
+        assert_eq!(out, WIP_REMINDER);
+    }
+
+    #[test]
+    fn below_threshold_reminder_unchanged() {
+        let dir = TempDir::new().expect("test");
+        for _ in 0..2 {
+            let out = handle_stop_inner(WIP_REMINDER, Some("s1"), &config(3), dir.path());
+            assert_eq!(
+                out, WIP_REMINDER,
+                "below threshold must not append anything"
+            );
+        }
+    }
+
+    #[test]
+    fn at_threshold_appends_task_wait_pointer() {
+        let dir = TempDir::new().expect("test");
+        for _ in 0..2 {
+            handle_stop_inner(WIP_REMINDER, Some("s1"), &config(3), dir.path());
+        }
+        let out = handle_stop_inner(WIP_REMINDER, Some("s1"), &config(3), dir.path());
+        assert!(
+            out.starts_with(WIP_REMINDER),
+            "original reminder must still be present"
+        );
+        assert!(
+            out.contains("llmenv task wait"),
+            "must point at the escape hatch: {out}"
+        );
+    }
+
+    #[test]
+    fn different_reminder_resets_stop_streak() {
+        let dir = TempDir::new().expect("test");
+        handle_stop_inner(WIP_REMINDER, Some("s1"), &config(2), dir.path());
+        let other = "You still have task(s) in progress:\n- bar\nkeep working";
+        let out = handle_stop_inner(other, Some("s1"), &config(2), dir.path());
+        assert_eq!(out, other, "a different reminder must reset the streak");
+    }
+
+    #[test]
+    fn pre_tool_use_streak_and_stop_streak_are_independent() {
+        let dir = TempDir::new().expect("test");
+        // Drive the PreToolUse tracker to just below its own threshold...
+        handle_pre_tool_use_inner(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
+        // ...then a Stop event with a fresh reminder must not be affected by
+        // (or reset) the PreToolUse streak, and vice versa.
+        let out = handle_stop_inner(WIP_REMINDER, Some("s1"), &config(2), dir.path());
+        assert_eq!(out, WIP_REMINDER);
+        let tool_out =
+            handle_pre_tool_use_inner(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
+        assert!(
+            !tool_out.is_empty(),
+            "PreToolUse streak must have kept counting: {tool_out}"
         );
     }
 
@@ -314,13 +470,30 @@ mod tests {
         use proptest::prelude::*;
 
         fn arb_session_state() -> impl Strategy<Value = SessionState> {
-            (".{0,20}", proptest::option::of(".{0,40}"), any::<u32>()).prop_map(
-                |(session_id, last_signature, consecutive)| SessionState {
-                    session_id,
-                    last_signature,
-                    consecutive,
-                },
+            (
+                ".{0,20}",
+                proptest::option::of(".{0,40}"),
+                any::<u32>(),
+                proptest::option::of(".{0,40}"),
+                any::<u32>(),
             )
+                .prop_map(
+                    |(
+                        session_id,
+                        last_signature,
+                        consecutive,
+                        last_stop_signature,
+                        stop_consecutive,
+                    )| {
+                        SessionState {
+                            session_id,
+                            last_signature,
+                            consecutive,
+                            last_stop_signature,
+                            stop_consecutive,
+                        }
+                    },
+                )
         }
 
         proptest! {

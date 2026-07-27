@@ -994,17 +994,35 @@ const fn default_read_once_ttl() -> u64 {
 }
 
 /// RepeatDetect: break identical-tool-call loops within a session (#1006).
-/// Engine-neutral (lives in `hook_run`, fires for any adapter/model). Opt-in
-/// (disabled by default).
+/// Engine-neutral (lives in `hook_run`, fires for any adapter/model). **On by
+/// default** — the biggest real-world trigger is a model stuck repeating
+/// llmenv's own task-tool redirect, which every session with the task
+/// tracker on can hit — so this is opt-*out*, not opt-in. Absent
+/// `features.repeat_detect` entirely resolves the same as `enabled: true`
+/// with defaults (see the call site in `hook_run::resolve_pre_tool_text`,
+/// which falls back to `RepeatDetect::default()` when the field is `None`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RepeatDetect {
-    #[serde(default)]
+    #[serde(default = "default_repeat_detect_enabled")]
     pub enabled: bool,
     /// Consecutive identical tool calls (same tool name + input) before a
     /// warning is surfaced to the model (default 3).
     #[serde(default = "default_repeat_detect_threshold")]
     pub threshold: u32,
+}
+
+impl Default for RepeatDetect {
+    fn default() -> Self {
+        Self {
+            enabled: default_repeat_detect_enabled(),
+            threshold: default_repeat_detect_threshold(),
+        }
+    }
+}
+
+const fn default_repeat_detect_enabled() -> bool {
+    true
 }
 
 const fn default_repeat_detect_threshold() -> u32 {
@@ -2200,17 +2218,40 @@ index_path: /custom/index/path
 
     #[test]
     fn repeat_detect_absent_is_none() {
+        // `None` here means "the block is absent" — the call site
+        // (`hook_run::resolve_pre_tool_text`) treats that the same as
+        // `RepeatDetect::default()` (enabled), not as disabled. See
+        // `repeat_detect_default_is_enabled` below for the on-by-default half
+        // of this contract.
         let cfg: Config = serde_yaml::from_str("features:\n  memory: []\n").unwrap();
         assert!(cfg.features.unwrap().repeat_detect.is_none());
     }
 
     #[test]
-    fn repeat_detect_default_disabled() {
+    fn repeat_detect_default_is_enabled() {
+        // Opt-*out*, not opt-in (#1006) — an explicit but empty block still
+        // enables it with default settings.
         let yaml = "features:\n  repeat_detect: {}\n";
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         let rd = cfg.features.unwrap().repeat_detect.unwrap();
-        assert!(!rd.enabled);
+        assert!(rd.enabled);
         assert_eq!(rd.threshold, 3);
+    }
+
+    #[test]
+    fn repeat_detect_can_be_explicitly_disabled() {
+        let yaml = "features:\n  repeat_detect:\n    enabled: false\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.features.unwrap().repeat_detect.unwrap().enabled);
+    }
+
+    /// The manual `Default` impl must stay in sync with serde's empty-object
+    /// defaults — same rationale as `slippage_default_matches_serde_empty`.
+    #[test]
+    fn repeat_detect_default_matches_serde_empty() {
+        let from_serde: RepeatDetect =
+            serde_json::from_str("{}").expect("empty object should deserialize");
+        assert_eq!(RepeatDetect::default(), from_serde);
     }
 
     #[test]
