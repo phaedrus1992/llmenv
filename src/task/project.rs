@@ -48,12 +48,9 @@ pub fn resolve_project_tag(cwd: &Path, home: Option<&Path>) -> String {
         })
         .or_else(|| {
             let env = crate::scope::matcher::Env {
-                hostname: String::new(),
-                user: String::new(),
                 cwd: cwd.to_string_lossy().into_owned(),
-                gateway_mac: None,
                 home: home.map(Path::to_path_buf),
-                os: String::new(),
+                ..crate::scope::matcher::Env::empty()
             };
             crate::scope::matcher::discover_project(&env).map(|p| (p.root, p.id))
         })

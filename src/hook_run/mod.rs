@@ -2382,6 +2382,7 @@ mod tests {
         crate::scope::ActiveScopes {
             tags,
             scopes: vec![],
+            ..Default::default()
         }
     }
 

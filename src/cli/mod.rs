@@ -941,10 +941,12 @@ fn run_export(
                 if !env.os.is_empty() {
                     filtered_tags.insert(env.os.clone());
                 }
+                filtered_tags.extend(active.extra_tags.iter().cloned());
 
                 let filtered = ActiveScopes {
                     scopes: filtered_scopes,
                     tags: filtered_tags,
+                    extra_tags: active.extra_tags.clone(),
                 };
                 let firing = firing_bundles(&config.bundle, &filtered, tag.as_deref());
                 (firing, filtered)
@@ -3983,7 +3985,11 @@ mod tests {
 
     fn active(scopes: Vec<crate::scope::ActiveScope>) -> ActiveScopes {
         let tags = scopes.iter().flat_map(|s| s.tags.iter().cloned()).collect();
-        ActiveScopes { scopes, tags }
+        ActiveScopes {
+            scopes,
+            tags,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -4924,6 +4930,7 @@ mod tests {
                 t.insert("mem".to_string());
                 t
             },
+            ..Default::default()
         }
     }
 
@@ -4948,6 +4955,7 @@ mod tests {
                 t.insert("mem".to_string());
                 t
             },
+            ..Default::default()
         }
     }
 

@@ -16,16 +16,29 @@ Variables used for llmenv-internal communication, state management, or integrati
 | `LLMENV_CONFIG_DIR` | Path to config directory | llmenv adapter | Session/process |
 | `LLMENV_PROJECT_ROOT` | Active project root directory | llmenv scope matcher | Session/process |
 | `LLMENV_ACTIVE_PROJECT` | Active project name | llmenv scope matcher | Session/process |
-| `LLMENV_ACTIVE_TAGS` | Colon-separated active tags | llmenv scope matcher | Session/process |
-| `LLMENV_ACTIVE_SCOPES` | Colon-separated active scopes | llmenv scope matcher | Session/process |
-| `LLMENV_ACTIVE_BUNDLES` | Colon-separated active bundles | llmenv scope matcher | Session/process |
+| `LLMENV_ACTIVE_TAGS` | Comma-separated active tags | llmenv scope matcher | Session/process |
+| `LLMENV_ACTIVE_SCOPES` | Comma-separated active scopes | llmenv scope matcher | Session/process |
+| `LLMENV_ACTIVE_BUNDLES` | Comma-separated active bundles | llmenv scope matcher | Session/process |
 | `LLMENV_ICM_CONTEXT` | ICM context chunk (from memory store) | llmenv SessionStart | Session/process |
 | `LLMENV_VERSION` | llmenv version (compile-time) | llmenv binary | Build-time |
 | `LLMENV_VERSION_TAG` | llmenv version tag (compile-time) | llmenv binary | Build-time |
 
 **Rule:** All new internal/IPC variables **must** use the `LLMENV_` prefix. Exceptions only with justification in code comments.
 
-### 2. **External Tool Variables** (no `LLMENV_` prefix)
+### 2. **User-Set Configuration Overrides** (`LLMENV_*` prefix — required)
+
+Variables the *user* sets to override or supplement llmenv's own config resolution — distinct
+from category 1's internal/IPC variables, which llmenv itself sets as *output* for other
+processes to read. These are read *by* llmenv as input.
+
+| Variable | Purpose | Read By | Scope |
+| ---------- | --------- | -------- | ------- |
+| `LLMENV_EXTRA_TAGS` | Comma-separated tags unioned into the active tag set, additive on top of `.llmenv.yaml`'s `tags` (or on top of nothing, if no `.llmenv.yaml` is present) — an escape hatch for activating tags without a committed project marker | llmenv scope matcher (`src/scope/matcher.rs`) | Session/process |
+
+**Rule:** Same `LLMENV_` prefix rule as category 1 — these are still llmenv-owned, just input
+rather than output.
+
+### 3. **External Tool Variables** (no `LLMENV_` prefix)
 
 Variables for controlling external LLM CLI tools, tools installed on the system, or third-party libraries. These should **not** use the `LLMENV_` prefix to avoid confusion with llmenv's own settings.
 
@@ -50,7 +63,7 @@ there for the canonical list instead of maintaining a stale local copy.
 
 **Rule:** External tool variables should use the tool's existing naming convention. Do **not** prefix them with `LLMENV_` — that's reserved for llmenv internals only.
 
-### 3. **Bundle-Provided Variables** (user-defined, optional prefix)
+### 4. **Bundle-Provided Variables** (user-defined, optional prefix)
 
 Variables that bundles define for their own use (e.g., token-efficiency bundle thresholds). These can be named freely. **Use `LLMENV_` only for variables that control llmenv's adapter behavior and are in the `LLMENV_OWNED_SETTINGS_KEYS` allowlist.** Otherwise, use a tool-specific prefix or no prefix.
 

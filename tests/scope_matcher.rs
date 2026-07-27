@@ -65,6 +65,68 @@ fn matches_project_from_llmenv_yaml() {
 }
 
 #[test]
+fn extra_tags_activate_without_llmenv_yaml() {
+    // No .llmenv.yaml at all — the primary use case for LLMENV_EXTRA_TAGS.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let env = Env {
+        hostname: "x".into(),
+        user: "y".into(),
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        extra_tags: vec!["custom".into()],
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg(), &env);
+    assert!(active.tags.contains("custom"));
+    assert!(active.scopes.iter().all(|s| s.kind != "project"));
+}
+
+#[test]
+fn extra_tags_empty_has_no_effect() {
+    let env = Env {
+        hostname: "x".into(),
+        user: "y".into(),
+        cwd: "/tmp".into(),
+        extra_tags: Vec::new(),
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg(), &env);
+    assert!(active.tags.is_empty());
+}
+
+#[test]
+fn extra_tags_multiple_all_activate() {
+    let env = Env {
+        hostname: "x".into(),
+        user: "y".into(),
+        cwd: "/tmp".into(),
+        extra_tags: vec!["one".into(), "two".into(), "three".into()],
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg(), &env);
+    assert!(active.tags.contains("one"));
+    assert!(active.tags.contains("two"));
+    assert!(active.tags.contains("three"));
+}
+
+#[test]
+fn extra_tags_overlapping_with_project_tags_dedups() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join(".llmenv.yaml"), "tags: [x]\n").expect("write yaml");
+
+    let env = Env {
+        hostname: "x".into(),
+        user: "y".into(),
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        extra_tags: vec!["x".into(), "y".into()],
+        ..Env::empty()
+    };
+    let active = evaluate(&cfg(), &env);
+    assert!(active.tags.contains("x"));
+    assert!(active.tags.contains("y"));
+    assert_eq!(active.tags.len(), 2, "overlapping tag must not duplicate");
+}
+
+#[test]
 fn precedence_order() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(tmp.path().join(".llmenv.yaml"), "").expect("write yaml");

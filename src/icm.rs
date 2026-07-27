@@ -138,6 +138,7 @@ mod tests {
         let active = ActiveScopes {
             scopes: vec![],
             tags,
+            ..Default::default()
         };
 
         let chunk = generate_context_chunk(&active, &[]);
@@ -182,6 +183,7 @@ mod tests {
                 unknown_fields: vec![],
             }],
             tags: BTreeSet::new(),
+            ..Default::default()
         };
         let chunk = generate_context_chunk(&active, &[]);
         assert!(chunk.contains("MyProject"), "name must appear");
@@ -204,6 +206,7 @@ mod tests {
                 unknown_fields: vec![],
             }],
             tags: BTreeSet::new(),
+            ..Default::default()
         };
         let chunk = generate_context_chunk(&active, &[]);
         assert!(chunk.contains("MyProject"));
@@ -223,6 +226,7 @@ mod tests {
         let active = ActiveScopes {
             scopes: vec![],
             tags,
+            ..Default::default()
         };
 
         let bundles = vec!["bundle1".to_string(), "bundle2".to_string()];
