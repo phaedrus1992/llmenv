@@ -12,7 +12,7 @@ use crate::util::{merge_yaml, normalize_yaml};
 pub use capabilities::{CapabilityContributor, merge_capabilities};
 use rules::RuleFile;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BundleRef {
     pub name: String,
     pub path: PathBuf,
