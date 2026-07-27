@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - `Capabilities::is_empty()` never checked `features.codebase_memory`, so a config fragment whose only content was a `codebase_memory` entry was silently reported as empty — dropping it wherever `is_empty()` gates rendering/merging. It now accounts for `codebase_memory` like every other feature list. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featurescodebase_memory) (#1021)
+- `merge_capabilities` hardcoded `advisor_size` to `None`, so setting `advisor_size` in any bundle or scope silently never reached the generated engine settings. It's now resolved by highest-precedence-wins like every other scalar capability field. Found during pre-pr-review of #1025.
 - Document `capabilities.model_providers`/`capabilities.default_models` in the configuration reference — the schema has supported custom model-provider endpoints and role-keyed default models for several releases with no user-facing docs. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#994)
 - `llmenv materialize`'s `opencode.schema.json` sidecar — documented as shipping back in 3.3.0 (#660) but never actually wired into the crate — now really gets written alongside `opencode.json`, which now points its own `$schema` field at the sidecar instead of opencode's hosted schema. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-opencode-adapter-emits) (#1001)
 
