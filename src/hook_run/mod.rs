@@ -11,6 +11,7 @@ pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 pub(crate) mod read_once;
+pub(crate) mod repeat_detect;
 pub(crate) mod task_tools;
 
 use std::io::Write;
@@ -499,17 +500,19 @@ fn run_inner(
         .and_then(|f| f.task_tracker.as_ref())
         .is_some_and(|t| t.enabled);
 
-    // PreToolUse text decision, shared by two mutually-exclusive interceptors
-    // that key off distinct tool names: the #985 task-tool redirect
-    // (TaskCreate/TaskList/TaskUpdate → `llmenv task`) and the #318/#864
-    // read-once dedup (Read). Both are computed before scope/memory resolution
-    // (neither needs it) and folded into one `pre_tool_text`, so the shared
-    // session-log handling below applies to both: take the early-return fast
-    // path only when session-log has no interest in PreToolUse at Debug level
-    // (EventKind::ToolUse's level); otherwise fall through so `run_session_log`
-    // still runs and the decision text is appended to `out` further down. Never
-    // unconditionally short-circuit, or enabling either would silently drop
-    // Debug-level session logging for every PreToolUse event (the #231/#864
+    // PreToolUse text decision, shared by three mutually-exclusive
+    // interceptors, checked in order: the #985 task-tool redirect
+    // (TaskCreate/TaskList/TaskUpdate → `llmenv task`), the #318/#864
+    // read-once dedup (Read), and the #1006 repeat-call detector (any tool,
+    // fallback when neither of the above already fired). All are computed
+    // before scope/memory resolution (none need it) and folded into one
+    // `pre_tool_text`, so the shared session-log handling below applies to
+    // all three: take the early-return fast path only when session-log has
+    // no interest in PreToolUse at Debug level (EventKind::ToolUse's level);
+    // otherwise fall through so `run_session_log` still runs and the decision
+    // text is appended to `out` further down. Never unconditionally
+    // short-circuit, or enabling any of them would silently drop Debug-level
+    // session logging for every PreToolUse event (the #231/#864
     // early-return-drops-logging bug class).
     let pre_tool_text = if event == HookEvent::PreToolUse {
         let text = if task_tracker_enabled
@@ -524,6 +527,15 @@ fn run_inner(
                 stdin_payload,
                 claude_session_id,
                 read_once,
+            ))
+        } else if let Some(ref features) = config.features
+            && let Some(ref repeat_detect) = features.repeat_detect
+            && repeat_detect.enabled
+        {
+            Some(crate::hook_run::repeat_detect::handle_pre_tool_use(
+                stdin_payload,
+                claude_session_id,
+                repeat_detect,
             ))
         } else {
             None

@@ -501,6 +501,31 @@ features:
 |---------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `track` | no       | `"release"` (default) or `"beta"`. `release` uses the GitHub latest-stable endpoint; `beta` uses the first non-draft release from the recent list. |
 
+### `features.repeat_detect:`
+
+Engine-neutral repeat-tool-call loop detection. Some models — small/local
+ones especially — can get stuck re-issuing the exact same tool call turn
+after turn with no progress. When enabled, llmenv tracks the most recent
+tool name + input per session and, once the same call repeats `threshold`
+times in a row, injects an advisory nudging the model to stop and try a
+different approach. It's a warning, not a block — llmenv never denies the
+repeated call, so a deliberately re-run command (e.g. re-running `cargo
+test` after an unrelated fix) is never blocked, and it fires for any
+adapter/model since the detector lives in the shared `hook_run` lifecycle
+layer, not per-adapter code.
+
+```yaml
+features:
+  repeat_detect:
+    enabled: true
+    threshold: 3   # consecutive identical calls before the warning fires
+```
+
+| Field       | Required | Notes                                                         |
+|-------------|----------|---------------------------------------------------------------|
+| `enabled`   | no       | Default `false`.                                              |
+| `threshold` | no       | Consecutive identical tool calls before warning; default `3`. |
+
 ### `features.context_mode:`
 
 Built-in context-saving support (#490). When enabled, llmenv wires the
