@@ -311,7 +311,7 @@ pub(super) fn hooks_with_glob_like_matchers(config: &Config) -> Vec<String> {
 /// owned — never the user's default `~/.claude` login. Deliberately confined to
 /// the explicit `doctor --gc` path: removing credential entries as a side effect
 /// of `export` would be the wrong default.
-fn forget_credentials_for(removed: &[PathBuf]) -> usize {
+pub(crate) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
     removed
         .iter()
         .filter(|path| {

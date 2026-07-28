@@ -62,8 +62,21 @@ impl Backend {
 ///
 /// Held as opaque JSON and re-injected verbatim — llmenv never needs to read the
 /// token itself, only its expiry timestamps.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Credentials(serde_json::Value);
+
+/// Redacting `Debug` — a derived one would print the access and refresh tokens
+/// verbatim into any `{:?}` or `tracing` field. Only the expiry timestamps are
+/// safe to show, and they're the only part worth debugging.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("expires_at", &self.expires_at())
+            .field("refresh_expires_at", &self.refresh_expires_at())
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
 
 impl Credentials {
     /// Wrap a raw credential document. `None` when it carries no
@@ -493,6 +506,25 @@ mod tests {
         let creds = Credentials::from_json(blob(1_785_282_755_897, Some(FUTURE_MS))).unwrap();
         assert_eq!(creds.expires_at(), Some(1_785_282_755_897));
         assert_eq!(creds.refresh_expires_at(), Some(FUTURE_MS));
+    }
+
+    /// A derived `Debug` would print both tokens verbatim into any log line that
+    /// formats a `Credentials`. Guard the redaction so it can't regress.
+    #[test]
+    fn debug_never_prints_the_tokens() {
+        let creds = Credentials::from_json(blob(FUTURE_MS, None)).unwrap();
+        let rendered = format!("{creds:?}");
+        assert!(
+            !rendered.contains("sk-ant-oat-TESTONLY"),
+            "access token leaked into Debug: {rendered}"
+        );
+        assert!(
+            !rendered.contains("sk-ant-ort-TESTONLY"),
+            "refresh token leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("redacted"), "expected a redaction marker");
+        // The expiry is the part that's actually useful to debug.
+        assert!(rendered.contains(&FUTURE_MS.to_string()));
     }
 
     #[test]

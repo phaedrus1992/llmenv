@@ -32,7 +32,9 @@ pub const HISTORY_FILE: &str = "history.jsonl";
 /// cannot be folded in, or the link cannot be created.
 pub fn link_projects_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
     let target = state_dir.join(PROJECTS_DIR);
-    std::fs::create_dir_all(&target)
+    // 0o700, not create_dir_all's 0o777&~umask: this directory's listing is every
+    // project the user has ever opened, and the transcripts under it are 0o600.
+    crate::adapter::skills::create_dir_owner_only(&target)
         .with_context(|| format!("creating durable transcript dir {}", target.display()))?;
     let link = config_dir.join(PROJECTS_DIR);
     if clear_link_site(&link, &target)? {
@@ -137,7 +139,8 @@ fn attach_store(_target: &Path, _link: &Path) -> anyhow::Result<()> {
 /// follow one into a bounded tree, matching the discipline in
 /// `adapter::claude_code::copy_dir_owner_only`.
 fn move_dir_newest_wins(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
+    crate::adapter::skills::create_dir_owner_only(dst)
+        .with_context(|| format!("creating {}", dst.display()))?;
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let entry = entry.with_context(|| format!("reading entry in {}", src.display()))?;
         let file_type = entry.file_type()?;

@@ -3948,6 +3948,15 @@ fn run_prune(
     if !failed.is_empty() {
         eprintln!("  {} entry(ies) could not be removed", failed.len());
     }
+    // Drop each removed folder's platform credential entry. `doctor --gc` already
+    // does this; prune deleting folders without it is how orphaned keychain items
+    // accumulate in the first place (#1057).
+    if !dry_run && !removed.is_empty() {
+        let forgotten = doctor::forget_credentials_for(&removed);
+        if forgotten > 0 {
+            eprintln!("  dropped {forgotten} orphaned OAuth credential entry(ies)");
+        }
+    }
 
     // Report plugin cache results separately (verb is set above).
     if plugin_cache {
