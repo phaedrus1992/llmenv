@@ -9,7 +9,7 @@ Activate a plugin collection only when you're inside a specific repository.
 
 marketplace:
   - name: dev-commons
-    url: https://github.com/phaedrus1992/llmenv-plugins.git
+    source: "https://github.com/phaedrus1992/llmenv-plugins.git"
 
 plugin-collection:
   - name: rust-tools

@@ -171,11 +171,45 @@ Full per-command reference: [commands.md](commands.md).
 - **Network scope never matches** — only `gateway_mac` is evaluated today;
   `ssid`/`cidr` are ignored. Use a host scope as a reliable fallback.
 
+## Recommended external tools
+
+These aren't required to run llmenv, but several `features:` and `memory:`
+integrations expect them to already be installed and on `PATH`:
+
+- **[icm](https://github.com/rtk-ai/icm)** — the memory backend behind
+  `features.memory` (ICM, Infinite Context Memory). Install via Homebrew:
+
+  ```bash
+  brew tap rtk-ai/tap
+  brew install icm
+  ```
+
+  Or build from source with `cargo install --path crates/icm-cli` (see the
+  repo's README for feature flags). See [MCP & Memory](mcp.md) for how llmenv
+  wires it in.
+
+- **[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)** —
+  the indexer behind `features.codebase_memory`. Must be on `PATH` (llmenv
+  looks for it at `~/.local/bin`):
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
+  ```
+
+  See [MCP & Memory → Codebase memory](mcp.md#codebase-memory-codebase_memory)
+  for the llmenv-side config.
+
+Run `llmenv doctor` after installing either one — it flags config that
+references a feature whose backend isn't reachable.
+
 ## Next steps
 
 - [Concepts](concepts.md) — how resolution actually works.
 - [Configuration](configuration.md) — the full schema.
 - [MCP & Memory](mcp.md) — wiring MCP servers and the shared memory backend.
+- [Examples](examples/index.md) — worked scenarios, and a link to a complete
+  [reference config](https://github.com/phaedrus1992/llmenv/tree/main/examples/config-llmenv-dir)
+  in the repo.
 
 ## Community
 

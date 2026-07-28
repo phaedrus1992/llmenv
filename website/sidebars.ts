@@ -37,6 +37,7 @@ const sidebars: SidebarsConfig = {
         'examples/office-home-network',
         'examples/per-repo-plugins',
         'examples/shared-memory-rust',
+        'examples/multi-host-memory',
         'examples/precedence-walkthrough',
       ],
     },

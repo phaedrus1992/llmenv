@@ -1,6 +1,8 @@
 # Precedence Walkthrough
 
-This example shows how a project scope overrides a host scope, step by step.
+This example shows how a project-triggered bundle's capabilities interact with
+a host-triggered bundle's — and the two different rules that apply depending
+on whether the field is a **scalar** or a **list**.
 
 ## Setup
 
@@ -9,36 +11,45 @@ This example shows how a project scope overrides a host scope, step by step.
 
 scope:
   host:
-    - name: my-laptop
-      hostname: ranger-mbp
+    - id: laptop
+      match: { hostname: "ranger-mbp" }
       tags: [me]
 
+bundle:
+  - name: default-mode
+    when: [me]
+  - name: restricted-mode
+    when: [restricted]
+```
+
+```yaml
+# bundles/default-mode/bundle.yaml
 capabilities:
   permissions:
-    - allow: "Bash(*)"
+    default_mode: acceptEdits
+    allow:
+      - { tool: Bash, pattern: "*" }
+```
 
-bundle:
-  - name: default-mcp
-    when: [me]
-    mcp:
-      - name: filesystem
-        transport: stdio
-        command: uvx
-        args: ["mcp-filesystem", "--root", "~"]
+```yaml
+# bundles/restricted-mode/bundle.yaml
+capabilities:
+  permissions:
+    default_mode: plan
+    deny:
+      - { tool: Bash, pattern: "rm -rf *" }
 ```
 
 ```yaml
 # /path/to/restricted-project/.llmenv.yaml
 
 tags: [restricted]
-
-# Narrow permissions for this project
-capabilities:
-  permissions:
-    - allow: "Bash(git *)"
-    - allow: "Read(*)"
-    - deny: "Bash(*)"
 ```
+
+A project marker can't declare `capabilities:` directly — it only contributes
+tags (and `enable_bundles`/`disable_bundles`). To give a project its own
+capabilities, tag a bundle so a project-contributed tag fires it, like
+`restricted-mode` above.
 
 ## Trace through the pipeline
 
@@ -46,41 +57,66 @@ capabilities:
 
 You're on `ranger-mbp` inside `restricted-project/`. Two scopes are active:
 
-| Scope | Source | Tags added |
+| Scope | Kind | Tags added |
 | --- | --- | --- |
-| `host:my-laptop` | config.yaml | `me` |
-| `project` | `.llmenv.yaml` | `restricted` |
+| `host:laptop` | host | `me` |
+| `restricted-project` | project | `restricted` |
 
 Active tag set: `{me, restricted}`
 
 **Step 2 — Contributors fire:**
 
-- `bundle:default-mcp` → tags `[me]` ∩ `{me, restricted}` = `{me}` → **fires**
-- No contributor with tag `restricted` exists → project doesn't add any contributor
+- `bundle:default-mode` → `[me]` ∩ `{me, restricted}` = `{me}` → **fires**,
+  selected by the **host** scope
+- `bundle:restricted-mode` → `[restricted]` ∩ `{me, restricted}` = `{restricted}`
+  → **fires**, selected by the **project** scope
 
-**Step 3 — Capabilities merge (project > host):**
+Bundle precedence is inherited from the scope kind that selected it —
+`restricted-mode` outranks `default-mode` because project outranks host
+(network → host → user → project, least to most specific).
 
-The project marker declares its own `capabilities.permissions`. Project scope wins:
+**Step 3 — Capabilities merge, scalar vs. list:**
+
+`default_mode` is a **scalar** — the highest-precedence contributor wins outright:
 
 ```text
-Final permissions:
-  allow: "Bash(git *)"
-  allow: "Read(*)"
-  deny: "Bash(*)"
+default_mode: plan   # restricted-mode (project) wins over default-mode (host)'s acceptEdits
 ```
 
-The host-level `allow: "Bash(*)"` is **not present** — it was overridden.
+`allow`/`deny` are **lists** — every contributor's entries concatenate, they
+never override:
+
+```text
+allow:
+  - { tool: Bash, pattern: "*" }          # from default-mode
+deny:
+  - { tool: Bash, pattern: "rm -rf *" }   # from restricted-mode
+```
+
+Both rules are present in the final manifest. llmenv doesn't resolve the
+allow/deny overlap itself — the engine's own runtime precedence (deny beats
+allow on Claude Code) is what actually blocks `rm -rf *` despite the broader
+allow rule also matching it.
 
 **Step 4 — Materialize:**
 
 The merged manifest is written to the cache directory. The adapter emits
-`settings.json` with the final (narrowed) permissions and the `filesystem` MCP
-(from the bundle that fired).
+`settings.json` with `default_mode: plan`, the concatenated `allow`/`deny`
+lists, and the `filesystem`-style tooling from whichever bundles fired.
 
 ## Key takeaway
 
-Scopes don't cancel each other — all active scopes contribute tags and their
-contributors fire additionally. But when the same **capability field** is declared
-at multiple scope levels, **the most specific scope wins** (project > user > host > network).
+Scalars (`default_mode`, a single `env` key) resolve by precedence — the most
+specific scope's bundle wins outright, and two bundles at the *same*
+precedence disagreeing on a scalar is a hard error (no rank to break the tie).
+Lists (`allow`/`ask`/`deny`, hooks, plugins) never override each other — every
+active contributor's entries concatenate and de-duplicate, regardless of
+precedence.
 
-Use this to set permissive defaults at the host level and tighten them per project.
+## Verify
+
+```bash
+cd /path/to/restricted-project
+llmenv doctor
+llmenv export --dry-run   # preview the merged manifest before it's written
+```
