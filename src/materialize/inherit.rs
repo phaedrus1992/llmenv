@@ -199,8 +199,19 @@ fn stranded_projects_dirs(adapter_root: &Path, state_dir: &Path) -> Vec<PathBuf>
 /// Immediate subdirectories of `dir`, skipping symlinks and staging dirs.
 /// An unreadable directory yields nothing — migration is best-effort.
 fn child_dirs(dir: &Path) -> Vec<PathBuf> {
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return Vec::new();
+    // An absent dir is nothing to migrate; anything else (a permission error,
+    // say) is warned rather than swallowed — treating it as "no children" would
+    // silently skip a folder full of transcripts.
+    let read_dir = match crate::paths::read_dir_optional(dir) {
+        Ok(Some(rd)) => rd,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                "inherit: cannot scan {} for transcripts: {e:#}",
+                dir.display()
+            );
+            return Vec::new();
+        }
     };
     read_dir
         .filter_map(|entry| {
