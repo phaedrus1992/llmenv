@@ -304,6 +304,51 @@ pub(super) fn hooks_with_glob_like_matchers(config: &Config) -> Vec<String> {
         .collect()
 }
 
+/// Drop the platform credential entry belonging to each cache folder GC just
+/// deleted, and report how many went (#1057).
+///
+/// Keyed by folder path, so this only ever touches entries llmenv's own folders
+/// owned — never the user's default `~/.claude` login. Deliberately confined to
+/// the explicit `doctor --gc` path: removing credential entries as a side effect
+/// of `export` would be the wrong default.
+pub(crate) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
+    removed
+        .iter()
+        .filter(|path| {
+            crate::auth::credentials::forget(path)
+                .inspect_err(|e| {
+                    tracing::debug!(
+                        "could not drop credential entry for {}: {e}",
+                        path.display()
+                    );
+                })
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/// Report the durable OAuth credential cache (#1057): present or not, and
+/// whether the cached token is still usable.
+fn report_credential_cache(cache_dir: &Path, pass: &str, info: &str, warn: &str) {
+    use crate::adapter::AgentAdapter;
+    let adapter_root = cache_dir.join(crate::adapter::claude_code::ClaudeCodeAdapter.name());
+    match crate::auth::credentials::load_cached(&adapter_root) {
+        Ok(None) => eprintln!(
+            "{info} No OAuth credential cached — a config or version change will prompt for \
+             login. Run `llmenv login` to cache one."
+        ),
+        Ok(Some(creds)) if creds.is_expired_now() => eprintln!(
+            "{warn} Cached OAuth credential has expired (access and refresh tokens both past \
+             their expiry) — run `llmenv login` to refresh it"
+        ),
+        Ok(Some(_)) => eprintln!(
+            "{pass} OAuth credential cached at {}",
+            crate::auth::credentials::cache_path(&adapter_root).display()
+        ),
+        Err(e) => eprintln!("{warn} Could not read the OAuth credential cache: {e}"),
+    }
+}
+
 pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
@@ -777,6 +822,8 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
+    report_credential_cache(&cache_dir, &pass, &info, &warn);
+
     eprintln!("{pass} Doctor check complete.");
 
     if gc {
@@ -796,6 +843,13 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                                 report.removed.len(),
                                 report.kept
                             );
+                            let forgotten = forget_credentials_for(&report.removed);
+                            if forgotten > 0 {
+                                eprintln!(
+                                    "{pass} GC: dropped {forgotten} orphaned OAuth credential \
+                                     entries"
+                                );
+                            }
                         }
                         Err(e) => eprintln!("{warn} GC failed: {}", e),
                     }

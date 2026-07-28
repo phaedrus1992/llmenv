@@ -410,6 +410,11 @@ Capture Claude Code auth credentials and store them in the llmenv auth cache.
 Runs `claude auth login` in a temporary directory, extracts the resulting
 `oauthAccount`, and saves it so new materialized folders inherit it automatically.
 
+The OAuth token is captured too, not just the account identity (added in
+v3.8.0) — so an inheriting folder is actually logged in rather than merely
+knowing which account you use. See
+[Inherited Claude Code state](configuration.md#oauth-credential-inheritance).
+
 - (no flags) — if `CLAUDE_CONFIG_DIR` is set and managed by llmenv, updates both
   that folder's auth and the global cache. Otherwise falls back to global-only
   (same as `--global`) and prints a note directing you to run `llmenv export` first.
@@ -506,10 +511,16 @@ active context (active bundles, active MCP servers, etc.). Checks:
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` are not set; reports (info) whether
   `CLAUDE_CODE_SUBAGENT_MODEL` is set; and checks whether a context-mode MCP
   server is registered
+- cached OAuth credential (added in v3.8.0) — reports whether a token is cached
+  in the durable state dir, and warns when the cached token has expired. See
+  [Inherited Claude Code state](configuration.md#oauth-credential-inheritance).
 
 - `--all` runs the full orphan analysis across the entire config (all bundles and
   scopes, not just active ones).
-- `--gc` runs cache garbage collection after the diagnostics.
+- `--gc` runs cache garbage collection after the diagnostics. On macOS this also
+  drops the keychain credential item belonging to each cache folder it deletes
+  (added in v3.8.0); matched by folder path, so your default `~/.claude` login is
+  never affected.
 - `--verbose` prints detailed per-check reasoning alongside each pass/fail result.
 
 ## Deprecated commands

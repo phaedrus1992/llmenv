@@ -8,6 +8,7 @@
 //! **Cache layout**: `<adapter_root>/state/auth/<uuid>.json`
 //! Each file holds one [`AuthEntry`] serialized as JSON (owner-only, 0o600).
 
+pub mod credentials;
 pub mod detect;
 
 use std::path::{Path, PathBuf};
@@ -135,6 +136,11 @@ pub fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntr
                 .ok()?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                return None;
+            }
+            // The credential cache (#1057) shares this directory but is not an
+            // AuthEntry; without this it would warn on every load.
+            if path.file_name().and_then(|n| n.to_str()) == Some(credentials::CACHE_FILE) {
                 return None;
             }
             let bytes = std::fs::read(&path)
@@ -411,6 +417,25 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].uuid, entry.uuid);
         assert_eq!(entries[0].email, entry.email);
+    }
+
+    #[test]
+    fn load_all_ignores_the_credential_cache_but_keeps_real_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = AuthEntry {
+            uuid: "dddd4444-0000-0000-0000-000000000000".to_string(),
+            email: "both@test.com".to_string(),
+            last_seen: "2025-01-01T00:00:00Z".to_string(),
+            raw: serde_json::json!({"id": "dddd4444-0000-0000-0000-000000000000"}),
+        };
+        save_auth_entry(tmp.path(), &entry).unwrap();
+        let creds = credentials::Credentials::from_json(serde_json::json!({ "claudeAiOauth": {} }))
+            .unwrap();
+        credentials::save_cached(tmp.path(), &creds).unwrap();
+
+        let entries = load_all_auth_entries(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].uuid, entry.uuid);
     }
 
     #[test]
