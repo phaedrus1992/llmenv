@@ -102,8 +102,20 @@ fn clear_link_site(link: &Path, target: &Path) -> anyhow::Result<bool> {
     }
     if file_type.is_dir() {
         move_dir_newest_wins(link, target)?;
-        std::fs::remove_dir_all(link)
-            .with_context(|| format!("removing migrated dir {}", link.display()))?;
+        // Deliberately not remove_dir_all: Claude Code writes into this directory
+        // while the session runs, so anything it created between the fold above
+        // and this call would be destroyed rather than inherited. Prune the empty
+        // skeleton the fold left, then require the directory itself to be empty —
+        // if it isn't, new transcripts landed mid-swap, so leave everything alone
+        // and let the next export fold them in.
+        crate::materialize::prune_empty_dirs(link)?;
+        if let Err(e) = std::fs::remove_dir(link) {
+            tracing::warn!(
+                "{} refilled during the swap ({e}); leaving it for the next export",
+                link.display()
+            );
+            return Ok(false);
+        }
         return Ok(true);
     }
     tracing::warn!(
@@ -495,6 +507,45 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(state.join(PROJECTS_DIR).join("-p").join("s.jsonl")).unwrap(),
             "body"
+        );
+    }
+
+    /// A file appearing mid-swap must be inherited later, never deleted. The old
+    /// `remove_dir_all` would have destroyed it.
+    #[cfg(unix)]
+    #[test]
+    fn swap_refilled_mid_flight_keeps_the_new_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("TAG-hash");
+        let target = state.join(PROJECTS_DIR);
+        std::fs::create_dir_all(&target).unwrap();
+        // A real dir whose file is NOT foldable-away: same name, newer in the
+        // destination, so the fold leaves the source file in place.
+        // Leave something the fold provably will not move: it skips symlinks by
+        // design. That makes the "directory refilled" condition deterministic,
+        // with no dependence on filesystem timestamp granularity.
+        let outside = tmp.path().join("outside.jsonl");
+        write(&outside, "not-ours");
+        let leftover = cfg.join(PROJECTS_DIR).join("-p").join("link.jsonl");
+        std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &leftover).unwrap();
+
+        link_projects_dir(&state, &cfg).unwrap();
+
+        // The entry the fold could not move must still be there, not deleted, and
+        // `projects/` must still be a real directory rather than a symlink — the
+        // swap is deferred to the next export instead of destroying data.
+        assert!(
+            std::fs::symlink_metadata(&leftover).is_ok(),
+            "an entry the fold skipped must not be destroyed"
+        );
+        assert!(
+            !std::fs::symlink_metadata(cfg.join(PROJECTS_DIR))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "swap must be deferred while the directory still holds data"
         );
     }
 
