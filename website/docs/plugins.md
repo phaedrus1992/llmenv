@@ -6,6 +6,8 @@ onto scopes by tag — the same model as bundles and MCP servers.
 
 ## Marketplaces
 
+(added in v1.0.0)
+
 A marketplace is a named source of plugins, declared at the top level:
 
 ```yaml

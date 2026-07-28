@@ -40,28 +40,21 @@
   margin-bottom: 2.5rem;
 }
 
-.featureGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 1.5rem;
-}
-
-.feature {
-  padding: 1.5rem;
-  border: 3px outset var(--ifm-color-primary);
-  border-radius: 0;
-  background: var(--ifm-background-color);
+.featureList {
+  max-width: 720px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
 }
 
 .featureTitle {
-  font-size: 1.1rem;
-  margin-bottom: 0.5rem;
-  color: var(--ifm-color-primary);
+  font-size: 1.3rem;
+  margin-bottom: 0.4rem;
 }
 
 .featureDesc {
-  font-size: 0.9rem;
   margin: 0;
   color: var(--ifm-color-emphasis-700);
-  line-height: 1.6;
+  line-height: 1.7;
 }

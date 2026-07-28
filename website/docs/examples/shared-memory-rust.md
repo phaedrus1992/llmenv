@@ -1,21 +1,22 @@
 # Shared Memory Across Rust Projects
 
-Configure a memory backend that activates for every project tagged `rust`, giving
-all your Rust repos a shared long-term memory context.
+Configure llmenv's memory backend (ICM) so every project tagged `rust` shares
+the same long-term memory context, instead of each repo getting its own.
 
 ## Config
 
 ```yaml
 # ~/.config/llmenv/config.yaml
 
-memory:
-  backend: networked
-  when: [rust]
-  host: memory-server
-  port: 7700
-
 host:
-  memory-server: 192.168.1.50
+  memory-server:
+    addr: "192.168.1.50"
+
+features:
+  memory:
+    - server_host: memory-server
+      port: 9092
+      when: [rust]
 ```
 
 ```yaml
@@ -26,37 +27,37 @@ tags: [rust]
 
 ## How it works
 
-- When `rust` is in the active tag set (contributed by any project marker with `tags: [rust]`), the memory backend fires.
-- The adapter emits an MCP server entry pointing at `memory-server:7700`.
-- All Claude Code sessions in any repo tagged `rust` share the same memory context.
+- `rust` is a plain activation tag, contributed by any project marker with
+  `tags: [rust]` — same selection model as bundles and MCP servers.
+- When `rust` is in the active tag set, this `features.memory` entry fires and
+  llmenv points the adapter at `memory-server:9092`.
+- Every Claude Code session in every repo tagged `rust` resolves to the same
+  memory backend, so decisions/patterns recorded in one Rust project are
+  recallable from any other.
 
-## Isolated memory per project
+## Scoping instead of sharing
 
-If you want project-private memory instead:
+At most one `features.memory` entry can be active per scope — the resolver
+errors if two entries' tags match simultaneously. So isolation is a tagging
+decision, not a backend flag: give a project a tag that doesn't intersect the
+shared entry's `when`, or add a second entry with its own host/tag pair for a
+project (or group of projects) that should have private memory instead:
 
 ```yaml
-# ~/.config/llmenv/config.yaml
-
-memory:
-  backend: local       # per-project, no sharing
+features:
+  memory:
+    - server_host: memory-server
+      port: 9092
+      when: [rust]              # shared pool
+    - server_host: memory-server
+      port: 9093
+      when: [proprietary-repo]  # private — different port, different tag
 ```
-
-Or use the `state:` block to give each project its own state directory:
-
-```yaml
-state:
-  tools:
-    - env: CONTEXT_MODE_DATA_DIR
-      subdir: context-mode
-```
-
-llmenv emits `CONTEXT_MODE_DATA_DIR=<state>/<subdir>` where `<state>` is a stable
-directory that survives version and config changes.
 
 ## Verify
 
 ```bash
 cd /path/to/any-rust-repo
 llmenv doctor
-# should show: active tags: [rust], memory: networked → memory-server:7700
+llmenv context   # shows the resolved memory host/port for the active tags
 ```

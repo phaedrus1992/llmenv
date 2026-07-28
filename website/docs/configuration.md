@@ -135,7 +135,7 @@ Each scope has an `id` (used in diagnostics and `LLMENV_ACTIVE_SCOPES`), a
   is evaluated today; `ssid`/`cidr` parse but are ignored.
 - **Host** `match` field: `hostname` (compared case-insensitively).
 - **User** `match` field: `user` (exact match against `$USER`).
-- **Content** `match` fields: `glob` (matched against paths relative to the
+- **Content** *(added in v3.3.0)* `match` fields: `glob` (matched against paths relative to the
   working directory) and `depth` (optional; caps how many directories deep
   the search descends — omit for an unbounded search). Unlike `network`/
   `host`/`user`, which check environment facts (network gateway, hostname,
@@ -189,7 +189,7 @@ capabilities:
     claude_code: { ... }
   native_mcp:
     claude_code: { ... }
-  native_model_providers:
+  native_model_providers:               # added in v3.7.0
     opencode: { ... }                    # deep-merged onto the provider block
 ```
 
@@ -206,6 +206,9 @@ capabilities:
   [Engines](engines.md).
 
 ### `model_providers` / `default_models`
+
+(added in v3.3.0; Crush rendering added in v3.6.1, opencode rendering added in
+v3.7.0)
 
 Custom or self-hosted model provider endpoints (Ollama, vLLM, LM Studio, a
 proxy, or an override of a built-in provider), and default-model selection by
@@ -326,6 +329,8 @@ See [MCP & Memory](mcp.md) for the full model.
 
 ## `lsp:`
 
+(added in v3.0.0)
+
 Language servers selected by tag, rendered into the agent's LSP config. Only
 engines whose adapter reports `supports_lsp() == true` render these — today
 that's Crush and Claude Code; other engines silently ignore `lsp:` entries,
@@ -378,6 +383,8 @@ built-in). Additional feature flags may be nested here in future versions.
 
 ### `features.memory:`
 
+(added in v1.0.0; `listen_host` added in v1.0.8)
+
 llmenv's own memory backend (ICM). A list of tag-scoped topology entries: each
 declares one host that runs the daemon and the tag set that activates it (same
 model as bundles and MCP servers). At most one entry may be active per scope —
@@ -415,6 +422,8 @@ See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
 
 ### `features.codebase_memory:`
+
+(added in v3.6.0)
 
 First-class integration for
 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp), a
@@ -458,6 +467,8 @@ emits.
 
 ### `features.throttle:`
 
+(added in v2.3.0)
+
 Usage throttling for an LLM backend. A list of tag-scoped entries (same
 selection model as `memory:` — at most one active per scope, resolver errors on
 two simultaneously active). When an entry is active, llmenv injects `PreToolUse`
@@ -492,6 +503,8 @@ than blocking the session.
 
 ### `features.upgrade:`
 
+(added in v3.3.0)
+
 Controls which release track `llmenv upgrade` uses. The CLI `--track` flag
 overrides this on a per-run basis.
 
@@ -506,6 +519,8 @@ features:
 | `track` | no       | `"release"` (default) or `"beta"`. `release` uses the GitHub latest-stable endpoint; `beta` uses the first non-draft release from the recent list. |
 
 ### `features.repeat_detect:`
+
+(added in v3.7.0)
 
 Engine-neutral repeat-loop detection, **on by default** (opt-*out*, not
 opt-in — omitting `features.repeat_detect` entirely resolves the same as
@@ -549,6 +564,8 @@ features:
 
 ### `features.context_mode:`
 
+(added in v3.0.0)
+
 Built-in context-saving support (#490). When enabled, llmenv wires the
 context-mode plugin automatically — marketplace, plugin registration, durable
 `CONTEXT_MODE_DATA_DIR` state dir, and MCP permission grants — replacing the
@@ -566,6 +583,8 @@ features:
 | `mcp_permissions` | no       | Per-tier permission override for the context-mode MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 
 ### `features.mcp_permissions:`
+
+(added in v3.6.1)
 
 Every feature-enabled MCP (`features.context_mode` and each `features.memory`
 entry) exposes its tools in three risk tiers — read-only, mutation, and
@@ -605,6 +624,8 @@ error at load time.
 
 ### `features.read_once:`
 
+(added in v3.3.0)
+
 Reduces redundant context usage: tracks files read via the `Read` tool within a
 session and warns or denies re-reads of an unchanged file within a TTL window.
 Opt-in (disabled by default). Only the `Read` tool is tracked; other tools are
@@ -629,6 +650,8 @@ features:
 
 ### `features.task_tracker:`
 
+(added in v3.6.0)
+
 In-engine task tracker (#231): durable, agent-native "what am I working on"
 state that survives compaction and session restarts. The `llmenv task` CLI
 subcommands always work regardless of this flag — it only gates the injected
@@ -652,6 +675,8 @@ features:
 See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
 
 ### `features.slippage:`
+
+(added in v3.3.0)
 
 Guardrails against model behavior drift across long sessions (effort decay,
 forgetting rules after context compaction). The master switch `enabled` gates
@@ -1018,6 +1043,8 @@ state:
 (`HOME`, `PATH`, `USER`, etc.) are rejected.
 
 ## `marketplace:` and `plugin-collection:`
+
+(added in v1.0.0)
 
 ```yaml
 marketplace:

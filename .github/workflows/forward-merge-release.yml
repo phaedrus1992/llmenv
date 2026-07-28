@@ -21,6 +21,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -198,6 +199,15 @@ jobs:
             PUSH_RC=$?
             if [[ $PUSH_RC -eq 0 ]]; then
               echo "Pushed directly to $TARGET"
+              # A push made with GITHUB_TOKEN deliberately doesn't trigger other
+              # workflows (GitHub's anti-recursion rule), so docs.yml's `push`
+              # trigger never fires for this forward-merge even though it landed
+              # on main. Dispatch it explicitly when website/ actually changed.
+              if [[ "$TARGET" == "main" ]] && [[ -n "$TARGET_SHA" ]] \
+                  && ! git diff --quiet "$TARGET_SHA" HEAD -- website/; then
+                echo "website/ changed on main; triggering docs deploy"
+                gh workflow run docs.yml --ref main
+              fi
             else
               # Log the actual error so operators can distinguish protection
               # rejections from auth/network failures.

@@ -9,23 +9,23 @@ Use different MCP servers depending on which network you're on, with no manual t
 
 scope:
   network:
-    - name: office
-      gateway_mac: "aa:bb:cc:dd:ee:ff"   # your office router's MAC
+    - id: office
+      match: { gateway_mac: "aa:bb:cc:dd:ee:ff" }   # your office router's MAC
       tags: [office]
-    - name: home
-      gateway_mac: "11:22:33:44:55:66"   # your home router's MAC
+    - id: home
+      match: { gateway_mac: "11:22:33:44:55:66" }   # your home router's MAC
       tags: [home]
 
 mcp:
   - name: internal-docs
     when: [office]
-    transport: stdio
+    type: stdio              # default; shown for clarity
     command: npx
     args: ["-y", "my-company-docs-mcp"]
 
   - name: home-assistant
     when: [home]
-    transport: stdio
+    type: stdio
     command: uvx
     args: ["home-assistant-mcp"]
 ```

@@ -53,6 +53,8 @@ mcp:
 
 ## Memory backend (`memory:`)
 
+(added in v1.0.0)
+
 The memory backend is a single service that one host runs locally while every
 host — including the one running it — reaches over the network. The daemon
 (`icm serve`) is stdio-only, so on the server host llmenv wraps it in
@@ -135,6 +137,8 @@ client URL — even when the network can't be auto-detected. The host that
 matches `server_host` additionally launches the local proxy.
 
 ## Codebase memory (`codebase_memory:`)
+
+(added in v3.6.0)
 
 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) is a
 local code-intelligence MCP server — a knowledge graph of a codebase's
