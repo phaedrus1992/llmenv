@@ -30,56 +30,38 @@
   flex-wrap: wrap;
 }
 
-.pipeline {
+.features {
   padding: 4rem 0;
   background: var(--ifm-background-surface-color);
 }
 
-.pipelineTitle {
+.featuresTitle {
   text-align: center;
-  margin-bottom: 0.5rem;
-}
-
-.pipelineSub {
-  text-align: center;
-  color: var(--ifm-color-emphasis-600);
   margin-bottom: 2.5rem;
 }
 
-.steps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  justify-content: center;
+.featureGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.5rem;
 }
 
-.step {
-  flex: 1 1 160px;
-  max-width: 180px;
-  text-align: center;
-  padding: 1.5rem 1rem;
+.feature {
+  padding: 1.5rem;
   border: 3px outset var(--ifm-color-primary);
   border-radius: 0;
   background: var(--ifm-background-color);
 }
 
-.stepArrow {
-  flex: 0 0 auto;
-  align-self: center;
-  font-size: 1.5rem;
-  color: var(--ifm-color-emphasis-400);
-}
-
-.stepLabel {
-  font-weight: 700;
-  font-size: 1rem;
-  margin-bottom: 0.4rem;
+.featureTitle {
+  font-size: 1.1rem;
+  margin-bottom: 0.5rem;
   color: var(--ifm-color-primary);
 }
 
-.stepDesc {
-  font-size: 0.85rem;
+.featureDesc {
+  font-size: 0.9rem;
   margin: 0;
   color: var(--ifm-color-emphasis-700);
-  line-height: 1.5;
+  line-height: 1.6;
 }
