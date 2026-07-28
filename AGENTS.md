@@ -8,7 +8,7 @@ env injection, MCP wiring) are implemented in core and ship with the binary —
 see ICM (`src/icm.rs`) and the adapter-injected hooks in
 `src/adapter/claude_code.rs` for the reference pattern.
 
-`examples/` (notably `examples/my-llmenv/`) is **illustrative configuration
+`examples/` (notably `examples/config-llmenv-dir/`) is **illustrative configuration
 only — never a target for new feature development.** It demonstrates how a user
 configures llmenv; it does not house product code. Do not add features there.
 
@@ -42,6 +42,22 @@ change is adequately documented in `website/docs/`. If the docs don't cover
 it, or if they describe the old behavior, update them in the same change.
 "Search the docs for the feature name" is not enough — the docs must
 correctly describe the new behavior end-to-end.
+
+**Hard rule — docs must say which version introduced a feature.** Any time
+`website/docs/` gains or edits a section describing a specific feature (a
+config field, a flag, a command, a `features.*`/`capabilities.*` key), tag it
+with the version it first shipped in — e.g. `(added in v3.6.0)` right after
+the heading or on its own line before the description. Plain text, not
+emphasis (`*...*`/`_..._`) — markdownlint's MD036 flags a line that's entirely
+emphasis as a mis-styled heading. Look the version up (the changelog entry
+that introduced it, or `git tag --contains <commit>`) — never guess it. Skip
+the tag only for content that has no single "introduced in" version:
+foundational concepts that predate versioning discipline (e.g. scopes/tags/
+bundles themselves), or a page that's a pure walkthrough with no new field of
+its own. If a feature changed materially since it shipped (a field renamed,
+behavior changed), note that too — e.g. `(added in v3.2.0; renamed from
+\`old_key\` in v3.5.0)` — so the version tag doesn't quietly become
+misleading the next time the doc is touched.
 
 **Keep entries short.** A sentence or two — what changed and why it matters
 to a user, not an exhaustive walkthrough of the implementation. The full

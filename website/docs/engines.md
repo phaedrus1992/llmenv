@@ -108,6 +108,8 @@ plugins) concatenate and de-duplicate.
 
 ## The Crush adapter
 
+(added in v3.0.0)
+
 [Crush](https://github.com/nicholasgasior/crush) is a second supported engine. It
 is **PATH-gated**: `export`, `hook`, and `regenerate` skip Crush silently if
 `crush` is not on `PATH`. When it is present, a separate `crush/` subtree is
@@ -201,6 +203,8 @@ capabilities:
 ```
 
 ## The opencode adapter
+
+(added in v3.6.1)
 
 [opencode](https://opencode.ai) is a third supported engine. Like Crush it is
 **PATH-gated**: `export`, `hook`, and `regenerate` skip opencode silently if
