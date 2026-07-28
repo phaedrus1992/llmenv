@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.7.0] - 2026-07-28
+
 ### Added
 
 - Give the docs site (`website/`) a 1997 GeoCities-style retro skin — dark black-and-gold theme, tiled background, marquee banner, under-construction badge, and a per-browser hit counter, all checked against WCAG AA contrast. Site-only change; no `llmenv` CLI/config behavior affected. (#1027)
@@ -650,7 +652,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.7.0...HEAD
+[3.7.0]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...v3.7.0
 [3.6.1]: https://github.com/phaedrus1992/llmenv/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/phaedrus1992/llmenv/compare/v3.5.1...v3.6.0
 [3.5.1]: https://github.com/phaedrus1992/llmenv/compare/v3.5.0...v3.5.1
