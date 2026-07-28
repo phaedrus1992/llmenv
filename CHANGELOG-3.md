@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Inherit the Claude Code OAuth token across cache folders, so a config edit or version bump no longer produces a login prompt. Previously only the account identity (`oauthAccount`) was inherited — the folder knew who you were but not that you were logged in. Covers both stores: `.credentials.json` on Linux/WSL and the macOS keychain item, whose service name embeds a hash of the config-dir path and so is no more stable across folders than a file. A live cached token is never overwritten by a stale folder's, and a folder's own token is never replaced. `llmenv login` captures the token too; `llmenv doctor` reports whether one is cached and whether it expired; `llmenv doctor --gc` drops the keychain item belonging to each folder it deletes. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#oauth-credential-inheritance) (#1057)
+- Keep third-party MCP server logins (Slack, Notion, Linear, …) across cache folders. Claude Code stores those tokens under `mcpOAuth` in the same store as the login token, so they ride along with it — but a lapsed Claude login no longer discards them, since the two authenticate different things and expire independently. `mcp-needs-auth-cache.json` is inherited too, so Claude Code doesn't re-probe every OAuth server after a hash change, and `llmenv doctor` reports how many MCP tokens are cached. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#third-party-mcp-server-logins) (#1058)
 
 ### Fixed
 

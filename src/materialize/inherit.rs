@@ -8,9 +8,15 @@
 //!
 //! `projects/` is relocated to the durable state dir (`<adapter_root>/state/`,
 //! #175) and the materialized folder gets a symlink to it — one transcript
-//! store, not a copy per hash. `history.jsonl` is copied in when absent rather
-//! than linked: a single file rewritten via write-temp-then-rename would
-//! replace the symlink with a regular file, which a directory link is immune to.
+//! store, not a copy per hash.
+//!
+//! Single files ([`COPIED_FILES`]: `history.jsonl` for `↑` recall, and
+//! `mcp-needs-auth-cache.json` recording which MCP servers still need an
+//! authorization, #1058) are copied rather than linked, because a
+//! write-temp-then-rename would replace a symlink with a regular file — a hazard
+//! a directory link is immune to. They move both ways: captured from a folder
+//! into the store when the store has none, and copied back into a new folder that
+//! has none. Neither direction ever overwrites an existing copy.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +26,17 @@ use anyhow::Context as _;
 pub const PROJECTS_DIR: &str = "projects";
 /// Prompt-history file (`↑` recall) inherited alongside the transcripts.
 pub const HISTORY_FILE: &str = "history.jsonl";
+/// Claude Code's record of which MCP servers still need an OAuth authorization.
+/// Holds no tokens — losing it just makes Claude Code re-probe every server
+/// after a hash change (#1058).
+pub const MCP_NEEDS_AUTH_FILE: &str = "mcp-needs-auth-cache.json";
+
+/// Files inherited by copying them in when the folder has none.
+///
+/// Copies rather than links: each is a single file that a write-temp-then-rename
+/// would replace, turning a symlink back into a regular file. A folder's own copy
+/// is never overwritten.
+const COPIED_FILES: &[&str] = &[HISTORY_FILE, MCP_NEEDS_AUTH_FILE];
 
 /// Point `<config_dir>/projects` at `<state_dir>/projects`.
 ///
@@ -43,21 +60,43 @@ pub fn link_projects_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<
     Ok(())
 }
 
-/// Copy the cached `history.jsonl` in when the folder has none.
-///
-/// Deliberately a copy, not a link: a single file rewritten via
-/// write-temp-then-rename would replace a symlink with a regular file.
+/// Copy each [`COPIED_FILES`] entry from the durable store into a folder that
+/// has none of its own.
 ///
 /// # Errors
-/// Returns an error when the copy fails. A missing cached file is a no-op.
-pub fn inherit_history_file(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
-    let src = state_dir.join(HISTORY_FILE);
-    let dst = config_dir.join(HISTORY_FILE);
-    if dst.exists() || !src.is_file() {
-        return Ok(());
+/// Returns an error when a copy fails. A file absent from the store is a no-op.
+pub fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    for name in COPIED_FILES {
+        let src = state_dir.join(name);
+        let dst = config_dir.join(name);
+        if dst.exists() || !src.is_file() {
+            continue;
+        }
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
-    std::fs::copy(&src, &dst)
-        .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+/// Copy a folder's single-file state back into the durable store when the store
+/// has no copy yet, so the next folder can inherit it.
+///
+/// Without this the store would never gain a `history.jsonl` or needs-auth cache
+/// in the first place — Claude Code only ever writes them into the config dir.
+/// Never overwrites the store's copy; the folder is not authoritative.
+///
+/// # Errors
+/// Returns an error when a copy fails.
+pub fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    for name in COPIED_FILES {
+        let src = config_dir.join(name);
+        let dst = state_dir.join(name);
+        if dst.exists() || !src.is_file() {
+            continue;
+        }
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+    }
     Ok(())
 }
 
@@ -353,14 +392,14 @@ mod tests {
         std::fs::create_dir_all(&cfg).unwrap();
         write(&state.join(HISTORY_FILE), "cached");
 
-        inherit_history_file(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg).unwrap();
         assert_eq!(
             std::fs::read_to_string(cfg.join(HISTORY_FILE)).unwrap(),
             "cached"
         );
 
         write(&cfg.join(HISTORY_FILE), "folder-own");
-        inherit_history_file(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg).unwrap();
         assert_eq!(
             std::fs::read_to_string(cfg.join(HISTORY_FILE)).unwrap(),
             "folder-own",
@@ -376,7 +415,7 @@ mod tests {
         let cfg = tmp.path().join("TAG-hash");
         std::fs::create_dir_all(&cfg).unwrap();
 
-        inherit_history_file(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg).unwrap();
         assert!(!cfg.join(HISTORY_FILE).exists());
     }
 
@@ -546,6 +585,52 @@ mod tests {
                 .file_type()
                 .is_symlink(),
             "swap must be deferred while the directory still holds data"
+        );
+    }
+
+    /// The needs-auth cache gets the same treatment as history — it's written into
+    /// CLAUDE_CONFIG_DIR and dies with it, so losing it re-probes every MCP server.
+    #[test]
+    fn mcp_needs_auth_cache_is_inherited_like_history() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("TAG-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+        write(
+            &state.join(MCP_NEEDS_AUTH_FILE),
+            r#"{"notion":{"timestamp":1}}"#,
+        );
+
+        inherit_copied_files(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cfg.join(MCP_NEEDS_AUTH_FILE)).unwrap(),
+            r#"{"notion":{"timestamp":1}}"#
+        );
+    }
+
+    /// Capture seeds the store from a folder — without it the store never gains a
+    /// copy, since Claude Code only writes these into the config dir.
+    #[test]
+    fn capture_seeds_the_store_and_never_clobbers_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("TAG-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&cfg.join(HISTORY_FILE), "from-folder");
+
+        capture_copied_files(&state, &cfg).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(state.join(HISTORY_FILE)).unwrap(),
+            "from-folder"
+        );
+
+        write(&cfg.join(HISTORY_FILE), "newer-folder-copy");
+        capture_copied_files(&state, &cfg).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(state.join(HISTORY_FILE)).unwrap(),
+            "from-folder",
+            "the store's copy is authoritative once it exists"
         );
     }
 

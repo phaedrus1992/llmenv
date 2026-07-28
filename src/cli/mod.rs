@@ -1611,7 +1611,13 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
     if let Err(e) = crate::materialize::inherit::link_projects_dir(state_dir, cache_path) {
         tracing::warn!("could not inherit /resume transcripts (non-fatal): {e:#}");
     }
-    if let Err(e) = crate::materialize::inherit::inherit_history_file(state_dir, cache_path) {
+    // Capture before inherit: Claude Code only ever writes these into the config
+    // dir, so without this the durable store would never gain a copy to hand to
+    // the next folder.
+    if let Err(e) = crate::materialize::inherit::capture_copied_files(state_dir, cache_path) {
+        tracing::warn!("could not capture folder state into the store (non-fatal): {e:#}");
+    }
+    if let Err(e) = crate::materialize::inherit::inherit_copied_files(state_dir, cache_path) {
         tracing::warn!("could not inherit prompt history (non-fatal): {e:#}");
     }
 }
