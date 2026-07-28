@@ -1,22 +1,197 @@
+/* ponytail: 1997 GeoCities skin (#1027). CSS/theme only — no content or nav changes.
+   Dark mode is forced site-wide (see docusaurus.config.ts colorMode), so all colors
+   here only need to be checked against Infima's dark surfaces — every foreground/
+   background pair below is WCAG AA (>=4.5:1 normal text) or better against black. */
+
 :root {
-  --ifm-color-primary: #2e6fdb;
-  --ifm-color-primary-dark: #285fc6;
-  --ifm-color-primary-darker: #2559bb;
-  --ifm-color-primary-darkest: #1e499a;
-  --ifm-color-primary-light: #3d7ee0;
-  --ifm-color-primary-lighter: #4a87e2;
-  --ifm-color-primary-lightest: #6a9fe8;
+  /* +10% over Infima's 100% base — scales every rem-based size on the site
+     (menus, breadcrumbs, TOC included) without per-component overrides. */
+  --ifm-font-size-base: 110%;
+
+  --ifm-color-primary: #ffd700;
+  --ifm-color-primary-dark: #e6c200;
+  --ifm-color-primary-darker: #d9b700;
+  --ifm-color-primary-darkest: #b39700;
+  --ifm-color-primary-light: #ffdc1a;
+  --ifm-color-primary-lighter: #ffe033;
+  --ifm-color-primary-lightest: #ffe866;
   --ifm-code-font-size: 95%;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  --docusaurus-highlighted-code-line-bg: rgba(255, 215, 0, 0.25);
+
+  /* Dim gold: backdrop for white text (construction banner stripe). ~6.2:1 contrast. */
+  --retro-gold-dim: #7a5c00;
+  --retro-link: #66ccff;
+  --retro-link-visited: #cc99ff;
+  --retro-link-active: #ff5555;
+  --retro-tile-a: #000000;
+  --retro-tile-b: #0d0900;
 }
 
-[data-theme='dark'] {
-  --ifm-color-primary: #5a9cf5;
-  --ifm-color-primary-dark: #3e8df3;
-  --ifm-color-primary-darker: #3086f2;
-  --ifm-color-primary-darkest: #0e6be5;
-  --ifm-color-primary-light: #76abf7;
-  --ifm-color-primary-lighter: #84b3f8;
-  --ifm-color-primary-lightest: #aecbfb;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+/* Tiled background goes on `html`, not `body` — `body`'s own box only covers one
+   viewport tall, so a background there stops repeating and shows plain grey below
+   the fold on any page taller than the screen. `html` is the canvas element and
+   always extends across the full scrollable page. */
+html {
+  background-image: repeating-conic-gradient(
+    var(--retro-tile-a) 0% 25%,
+    var(--retro-tile-b) 0% 50%
+  );
+  background-size: 40px 40px;
+}
+
+body {
+  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+article h1 {
+  font-family: Impact, 'Arial Black', sans-serif;
+  /* Solid bright gold fill (~15:1 on black) with a dark-gold shadow for the bevel —
+     not the other way around, which buried part of each glyph in low-contrast gold. */
+  color: var(--ifm-color-primary);
+  text-shadow: 2px 2px 0 var(--retro-gold-dim);
+  letter-spacing: 0.03em;
+}
+
+a:not(.button) {
+  color: var(--retro-link);
+  text-decoration: underline;
+}
+
+a:not(.button):visited {
+  color: var(--retro-link-visited);
+}
+
+a:not(.button):active {
+  color: var(--retro-link-active);
+}
+
+.button--primary {
+  /* Gold is a light background — black text keeps ~15:1 contrast (white would fail). */
+  color: #000;
+}
+
+hr,
+.retro-divider {
+  height: 8px;
+  border: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--ifm-color-primary) 0 20px,
+    #000 20px 40px
+  );
+}
+
+hr {
+  margin: 1.5rem 0;
+}
+
+.retro-divider {
+  /* Top margin matches .retro-marquee-track's own 0.35rem padding above the text,
+     so the gap below the marquee text mirrors the gap above it. Bottom margin
+     stays small — this divider sits just above the navbar, not mid-content. */
+  margin: 0.35rem 0 0.25rem;
+}
+
+@keyframes retro-marquee {
+  from {
+    /* 100vw (not 100%) — percent resolves against the text's own width, so on a
+       wide viewport with shorter text it wasn't clearing the track's right edge
+       and the text popped in already partway on-screen instead of sliding in. */
+    transform: translateX(100vw);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes retro-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.retro-marquee-track {
+  overflow: hidden;
+  white-space: nowrap;
+  background: #000;
+  color: var(--ifm-color-primary);
+  font-weight: bold;
+  padding: 0.35rem 0;
+}
+
+.retro-marquee-text {
+  display: inline-block;
+  animation: retro-marquee 14s linear infinite;
+}
+
+.retro-blink {
+  animation: retro-blink 1s step-start infinite;
+}
+
+/* Lives inside the navbar (see src/theme/NavbarItem/ComponentTypes.tsx) so it
+   collapses with the rest of the nav items on narrow screens instead of being
+   a separate fixed banner. */
+.retro-navbar-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 996px) {
+  .retro-navbar-status {
+    display: none;
+  }
+}
+
+.retro-construction {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 900;
+  /* White text needs a dim (not bright) gold stripe to clear 4.5:1 — see var comment above. */
+  background: repeating-linear-gradient(45deg, var(--retro-gold-dim) 0 10px, #000 10px 20px);
+  color: #fff;
+  padding: 0.25rem 0.5rem;
+  border: 2px solid #000;
+}
+
+.retro-hit-counter {
+  font-family: 'Courier New', monospace;
+  font-weight: bold;
+  background: #000;
+  color: var(--ifm-color-primary);
+  padding: 0.2rem 0.4rem;
+  border: 2px inset #888;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .retro-marquee-text,
+  .retro-blink {
+    animation: none;
+  }
+}
+
+/* WCAG 2.1 SC 1.4.2 (Audio Control): audio that autoplays for >3s needs a way
+   to pause/stop/mute it. Fixed so it's reachable regardless of scroll position
+   or viewport width — this is a control, not decoration, so it never hides. */
+.retro-midi-toggle {
+  position: fixed;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  z-index: 1000;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  border: 2px solid var(--ifm-color-primary);
+  background: #000;
+  color: var(--ifm-color-primary);
+  font-size: 1.1rem;
+  cursor: pointer;
 }
