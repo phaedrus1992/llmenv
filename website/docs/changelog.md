@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.7.0] - 2026-07-28
+
 ### Added
 
 - Give the docs site (`website/`) a 1997 GeoCities-style retro skin — dark black-and-gold theme, tiled background, marquee banner, under-construction badge, and a per-browser hit counter, all checked against WCAG AA contrast. Site-only change; no `llmenv` CLI/config behavior affected. (#1027)
