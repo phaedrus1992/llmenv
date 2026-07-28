@@ -25,6 +25,9 @@ use sha2::{Digest, Sha256};
 const CREDENTIALS_FILE: &str = ".credentials.json";
 /// Top-level key carrying the OAuth token set.
 const OAUTH_KEY: &str = "claudeAiOauth";
+/// Sibling key in the same store holding per-MCP-server OAuth tokens, keyed
+/// `<server-name>|<sha256({type,url,headers})[..16]>` (#1058).
+const MCP_OAUTH_KEY: &str = "mcpOAuth";
 /// Cache file name under the durable auth dir.
 pub(super) const CACHE_FILE: &str = "credentials.json";
 /// Service-name prefix Claude Code uses for its keychain credential item.
@@ -79,12 +82,42 @@ impl std::fmt::Debug for Credentials {
 }
 
 impl Credentials {
-    /// Wrap a raw credential document. `None` when it carries no
-    /// `claudeAiOauth` object.
+    /// Wrap a raw credential document.
+    ///
+    /// Accepts one carrying the login token, MCP server tokens, or both — they
+    /// are sibling keys in the same store and expire independently, so an
+    /// MCP-only document is still worth caching (#1058). `None` when it has
+    /// neither.
     #[must_use]
     pub fn from_json(value: serde_json::Value) -> Option<Self> {
-        value.get(OAUTH_KEY)?.as_object()?;
-        Some(Self(value))
+        let has_login = value
+            .get(OAUTH_KEY)
+            .is_some_and(serde_json::Value::is_object);
+        let has_mcp = value
+            .get(MCP_OAUTH_KEY)
+            .is_some_and(serde_json::Value::is_object);
+        (has_login || has_mcp).then_some(Self(value))
+    }
+
+    /// How many MCP servers have a usable token cached.
+    ///
+    /// Skips tokenless stubs — Claude Code writes an entry with neither token
+    /// while an authorization flow is in flight and clears it afterwards.
+    #[must_use]
+    pub fn mcp_server_count(&self) -> usize {
+        self.0
+            .get(MCP_OAUTH_KEY)
+            .and_then(serde_json::Value::as_object)
+            .map_or(0, |servers| {
+                servers
+                    .values()
+                    .filter(|entry| {
+                        ["accessToken", "refreshToken"]
+                            .iter()
+                            .any(|k| entry.get(k).is_some_and(|v| !v.is_null()))
+                    })
+                    .count()
+            })
     }
 
     /// Access-token expiry, epoch **milliseconds**.
@@ -110,6 +143,14 @@ impl Credentials {
     /// grounds for discarding a credential.
     #[must_use]
     pub fn is_expired(&self, now_ms: i64) -> bool {
+        // MCP server tokens are siblings of the login token in the same store and
+        // expire independently, so a dead login token must not discard them —
+        // that would silently log the user out of every third-party MCP server
+        // (Slack, Notion, …). MCP entries carry no expiry of their own; Claude
+        // Code refreshes or re-authorizes them per server (#1058).
+        if self.mcp_server_count() > 0 {
+            return false;
+        }
         let access_dead = self.expires_at().is_some_and(|t| t <= now_ms);
         let refresh_live = self.refresh_expires_at().is_some_and(|t| t > now_ms);
         access_dead && !refresh_live
@@ -506,6 +547,81 @@ mod tests {
         let creds = Credentials::from_json(blob(1_785_282_755_897, Some(FUTURE_MS))).unwrap();
         assert_eq!(creds.expires_at(), Some(1_785_282_755_897));
         assert_eq!(creds.refresh_expires_at(), Some(FUTURE_MS));
+    }
+
+    /// A blob carrying MCP server tokens is worth keeping even when the login
+    /// token is dead — they authenticate different things and expire
+    /// independently (#1058). Discarding it would silently log the user out of
+    /// every third-party MCP server (Slack, Notion, …).
+    #[test]
+    fn dead_login_token_with_mcp_tokens_is_not_expired() {
+        let mut doc = blob(PAST_MS, Some(PAST_MS));
+        doc["mcpOAuth"] = serde_json::json!({
+            "notion|0123456789abcdef": { "accessToken": "mcp-TESTONLY" }
+        });
+        let creds = Credentials::from_json(doc).unwrap();
+        assert!(
+            !creds.is_expired(PAST_MS + 1),
+            "a dead login token must not discard live MCP server tokens"
+        );
+    }
+
+    /// Without any MCP tokens, a dead login token is still worthless.
+    #[test]
+    fn dead_login_token_without_mcp_tokens_is_expired() {
+        let creds = Credentials::from_json(blob(PAST_MS, Some(PAST_MS))).unwrap();
+        assert!(creds.is_expired(PAST_MS + 1));
+    }
+
+    /// An empty `mcpOAuth` map is not a reason to keep a dead blob.
+    #[test]
+    fn empty_mcp_map_does_not_rescue_a_dead_blob() {
+        let mut doc = blob(PAST_MS, Some(PAST_MS));
+        doc["mcpOAuth"] = serde_json::json!({});
+        let creds = Credentials::from_json(doc).unwrap();
+        assert!(creds.is_expired(PAST_MS + 1));
+    }
+
+    /// A blob with MCP tokens but no login token at all is still worth caching —
+    /// `from_json` must not reject it.
+    #[test]
+    fn mcp_only_blob_is_accepted() {
+        let doc = serde_json::json!({
+            "mcpOAuth": { "slack|0123456789abcdef": { "accessToken": "mcp-TESTONLY" } }
+        });
+        assert!(
+            Credentials::from_json(doc).is_some(),
+            "an MCP-only blob must be cacheable"
+        );
+    }
+
+    /// Counting is what `doctor` reports, so it must ignore tokenless stubs —
+    /// Claude Code writes those transiently before a flow completes.
+    #[test]
+    fn mcp_server_count_skips_tokenless_stubs() {
+        let mut doc = blob(FUTURE_MS, None);
+        doc["mcpOAuth"] = serde_json::json!({
+            "notion|aaaa": { "accessToken": "mcp-TESTONLY" },
+            "slack|bbbb":  { "refreshToken": "mcp-TESTONLY" },
+            "grid|cccc":   { "clientId": "stub-no-tokens" },
+        });
+        let creds = Credentials::from_json(doc).unwrap();
+        assert_eq!(creds.mcp_server_count(), 2);
+    }
+
+    /// The whole document round-trips, so MCP tokens survive cache and inject.
+    #[test]
+    fn mcp_tokens_survive_a_cache_roundtrip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut doc = blob(FUTURE_MS, None);
+        doc["mcpOAuth"] = serde_json::json!({
+            "notion|aaaa": { "accessToken": "mcp-TESTONLY" }
+        });
+        let creds = Credentials::from_json(doc).unwrap();
+        save_cached(tmp.path(), &creds).unwrap();
+        let back = load_cached(tmp.path()).unwrap().unwrap();
+        assert_eq!(back.mcp_server_count(), 1);
+        assert_eq!(back.as_json(), creds.as_json());
     }
 
     /// A derived `Debug` would print both tokens verbatim into any log line that

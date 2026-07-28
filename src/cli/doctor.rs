@@ -341,10 +341,17 @@ fn report_credential_cache(cache_dir: &Path, pass: &str, info: &str, warn: &str)
             "{warn} Cached OAuth credential has expired (access and refresh tokens both past \
              their expiry) — run `llmenv login` to refresh it"
         ),
-        Ok(Some(_)) => eprintln!(
-            "{pass} OAuth credential cached at {}",
-            crate::auth::credentials::cache_path(&adapter_root).display()
-        ),
+        Ok(Some(creds)) => {
+            let cache_file = crate::auth::credentials::cache_path(&adapter_root);
+            let path = cache_file.display();
+            // MCP server tokens ride in the same blob (#1058); report them so a
+            // user can tell whether their Slack/Notion logins are covered too.
+            match creds.mcp_server_count() {
+                0 => eprintln!("{pass} OAuth credential cached at {path}"),
+                1 => eprintln!("{pass} OAuth credential cached at {path} (+1 MCP server token)"),
+                n => eprintln!("{pass} OAuth credential cached at {path} (+{n} MCP server tokens)"),
+            }
+        }
         Err(e) => eprintln!("{warn} Could not read the OAuth credential cache: {e}"),
     }
 }
