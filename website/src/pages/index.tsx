@@ -73,9 +73,9 @@ function Features() {
     <section className={styles.features}>
       <div className="container">
         <h2 className={styles.featuresTitle}>Why llmenv</h2>
-        <div className={styles.featureGrid}>
+        <div className={styles.featureList}>
           {FEATURES.map((feature) => (
-            <div className={styles.feature} key={feature.title}>
+            <div key={feature.title}>
               <h3 className={styles.featureTitle}>{feature.title}</h3>
               <p className={styles.featureDesc}>{feature.description}</p>
             </div>
