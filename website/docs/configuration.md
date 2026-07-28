@@ -1042,6 +1042,70 @@ state:
 `env` names must be `[A-Z][A-Z0-9_]*`. A handful of system-reserved names
 (`HOME`, `PATH`, `USER`, etc.) are rejected.
 
+### Inherited Claude Code state
+
+(added in v3.8.0)
+
+Some Claude Code state has no env var to relocate it — it is hardcoded to live
+inside `CLAUDE_CONFIG_DIR`. llmenv inherits that state into each newly
+materialized folder automatically; there is nothing to configure.
+
+| State | Where it lives | How it's inherited |
+| ----- | -------------- | ------------------ |
+| `/resume` transcripts | `projects/<escaped-cwd>/<session-uuid>.jsonl` | The folder's `projects/` is a symlink to `$LLMENV_STATE_DIR/projects`, so every folder shares one transcript store |
+| Prompt history (`↑` recall) | `history.jsonl` | Copied in from `$LLMENV_STATE_DIR` when the folder has none |
+| OAuth credential | macOS keychain, service name keyed by the config-dir path; `.credentials.json` elsewhere | Cached in `$LLMENV_STATE_DIR/auth/credentials.json` (owner-only, `0600`) and written into a folder that has none |
+
+Transcripts are linked rather than copied, so a session started under one config
+hash stays visible to `/resume` after a config edit or version bump — and there
+is one store on disk instead of a copy per folder.
+
+`history.jsonl` is copied instead of linked because a single file rewritten via
+write-then-rename would replace the symlink with a regular file. A copy is only
+made when the folder has none; llmenv never overwrites a folder's own history.
+
+On first run after upgrading, transcripts stranded in older hashed folders (from
+before this behavior existed) are folded into the shared store, with the newest
+copy of a given session winning.
+
+#### OAuth credential inheritance
+
+(added in v3.8.0)
+
+Staying logged in needs two separate things. The account identity
+(`oauthAccount` in `.claude.json`) says *who* you are; the OAuth token says you
+are authenticated. llmenv has inherited the identity since v1.0.0 — the token is
+inherited as of v3.8.0, so a config edit or version bump no longer produces a
+login prompt.
+
+The token is not stored in a stable place by Claude Code on either platform. On
+Linux and WSL it is `.credentials.json` inside `CLAUDE_CONFIG_DIR`, so it dies
+with the folder. On macOS it is a keychain generic password whose *service name
+embeds a hash of the config-dir path* — a different path is a different keychain
+item, so the keychain is no more stable across hash changes than a file is.
+llmenv handles both.
+
+Two rules govern the cache, and both exist to avoid destroying a working login:
+
+- **On `export`:** the folder's token is copied into the cache only when the
+  cache is empty or the cached token is dead. A live cached token is never
+  overwritten by whatever a possibly-stale folder happens to hold.
+- **On materialization:** the cached token is written into the new folder only
+  when that folder has none. A token the folder already holds is never replaced.
+
+"Dead" means the access token is past `expiresAt` *and* no live refresh token
+remains. An expired access token with a valid refresh token is still worth
+keeping — Claude Code renews it on next use.
+
+`llmenv login` caches the token alongside the account identity, and writes both
+into the current folder when one is active.
+
+`llmenv doctor` reports whether a token is cached and whether it has expired.
+`llmenv doctor --gc` additionally drops the macOS keychain item belonging to each
+cache folder it deletes, since that item would otherwise outlive the folder it
+was keyed to. Entries are matched by folder path, so your default `~/.claude`
+login is never touched. This runs only under `--gc`, never on `export`.
+
 ## `marketplace:` and `plugin-collection:`
 
 (added in v1.0.0)
