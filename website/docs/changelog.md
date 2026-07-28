@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Inherit the Claude Code OAuth token across cache folders, so a config edit or version bump no longer produces a login prompt. Previously only the account identity (`oauthAccount`) was inherited — the folder knew who you were but not that you were logged in. Covers both stores: `.credentials.json` on Linux/WSL and the macOS keychain item, whose service name embeds a hash of the config-dir path and so is no more stable across folders than a file. A live cached token is never overwritten by a stale folder's, and a folder's own token is never replaced. `llmenv login` captures the token too; `llmenv doctor` reports whether one is cached and whether it expired; `llmenv doctor --gc` drops the keychain item belonging to each folder it deletes. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#oauth-credential-inheritance) (#1057)
+
+### Fixed
+
+- Stop losing `/resume` history on every cache-folder change. Claude Code keeps its transcripts in `projects/` inside `CLAUDE_CONFIG_DIR`, so a config edit or version bump left the session list empty. `projects/` now lives once in the durable state dir with each folder symlinked to it, and `history.jsonl` is copied in when a folder has none. Transcripts stranded by the old behavior are folded into the shared store on first run, newest copy of a session winning. The previous `migrate_ephemeral` mechanism only ran in `strict` hashing mode and scanned the wrong directory level, so on the default mode it never migrated anything. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#inherited-claude-code-state) (#1059)
+
 ## [3.7.0] - 2026-07-28
 
 ### Added

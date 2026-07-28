@@ -1015,6 +1015,7 @@ fn run_export(
                             cache_path,
                             &adapter_root,
                             &mut manifest,
+                            crate::auth::credentials::Backend::detect(),
                         );
                     }
                     Ok(None) => {} // absent/corrupt: already logged inside CacheManifest::read
@@ -1545,6 +1546,7 @@ fn materialize_from_manifest(
         env_vars.extend(crate::materialize::state::state_env_vars(
             &state_cfg, &state_dir,
         ));
+        inherit_claude_state(&adapter_root, &state_dir, &cache_path);
     }
 
     // Defense-in-depth (#67): validate var names at the source, not only at the
@@ -1594,15 +1596,57 @@ fn build_and_materialize(
     )
 }
 
-/// Inject the most-recently-cached auth entry into a materialized folder (#172).
+/// Inject the most-recently-cached auth entry into a materialized folder (#172),
+/// plus the cached OAuth credential (#1057).
 ///
 /// Non-fatal: if the cache is empty or the inject fails the folder simply has
 /// no pre-seeded auth. Errors are traced at debug so `run_export` stays clean.
+/// Inherit the Claude Code state that has no env var to relocate it: `/resume`
+/// transcripts and prompt history (#1059).
+///
+/// Best-effort — a folder that can't inherit its transcripts is a degraded
+/// session, not a failed `export`, so every failure warns instead of propagating.
+fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path) {
+    migrate_stranded_transcripts_once(adapter_root, state_dir);
+    if let Err(e) = crate::materialize::inherit::link_projects_dir(state_dir, cache_path) {
+        tracing::warn!("could not inherit /resume transcripts (non-fatal): {e:#}");
+    }
+    if let Err(e) = crate::materialize::inherit::inherit_history_file(state_dir, cache_path) {
+        tracing::warn!("could not inherit prompt history (non-fatal): {e:#}");
+    }
+}
+
+/// Fold transcripts stranded in pre-#1059 hashed folders into the durable store,
+/// at most once per state dir.
+///
+/// Gated on a marker file rather than run every export: the scan walks every
+/// hashed folder the cache has ever held, which is wasted work on a path that
+/// fires on every shell prompt. A marker that can't be written is logged and the
+/// migration simply retries next time — re-running is harmless (idempotent).
+fn migrate_stranded_transcripts_once(adapter_root: &Path, state_dir: &Path) {
+    let marker = state_dir.join(".transcripts-migrated");
+    if marker.exists() {
+        return;
+    }
+    match crate::materialize::inherit::migrate_stranded_projects(adapter_root, state_dir) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("[llmenv] inherited /resume transcripts from {n} older folder(s)"),
+        Err(e) => {
+            tracing::warn!("migrating stranded transcripts failed (non-fatal): {e:#}");
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&marker, b"") {
+        tracing::debug!("could not write {}: {e}", marker.display());
+    }
+}
+
 fn inject_cached_auth_if_available(
     adapter_root: &std::path::Path,
     cache_path: &std::path::Path,
 ) -> crate::materialize::manifest::AuthStatus {
     use crate::materialize::manifest::{AuthSource, AuthStatus};
+    inject_cached_credentials(adapter_root, cache_path);
     match crate::auth::choose_auth_for_inheritance(adapter_root) {
         Err(e) => {
             tracing::debug!("auth cache lookup failed (non-fatal): {e}");
@@ -1623,6 +1667,21 @@ fn inject_cached_auth_if_available(
                 AuthStatus::default()
             }
         },
+    }
+}
+
+/// Seed a freshly materialized folder with the cached OAuth credential (#1057)
+/// so a hash change does not present a login prompt.
+///
+/// Non-fatal, and never overwrites a credential the folder already holds — the
+/// `AuthStatus` in the manifest tracks account identity, not the token, so this
+/// reports nothing back to the caller.
+fn inject_cached_credentials(adapter_root: &std::path::Path, cache_path: &std::path::Path) {
+    let backend = crate::auth::credentials::Backend::detect();
+    match crate::auth::credentials::inject_if_missing(backend, adapter_root, cache_path) {
+        Ok(true) => eprintln!("[llmenv] auth: OAuth credential inherited from durable state"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("credential inject failed (non-fatal): {e}"),
     }
 }
 
@@ -3081,7 +3140,9 @@ fn resolve_session_id(
 /// With `--global`: updates the stable cache (inherited by all future folders).
 fn run_login(global: bool) -> anyhow::Result<()> {
     let config = Config::load(&paths::config_path()?)?;
-    // Intentionally Claude Code-only: Crush has no auth concept yet (#544).
+    // Intentionally Claude Code-only. Crush does have `crush login`, but it
+    // persists tokens under $CRUSH_GLOBAL_DATA — already llmenv's durable state
+    // dir — so its auth survives a hash change with no help from us (#544).
     let adapter_root =
         PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)).join(ClaudeCodeAdapter.name());
 
@@ -3141,6 +3202,7 @@ fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyh
 
     crate::auth::save_auth_entry(adapter_root, &entry)?;
     eprintln!("[llmenv] login: saved auth for {}", entry.email);
+    capture_login_credentials(adapter_root, tmp.path(), current_folder)?;
 
     if let Some(folder) = current_folder
         && folder.is_dir()
@@ -3162,6 +3224,41 @@ fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyh
                 folder,
             ),
         }
+    }
+    Ok(())
+}
+
+/// Capture the OAuth credential a fresh `claude auth login` produced (#1057).
+///
+/// Overwrites the cache unconditionally — unlike the export path, the user just
+/// authenticated, so the new token always wins. Also writes it straight into
+/// `current_folder` so the session in progress is logged in without re-exporting.
+///
+/// Non-fatal when the login dir yields no credential: `oauthAccount` was already
+/// captured, so identity inheritance still works.
+///
+/// # Errors
+/// Returns an error when the cache or folder write fails.
+fn capture_login_credentials(
+    adapter_root: &Path,
+    login_dir: &Path,
+    current_folder: Option<&Path>,
+) -> anyhow::Result<()> {
+    use crate::auth::credentials;
+    let backend = credentials::Backend::detect();
+    let Some(creds) = credentials::read_backend(backend, login_dir)? else {
+        tracing::debug!("login produced no OAuth credential; only the account identity was cached");
+        return Ok(());
+    };
+    credentials::save_cached(adapter_root, &creds)?;
+    eprintln!("[llmenv] login: saved OAuth credential to durable state");
+    if let Some(folder) = current_folder.filter(|f| f.is_dir()) {
+        credentials::write_backend(backend, folder, &creds)?;
+    }
+    // The login dir is a temp dir about to be removed; on macOS its keychain
+    // item would outlive it, so drop it now that the blob is cached.
+    if let Err(e) = credentials::forget(login_dir) {
+        tracing::debug!("could not drop the login dir's credential entry: {e}");
     }
     Ok(())
 }
