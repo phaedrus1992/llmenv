@@ -1054,6 +1054,7 @@ materialized folder automatically; there is nothing to configure.
 | ----- | -------------- | ------------------ |
 | `/resume` transcripts | `projects/<escaped-cwd>/<session-uuid>.jsonl` | The folder's `projects/` is a symlink to `$LLMENV_STATE_DIR/projects`, so every folder shares one transcript store |
 | Prompt history (`↑` recall) | `history.jsonl` | Copied in from `$LLMENV_STATE_DIR` when the folder has none |
+| MCP "needs auth" record | `mcp-needs-auth-cache.json` | Copied in when the folder has none, so Claude Code doesn't re-probe every OAuth MCP server |
 | OAuth credential | macOS keychain, service name keyed by the config-dir path; `.credentials.json` elsewhere | Cached in `$LLMENV_STATE_DIR/auth/credentials.json` (owner-only, `0600`) and written into a folder that has none |
 
 Transcripts are linked rather than copied, so a session started under one config
@@ -1101,6 +1102,31 @@ keeping — Claude Code renews it on next use.
 into the current folder when one is active.
 
 `llmenv doctor` reports whether a token is cached and whether it has expired.
+
+#### Third-party MCP server logins
+
+(added in v3.8.0)
+
+Authenticating an OAuth-backed MCP server — Slack, Notion, Linear, and the like —
+also survives a hash change, and needs nothing extra configured.
+
+Claude Code keeps those tokens under an `mcpOAuth` key **in the same store as the
+login token**, keyed per server as
+`<server-name>|<sha256({type,url,headers})[..16]>`. Because llmenv caches and
+re-injects that store verbatim, MCP tokens come along with the login token
+automatically. The per-server key includes the server's URL and headers, so
+changing either invalidates just that server's entry rather than the rest.
+
+Two consequences worth knowing:
+
+- A dead login token does **not** discard live MCP tokens. They authenticate
+  different things and expire independently, so a store holding MCP tokens is
+  kept even when the Claude login in it has lapsed.
+- `llmenv doctor` appends the MCP token count to its credential line, e.g.
+  `OAuth credential cached at … (+3 MCP server tokens)`.
+
+The `claude.ai` connectors are managed by the Claude desktop app rather than
+Claude Code, so they're outside llmenv's scope.
 `llmenv doctor --gc` additionally drops the macOS keychain item belonging to each
 cache folder it deletes, since that item would otherwise outlive the folder it
 was keyed to. Entries are matched by folder path, so your default `~/.claude`
