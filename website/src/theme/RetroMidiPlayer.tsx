@@ -4,7 +4,12 @@ import Soundfont, { type Instrument } from 'soundfont-player';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 
 const MELODIC_INSTRUMENT = 'acoustic_grand_piano';
-const PERCUSSION_INSTRUMENT = 'percussion';
+// This soundfont pack (gleitz/midi-js-soundfonts) only ships the 128 standard
+// GM melodic instruments (see MusyngKite/names.json) — there's no dedicated
+// drum-kit instrument, so 'percussion' 404s. synth_drum (GM program 119) is
+// the closest available substitute for channel 10 in this simplified 2-voice
+// mapping; it plays one timbre per note rather than a real multi-drum kit.
+const PERCUSSION_INSTRUMENT = 'synth_drum';
 // General MIDI reserves channel 10 for drums/percussion (1-indexed, as midi-player-js reports it).
 const PERCUSSION_CHANNEL = 10;
 const ENABLED_STORAGE_KEY = 'llmenv-docs-midi-enabled';
