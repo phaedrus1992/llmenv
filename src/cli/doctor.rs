@@ -244,8 +244,14 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         }
     }
 
-    // crush, opencode — always optional
-    for bin in &["crush", "opencode"] {
+    // Every other registered engine — always optional. Derived from the adapter
+    // registry rather than a hardcoded list, so a newly registered engine is
+    // reported here without a second edit (#1032).
+    for adapter in crate::adapter::registered_adapters() {
+        if crate::adapter::engine_id(adapter.as_ref()) == "claude_code" {
+            continue; // reported above, where it is required rather than optional
+        }
+        let bin = adapter.binary_name();
         if crate::adapter::binary_on_path(bin) {
             eprintln!("{pass} {bin} found on PATH");
         } else {
@@ -254,23 +260,92 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
     }
 }
 
-/// Returns `native_permissions` keys that don't match any configured MCP server
-/// or known engine adapter name. The ICM MCP server (`"icm"`) is always present.
-pub(super) fn orphan_native_permission_keys(config: &Config) -> Vec<&str> {
-    let known_mcps: HashSet<&str> = config
-        .mcp
-        .iter()
-        .map(|m| m.name.as_str())
-        .chain(std::iter::once("icm"))
-        .collect();
-    const ENGINE_NAMES: &[&str] = &["claude_code"];
-    config
-        .capabilities
-        .native_permissions
-        .keys()
-        .filter(|k| !known_mcps.contains(k.as_str()) && !ENGINE_NAMES.contains(&k.as_str()))
-        .map(|k| k.as_str())
-        .collect()
+/// Claude Code field-prefix patterns: a bare `<field>:<value>` filter, as
+/// opposed to a command-prefix pattern. `WebFetch(domain:example.com)` is the
+/// common one.
+const CLAUDE_FIELD_PREFIXES: &[&str] = &["domain:", "url:"];
+
+/// Whether `pattern` uses Claude Code's colon-prefix syntax rather than a plain
+/// glob: either a trailing `:*` command-prefix match (`git commit:*`, `rg:*`) or
+/// a leading field filter (`domain:example.com`).
+///
+/// Matching the actual grammar rather than "any colon after a word character"
+/// matters in both directions. A pattern like `docker run -p 8080:8080 *` or
+/// `awk -F: *` carries a literal colon that behaves identically under both
+/// engines and must not be flagged; conversely a quoted or globbed token before
+/// the colon (`"wip":*`, `*:*`) is still Claude's prefix syntax and must be.
+fn uses_colon_prefix_syntax(pattern: &str) -> bool {
+    pattern.ends_with(":*")
+        || CLAUDE_FIELD_PREFIXES
+            .iter()
+            .any(|prefix| pattern.starts_with(prefix))
+}
+
+/// A permission rule that is dead config under opencode (#838).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ColonPrefixRule {
+    /// `"allow"`, `"ask"`, or `"deny"` — the tier the rule was declared in.
+    pub tier: &'static str,
+    /// `"<tool>(<pattern>)"`, as the user would recognize it.
+    pub rule: String,
+}
+
+impl ColonPrefixRule {
+    /// The diagnostic for this rule. A dead `deny` fails **open** — the rule the
+    /// user wrote to block something doesn't block it — so it gets stronger
+    /// wording than a dead `allow`, which merely fails closed into a prompt.
+    pub fn message(&self) -> String {
+        let Self { tier, rule } = self;
+        let consequence = if *tier == "deny" {
+            "so the deny is NOT enforced there — whatever it was meant to block is left \
+             to opencode's default"
+        } else {
+            "so the grant never applies there"
+        };
+        format!(
+            "permission rule {rule} ({tier}) uses Claude Code's colon-prefix syntax, which \
+             opencode matches as a literal glob, {consequence}. Use a space-separated pattern \
+             (e.g. `git commit *`) for a rule both engines honour, or move the Claude-only form \
+             to `native_permissions.claude_code`"
+        )
+    }
+}
+
+/// Returns every neutral permission rule whose pattern uses Claude Code's
+/// colon-prefix syntax, for a config where opencode is also materialized (#838).
+///
+/// opencode matches a permission pattern as a plain glob against the whole
+/// command string, so `git commit:*` matches nothing there. Only the
+/// engine-neutral `permissions` block is checked; `native_permissions.claude_code`
+/// is Claude-scoped on purpose and correct as written.
+///
+/// Takes merged `capabilities` so rules contributed by a `bundle.yaml` are
+/// covered — a dead `deny` shipped in a shared bundle is the case most worth
+/// catching. `opencode_active` is passed in rather than probed so the check is
+/// testable without depending on the host's `PATH`.
+pub(super) fn claude_only_colon_permission_patterns(
+    capabilities: &Capabilities,
+    opencode_active: bool,
+) -> Vec<ColonPrefixRule> {
+    if !opencode_active {
+        return Vec::new();
+    }
+    let perms = &capabilities.permissions;
+    [
+        ("allow", &perms.allow),
+        ("ask", &perms.ask),
+        ("deny", &perms.deny),
+    ]
+    .into_iter()
+    .flat_map(|(tier, rules)| rules.iter().map(move |rule| (tier, rule)))
+    .filter_map(|(tier, rule)| {
+        let pattern = rule.pattern.as_deref()?;
+        uses_colon_prefix_syntax(pattern).then(|| ColonPrefixRule {
+            tier,
+            rule: format!("{}({pattern})", rule.tool),
+        })
+    })
+    .collect()
 }
 
 /// Whether `matcher` is shaped like a file-extension glob (`*.rs`, `**/*.py`)
@@ -388,12 +463,6 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         );
     }
 
-    for key in orphan_native_permission_keys(&config) {
-        eprintln!(
-            "{warn} native_permissions key '{key}' does not match any configured MCP server, engine, or adapter",
-        );
-    }
-
     for hit in hooks_with_glob_like_matchers(&config) {
         eprintln!(
             "{warn} hook {hit} looks like a file-extension glob, but Claude Code matches \
@@ -499,6 +568,13 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     let doctor_firing = super::firing_bundles(&config.bundle, &active, None);
     let doctor_manifest =
         super::build_manifest(&config, &config_dir, &active, &doctor_firing, false)?;
+
+    // Dead per-engine keys (#1032) and permission patterns opencode can never
+    // match (#838). Reported from the merged manifest so bundle-contributed
+    // config is covered, which is why this sits below build_manifest rather than
+    // with the other structural checks above.
+    super::warn_dead_config(&config, doctor_manifest.as_ref().map(|(m, _)| m), &warn);
+
     if let Some((manifest, _)) = &doctor_manifest {
         for adapter in super::installed_adapters(&config) {
             let supported = adapter.supported_hook_events();
@@ -879,9 +955,10 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 mod tests {
     use super::*;
     use crate::config::{
-        Bundle, Capabilities, Features, Hook, HostEntry, Marketplace, McpServer, McpTransport,
-        Memory, NativePermissionRules, PluginCollection,
+        Bundle, Capabilities, Features, Hook, HostEntry, Marketplace, Memory,
+        NativePermissionRules, PermissionRule, Permissions, PluginCollection,
     };
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
 
     // -- bundles_with_missing_dirs --
@@ -1029,90 +1106,201 @@ mod tests {
         assert_eq!(orphans, vec![&["bundle-tag".to_string()][..]]);
     }
 
-    // -- orphan_native_permission_keys --
+    // -- claude_only_colon_permission_patterns --
 
-    #[test]
-    fn orphan_permissions_none_for_known_engine() {
-        let config = Config {
-            capabilities: Capabilities {
-                native_permissions: BTreeMap::from([(
-                    "claude_code".into(),
-                    NativePermissionRules::default(),
-                )]),
-                ..Capabilities::default()
+    fn rule(tool: &str, pattern: Option<&str>, paths: Vec<String>) -> PermissionRule {
+        PermissionRule {
+            tool: tool.into(),
+            pattern: pattern.map(Into::into),
+            paths,
+        }
+    }
+
+    fn caps_with_allow(tool: &str, pattern: &str) -> Capabilities {
+        Capabilities {
+            permissions: Permissions {
+                allow: vec![rule(tool, Some(pattern), vec![])],
+                ..Default::default()
             },
-            ..Config::default()
-        };
-        let orphans = orphan_native_permission_keys(&config);
-        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+            ..Capabilities::default()
+        }
+    }
+
+    /// `"<tool>(<pattern>)"` strings, for comparing against expected rules
+    /// without spelling out the tier on every assertion.
+    fn rule_strings(found: &[ColonPrefixRule]) -> Vec<&str> {
+        found.iter().map(|r| r.rule.as_str()).collect()
     }
 
     #[test]
-    fn orphan_permissions_accepts_icm() {
-        let config = Config {
-            capabilities: Capabilities {
-                native_permissions: BTreeMap::from([(
-                    "icm".into(),
-                    NativePermissionRules::default(),
-                )]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
-        };
-        let orphans = orphan_native_permission_keys(&config);
-        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    fn colon_syntax_detected_for_subcommand_and_field_forms() {
+        for pattern in [
+            "git commit:*",
+            "rg:*",
+            "domain:example.com",
+            "url:https://example.com/x",
+            "npm run:*",
+            // A quoted or globbed token before the colon is still Claude's
+            // prefix syntax — the old "word char before the colon" heuristic
+            // failed open on both.
+            "\"wip\":*",
+            "*:*",
+        ] {
+            assert!(
+                uses_colon_prefix_syntax(pattern),
+                "expected colon-prefix: {pattern}"
+            );
+        }
     }
 
     #[test]
-    fn orphan_permissions_accepts_configured_mcp() {
-        let config = Config {
-            mcp: vec![McpServer {
-                name: "my-server".into(),
-                when: vec![],
-                transport: McpTransport::Stdio,
-                command: Some("echo".into()),
-                args: vec![],
-                env: BTreeMap::new(),
-                url: None,
-                headers: BTreeMap::new(),
-                disabled: false,
-                disabled_tools: vec![],
-                timeout: None,
-            }],
-            capabilities: Capabilities {
-                native_permissions: BTreeMap::from([(
-                    "my-server".into(),
-                    NativePermissionRules::default(),
-                )]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
-        };
-        let orphans = orphan_native_permission_keys(&config);
-        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    fn colon_syntax_not_detected_for_portable_patterns() {
+        for pattern in [
+            "git commit *",
+            "*",
+            "rg *",
+            "https://example.com/*",
+            "src/**/*.rs",
+            "mcp__server__tool",
+            ":leading-colon",
+            "",
+            ":",
+            // Literal colons that mean the same thing to both engines. The old
+            // heuristic flagged every one of these and told the user to rewrite
+            // a pattern that was already correct.
+            "docker run -p 8080:8080 *",
+            "kubectl port-forward svc/api 8080:80",
+            "awk -F: *",
+            "git log --pretty=format:%h *",
+            "curl http://localhost:3000/*",
+        ] {
+            assert!(
+                !uses_colon_prefix_syntax(pattern),
+                "unexpected colon-prefix: {pattern}"
+            );
+        }
     }
 
     #[test]
-    fn orphan_permissions_reports_unknown_key() {
-        let config = Config {
-            capabilities: Capabilities {
-                native_permissions: BTreeMap::from([(
-                    "mcp__unknown-server".into(),
-                    NativePermissionRules::default(),
-                )]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
-        };
-        let orphans = orphan_native_permission_keys(&config);
-        assert_eq!(orphans, vec!["mcp__unknown-server"]);
+    fn colon_patterns_flagged_when_opencode_active() {
+        let caps = caps_with_allow("Bash", "git commit:*");
+        let found = claude_only_colon_permission_patterns(&caps, true);
+        assert_eq!(rule_strings(&found), vec!["Bash(git commit:*)"]);
+        assert_eq!(found[0].tier, "allow");
     }
 
     #[test]
-    fn orphan_permissions_empty_no_permissions() {
-        let config = Config::default();
-        let orphans = orphan_native_permission_keys(&config);
-        assert!(orphans.is_empty(), "expected empty: {orphans:?}");
+    fn colon_patterns_silent_when_opencode_inactive() {
+        let caps = caps_with_allow("Bash", "git commit:*");
+        assert!(
+            claude_only_colon_permission_patterns(&caps, false).is_empty(),
+            "Claude-only patterns are correct when opencode won't be materialized"
+        );
+    }
+
+    #[test]
+    fn colon_patterns_silent_for_portable_pattern_with_opencode_active() {
+        let caps = caps_with_allow("Bash", "git commit *");
+        assert!(claude_only_colon_permission_patterns(&caps, true).is_empty());
+    }
+
+    #[test]
+    fn colon_patterns_cover_ask_and_deny_tiers() {
+        let caps = Capabilities {
+            permissions: Permissions {
+                ask: vec![rule("Bash", Some("docker run:*"), vec![])],
+                deny: vec![rule("WebFetch", Some("domain:evil.test"), vec![])],
+                ..Default::default()
+            },
+            ..Capabilities::default()
+        };
+        let found = claude_only_colon_permission_patterns(&caps, true);
+        assert_eq!(
+            rule_strings(&found),
+            vec!["Bash(docker run:*)", "WebFetch(domain:evil.test)"]
+        );
+        assert_eq!(found[0].tier, "ask");
+        assert_eq!(found[1].tier, "deny");
+    }
+
+    /// A dead `deny` fails open, so its diagnostic must say the deny is not
+    /// enforced rather than reuse the allow-tier "grant" wording.
+    #[test]
+    fn deny_tier_message_says_the_deny_is_not_enforced() {
+        let deny = ColonPrefixRule {
+            tier: "deny",
+            rule: "WebFetch(domain:evil.test)".into(),
+        };
+        let msg = deny.message();
+        assert!(msg.contains("NOT enforced"), "{msg}");
+
+        let allow = ColonPrefixRule {
+            tier: "allow",
+            rule: "Bash(git commit:*)".into(),
+        };
+        assert!(!allow.message().contains("NOT enforced"), "{msg}");
+    }
+
+    /// `paths` entries are file paths, not command patterns — a colon in one is
+    /// not Claude's subcommand syntax and must not be flagged.
+    #[test]
+    fn colon_patterns_ignore_path_rules() {
+        let caps = Capabilities {
+            permissions: Permissions {
+                allow: vec![rule("Read", None, vec!["notes/todo:urgent.md".into()])],
+                ..Default::default()
+            },
+            ..Capabilities::default()
+        };
+        assert!(claude_only_colon_permission_patterns(&caps, true).is_empty());
+    }
+
+    /// `native_permissions.claude_code` is deliberately Claude-scoped, so its
+    /// colon-prefix rules are correct config and must stay unflagged.
+    #[test]
+    fn colon_patterns_ignore_claude_scoped_native_permissions() {
+        let caps = Capabilities {
+            native_permissions: BTreeMap::from([(
+                "claude_code".into(),
+                NativePermissionRules {
+                    allow: vec!["Bash(git commit:*)".into()],
+                    ..Default::default()
+                },
+            )]),
+            ..Capabilities::default()
+        };
+        assert!(claude_only_colon_permission_patterns(&caps, true).is_empty());
+    }
+
+    proptest! {
+        /// Never panics, whatever a config author writes — patterns are
+        /// arbitrary user strings, including non-ASCII and lone colons.
+        #[test]
+        fn colon_syntax_never_panics(pattern in ".*") {
+            let _ = uses_colon_prefix_syntax(&pattern);
+        }
+
+        /// A pattern with no colon at all can never be colon-prefix syntax.
+        #[test]
+        fn colon_syntax_false_without_a_colon(pattern in "[^:]*") {
+            prop_assert!(!uses_colon_prefix_syntax(&pattern));
+        }
+
+        /// The command-prefix form is exactly "ends with `:*`", so appending
+        /// `:*` to any pattern makes it colon-prefix syntax.
+        #[test]
+        fn colon_syntax_true_for_any_colon_star_suffix(prefix in ".*") {
+            let pattern = format!("{prefix}:*");
+            prop_assert!(uses_colon_prefix_syntax(&pattern));
+        }
+
+        /// A trailing `*` alone must not be enough — only the `:*` pair counts,
+        /// so a pattern whose colon is followed by anything else stays portable.
+        #[test]
+        fn colon_syntax_false_for_space_separated_glob(cmd in "[a-z]{1,8}", sub in "[a-z]{1,8}") {
+            let pattern = format!("{cmd} {sub} *");
+            prop_assert!(!uses_colon_prefix_syntax(&pattern));
+        }
     }
 
     // -- hooks_with_glob_like_matchers --

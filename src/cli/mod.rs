@@ -773,6 +773,72 @@ fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
     list.iter().any(|item| item.eq_ignore_ascii_case(target))
 }
 
+/// Warn about every `native_*.<engine>` key no registered adapter will read
+/// (#1032). `prefix` lets `doctor` use its own warning glyph while `export` and
+/// `regenerate` use the plain `warning:` form.
+///
+/// Takes merged capabilities plus the merged `native:` block so keys contributed
+/// by a `bundle.yaml` are covered, not just top-level `config.yaml`.
+///
+/// Called explicitly per command rather than from [`installed_adapters`] so the
+/// warning fires exactly once even in `doctor`, which calls that gate itself.
+pub(super) fn warn_dead_native_keys(
+    capabilities: &crate::config::Capabilities,
+    native: &std::collections::BTreeMap<String, serde_yaml::Value>,
+    prefix: &str,
+) {
+    for dead in crate::adapter::native_keys::dead_native_engine_keys(capabilities, native) {
+        eprintln!("{prefix} {}", dead.message());
+    }
+}
+
+/// Report every config setting that will be silently dropped at render time:
+/// dead `native_*.<engine>` keys (#1032) and permission patterns that opencode
+/// can never match (#838).
+///
+/// Reads the merged manifest when one was built, so bundle-contributed settings
+/// are covered, and falls back to the raw config when no bundle fired. Shared by
+/// `export`, `regenerate`, and `doctor` so a new materialize path can't quietly
+/// opt out of the diagnostics.
+pub(super) fn warn_dead_config(
+    config: &Config,
+    manifest: Option<&crate::merge::MergedManifest>,
+    prefix: &str,
+) {
+    let (capabilities, native) = match manifest {
+        Some(m) => (&m.capabilities, &m.native),
+        None => (&config.capabilities, &config.native),
+    };
+    warn_dead_native_keys(capabilities, native, prefix);
+    let opencode_active = engine_is_active(config, "opencode");
+    for hit in doctor::claude_only_colon_permission_patterns(capabilities, opencode_active) {
+        eprintln!("{prefix} {}", hit.message());
+    }
+}
+
+/// Whether `engine` will actually be materialized on this host: an adapter with
+/// that engine id is registered, its binary is on `PATH`, and
+/// `disabled_engines` doesn't turn it off.
+///
+/// Shares [`installed_adapters`]' gate rules without re-running its
+/// `disabled_engines` typo warnings, so a caller that only needs to ask about one
+/// engine doesn't duplicate that output. Resolves the binary name through the
+/// registry rather than hardcoding it, so an adapter rename can't silently
+/// desynchronize the two.
+pub(super) fn engine_is_active(config: &Config, engine: &str) -> bool {
+    if config
+        .disabled_engines
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case(engine))
+    {
+        return false;
+    }
+    crate::adapter::registered_adapters().into_iter().any(|a| {
+        crate::adapter::engine_id(a.as_ref()) == engine
+            && crate::adapter::binary_on_path(a.binary_name())
+    })
+}
+
 /// Registered adapters whose binary is present on `PATH` and that aren't
 /// named in `config.disabled_engines` (#562), logging (at info) and skipping
 /// any that fail either check — the shared gate `run_export`, `run_regenerate`,
@@ -970,6 +1036,12 @@ fn run_export(
         Ok(v) => v,
         Err(e) => return Err(e).context("failed to build merged manifest"),
     };
+
+    warn_dead_config(
+        &config,
+        shared_manifest.as_ref().map(|(m, _)| m),
+        "warning:",
+    );
 
     let mut any_adapter_failed = false;
     let mut any_adapter_eligible = false;
@@ -1221,6 +1293,12 @@ fn run_regenerate() -> anyhow::Result<()> {
         Ok(v) => v,
         Err(e) => return Err(e).context("failed to build merged manifest"),
     };
+    warn_dead_config(
+        &config,
+        shared_manifest.as_ref().map(|(m, _)| m),
+        "warning:",
+    );
+
     let mut materialized_any = false;
     let mut any_adapter_failed = false;
     for adapter in installed_adapters(&config) {
@@ -3792,6 +3870,27 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
             valid = false;
         }
     }
+
+    // Dead per-engine keys (#1032). `validate` inspects the config file itself,
+    // so this reads the top-level maps rather than a merged manifest. An unknown
+    // engine id is unambiguously wrong — there is no authoring reason to write
+    // one — so it fails validation instead of only warning. A key naming a real
+    // engine whose adapter doesn't read that map stays a warning: sharing one
+    // config across engines makes it a legitimate no-op.
+    for dead in
+        crate::adapter::native_keys::dead_native_engine_keys(&config.capabilities, &config.native)
+    {
+        match dead.reason {
+            crate::adapter::native_keys::DeadKeyReason::UnknownEngine => {
+                eprintln!("{fail} {}", dead.message());
+                valid = false;
+            }
+            crate::adapter::native_keys::DeadKeyReason::MapNotRead => {
+                eprintln!("{warn} {}", dead.message());
+            }
+        }
+    }
+
     if valid {
         eprintln!("{pass} config valid ({} bundle(s))", config.bundle.len());
     } else {

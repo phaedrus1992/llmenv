@@ -466,6 +466,21 @@ impl AgentAdapter for OpencodeAdapter {
         true
     }
 
+    /// Every map this adapter reads. `native_hooks` and `native_plugins` are
+    /// absent even though `supports_plugins()` is true and
+    /// `supported_hook_events()` is non-empty: hooks render from the neutral
+    /// `capabilities.hooks` through the JS shim, and plugins render from the
+    /// resolved plugin list — neither path consults a per-engine fragment.
+    fn native_maps(&self) -> &'static [&'static str] {
+        use crate::adapter::native_keys as nk;
+        &[
+            nk::NATIVE_PERMISSIONS,
+            nk::NATIVE_MCP,
+            nk::NATIVE_MODEL_PROVIDERS,
+            nk::NATIVE,
+        ]
+    }
+
     fn supported_hook_events(&self) -> &'static [&'static str] {
         SUPPORTED_HOOK_EVENTS
     }

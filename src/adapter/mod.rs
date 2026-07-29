@@ -1,6 +1,7 @@
 pub mod claude_code;
 pub mod crush;
 pub(crate) mod llmenv_skill;
+pub(crate) mod native_keys;
 pub mod opencode;
 pub(crate) mod skills;
 
@@ -139,6 +140,25 @@ pub trait AgentAdapter {
     /// default-model selection. Claude Code does not (Anthropic-only, no
     /// provider switching).
     fn supports_model_providers(&self) -> bool;
+
+    /// The `native_*` config maps this adapter actually reads, named by their
+    /// config field (see the `NATIVE_*` constants in [`native_keys`]).
+    ///
+    /// A per-engine key naming this adapter in a map that is *absent* from this
+    /// list is dead config: it deserializes, merges, and hashes, then no code
+    /// ever looks it up. [`native_keys::dead_native_engine_keys`] reports those.
+    ///
+    /// This is deliberately a declaration of *consumption*, not of capability.
+    /// The two diverge — opencode reports `supports_plugins() == true` and a
+    /// non-empty [`AgentAdapter::supported_hook_events`], yet reads neither
+    /// `native_plugins` nor `native_hooks` (it renders hooks from the neutral
+    /// `capabilities.hooks` through its JS shim instead). Gating on the
+    /// capability predicates therefore blesses keys nothing reads (#1032).
+    ///
+    /// # Extending
+    /// Adding a `manifest.capabilities.native_x.get("<id>")` call to an adapter
+    /// means adding `NATIVE_X` here in the same edit.
+    fn native_maps(&self) -> &'static [&'static str];
 
     /// The set of native hook-event names this adapter emits. Callers use this
     /// to guard event registration so events an adapter never fires are not
@@ -636,6 +656,64 @@ mod tests {
     #[test]
     fn known_engine_ids_matches_registered_adapters() {
         assert_eq!(known_engine_ids(), vec!["claude_code", "crush", "opencode"]);
+    }
+
+    /// Locks the `native_*` consumption matrix (#1032). This is the source of
+    /// truth `native_keys` validates against, and it is hand-maintained — grep
+    /// for `native_<map>.get(` in each adapter to re-derive it. Adding a `.get()`
+    /// without adding the map here means the key is still silently dropped;
+    /// removing a `.get()` without removing it here means dead config is blessed.
+    #[test]
+    fn native_maps_match_actual_consumers() {
+        use crate::adapter::native_keys as nk;
+        let declared: Vec<(String, Vec<&str>)> = registered_adapters()
+            .iter()
+            .map(|a| (engine_id(a.as_ref()), a.native_maps().to_vec()))
+            .collect();
+        assert_eq!(
+            declared,
+            vec![
+                (
+                    "claude_code".to_string(),
+                    vec![
+                        nk::NATIVE_PERMISSIONS,
+                        nk::NATIVE_HOOKS,
+                        nk::NATIVE_PLUGINS,
+                        nk::NATIVE_MCP,
+                        nk::NATIVE,
+                    ]
+                ),
+                (
+                    "crush".to_string(),
+                    vec![
+                        nk::NATIVE_PERMISSIONS,
+                        nk::NATIVE_HOOKS,
+                        nk::NATIVE_MCP,
+                        nk::NATIVE_MODEL_PROVIDERS,
+                        nk::NATIVE,
+                    ]
+                ),
+                (
+                    "opencode".to_string(),
+                    vec![
+                        nk::NATIVE_PERMISSIONS,
+                        nk::NATIVE_MCP,
+                        nk::NATIVE_MODEL_PROVIDERS,
+                        nk::NATIVE,
+                    ]
+                ),
+            ]
+        );
+    }
+
+    /// The colon-prefix permission lint (#838) resolves opencode by this exact
+    /// engine id, so a rename must fail here rather than silently disable it.
+    #[test]
+    fn opencode_engine_id_is_stable() {
+        assert!(
+            known_engine_ids().contains(&"opencode".to_string()),
+            "the #838 permission lint looks opencode up by this id"
+        );
     }
 
     #[test]
