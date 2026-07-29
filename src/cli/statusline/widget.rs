@@ -487,14 +487,14 @@ fn render_branch(
     cfg: Option<&llmenv_config::WidgetConfig>,
     use_color: bool,
 ) -> String {
-    render_branch_with(data, cfg, use_color, "gh")
+    render_branch_with(data, cfg, use_color, GhPrCmd::new("gh"))
 }
 
 fn render_branch_with(
     data: &EngineData,
     cfg: Option<&llmenv_config::WidgetConfig>,
     use_color: bool,
-    gh_cmd: &str,
+    gh: GhPrCmd<'_>,
 ) -> String {
     let Some(name) = resolve_branch_name(data) else {
         return String::new();
@@ -506,7 +506,7 @@ fn render_branch_with(
     let label = format.replace("{name}", &name);
     // Link the branch to its PR (OSC 8). Route through resolve_pr so the link
     // derives the PR when the engine sends none (Claude Code), matching {pr}.
-    let pr_url = resolve_pr_with(data, gh_cmd)
+    let pr_url = resolve_pr_with(data, gh)
         .and_then(|p| p.url)
         .map(|u| super::sanitize(&u))
         .unwrap_or_default();
@@ -615,7 +615,31 @@ const PR_CACHE_TTL_SECS: i64 = 60;
 /// `gh` hits the GitHub API over the network; a stalled connection must not
 /// hang the statusline render. 3s is generous for a healthy connection and
 /// short enough that a bad one doesn't stall the prompt.
-const GH_PR_TIMEOUT_SECS: u64 = 3;
+const DEFAULT_GH_PR_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Which `gh` binary [`gh_pr_view`] invokes and how long it may take.
+///
+/// The timeout travels with the binary rather than being read from a constant
+/// so tests can point at a fake `gh` *and* give it a budget that machine load
+/// can't blow: a test asserting "this JSON parses into this `PrInfo`" must not
+/// fail because a `/bin/sh` child missed a 3-second production deadline
+/// (#1073). Bundling the two also keeps [`derive_pr`] within the
+/// positional-parameter limit.
+#[derive(Clone, Copy, Debug)]
+struct GhPrCmd<'a> {
+    bin: &'a str,
+    timeout: Duration,
+}
+
+impl<'a> GhPrCmd<'a> {
+    /// `bin` with the production timeout ([`DEFAULT_GH_PR_TIMEOUT`]).
+    fn new(bin: &'a str) -> Self {
+        Self {
+            bin,
+            timeout: DEFAULT_GH_PR_TIMEOUT,
+        }
+    }
+}
 
 /// Resolve the PR for the current session, in precedence order:
 ///
@@ -632,13 +656,13 @@ const GH_PR_TIMEOUT_SECS: u64 = 3;
 /// branch. All of these degrade silently, matching [`render_branch`]'s
 /// fallback.
 fn resolve_pr(data: &EngineData) -> Option<PrInfo> {
-    resolve_pr_with(data, "gh")
+    resolve_pr_with(data, GhPrCmd::new("gh"))
 }
 
-/// [`resolve_pr`]'s backend, with the `gh` binary injectable so tests can
+/// [`resolve_pr`]'s backend, with the `gh` invocation injectable so tests can
 /// exercise the full engine-precedence + branch-resolution + derivation chain
 /// against a fake `gh` instead of the real one.
-fn resolve_pr_with(data: &EngineData, gh_cmd: &str) -> Option<PrInfo> {
+fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Option<PrInfo> {
     if let Some(pr) = &data.pr {
         return Some(pr.clone());
     }
@@ -648,7 +672,7 @@ fn resolve_pr_with(data: &EngineData, gh_cmd: &str) -> Option<PrInfo> {
         .and_then(|w| w.current_dir.as_deref())?;
     let branch = resolve_branch_name(data)?;
     derive_pr(
-        gh_cmd,
+        gh,
         Path::new(dir),
         &branch,
         usage_state_dir().as_deref(),
@@ -657,11 +681,11 @@ fn resolve_pr_with(data: &EngineData, gh_cmd: &str) -> Option<PrInfo> {
 }
 
 /// Cache-then-derive backend for [`resolve_pr`]'s fallback path, fully
-/// parameterized (`gh_cmd`, `cache_dir`, `now`) so tests can substitute a
-/// fake `gh` and a controlled clock without touching the real network or
-/// process environment.
+/// parameterized (`gh`, `cache_dir`, `now`) so tests can substitute a fake
+/// `gh` and a controlled clock without touching the real network or process
+/// environment.
 fn derive_pr(
-    gh_cmd: &str,
+    gh: GhPrCmd<'_>,
     repo_dir: &Path,
     branch: &str,
     cache_dir: Option<&Path>,
@@ -673,7 +697,7 @@ fn derive_pr(
     {
         return cached;
     }
-    let fresh = gh_pr_view(gh_cmd, repo_dir, branch);
+    let fresh = gh_pr_view(gh, repo_dir, branch);
     if let Some(path) = &cache_path {
         write_pr_cache(path, &fresh, now);
     }
@@ -738,11 +762,11 @@ fn write_pr_cache(path: &Path, pr: &Option<PrInfo>, now: i64) {
 /// Shell out to `gh pr view --json number,url,reviewDecision -- <branch>` in
 /// `repo_dir` and parse the result. `None` on any failure — spawn error (`gh`
 /// not installed), non-zero exit (not authenticated, no remote, no open PR
-/// for the branch), a timeout ([`GH_PR_TIMEOUT_SECS`]), or unparseable
-/// output. Every failure is logged at `debug` only — this must degrade
-/// silently to the statusline, never print or panic.
-fn gh_pr_view(gh_cmd: &str, repo_dir: &Path, branch: &str) -> Option<PrInfo> {
-    let mut cmd = Command::new(gh_cmd);
+/// for the branch), a timeout (`gh.timeout`), or unparseable output. Every
+/// failure is logged at `debug` only — this must degrade silently to the
+/// statusline, never print or panic.
+fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> Option<PrInfo> {
+    let mut cmd = Command::new(gh.bin);
     // `--` terminates option parsing so `branch` (derived from git state) is
     // always read as the positional argument, never as a `gh` flag — a
     // branch named e.g. `--json` (or starting with `-`) can't be
@@ -767,7 +791,7 @@ fn gh_pr_view(gh_cmd: &str, repo_dir: &Path, branch: &str) -> Option<PrInfo> {
             return None;
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(GH_PR_TIMEOUT_SECS);
+    let deadline = Instant::now() + gh.timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -791,12 +815,17 @@ fn gh_pr_view(gh_cmd: &str, repo_dir: &Path, branch: &str) -> Option<PrInfo> {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    tracing::debug!("gh pr view timed out after {GH_PR_TIMEOUT_SECS}s (non-fatal)");
+                    let secs = gh.timeout.as_secs_f32();
+                    tracing::debug!("gh pr view timed out after {secs}s (non-fatal)");
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(e) => {
+                // Same cleanup as the timeout arm: the child's state is
+                // unknown, so don't abandon it still running.
+                let _ = child.kill();
+                let _ = child.wait();
                 tracing::debug!("gh pr view: wait failed (non-fatal): {e}");
                 return None;
             }
@@ -1580,7 +1609,7 @@ mod tests {
             "workspace": { "current_dir": repo_dir.path().to_string_lossy() }
         }))
         .unwrap();
-        let out = render_branch_with(&data, None, true, &gh.to_string_lossy());
+        let out = render_branch_with(&data, None, true, fake_gh(&gh.to_string_lossy()));
         assert!(
             out.contains("\x1b]8;;https://github.com/o/r/pull/973"),
             "expected branch→derived-PR link: {out:?}"
@@ -1614,7 +1643,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            resolve_pr_with(&data, &gh.to_string_lossy()),
+            resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())),
             Some(PrInfo {
                 number: Some(834),
                 url: Some("https://github.com/o/r/pull/834".to_string()),
@@ -1643,7 +1672,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            resolve_pr_with(&data, &gh.to_string_lossy()),
+            resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())),
             Some(PrInfo {
                 number: Some(5),
                 url: Some("https://github.com/o/r/pull/5".to_string()),
@@ -1670,7 +1699,7 @@ mod tests {
             "workspace": { "current_dir": dir.path().to_string_lossy() }
         }))
         .unwrap();
-        assert_eq!(resolve_pr_with(&data, &gh.to_string_lossy()), None);
+        assert_eq!(resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())), None);
     }
 
     #[test]
@@ -1716,6 +1745,23 @@ mod tests {
         path
     }
 
+    /// A fake-`gh` invocation with a deliberately generous timeout (#1073).
+    ///
+    /// These tests assert what the derivation chain *does* with a subprocess's
+    /// output — not how quickly the OS schedules that subprocess. Under
+    /// `DEFAULT_GH_PR_TIMEOUT` a loaded machine can fail to run the `/bin/sh`
+    /// fake to completion inside the production budget, turning every such
+    /// test into a load-sensitive coin flip. The timeout's own behavior is
+    /// covered separately by
+    /// `gh_pr_view_returns_none_when_gh_outlives_its_timeout`.
+    #[cfg(unix)]
+    fn fake_gh(bin: &str) -> GhPrCmd<'_> {
+        GhPrCmd {
+            bin,
+            timeout: Duration::from_secs(120),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn gh_pr_view_derived_path_renders_expected_widget() {
@@ -1728,7 +1774,7 @@ mod tests {
             bin_dir.path(),
             "#!/bin/sh\necho '{\"number\":834,\"url\":\"https://github.com/o/r/pull/834\",\"reviewDecision\":\"CHANGES_REQUESTED\"}'\n",
         );
-        let pr = gh_pr_view(&gh.to_string_lossy(), repo_dir.path(), "feat/x").unwrap();
+        let pr = gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x").unwrap();
         assert_eq!(pr.number, Some(834));
         assert_eq!(render_pr_info(&pr, None, false), "#834");
         assert_eq!(pr.review_state.as_deref(), Some("changes_requested"));
@@ -1748,7 +1794,7 @@ mod tests {
             "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > argv.log\necho '{\"number\":1}'\n",
         );
         let branch = "--json";
-        let _ = gh_pr_view(&gh.to_string_lossy(), repo_dir.path(), branch);
+        let _ = gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), branch);
         let argv = std::fs::read_to_string(repo_dir.path().join("argv.log")).unwrap();
         let args: Vec<&str> = argv.lines().collect();
         let dash_dash = args
@@ -1769,7 +1815,11 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let missing = repo_dir.path().join("no-such-gh-binary");
         assert_eq!(
-            gh_pr_view(&missing.to_string_lossy(), repo_dir.path(), "feat/x"),
+            gh_pr_view(
+                fake_gh(&missing.to_string_lossy()),
+                repo_dir.path(),
+                "feat/x"
+            ),
             None
         );
     }
@@ -1787,8 +1837,36 @@ mod tests {
             "#!/bin/sh\necho 'no pull requests found' >&2\nexit 1\n",
         );
         assert_eq!(
-            gh_pr_view(&gh.to_string_lossy(), repo_dir.path(), "feat/x"),
+            gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
             None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_pr_view_returns_none_when_gh_outlives_its_timeout() {
+        // The timeout's own contract (#1073): a `gh` that would eventually
+        // print a perfectly good PR still yields None if it doesn't finish in
+        // time, and gh_pr_view gives up rather than blocking the render. This
+        // is the one test that legitimately asserts on the timeout, so it
+        // injects a tiny budget against a fake that sleeps far longer —
+        // orders of magnitude of margin, rather than racing production's 3s.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\nsleep 30\necho '{\"number\":1}'\n",
+        );
+        let gh_bin = gh.to_string_lossy();
+        let cmd = GhPrCmd {
+            bin: &gh_bin,
+            timeout: Duration::from_millis(50),
+        };
+        let started = Instant::now();
+        assert_eq!(gh_pr_view(cmd, repo_dir.path(), "feat/x"), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "timeout must abandon the child, not wait it out"
         );
     }
 
@@ -1803,7 +1881,7 @@ mod tests {
             "#!/bin/sh\necho called >> gh-calls.log\necho '{\"number\":1,\"url\":null,\"reviewDecision\":null}'\n",
         );
         let pr = derive_pr(
-            &gh.to_string_lossy(),
+            fake_gh(&gh.to_string_lossy()),
             repo_dir.path(),
             "feat/x",
             Some(cache_dir.path()),
@@ -1838,7 +1916,7 @@ mod tests {
         );
         // now=1_030 is within the 60s TTL of the ts=1_000 cache entry.
         let pr = derive_pr(
-            &gh.to_string_lossy(),
+            fake_gh(&gh.to_string_lossy()),
             repo_dir.path(),
             "feat/x",
             Some(cache_dir.path()),
@@ -1878,7 +1956,7 @@ mod tests {
         // now=1_000+PR_CACHE_TTL_SECS+1 is past the cache entry's TTL.
         let now = 1_000 + PR_CACHE_TTL_SECS + 1;
         let pr = derive_pr(
-            &gh.to_string_lossy(),
+            fake_gh(&gh.to_string_lossy()),
             repo_dir.path(),
             "feat/x",
             Some(cache_dir.path()),

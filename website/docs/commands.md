@@ -95,6 +95,28 @@ fails on missing/malformed input: unknown widgets, a missing data file, or
 unparseable stdin all degrade to an empty render for that widget rather than
 an error.
 
+### Broken config renders an error row
+
+(added in v3.8.0)
+
+A `config.yaml` that can't be loaded or parsed is the one failure that does
+*not* degrade to empty. Instead of rendering nothing, the statusline prints a
+single row naming the problem and the remedy:
+
+```text
+⚠️ llmenv: config error — run 'llmenv doctor'
+```
+
+The command still exits 0, so the engine keeps rendering the status line. The
+row deliberately omits the underlying parse error — it's multi-line and
+arbitrarily long, where a status line is one short row. Run
+[`llmenv doctor`](#doctor) to see the actual error and its location.
+
+Previously a config parse error exited non-zero with empty stdout, so the
+statusline silently vanished from every open terminal with the real error
+going only to a stderr the engine discards — leaving no signal that the
+config was broken.
+
 ## `context`
 
 ```text

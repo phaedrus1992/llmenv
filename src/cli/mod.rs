@@ -1240,8 +1240,23 @@ fn run_export(
 /// (e.g. manual invocation outside a session); `StatusData::load` degrades to
 /// defaults on a missing/wrong-shape file rather than erroring.
 fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
-    let config_path = paths::config_path()?;
-    let config = crate::hook_run::load_cached_config(&config_path)?;
+    // A broken config must degrade to a visible error row, not to nothing
+    // (#1052). Propagating here would exit non-zero with empty stdout, and the
+    // engine discards the stderr `main()` already wrote the parse error to —
+    // so the statusline would silently vanish with no signal anywhere.
+    let loaded = paths::config_path().and_then(|path| crate::hook_run::load_cached_config(&path));
+    let config = match loaded {
+        Ok(config) => config,
+        // An absent config takes this arm too, and shares the row deliberately:
+        // `llmenv doctor` is the right next step either way, so distinguishing
+        // them would add a second row variant for a state that only exists
+        // before the first `llmenv sync`.
+        Err(e) => {
+            tracing::warn!("statusline: config unavailable, rendering error row: {e:#}");
+            print!("{}", statusline::render_config_error(use_color));
+            return Ok(());
+        }
+    };
     let data_path = statusline_data_path_with_env(&config, &|name| std::env::var(name).ok());
 
     let output = statusline::run_statusline(&config, &data_path, &mut std::io::stdin(), use_color)?;
