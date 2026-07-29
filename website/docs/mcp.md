@@ -103,6 +103,59 @@ features:
 3. If this host matches `server_host` (its id is among the matched host scopes),
    the CLI also launches the local `mcp-proxy` bound to `0.0.0.0:<port>`.
 
+### Proxy lifecycle on the server host
+
+(added in v3.8.0)
+
+Every `llmenv export` on the server host checks that the proxy is up, so the
+check runs on each shell prompt and has to be both cheap and correct about what
+"up" means.
+
+**The port decides whether the proxy is running.** llmenv opens a TCP connection
+to the bind address; if something answers, the proxy is up and nothing is
+started. The pidfile at `$XDG_STATE_HOME/llmenv/mcp-proxy.pid` records *which*
+process to signal — it is never treated as evidence that the proxy is alive. A
+missing or stale pidfile alongside a live proxy therefore doesn't cause a second
+one to be launched, and a pidfile naming a process that is no longer running is
+cleared rather than left to mislead.
+
+**A freshly spawned proxy is polled, not slept on.** llmenv waits up to 5 s for
+the new process to open its socket, checking every 50 ms, so a fast start returns
+immediately and a slow one still succeeds. The budget is sized for the `uvx`
+path, which pays uv's resolve cost on top of interpreter startup (~2 s, more on a
+cold cache) — the direct `PATH` install binds in well under a second. If the
+proxy exits before binding, that's reported at once instead of waiting the budget
+out.
+
+**A spawn is guarded by a lockfile** next to the pidfile, so several shells
+redrawing their prompts at once start one proxy rather than one each. The
+lockfile records the pid that holds it; if that process is gone — killed with
+`^C` mid-start, say — the next export reclaims the lock instead of failing
+against it.
+
+**`listen_host` may be IPv6.** llmenv brackets it when building the bind address
+(`::1` and port 9092 become `[::1]:9092`), which is what both `mcp-proxy` and the
+liveness probe expect. Write the plain address in config; don't bracket it
+yourself.
+
+**The proxy's stderr is kept**, at `$XDG_STATE_HOME/llmenv/mcp-proxy.log`
+(owner-readable only, and llmenv refuses to write through a symlink or FIFO left
+at that path). It rotates to `mcp-proxy.log.1` once it passes 1 MiB, keeping one
+generation of history. When the proxy fails to start, llmenv quotes the last
+lines of that log in the warning, which is usually enough to see the cause
+directly:
+
+```text
+warning: failed to ensure mcp-proxy running: mcp-proxy (pid 32097) exited
+(exit status: 1) before binding to 0.0.0.0:9092; last lines of
+/Users/you/.local/state/llmenv/mcp-proxy.log:
+  Traceback (most recent call last):
+  ImportError: cannot import name 'request_ctx' from 'mcp.server.lowlevel.server'
+```
+
+A failure here is a warning, not an error: `llmenv export` still emits its
+environment variables so the shell hook keeps working without the memory backend.
+
 ### Placing a host on a network manually
 
 Network auto-detection (gateway MAC, SSID, CIDR) doesn't always work — a VPN, a
@@ -236,6 +289,33 @@ nc -vz fixed.local 7878
 
 The server only renders when one of its tags is active. Check that a scope in
 the current environment emits a matching tag (`llmenv tag-ls`).
+
+### Proxy won't start
+
+(added in v3.8.0)
+
+The warning from `llmenv export` quotes the tail of the proxy's log. For the full
+output, read it directly:
+
+```bash
+tail -50 "${XDG_STATE_HOME:-$HOME/.local/state}/llmenv/mcp-proxy.log"
+```
+
+A common cause is a dependency resolution `mcp-proxy` can't import — it declares
+an open-ended `mcp` requirement, so `uvx mcp-proxy` can pick a combination that
+fails at import time. Pinning the install sidesteps it:
+
+```bash
+uv tool install mcp-proxy --with "mcp<2"
+```
+
+To reproduce a cold start deliberately, stop the proxy and let the next export
+bring it back:
+
+```bash
+pkill -f 'mcp-proxy --host'
+llmenv export >/dev/null
+```
 
 ## Tag-scoped memory and the env var contract
 
