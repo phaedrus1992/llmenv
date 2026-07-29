@@ -538,12 +538,12 @@ pub(crate) fn open_bounded_log(path: &Path, max_bytes: u64) -> anyhow::Result<st
 
     // Refuse anything at this path that isn't a plain file. `symlink_metadata`
     // rather than `metadata` so a symlink is seen as a symlink: opening one would
-    // append the proxy's stderr to whatever it points at, and a pre-placed FIFO
+    // append the child's stderr to whatever it points at, and a pre-placed FIFO
     // would block the open — hanging the shell prompt on every export.
     match std::fs::symlink_metadata(path) {
         Ok(meta) if !meta.is_file() => {
             anyhow::bail!(
-                "proxy log path {} is not a regular file ({:?}); refusing to write through it",
+                "log path {} is not a regular file ({:?}); refusing to write through it",
                 path.display(),
                 meta.file_type()
             );
@@ -559,9 +559,7 @@ pub(crate) fn open_bounded_log(path: &Path, max_bytes: u64) -> anyhow::Result<st
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("inspecting proxy log {}", path.display()))
-            );
+            return Err(anyhow::Error::new(e).context(format!("inspecting log {}", path.display())));
         }
     }
 
@@ -574,7 +572,7 @@ pub(crate) fn open_bounded_log(path: &Path, max_bytes: u64) -> anyhow::Result<st
     }
     let file = opts
         .open(path)
-        .with_context(|| format!("opening proxy log {}", path.display()))?;
+        .with_context(|| format!("opening log {}", path.display()))?;
 
     // `mode()` only applies at creation, so a log left behind with looser
     // permissions would keep them. The proxy's stderr can describe the memory
@@ -596,7 +594,7 @@ pub(crate) fn open_bounded_log(path: &Path, max_bytes: u64) -> anyhow::Result<st
 /// "Nothing to show" and "couldn't look" have to stay distinguishable: reporting
 /// an unreadable log as though the proxy printed nothing tells the user the
 /// opposite of the truth, and sends them to read a file they can't read.
-pub(crate) enum LogTail {
+enum LogTail {
     Lines(String),
     Empty,
     Unreadable(std::io::Error),
@@ -610,15 +608,8 @@ pub(crate) enum LogTail {
 /// wrong in the incident that prompted #1086 — the real cause was an
 /// `ImportError` visible only in the discarded stderr.
 fn proxy_log_hint(pid_path: &Path) -> String {
-    bounded_log_hint(&log_path_for(pid_path), LOG_TAIL_LINES, LOG_TAIL_BYTES)
-}
-
-/// Builds the trailing fragment of a failure message: the last few lines of
-/// `log_path`, or why they aren't available. Shared by [`proxy_log_hint`] and
-/// other spawned-child diagnostics that redirect stderr through
-/// [`open_bounded_log`] (#1091).
-pub(crate) fn bounded_log_hint(log_path: &Path, max_lines: usize, max_bytes: u64) -> String {
-    match tail_bounded_log(log_path, max_lines, max_bytes) {
+    let log_path = log_path_for(pid_path);
+    match tail_bounded_log(&log_path, LOG_TAIL_LINES, LOG_TAIL_BYTES) {
         LogTail::Lines(tail) => format!("; last lines of {}:\n  {tail}", log_path.display()),
         LogTail::Empty => format!("; no output in {} either", log_path.display()),
         LogTail::Unreadable(e) => format!("; cannot read {} ({e})", log_path.display()),
@@ -636,7 +627,7 @@ pub(crate) fn bounded_log_hint(log_path: &Path, max_lines: usize, max_bytes: u64
 /// UTF-8. Control characters are stripped, because these lines are
 /// third-party output printed straight to the user's terminal and escape
 /// sequences in them would be interpreted rather than shown.
-pub(crate) fn tail_bounded_log(path: &Path, max_lines: usize, max_bytes: u64) -> LogTail {
+fn tail_bounded_log(path: &Path, max_lines: usize, max_bytes: u64) -> LogTail {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let mut f = match std::fs::File::open(path) {
         Ok(f) => f,

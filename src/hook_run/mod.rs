@@ -627,14 +627,31 @@ fn run_inner(
     // session logging for every PreToolUse event (the #231/#864
     // early-return-drops-logging bug class).
     let pre_tool_text = if event == HookEvent::PreToolUse {
-        let state_dir = crate::paths::state_dir()?;
-        let text = resolve_pre_tool_text(
-            stdin_payload,
-            claude_session_id,
-            &config,
-            task_tracker_enabled,
-            &state_dir,
-        );
+        // A `state_dir()` failure must degrade the same way it did before
+        // #1089 (each of read_once/repeat_detect resolved it independently
+        // and skipped itself on error) rather than propagate via `?` and
+        // abort the whole PreToolUse decision — that would silently drop
+        // the task-tracker redirect too, and any session logging below,
+        // reintroducing the #231/#864 early-return-drops-logging bug class
+        // for a failure mode neither of those issues anticipated.
+        let text = match crate::paths::state_dir() {
+            Ok(state_dir) => resolve_pre_tool_text(
+                stdin_payload,
+                claude_session_id,
+                &config,
+                task_tracker_enabled,
+                &state_dir,
+            ),
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "failed to resolve state_dir; read_once/repeat_detect skipped for this call"
+                );
+                task_tracker_enabled
+                    .then(|| crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload))
+                    .flatten()
+            }
+        };
         match text {
             Some(t) => {
                 // Derived from the same `event_to_log_kind` mapping
@@ -1057,8 +1074,17 @@ async fn run_session_log(
     }
     let session_id = match call.claude_session_id {
         Some(csid) => {
-            ensure_transcript_session(call.log_cfg, call.client, csid, call.ctx, call.state_path)
-                .await
+            // Per-event: no verification, matching this path's pre-#1090
+            // cost — see ensure_transcript_session's `verify` doc.
+            ensure_transcript_session(
+                call.log_cfg,
+                call.client,
+                csid,
+                call.ctx,
+                call.state_path,
+                false,
+            )
+            .await
         }
         None => {
             debug!("event captured without claude_session_id — transcript record skipped");
@@ -1145,7 +1171,8 @@ async fn handle_session_log(
                     crate::session_log::reap_session_log(p, days);
                 }
             }
-            ensure_transcript_session(cfg, client, csid, ctx, state_path).await
+            // SessionStart: once per launch, worth revalidating (#1090).
+            ensure_transcript_session(cfg, client, csid, ctx, state_path, true).await
         }
         (_, Some(csid)) => state_path.and_then(|p| state::lookup_session_at(p, csid)),
         (_, None) => None,
@@ -1170,20 +1197,29 @@ async fn handle_session_log(
 /// `cfg.transcript` and a client is available — start a new one and persist
 /// the correlation. Returns `None` when transcript logging is unavailable and
 /// nothing was recorded before.
+///
+/// `verify`: whether to revalidate a cached id against ICM before trusting it
+/// (#1090) rather than treating its presence alone as proof of liveness — the
+/// #1085 failure mode (a wrong cached value trusted forever because the only
+/// check that would notice consulted the record itself). Revalidation costs a
+/// full-transcript fetch (`icm_transcript_show` has no cheap existence-only
+/// form), so only the `SessionStart` caller — once per launch — passes
+/// `true`; the per-event caller in `run_session_log` passes `false` to avoid
+/// turning every logged tool call into an ICM round trip that grows with the
+/// transcript itself.
 async fn ensure_transcript_session(
     cfg: &SessionLog,
     client: Option<&McpHttpClient>,
     csid: &str,
     ctx: &ScopeContext,
     state_path: Option<&std::path::Path>,
+    verify: bool,
 ) -> Option<String> {
     let path = state_path?;
     if let Some(existing) = state::lookup_session_at(path, csid) {
-        // #1090: a recorded id is a cache, not proof the ICM session is
-        // still live — verify before trusting it. Falling through to start a
-        // fresh session on a failed verification avoids the #1085 failure
-        // mode (a wrong cached value trusted forever because the only check
-        // that would notice consulted the record itself).
+        if !verify {
+            return Some(existing);
+        }
         match client {
             Some(client) => match transcript_dispatch::verify_session(client, &existing).await {
                 Ok(()) => return Some(existing),
@@ -1583,9 +1619,6 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
     // Not waited on: the child is process-group-detached and outlives us.
 }
 
-/// Spawn a detached child to run post-session consolidation. Best-effort
-/// fire-and-forget — spawn failures are logged at debug level and the caller
-/// never waits on the child.
 /// Where codebase-memory-mcp's index cache lives for `cm`/`state_dir`: the
 /// configured `index_path` override, or `state_dir/codebase-memory` by
 /// default. Single source of truth for both the spawned child's
@@ -1667,6 +1700,9 @@ fn trigger_codebase_memory_index(
     }
 }
 
+/// Spawn a detached child to run post-session consolidation. Best-effort
+/// fire-and-forget — spawn failures are logged at debug level and the caller
+/// never waits on the child.
 fn post_session_consolidation() {
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("consolidation-run: cannot resolve current_exe");
@@ -2802,9 +2838,15 @@ mod session_log_tests {
             ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
 
-        let id =
-            ensure_transcript_session(&cfg, Some(&client), "claude-1", &ctx(), Some(&state_path))
-                .await;
+        let id = ensure_transcript_session(
+            &cfg,
+            Some(&client),
+            "claude-1",
+            &ctx(),
+            Some(&state_path),
+            true,
+        )
+        .await;
 
         assert_eq!(id.as_deref(), Some("icm-sess-1"));
         assert_eq!(
@@ -2846,11 +2888,58 @@ mod session_log_tests {
             ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
 
-        let id =
-            ensure_transcript_session(&cfg, Some(&client), "claude-2", &ctx(), Some(&state_path))
-                .await;
+        let id = ensure_transcript_session(
+            &cfg,
+            Some(&client),
+            "claude-2",
+            &ctx(),
+            Some(&state_path),
+            true,
+        )
+        .await;
 
         assert_eq!(id.as_deref(), Some("icm-sess-2"));
+    }
+
+    /// #1090 regression: `run_session_log`'s per-event path calls
+    /// `ensure_transcript_session` for every mapped hook event, not just
+    /// `SessionStart` — verifying on every one of those would turn each
+    /// logged tool call into an `icm_transcript_show` round trip that grows
+    /// with the transcript itself (`icm_transcript_show` has no cheap
+    /// existence-only form). `verify: false` must reuse a cached id without
+    /// ever calling ICM.
+    #[tokio::test]
+    async fn ensure_transcript_session_with_verify_false_skips_the_network_call() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+        state::record_session_at(&state_path, "claude-5", "icm-sess-5").unwrap();
+        // No mock mounted at all: any HTTP call here would fail the request.
+        let server = MockServer::start().await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let cfg = SessionLog {
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                retention_days: None,
+            }),
+            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
+        };
+
+        let id = ensure_transcript_session(
+            &cfg,
+            Some(&client),
+            "claude-5",
+            &ctx(),
+            Some(&state_path),
+            false,
+        )
+        .await;
+
+        assert_eq!(id.as_deref(), Some("icm-sess-5"));
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "verify: false must not make any ICM call"
+        );
     }
 
     #[tokio::test]
@@ -2890,9 +2979,15 @@ mod session_log_tests {
             ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
         };
 
-        let id =
-            ensure_transcript_session(&cfg, Some(&client), "claude-4", &ctx(), Some(&state_path))
-                .await;
+        let id = ensure_transcript_session(
+            &cfg,
+            Some(&client),
+            "claude-4",
+            &ctx(),
+            Some(&state_path),
+            true,
+        )
+        .await;
 
         assert_eq!(
             id.as_deref(),

@@ -58,6 +58,28 @@ enum CallToolError {
     Fatal(anyhow::Error),
 }
 
+impl From<CallToolError> for anyhow::Error {
+    fn from(e: CallToolError) -> Self {
+        match e {
+            CallToolError::StaleSession(e) | CallToolError::Fatal(e) => e,
+        }
+    }
+}
+
+/// Whether `status` is the MCP Streamable HTTP transport's shape for "this
+/// session id isn't valid" (mcp-proxy itself uses 400 for "Bad Request:
+/// Missing session ID"; a dead/expired session is 404). Over-broad by
+/// design: a 400 for an unrelated reason (e.g. malformed tool arguments)
+/// also takes the stale-session retry path, wasting one re-initialize
+/// before the real error surfaces on the second attempt — but it always
+/// does surface, just one round trip later.
+fn is_stale_session_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+    )
+}
+
 impl McpHttpClient {
     /// Build a client for `url` whose every request is bounded by `timeout`.
     ///
@@ -193,12 +215,19 @@ impl McpHttpClient {
     pub async fn call_tool(&self, name: &str, arguments: Value) -> anyhow::Result<String> {
         match self.try_call_tool(name, &arguments).await {
             Ok(text) => Ok(text),
-            Err(CallToolError::StaleSession(_)) => {
+            Err(CallToolError::StaleSession(first_err)) => {
+                tracing::warn!(
+                    error = %first_err,
+                    tool = %name,
+                    "cached MCP session rejected, re-initializing and retrying once"
+                );
                 *self.session_id.lock().await = None;
-                match self.try_call_tool(name, &arguments).await {
-                    Ok(text) => Ok(text),
-                    Err(CallToolError::StaleSession(e) | CallToolError::Fatal(e)) => Err(e),
-                }
+                self.try_call_tool(name, &arguments)
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .with_context(|| {
+                        format!("retry after stale session; first attempt: {first_err}")
+                    })
             }
             Err(CallToolError::Fatal(e)) => Err(e),
         }
@@ -251,15 +280,11 @@ impl McpHttpClient {
                 })
                 .unwrap_or_else(|_| "(failed to read error body)".to_string());
             let err = anyhow!("tool {name} returned HTTP {}: {}", status, body);
-            return Err(
-                if status == reqwest::StatusCode::BAD_REQUEST
-                    || status == reqwest::StatusCode::NOT_FOUND
-                {
-                    CallToolError::StaleSession(err)
-                } else {
-                    CallToolError::Fatal(err)
-                },
-            );
+            return Err(if is_stale_session_status(status) {
+                CallToolError::StaleSession(err)
+            } else {
+                CallToolError::Fatal(err)
+            });
         }
 
         let body: Value = resp
@@ -1061,6 +1086,18 @@ mod tests {
                 blocked_reason(&IpAddr::V6(mapped), policy).is_some(),
                 blocked_reason(&IpAddr::V4(v4_addr), policy).is_some()
             );
+        }
+
+        #[test]
+        fn prop_only_400_and_404_are_stale_session_status(code in 100u16..1000) {
+            // #1094: exactly 400/404 trigger the clear-and-retry path; every
+            // other status (2xx included, though callers only reach this on
+            // a non-2xx) must not.
+            let Ok(status) = reqwest::StatusCode::from_u16(code) else {
+                return Ok(());
+            };
+            let expected = matches!(code, 400 | 404);
+            prop_assert_eq!(is_stale_session_status(status), expected);
         }
     }
 }
