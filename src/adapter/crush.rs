@@ -41,6 +41,19 @@ impl AgentAdapter for CrushAdapter {
         true
     }
 
+    /// Every map this adapter reads — `native_plugins` is absent because Crush
+    /// has no Claude-style plugin concept.
+    fn native_maps(&self) -> &'static [&'static str] {
+        use crate::adapter::native_keys as nk;
+        &[
+            nk::NATIVE_PERMISSIONS,
+            nk::NATIVE_HOOKS,
+            nk::NATIVE_MCP,
+            nk::NATIVE_MODEL_PROVIDERS,
+            nk::NATIVE,
+        ]
+    }
+
     fn supported_hook_events(&self) -> &'static [&'static str] {
         SUPPORTED_HOOK_EVENTS
     }

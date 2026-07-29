@@ -504,17 +504,23 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - dead `native_<feature>.<engine>` keys (added in v3.8.0) — warns when a key in
   `native_permissions`, `native_hooks`, `native_plugins`, `native_mcp`,
   `native_model_providers`, or `native` names no registered engine (a typo), or
-  names an engine that has no such feature (e.g.
-  `native_model_providers.claude_code`). Either way the block parses and merges
-  but is never rendered. `llmenv export` and `llmenv regenerate` warn about the
-  same thing. See [Engines](engines.md#engine-keys-are-validated).
+  names an engine whose adapter never reads that map (e.g.
+  `native_model_providers.claude_code`, `native_hooks.opencode`). Either way the
+  block parses and merges but is never rendered. Checked against the merged
+  config, so bundle-contributed keys are covered. `llmenv export` and
+  `llmenv regenerate` warn about the same thing, and `llmenv validate` fails on
+  an unknown engine id. See
+  [Engines](engines.md#engine-keys-are-validated).
 - Claude-only permission patterns under opencode (added in v3.8.0) — warns when a
   `capabilities.permissions` pattern uses Claude Code's colon-prefix syntax
-  (`git commit:*`, `domain:example.com`) while opencode is also installed and
-  enabled. opencode matches a pattern as a plain glob, so the grant is dead
-  config there. Use a space-separated pattern (`git commit *`) for a rule both
+  (a trailing `:*` command prefix like `git commit:*`, or a `domain:`/`url:`
+  field filter) while opencode is also installed and enabled. opencode matches a
+  pattern as a plain glob, so the rule never applies there. A dead `deny` is
+  called out specially: it fails open, so the thing it was written to block
+  isn't blocked. Use a space-separated pattern (`git commit *`) for a rule both
   engines honour, or move the Claude-only form to
-  `native_permissions.claude_code`.
+  `native_permissions.claude_code`. `llmenv export` and `llmenv regenerate`
+  report this too.
 - glob-shaped hook matchers — warns when a `hook.matcher` looks like a
   file-extension glob (e.g. `*.rs`, `.py`) instead of a tool-name pattern;
   Claude Code matches `hook.matcher` against tool name only, never file path,

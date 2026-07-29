@@ -192,6 +192,19 @@ impl AgentAdapter for ClaudeCodeAdapter {
         false
     }
 
+    /// Every map this adapter reads — `native_model_providers` is absent
+    /// because Claude Code has no provider block to merge into.
+    fn native_maps(&self) -> &'static [&'static str] {
+        use crate::adapter::native_keys as nk;
+        &[
+            nk::NATIVE_PERMISSIONS,
+            nk::NATIVE_HOOKS,
+            nk::NATIVE_PLUGINS,
+            nk::NATIVE_MCP,
+            nk::NATIVE,
+        ]
+    }
+
     fn supported_hook_events(&self) -> &'static [&'static str] {
         CLAUDE_CODE_HOOK_EVENTS
     }

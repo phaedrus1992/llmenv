@@ -42,18 +42,40 @@ event) that requires the override.
 (added in v3.8.0)
 
 Every `native_<feature>` map is keyed by an engine id, and each adapter reads
-only its own key. A key naming no registered engine — a typo like
-`native_mcp.opencde` — is therefore never rendered. So is a key naming a real
-engine that has no such feature, e.g. `native_model_providers.claude_code`
-(Claude Code is Anthropic-only, with no provider block to merge into).
+only its own key. Two kinds of key are therefore never rendered:
 
-`llmenv export`, `llmenv regenerate`, and `llmenv doctor` all warn about both
-cases instead of dropping the block silently. Engine ids are matched exactly, so
-`Claude_Code` is reported as unknown — adapters look the key up verbatim.
+- **An unknown engine id** — a typo like `native_mcp.opencde`. Engine ids are
+  matched exactly, so `Claude_Code` counts as unknown too: adapters look the key
+  up verbatim.
+- **A real engine whose adapter doesn't read that map.** Each adapter declares
+  which `native_<feature>` maps it consumes. `native_model_providers.claude_code`
+  is dead because Claude Code is Anthropic-only with no provider block;
+  `native_hooks.opencode` and `native_plugins.opencode` are dead because opencode
+  renders hooks from the neutral `capabilities.hooks` through its shim and
+  plugins from the resolved plugin list, never from a per-engine fragment.
 
-`native_permissions` additionally accepts an MCP server name as a key (it doubles
-as the per-server permission map), so a configured server name there is not
-flagged.
+The current matrix of which adapter reads which map:
+
+| Map | `claude_code` | `crush` | `opencode` |
+| --- | --- | --- | --- |
+| `native_permissions` | yes | yes | yes |
+| `native_hooks` | yes | yes | no |
+| `native_plugins` | yes | no | no |
+| `native_mcp` | yes | yes | yes |
+| `native_model_providers` | no | yes | yes |
+| `native` | yes | yes | yes |
+
+`llmenv export`, `llmenv regenerate`, and `llmenv doctor` warn about both kinds,
+reading the *merged* config so a key contributed by a `bundle.yaml` is covered
+too. `llmenv validate` goes further and **fails** on an unknown engine id, since
+there is no legitimate reason to write one; a key naming a real engine that
+doesn't read the map stays a warning there, because sharing one config across
+engines makes it a deliberate no-op.
+
+`native_permissions` is keyed by engine like every other map — an MCP server name
+is not a valid key. Per-MCP-server permissions are expressed as
+`mcp__<server>__<tool>` rule strings under an engine key, or through
+`features.<name>.mcp_permissions`.
 
 ```yaml
 capabilities:

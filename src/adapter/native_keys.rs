@@ -2,27 +2,46 @@
 //!
 //! Every per-engine capability map is keyed by an arbitrary string that serde
 //! accepts verbatim. Adapters then look up only their own id (`.get("opencode")`),
-//! so a typo or a feature/engine mismatch deserializes, merges, and hashes
-//! cleanly and is then dropped on the floor with no diagnostic (#1032).
+//! so a typo — or a key naming an engine whose adapter never reads that map —
+//! deserializes, merges, and hashes cleanly and is then dropped on the floor
+//! with no diagnostic (#1032).
 
-use crate::adapter::{AgentAdapter, engine_id, registered_adapters};
-use crate::config::Config;
+use std::collections::BTreeMap;
 
-/// Why a `native_*.<engine>` key will never reach an adapter.
+use crate::adapter::{engine_id, registered_adapters};
+use crate::config::Capabilities;
+
+/// Config field names of the per-engine `native_*` maps. Adapters name the ones
+/// they read via [`AgentAdapter::native_maps`]; sharing the constants keeps a
+/// declaration from drifting from the field by a typo.
+pub(crate) const NATIVE_PERMISSIONS: &str = "native_permissions";
+pub(crate) const NATIVE_HOOKS: &str = "native_hooks";
+pub(crate) const NATIVE_PLUGINS: &str = "native_plugins";
+pub(crate) const NATIVE_MCP: &str = "native_mcp";
+pub(crate) const NATIVE_MODEL_PROVIDERS: &str = "native_model_providers";
+/// The catch-all `native:` block. Top-level `config.native` and the
+/// bundle-contributed `capabilities.native` both merge into the same rendered
+/// place, so adapters declare this one name for both.
+pub(crate) const NATIVE: &str = "native";
+
+/// Why a `native_*.<engine>` key never reaches an adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeadKeyReason {
     /// No registered adapter uses this engine id — almost always a typo.
     /// Adapters key off the exact string, so case differences count as typos.
     UnknownEngine,
-    /// The engine is registered but has no such feature, so it never reads the
-    /// block. `feature` is the human-readable feature name for the diagnostic.
-    FeatureUnsupported { feature: &'static str },
+    /// The engine is registered but its adapter never reads this map.
+    MapNotRead,
 }
 
 /// A `native_*` key that no adapter will ever consume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeadNativeKey {
-    /// Config field the key lives under, e.g. `native_mcp`.
+    /// Config field the key lives under, e.g. `native_mcp`. Carries a
+    /// `top-level `/`capabilities.` qualifier for the two `native:` blocks.
+    pub label: String,
+    /// The `native_*` map this key belongs to, as named by
+    /// [`AgentAdapter::native_maps`].
     pub map: &'static str,
     /// The offending key exactly as written in the config.
     pub key: String,
@@ -30,145 +49,143 @@ pub(crate) struct DeadNativeKey {
 }
 
 impl DeadNativeKey {
-    /// One-line diagnostic naming the map, the key, and why it does nothing.
+    /// One-line diagnostic naming the key, why it does nothing, and where the
+    /// setting actually belongs.
     pub fn message(&self) -> String {
-        let Self { map, key, reason } = self;
+        let Self {
+            label,
+            map,
+            key,
+            reason,
+        } = self;
         match reason {
             DeadKeyReason::UnknownEngine => format!(
-                "{map} key '{key}' is not a registered engine (known: {}) — the block is \
+                "{label} key '{key}' is not a registered engine (known: {}) — the block is \
                  accepted by the config schema but never rendered",
-                known_engine_ids_csv()
+                crate::adapter::known_engine_ids().join(", ")
             ),
-            DeadKeyReason::FeatureUnsupported { feature } => format!(
-                "{map} key '{key}' targets a registered engine that has no {feature} support — \
-                 the block is accepted by the config schema but never rendered"
+            DeadKeyReason::MapNotRead => format!(
+                "{label} key '{key}' names a registered engine whose adapter never reads \
+                 {map} — the block is accepted by the config schema but never rendered. {}",
+                neutral_redirect(map)
             ),
         }
     }
 }
 
-fn known_engine_ids_csv() -> String {
-    crate::adapter::known_engine_ids().join(", ")
-}
-
-/// Whether an engine consumes a given `native_*` map at all. `None` means every
-/// engine reads it, so only the engine id itself needs checking.
-type FeatureGate = Option<(&'static str, fn(&dyn AgentAdapter) -> bool)>;
-
-fn hooks_gate(adapter: &dyn AgentAdapter) -> bool {
-    !adapter.supported_hook_events().is_empty()
-}
-
-fn plugins_gate(adapter: &dyn AgentAdapter) -> bool {
-    adapter.supports_plugins()
-}
-
-fn model_providers_gate(adapter: &dyn AgentAdapter) -> bool {
-    adapter.supports_model_providers()
-}
-
-/// Returns every `native_*` key across all six maps that no adapter will read.
-///
-/// Ordering is stable: maps in declaration order, keys in `BTreeMap` order
-/// within each map, so callers can print without sorting.
-pub(crate) fn dead_native_engine_keys(config: &Config) -> Vec<DeadNativeKey> {
-    let adapters = registered_adapters();
-    let engine_of = |key: &str| {
-        adapters
-            .iter()
-            .find(|a| engine_id(a.as_ref()) == key)
-            .map(std::convert::AsRef::as_ref)
+/// Where a setting belongs when the engine's adapter doesn't read the
+/// per-engine map. Mirrors the wording of `modeled_key_redirect` in
+/// `super`, which answers the same question from the opposite direction.
+fn neutral_redirect(map: &str) -> String {
+    let neutral = match map {
+        NATIVE_PERMISSIONS => "permissions",
+        NATIVE_HOOKS => "hooks",
+        NATIVE_PLUGINS => "plugins",
+        NATIVE_MCP => "mcp",
+        NATIVE_MODEL_PROVIDERS => "model_providers",
+        // The catch-all block has no neutral counterpart to redirect to.
+        _ => {
+            return "This engine has no such passthrough — drop the block or move it under an \
+                    engine that does."
+                .to_string();
+        }
     };
+    format!("Declare it through `capabilities.{neutral}` instead.")
+}
 
-    let caps = &config.capabilities;
-    let permission_key_aliases = permission_key_aliases(config);
+/// Returns every `native_*` key that no adapter will read, across all six
+/// per-engine maps plus both `native:` blocks.
+///
+/// Takes the **merged** capabilities and top-level `native` block, not the raw
+/// top-level config: `bundle.yaml` may contribute to every one of these maps
+/// (see `BUNDLE_YAML_KNOWN_KEYS`), and a typo in a shared bundle is the case
+/// most worth catching. Pass `manifest.capabilities` / `manifest.native` from a
+/// built [`crate::merge::MergedManifest`], or the raw `Config` fields when
+/// validating the config file itself.
+///
+/// Ordering is stable — maps in declaration order, keys in `BTreeMap` order —
+/// so callers can print without sorting and the output is diffable.
+pub(crate) fn dead_native_engine_keys(
+    capabilities: &Capabilities,
+    top_level_native: &BTreeMap<String, serde_yaml::Value>,
+) -> Vec<DeadNativeKey> {
+    let adapters = registered_adapters();
+    let caps = capabilities;
 
-    // (field name, keys, feature gate, extra keys that are valid for reasons
-    // other than being an engine id).
-    let maps: [(&'static str, Vec<&String>, FeatureGate, bool); 7] = [
+    // (diagnostic label, map name, keys). The label distinguishes the two
+    // `native:` blocks, which share one map name because they render together.
+    let maps: [(&str, &'static str, Vec<&String>); 7] = [
         (
-            "native_permissions",
+            NATIVE_PERMISSIONS,
+            NATIVE_PERMISSIONS,
             caps.native_permissions.keys().collect(),
-            None,
-            true,
         ),
         (
-            "native_hooks",
+            NATIVE_HOOKS,
+            NATIVE_HOOKS,
             caps.native_hooks.keys().collect(),
-            Some(("hook", hooks_gate)),
-            false,
         ),
         (
-            "native_plugins",
+            NATIVE_PLUGINS,
+            NATIVE_PLUGINS,
             caps.native_plugins.keys().collect(),
-            Some(("plugin", plugins_gate)),
-            false,
         ),
-        ("native_mcp", caps.native_mcp.keys().collect(), None, false),
+        (NATIVE_MCP, NATIVE_MCP, caps.native_mcp.keys().collect()),
         (
-            "native_model_providers",
+            NATIVE_MODEL_PROVIDERS,
+            NATIVE_MODEL_PROVIDERS,
             caps.native_model_providers.keys().collect(),
-            Some(("model-provider", model_providers_gate)),
-            false,
         ),
-        ("native", config.native.keys().collect(), None, false),
         (
-            "capabilities.native",
-            caps.native.keys().collect(),
-            None,
-            false,
+            "top-level native",
+            NATIVE,
+            top_level_native.keys().collect(),
         ),
+        ("capabilities.native", NATIVE, caps.native.keys().collect()),
     ];
 
     let mut dead = Vec::new();
-    for (map, keys, gate, allow_mcp_aliases) in maps {
+    for (label, map, keys) in maps {
         for key in keys {
-            if allow_mcp_aliases && permission_key_aliases.contains(key.as_str()) {
-                continue;
-            }
-            let Some(adapter) = engine_of(key) else {
-                dead.push(DeadNativeKey {
-                    map,
-                    key: key.clone(),
-                    reason: DeadKeyReason::UnknownEngine,
-                });
-                continue;
+            let adapter = adapters
+                .iter()
+                .find(|a| engine_id(a.as_ref()) == *key)
+                .map(std::convert::AsRef::as_ref);
+            let reason = match adapter {
+                None => DeadKeyReason::UnknownEngine,
+                Some(a) if !a.native_maps().contains(&map) => DeadKeyReason::MapNotRead,
+                Some(_) => continue,
             };
-            if let Some((feature, supported)) = gate
-                && !supported(adapter)
-            {
-                dead.push(DeadNativeKey {
-                    map,
-                    key: key.clone(),
-                    reason: DeadKeyReason::FeatureUnsupported { feature },
-                });
-            }
+            dead.push(DeadNativeKey {
+                label: label.to_string(),
+                map,
+                key: key.clone(),
+                reason,
+            });
         }
     }
     dead
 }
 
-/// Keys that are legitimately valid in `native_permissions` without naming an
-/// engine: `native_permissions` doubles as the per-MCP-server permission map,
-/// so a configured server name (plus llmenv's own always-present `icm`) is a
-/// real key, not a typo.
-fn permission_key_aliases(config: &Config) -> std::collections::HashSet<&str> {
-    config
-        .mcp
-        .iter()
-        .map(|m| m.name.as_str())
-        .chain(std::iter::once("icm"))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Capabilities, McpServer, McpTransport, NativePermissionRules};
-    use std::collections::BTreeMap;
+    use crate::config::{McpServer, McpTransport, NativePermissionRules};
 
-    fn yaml_map() -> serde_yaml::Value {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    /// Single-key capability map holding an empty native block.
+    fn yaml_keyed(key: &str) -> BTreeMap<String, serde_yaml::Value> {
+        BTreeMap::from([(
+            key.into(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        )])
+    }
+
+    fn perms_keyed(key: &str) -> BTreeMap<String, NativePermissionRules> {
+        BTreeMap::from([(key.into(), NativePermissionRules::default())])
+    }
+
+    fn dead(caps: &Capabilities) -> Vec<DeadNativeKey> {
+        dead_native_engine_keys(caps, &BTreeMap::new())
     }
 
     fn mcp_named(name: &str) -> McpServer {
@@ -189,181 +206,147 @@ mod tests {
 
     #[test]
     fn empty_config_has_no_dead_keys() {
-        assert!(dead_native_engine_keys(&Config::default()).is_empty());
+        assert!(dead(&Capabilities::default()).is_empty());
     }
 
+    /// One engine per map that genuinely reads it — see the consumption matrix
+    /// asserted by `native_maps_match_actual_consumers` in `super`.
     #[test]
-    fn every_map_accepts_a_registered_engine() {
-        let config = Config {
-            native: BTreeMap::from([("crush".into(), yaml_map())]),
-            capabilities: Capabilities {
-                native_permissions: BTreeMap::from([(
-                    "opencode".into(),
-                    NativePermissionRules::default(),
-                )]),
-                native_hooks: BTreeMap::from([("claude_code".into(), yaml_map())]),
-                native_plugins: BTreeMap::from([("opencode".into(), yaml_map())]),
-                native_mcp: BTreeMap::from([("crush".into(), yaml_map())]),
-                native_model_providers: BTreeMap::from([("opencode".into(), yaml_map())]),
-                native: BTreeMap::from([("claude_code".into(), yaml_map())]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
+    fn every_map_accepts_an_engine_that_reads_it() {
+        let caps = Capabilities {
+            native_permissions: perms_keyed("opencode"),
+            native_hooks: yaml_keyed("crush"),
+            native_plugins: yaml_keyed("claude_code"),
+            native_mcp: yaml_keyed("opencode"),
+            native_model_providers: yaml_keyed("crush"),
+            native: yaml_keyed("claude_code"),
+            ..Capabilities::default()
         };
-        let dead = dead_native_engine_keys(&config);
-        assert!(dead.is_empty(), "expected empty: {dead:?}");
+        let found = dead_native_engine_keys(&caps, &yaml_keyed("opencode"));
+        assert!(found.is_empty(), "expected empty: {found:?}");
     }
 
     #[test]
     fn typo_flagged_in_every_map() {
-        let config = Config {
-            native: BTreeMap::from([("opencde".into(), yaml_map())]),
-            capabilities: Capabilities {
-                native_permissions: BTreeMap::from([(
-                    "opencde".into(),
-                    NativePermissionRules::default(),
-                )]),
-                native_hooks: BTreeMap::from([("opencde".into(), yaml_map())]),
-                native_plugins: BTreeMap::from([("opencde".into(), yaml_map())]),
-                native_mcp: BTreeMap::from([("opencde".into(), yaml_map())]),
-                native_model_providers: BTreeMap::from([("opencde".into(), yaml_map())]),
-                native: BTreeMap::from([("opencde".into(), yaml_map())]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
+        let caps = Capabilities {
+            native_permissions: perms_keyed("opencde"),
+            native_hooks: yaml_keyed("opencde"),
+            native_plugins: yaml_keyed("opencde"),
+            native_mcp: yaml_keyed("opencde"),
+            native_model_providers: yaml_keyed("opencde"),
+            native: yaml_keyed("opencde"),
+            ..Capabilities::default()
         };
-        let dead = dead_native_engine_keys(&config);
-        assert_eq!(dead.len(), 7, "one per map: {dead:?}");
+        let found = dead_native_engine_keys(&caps, &yaml_keyed("opencde"));
+        assert_eq!(found.len(), 7, "one per map: {found:?}");
         assert!(
-            dead.iter()
+            found
+                .iter()
                 .all(|d| d.reason == DeadKeyReason::UnknownEngine && d.key == "opencde")
         );
-        let maps: Vec<&str> = dead.iter().map(|d| d.map).collect();
+        let labels: Vec<&str> = found.iter().map(|d| d.label.as_str()).collect();
         assert_eq!(
-            maps,
+            labels,
             vec![
                 "native_permissions",
                 "native_hooks",
                 "native_plugins",
                 "native_mcp",
                 "native_model_providers",
-                "native",
+                "top-level native",
                 "capabilities.native",
             ]
         );
     }
 
+    /// Claude Code is Anthropic-only and reads no provider block (#1032 case 2).
     #[test]
-    fn model_providers_flagged_for_engine_without_provider_support() {
-        let config = Config {
-            capabilities: Capabilities {
-                native_model_providers: BTreeMap::from([("claude_code".into(), yaml_map())]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
+    fn model_providers_flagged_for_engine_that_does_not_read_it() {
+        let caps = Capabilities {
+            native_model_providers: yaml_keyed("claude_code"),
+            ..Capabilities::default()
         };
-        let dead = dead_native_engine_keys(&config);
         assert_eq!(
-            dead,
+            dead(&caps),
             vec![DeadNativeKey {
-                map: "native_model_providers",
+                label: NATIVE_MODEL_PROVIDERS.to_string(),
+                map: NATIVE_MODEL_PROVIDERS,
                 key: "claude_code".into(),
-                reason: DeadKeyReason::FeatureUnsupported {
-                    feature: "model-provider"
-                },
+                reason: DeadKeyReason::MapNotRead,
             }]
         );
     }
 
+    /// Crush renders plugins from nothing — only Claude Code reads the map.
     #[test]
-    fn plugins_flagged_for_engine_without_plugin_support() {
-        let config = Config {
-            capabilities: Capabilities {
-                native_plugins: BTreeMap::from([("crush".into(), yaml_map())]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
+    fn plugins_flagged_for_crush() {
+        let caps = Capabilities {
+            native_plugins: yaml_keyed("crush"),
+            ..Capabilities::default()
         };
-        let dead = dead_native_engine_keys(&config);
-        assert_eq!(
-            dead,
-            vec![DeadNativeKey {
-                map: "native_plugins",
-                key: "crush".into(),
-                reason: DeadKeyReason::FeatureUnsupported { feature: "plugin" },
-            }]
-        );
+        let found = dead(&caps);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].reason, DeadKeyReason::MapNotRead);
     }
 
+    /// The regression this replaced a capability-predicate gate to catch:
+    /// opencode reports `supports_plugins() == true` and a non-empty
+    /// `supported_hook_events()`, but reads neither map.
     #[test]
-    fn native_permissions_accepts_configured_mcp_and_icm() {
-        let config = Config {
-            mcp: vec![mcp_named("my-server")],
-            capabilities: Capabilities {
-                native_permissions: BTreeMap::from([
-                    ("my-server".into(), NativePermissionRules::default()),
-                    ("icm".into(), NativePermissionRules::default()),
-                ]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
+    fn opencode_hooks_and_plugins_are_flagged_despite_capability_predicates() {
+        let caps = Capabilities {
+            native_hooks: yaml_keyed("opencode"),
+            native_plugins: yaml_keyed("opencode"),
+            ..Capabilities::default()
         };
-        let dead = dead_native_engine_keys(&config);
-        assert!(dead.is_empty(), "expected empty: {dead:?}");
+        let found = dead(&caps);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().all(|d| d.reason == DeadKeyReason::MapNotRead));
+        assert!(found.iter().all(|d| d.key == "opencode"));
+    }
+
+    /// `native_permissions` is keyed by engine, not by MCP server name — every
+    /// consumer is an exact engine lookup, so a server name there is dead
+    /// config and must be reported rather than exempted.
+    #[test]
+    fn native_permissions_mcp_server_name_is_dead() {
+        let caps = Capabilities {
+            native_permissions: perms_keyed("my-server"),
+            ..Capabilities::default()
+        };
+        let found = dead(&caps);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].reason, DeadKeyReason::UnknownEngine);
+        // Configuring the server changes nothing — the map is engine-keyed.
+        assert_eq!(dead(&caps).len(), 1, "{:?}", mcp_named("my-server").name);
     }
 
     #[test]
     fn native_permissions_flags_unconfigured_mcp_name() {
-        let config = Config {
-            capabilities: Capabilities {
-                native_permissions: BTreeMap::from([(
-                    "mcp__unknown-server".into(),
-                    NativePermissionRules::default(),
-                )]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
+        let caps = Capabilities {
+            native_permissions: perms_keyed("mcp__unknown-server"),
+            ..Capabilities::default()
         };
-        let dead = dead_native_engine_keys(&config);
-        assert_eq!(dead.len(), 1);
-        assert_eq!(dead[0].key, "mcp__unknown-server");
-        assert_eq!(dead[0].reason, DeadKeyReason::UnknownEngine);
-    }
-
-    /// The MCP-name alias only applies to `native_permissions`; every other map
-    /// is engine-keyed, so an MCP server name there is dead config.
-    #[test]
-    fn mcp_alias_does_not_leak_into_other_maps() {
-        let config = Config {
-            mcp: vec![mcp_named("my-server")],
-            capabilities: Capabilities {
-                native_mcp: BTreeMap::from([("my-server".into(), yaml_map())]),
-                ..Capabilities::default()
-            },
-            ..Config::default()
-        };
-        let dead = dead_native_engine_keys(&config);
-        assert_eq!(dead.len(), 1, "{dead:?}");
-        assert_eq!(dead[0].map, "native_mcp");
+        let found = dead(&caps);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "mcp__unknown-server");
+        assert_eq!(found[0].reason, DeadKeyReason::UnknownEngine);
     }
 
     /// Adapters look keys up with an exact `.get()`, so a case variant really is
     /// dead config and must be reported rather than accepted.
     #[test]
     fn case_variant_of_engine_id_is_dead() {
-        let config = Config {
-            native: BTreeMap::from([("Claude_Code".into(), yaml_map())]),
-            ..Config::default()
-        };
-        let dead = dead_native_engine_keys(&config);
-        assert_eq!(dead.len(), 1);
-        assert_eq!(dead[0].reason, DeadKeyReason::UnknownEngine);
+        let found = dead_native_engine_keys(&Capabilities::default(), &yaml_keyed("Claude_Code"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].reason, DeadKeyReason::UnknownEngine);
     }
 
     #[test]
     fn unknown_engine_message_lists_known_ids() {
         let msg = DeadNativeKey {
-            map: "native_mcp",
+            label: NATIVE_MCP.to_string(),
+            map: NATIVE_MCP,
             key: "opencde".into(),
             reason: DeadKeyReason::UnknownEngine,
         }
@@ -375,16 +358,28 @@ mod tests {
     }
 
     #[test]
-    fn feature_unsupported_message_names_the_feature() {
+    fn map_not_read_message_names_the_neutral_field() {
         let msg = DeadNativeKey {
-            map: "native_model_providers",
+            label: NATIVE_MODEL_PROVIDERS.to_string(),
+            map: NATIVE_MODEL_PROVIDERS,
             key: "claude_code".into(),
-            reason: DeadKeyReason::FeatureUnsupported {
-                feature: "model-provider",
-            },
+            reason: DeadKeyReason::MapNotRead,
         }
         .message();
-        assert!(msg.contains("model-provider"), "{msg}");
         assert!(msg.contains("claude_code"), "{msg}");
+        assert!(msg.contains("capabilities.model_providers"), "{msg}");
+    }
+
+    /// The catch-all block has no neutral counterpart, so it must not claim one.
+    #[test]
+    fn map_not_read_message_for_native_block_has_no_neutral_field() {
+        let msg = DeadNativeKey {
+            label: "top-level native".to_string(),
+            map: NATIVE,
+            key: "claude_code".into(),
+            reason: DeadKeyReason::MapNotRead,
+        }
+        .message();
+        assert!(!msg.contains("capabilities."), "{msg}");
     }
 }
