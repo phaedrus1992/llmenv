@@ -1,18 +1,20 @@
 //! Lifecycle management for `mcp-proxy`.
 //!
 //! When this host is the ICM server, the shell hook calls
-//! [`ensure_running`] on every export. It re-uses an existing proxy when the
-//! pidfile points at a live process and spawns a new one otherwise.
+//! [`ensure_running`] on every export. Liveness is decided by the bind address:
+//! if something is serving it, the proxy is up. The pidfile records *which*
+//! process to signal, and is never treated as evidence of life (#1085).
 
 use anyhow::Context;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsureOutcome {
-    /// A live proxy already owned the pidfile; nothing was done.
+    /// Something was already serving the bind address; nothing was started.
     AlreadyRunning,
-    /// A new proxy was spawned and the pidfile was (over)written.
+    /// A new proxy was spawned, confirmed bound, and recorded in the pidfile.
     Spawned,
 }
 
@@ -22,47 +24,94 @@ pub enum EnsureOutcome {
 /// short enough that a failed check doesn't visibly stall the shell prompt.
 const LIVENESS_TCP_TIMEOUT_MS: u64 = 200;
 
-/// How long to wait after spawning before probing the proxy's TCP port.
+/// How long to wait, in total, for a freshly spawned proxy to open its socket.
 ///
-/// The proxy needs a moment to open its listening socket. 300 ms covers the
-/// typical interpreter startup + bind time on a busy machine without noticeably
-/// delaying `llmenv export`.
-const SPAWN_SETTLE_MS: u64 = 300;
+/// Measured bind times: `mcp-proxy` on `PATH` ~0.55 s, `uvx mcp-proxy` ~2.1 s
+/// (it pays uv's resolve cost on top of interpreter startup). A cold uv cache is
+/// slower still, so the deadline is generous rather than tight (#1084). It costs
+/// nothing in the common failure mode: [`wait_for_bind`] returns as soon as the
+/// child exits, so a proxy that dies on startup is reported in milliseconds
+/// instead of waiting this out.
+const BIND_DEADLINE_MS: u64 = 5_000;
 
-/// Ensures that `mcp-proxy` is running, bound to `bind`. Reads `pid_path` to
-/// check for an existing instance; if alive, returns
-/// [`EnsureOutcome::AlreadyRunning`]. Otherwise calls `spawn(bind)` and writes
-/// the returned pid to `pid_path`.
+/// How long to wait between bind probes while polling.
 ///
-/// Liveness is checked by attempting a TCP connection to `bind`. This is more
-/// reliable than a PID-existence check (`kill -0`): it proves the proxy has
-/// opened its socket and is accepting connections, not just that *some* process
-/// holds the PID (PID-reuse TOCTOU, #300). A post-spawn probe also surfaces
-/// bind/startup failures that were previously invisible after stderr was
-/// silenced (#301).
+/// Small enough that a fast bind is not rounded up to a visible delay on the
+/// shell prompt, large enough not to spin.
+const BIND_POLL_INTERVAL_MS: u64 = 50;
+
+/// Rotate the proxy's stderr log once it reaches this size.
+///
+/// The log exists to diagnose startup failures, so one generation of history is
+/// enough; the cap bounds total on-disk usage at twice this (#1086).
+const PROXY_LOG_MAX_BYTES: u64 = 1 << 20;
+
+/// How many trailing lines of the proxy log to quote in a startup-failure error.
+const LOG_TAIL_LINES: usize = 10;
+
+/// How many trailing bytes of the proxy log to scan for [`LOG_TAIL_LINES`].
+///
+/// Bounds the read so a large log can't be pulled into memory wholesale.
+const LOG_TAIL_BYTES: u64 = 8 * 1024;
+
+/// Ensures that `mcp-proxy` is running, bound to `bind`. Returns
+/// [`EnsureOutcome::AlreadyRunning`] when something is already serving `bind`,
+/// otherwise calls `spawn(bind)`, waits for the new child to open its socket,
+/// and records its pid in `pid_path`.
+///
+/// Liveness is decided **only** by attempting a TCP connection to `bind`, never
+/// by the pidfile (#1085). A pidfile can be missing while the proxy is up, or
+/// name a pid that is dead or recycled; treating it as evidence of life made a
+/// stale pidfile unrecoverable and let a dead pid be recorded as the listener.
+/// The pidfile answers "who do I signal", and is reconciled (cleared when it
+/// names a process that is not running) whenever the port proves a proxy is up.
+///
+/// The pid is written only *after* the bind is confirmed and the child is
+/// confirmed still alive, so a child that dies into a port already held by an
+/// orphaned proxy is never recorded as the live listener (#1085).
 ///
 /// Concurrency: a sibling `<pid_path>.lock` file is created with
 /// `O_CREAT|O_EXCL`. The first writer wins the lock and does the
-/// spawn-and-write; other concurrent callers see `AlreadyExists`, wait briefly
-/// for the holder to publish the pid, then re-check and either accept the new
-/// pidfile or fail loudly. This prevents the TOCTOU window between
-/// "pidfile-empty → spawn → write" that would otherwise let two exports each
-/// spawn their own proxy.
+/// spawn-and-publish; other concurrent callers see `AlreadyExists`, re-probe the
+/// port, and either accept the running proxy or fail loudly. This prevents the
+/// TOCTOU window that would otherwise let two exports each spawn their own proxy.
 ///
-/// `spawn` is injected so tests can simulate process launches without
-/// actually invoking `mcp-proxy`. Production callers pass [`spawn_mcp_proxy`].
+/// `spawn` is injected so tests can simulate process launches without actually
+/// invoking `mcp-proxy`. Production callers pass [`spawn_mcp_proxy`]. It returns
+/// a [`Child`] rather than a bare pid because `Child::try_wait` is the only
+/// reliable way to tell a running child from one that has already exited — a
+/// `kill -0` check reports an unreaped child as alive (#1085).
 ///
 /// # Errors
-/// Returns an error if the pidfile contents cannot be parsed, the parent
-/// directory cannot be created, the spawn callback fails, writing the pidfile
-/// fails, or the proxy does not become reachable within the settle window.
+/// Returns an error if the parent directory cannot be created, the spawn
+/// callback fails, the child exits before binding, the child never binds within
+/// [`BIND_DEADLINE_MS`], writing the pidfile fails, or another process holds the
+/// lock while nothing is serving `bind`.
 pub fn ensure_running<F>(bind: &str, pid_path: &Path, spawn: F) -> anyhow::Result<EnsureOutcome>
 where
-    F: FnOnce(&str) -> anyhow::Result<u32>,
+    F: FnOnce(&str) -> anyhow::Result<Child>,
 {
-    // Fast path: existing proxy is already accepting connections (#300 — TCP
-    // probe rather than kill-0 avoids the PID-reuse TOCTOU).
-    if read_pidfile(pid_path)?.is_some() && probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+    ensure_running_within(bind, pid_path, spawn, BIND_DEADLINE_MS)
+}
+
+/// [`ensure_running`] with an explicit bind budget, so tests can exercise the
+/// timeout path without spending the production deadline.
+///
+/// # Errors
+/// See [`ensure_running`].
+fn ensure_running_within<F>(
+    bind: &str,
+    pid_path: &Path,
+    spawn: F,
+    budget_ms: u64,
+) -> anyhow::Result<EnsureOutcome>
+where
+    F: FnOnce(&str) -> anyhow::Result<Child>,
+{
+    // Fast path: the port is the source of truth. Something serving `bind` means
+    // the proxy is up regardless of what the pidfile says (#1085).
+    if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+        reconcile_pidfile(pid_path);
         return Ok(EnsureOutcome::AlreadyRunning);
     }
 
@@ -79,51 +128,147 @@ where
         .open(&lock_path)
     {
         Ok(_) => {
-            // We hold the lock — do the spawn-and-publish, then drop it.
-            let result = (|| -> anyhow::Result<EnsureOutcome> {
-                // Re-check inside the lock: another writer may have raced us
-                // past the early-out and published a live pid between our
-                // check above and our lock acquisition (#300).
-                if read_pidfile(pid_path)?.is_some() && probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
-                    return Ok(EnsureOutcome::AlreadyRunning);
-                }
-                let pid = spawn(bind)?;
-                write_pidfile_atomic(pid_path, pid)?;
-
-                // Post-spawn liveness check (#301): give the proxy time to bind
-                // its socket, then verify it's actually accepting connections.
-                // This surfaces startup failures (bad port, missing binary, etc.)
-                // that were previously invisible after stderr was silenced.
-                std::thread::sleep(std::time::Duration::from_millis(SPAWN_SETTLE_MS));
-                if !probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
-                    let _ = std::fs::remove_file(pid_path);
-                    anyhow::bail!(
-                        "mcp-proxy spawned (pid {pid}) but did not bind to {bind} \
-                         within {}ms; check that the port is free and mcp-proxy is \
-                         correctly installed",
-                        SPAWN_SETTLE_MS
-                    );
-                }
-
-                Ok(EnsureOutcome::Spawned)
-            })();
+            let result = spawn_and_publish(bind, pid_path, spawn, budget_ms);
             let _ = std::fs::remove_file(&lock_path);
             result
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another caller is mid-spawn. Trust that it will publish a live
-            // pid and re-read; if the pidfile still looks dead, surface that
-            // as an error rather than racing again — callers can retry.
-            if read_pidfile(pid_path)?.is_some() && probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+            // Another caller is mid-spawn. Re-probe the port; if their proxy is
+            // up we're done, otherwise surface it rather than racing them.
+            if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+                reconcile_pidfile(pid_path);
                 Ok(EnsureOutcome::AlreadyRunning)
             } else {
                 Err(anyhow::anyhow!(
-                    "another process holds {} but has not published a live pid",
+                    "another process holds {} but nothing is serving {bind}",
                     lock_path.display()
                 ))
             }
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Spawns the proxy and publishes its pid, under the caller-held lockfile.
+///
+/// Split out of [`ensure_running`] so the lockfile is released on every exit
+/// path without nesting the whole body in a closure.
+fn spawn_and_publish<F>(
+    bind: &str,
+    pid_path: &Path,
+    spawn: F,
+    budget_ms: u64,
+) -> anyhow::Result<EnsureOutcome>
+where
+    F: FnOnce(&str) -> anyhow::Result<Child>,
+{
+    // Re-check inside the lock: another writer may have raced us past the
+    // early-out and started a proxy between our probe and our lock acquisition.
+    if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+        reconcile_pidfile(pid_path);
+        return Ok(EnsureOutcome::AlreadyRunning);
+    }
+
+    let mut child = spawn(bind)?;
+    let pid = child.id();
+
+    match wait_for_bind(bind, &mut child, budget_ms)? {
+        BindResult::Bound => {}
+        BindResult::ChildExited(status) => {
+            anyhow::bail!(
+                "mcp-proxy (pid {pid}) exited ({status}) before binding to {bind}{}",
+                proxy_log_hint(pid_path)
+            );
+        }
+        BindResult::TimedOut => {
+            anyhow::bail!(
+                "mcp-proxy (pid {pid}) did not bind to {bind} within {budget_ms}ms{}",
+                proxy_log_hint(pid_path)
+            );
+        }
+    }
+
+    // The port is serving — but confirm *our* child is what's serving it before
+    // recording its pid (#1085). A child that died into a port already held by
+    // an orphaned proxy would otherwise be published as the live listener.
+    if child
+        .try_wait()
+        .context("waiting on mcp-proxy child")?
+        .is_some()
+    {
+        reconcile_pidfile(pid_path);
+        return Ok(EnsureOutcome::AlreadyRunning);
+    }
+
+    write_pidfile_atomic(pid_path, pid)?;
+    Ok(EnsureOutcome::Spawned)
+}
+
+/// Why [`wait_for_bind`] stopped waiting.
+#[derive(Debug)]
+enum BindResult {
+    /// Something is now serving the bind address.
+    Bound,
+    /// The child exited before the bind address became reachable.
+    ChildExited(ExitStatus),
+    /// The child is still running but never bound within the deadline.
+    TimedOut,
+}
+
+/// Polls `bind` until it accepts connections, `child` exits, or `budget_ms`
+/// elapses.
+///
+/// Replaces a single fixed sleep plus one-shot probe (#1084), which both
+/// declared failure before a healthy proxy had finished starting and made a
+/// genuinely dead proxy take the full settle window to report. The budget is a
+/// parameter rather than reading [`BIND_DEADLINE_MS`] directly so the timeout
+/// path is testable without spending the production budget.
+///
+/// # Errors
+/// Returns an error only if the child's status cannot be queried.
+fn wait_for_bind(bind: &str, child: &mut Child, budget_ms: u64) -> anyhow::Result<BindResult> {
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    loop {
+        if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+            return Ok(BindResult::Bound);
+        }
+        if let Some(status) = child.try_wait().context("waiting on mcp-proxy child")? {
+            return Ok(BindResult::ChildExited(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(BindResult::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(BIND_POLL_INTERVAL_MS));
+    }
+}
+
+/// Clears a pidfile that names a process which is not running.
+///
+/// Called once the port has proved a proxy is up. A pidfile naming a dead or
+/// recycled pid is worse than no pidfile — the old fast path read any non-empty
+/// pidfile as proof of life, so a wrong pid could never be recovered from
+/// (#1085). A pid that *is* alive is left alone: `kill -0` cannot prove which
+/// process owns the port, so the running pid is the best available answer to
+/// "who do I signal".
+///
+/// Best-effort and non-fatal: liveness has already been established by the port,
+/// so failing an export over an unwritable pidfile would trade a cosmetic
+/// problem for a real one.
+fn reconcile_pidfile(pid_path: &Path) {
+    match read_pidfile(pid_path) {
+        Ok(None) => {}
+        Ok(Some(pid)) if is_alive(pid) => {}
+        Ok(Some(pid)) => {
+            tracing::debug!("clearing proxy pidfile: pid {pid} is not running");
+            let _ = std::fs::remove_file(pid_path);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "clearing unreadable proxy pidfile {}: {e}",
+                pid_path.display()
+            );
+            let _ = std::fs::remove_file(pid_path);
+        }
     }
 }
 
@@ -166,6 +311,100 @@ pub fn default_pid_path() -> anyhow::Result<PathBuf> {
     Err(anyhow::anyhow!(
         "cannot determine pidfile path: neither XDG_STATE_HOME nor HOME is set"
     ))
+}
+
+/// Path of the proxy's stderr log, a sibling of the pidfile.
+fn log_path_for(pid_path: &Path) -> PathBuf {
+    pid_path.with_file_name("mcp-proxy.log")
+}
+
+/// Default path for the proxy's stderr log —
+/// `$XDG_STATE_HOME/llmenv/mcp-proxy.log`, falling back to
+/// `~/.local/state/llmenv/mcp-proxy.log`.
+///
+/// # Errors
+/// Returns an error if neither `XDG_STATE_HOME` nor `HOME` is set.
+pub fn default_log_path() -> anyhow::Result<PathBuf> {
+    Ok(log_path_for(&default_pid_path()?))
+}
+
+/// Opens the proxy's stderr log for appending, rotating it to `mcp-proxy.log.1`
+/// first if it has reached [`PROXY_LOG_MAX_BYTES`].
+///
+/// Created `0o600` on Unix: the proxy's stderr can carry details of the memory
+/// backend it bridges, and the mode is set at creation rather than chmod'd after
+/// so there is no window in which the file is world-readable.
+///
+/// # Errors
+/// Returns an error if the parent directory cannot be created or the log cannot
+/// be opened.
+fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() >= PROXY_LOG_MAX_BYTES) {
+        // Single generation: enough to keep the previous failure's trace around
+        // without unbounded growth. A failed rotation is not worth aborting the
+        // spawn over — the append below still succeeds.
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+        .with_context(|| format!("opening proxy log {}", path.display()))
+}
+
+/// Builds the trailing fragment of a startup-failure message: the last few lines
+/// of the proxy log if there are any, otherwise the log's path.
+///
+/// Replaces the previous message's guesses ("check that the port is free and
+/// mcp-proxy is correctly installed"), which named two causes that were both
+/// wrong in the incident that prompted #1086 — the real cause was an
+/// `ImportError` visible only in the discarded stderr.
+fn proxy_log_hint(pid_path: &Path) -> String {
+    let log = log_path_for(pid_path);
+    let tail = tail_proxy_log(&log);
+    if tail.is_empty() {
+        format!("; no output in {} either", log.display())
+    } else {
+        format!("; last lines of {}:\n  {tail}", log.display())
+    }
+}
+
+/// Reads up to [`LOG_TAIL_LINES`] trailing lines from `path`, scanning at most
+/// [`LOG_TAIL_BYTES`] from the end. Returns an empty string when the log is
+/// missing, empty, or unreadable — a diagnostic aid must never itself fail.
+///
+/// Decoded lossily: the proxy's stderr is arbitrary bytes, not guaranteed UTF-8.
+fn tail_proxy_log(path: &Path) -> String {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if f.seek(SeekFrom::Start(len.saturating_sub(LOG_TAIL_BYTES)))
+        .is_err()
+    {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if (&mut f).take(LOG_TAIL_BYTES).read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(LOG_TAIL_LINES)
+        .collect();
+    lines.reverse();
+    lines.join("\n  ")
 }
 
 /// Builds the `mcp-proxy` invocation, preferring a `mcp-proxy` already on
@@ -214,42 +453,72 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+/// Splits a `host:port` bind string into a validated IP address and port.
+///
+/// Parse-don't-validate: both values are forwarded into the child's argv
+/// (`--host <host> --port <port>`), so a value with embedded spaces or
+/// flag-like content would be misread by `mcp-proxy`. Returning the parsed
+/// types means the caller reformats from `IpAddr`/`u16` rather than passing the
+/// original text through, so nothing unvalidated can reach the argv.
+///
+/// Kept separate from [`spawn_mcp_proxy`] so bind-string parsing is testable
+/// without launching a real proxy — exhaustively testing it through the spawner
+/// would fork hundreds of short-lived `mcp-proxy` processes and write their
+/// stderr into the user's real state directory.
+///
+/// # Errors
+/// Returns an error if `bind` has no `:port` suffix, the port is not a `u16`, or
+/// the host is not an IP address literal (hostnames included — `mcp-proxy` is
+/// given an address to bind, not a name to resolve).
+fn parse_bind(bind: &str) -> anyhow::Result<(std::net::IpAddr, u16)> {
+    let (host, port) = bind
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bind port {port:?} is not a valid u16: {e}"))?;
+    let host: std::net::IpAddr = host
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bind host {host:?} is not a valid IP address: {e}"))?;
+    Ok((host, port))
+}
+
 /// Production spawner: launches `mcp-proxy --host <host> --port <port> -- icm serve` (or
-/// `uvx mcp-proxy ...` when `mcp-proxy` isn't on `PATH`) and returns its pid.
+/// `uvx mcp-proxy ...` when `mcp-proxy` isn't on `PATH`) and returns the child.
 /// `bind` is `host:port` where `host` must be a valid IP address literal;
 /// both are forwarded to `mcp-proxy`. `icm serve` is the stdio-only memory
 /// daemon it bridges onto the network.
 ///
+/// Returns the [`Child`] rather than its pid so the caller can distinguish a
+/// running proxy from one that has already exited; see [`ensure_running`].
+///
 /// # Errors
 /// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor
 /// `uvx` is on `PATH`, or if the child cannot be spawned.
-pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
-    let (host, port) = bind
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
-    // Parse-don't-validate: both host and port are forwarded verbatim into the
-    // child's argv (`--host <host> --port <port>`), so a value with embedded
-    // spaces or flag-like content would be misread by mcp-proxy. Reject a
-    // non-numeric port before it reaches the (stderr-silenced) daemon; validate
-    // the host is a valid IP address so hostnames or injected flags are rejected.
-    let port: u16 = port
-        .parse()
-        .map_err(|e| anyhow::anyhow!("bind port {port:?} is not a valid u16: {e}"))?;
-    host.parse::<std::net::IpAddr>()
-        .map_err(|e| anyhow::anyhow!("bind host {host:?} is not a valid IP address: {e}"))?;
+pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
+    let (host, port) = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
     let mut cmd = Command::new(program);
     cmd.args(leading)
         .arg("--host")
-        .arg(host)
+        .arg(host.to_string())
         .arg("--port")
         .arg(port.to_string())
         .arg("--")
         .arg("icm")
         .arg("serve");
-    configure_detached(&mut cmd);
-    let child = cmd.spawn()?;
-    Ok(child.id())
+    // Point stderr at the log so a startup failure is diagnosable (#1086). If the
+    // log can't be opened we still spawn — a missing diagnostic is a smaller
+    // problem than no memory backend — but say so rather than degrading silently.
+    let stderr = match default_log_path().and_then(|p| open_proxy_log(&p)) {
+        Ok(file) => Stdio::from(file),
+        Err(e) => {
+            tracing::warn!("proxy stderr log unavailable, discarding proxy stderr: {e}");
+            Stdio::null()
+        }
+    };
+    configure_detached(&mut cmd, stderr);
+    cmd.spawn().map_err(Into::into)
 }
 
 /// Configures `cmd` to run as a detached background daemon rather than a
@@ -263,18 +532,20 @@ pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<u32> {
 /// would also be killed by terminal job-control signals (^C / SIGHUP on SSH
 /// disconnect) sent to the foreground process group.
 ///
-/// On all platforms stdio is redirected to the null device, which is the part
-/// that fixes the pipe pollution. On Unix the child additionally joins a new
-/// process group (`process_group(0)`) so foreground-group job-control signals
-/// (`^C`) don't reach it; this does *not* start a new session, so a `setsid`
-/// daemon would still share the controlling terminal — acceptable here because
-/// `llmenv export` exits immediately after spawning, leaving the proxy
-/// reparented to init. `setsid` is intentionally not used to avoid pulling in
-/// `libc` (mirrors the `is_alive` rationale below).
-fn configure_detached(cmd: &mut Command) {
+/// stdin and stdout are always redirected to the null device, which is the part
+/// that fixes the pipe pollution — it came from the child inheriting the export's
+/// *stdout*, so `stderr` is free to go elsewhere and callers pass it in
+/// (#1086 points it at a log file; #298 stays fixed either way). On Unix the
+/// child additionally joins a new process group (`process_group(0)`) so
+/// foreground-group job-control signals (`^C`) don't reach it; this does *not*
+/// start a new session, so a `setsid` daemon would still share the controlling
+/// terminal — acceptable here because `llmenv export` exits immediately after
+/// spawning, leaving the proxy reparented to init. `setsid` is intentionally not
+/// used to avoid pulling in `libc` (mirrors the `is_alive` rationale below).
+fn configure_detached(cmd: &mut Command, stderr: Stdio) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     detach_process_group(cmd);
 }
 
@@ -379,7 +650,7 @@ pub fn is_alive(pid: u32) -> bool {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::is_executable;
+    use super::{Command, Path, Stdio, is_executable};
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -418,7 +689,7 @@ mod tests {
         // `sleep` is alive long enough to inspect; we kill it before asserting.
         let mut cmd = Command::new("sleep");
         cmd.arg("30");
-        configure_detached(&mut cmd);
+        configure_detached(&mut cmd, std::process::Stdio::null());
         let mut child = cmd.spawn().expect("spawn sleep");
         let child_pid = child.id();
 
@@ -532,191 +803,502 @@ mod tests {
         );
     }
 
-    /// ensure_running treats a pidfile + no listener as dead and spawns (#300).
-    /// Simulates the PID-reuse scenario: the pidfile has a pid but nothing is
-    /// listening on the bind address, so ensure_running must not return
-    /// AlreadyRunning — it must spawn.
-    #[test]
-    fn ensure_running_spawns_when_pidfile_exists_but_port_is_not_bound() {
-        use super::{EnsureOutcome, ensure_running, probe_tcp, write_pidfile_atomic};
-        use std::net::TcpListener;
-        use std::sync::{Arc, Mutex};
+    // `ensure_running`'s own behaviour is covered in tests/mcp_proxy.rs, which
+    // owns the ephemeral-port machinery needed to keep those cases from flaking.
+    // What follows unit-tests the private helpers around it.
 
-        // Grab a free port then drop the listener so the port is closed.
-        let port = {
-            let l = TcpListener::bind("127.0.0.1:0").expect("bind");
-            l.local_addr().expect("addr").port()
-        };
-        let bind = format!("127.0.0.1:{port}");
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pid_path = dir.path().join("mcp-proxy.pid");
-
-        // Seed the pidfile with a plausible but stale PID.
-        write_pidfile_atomic(&pid_path, 99_999).expect("write pidfile");
-
-        // Confirm nothing is listening (port is free).
-        assert!(!probe_tcp(&bind, 50), "port must be closed before test");
-
-        // The spawn closure binds a listener *inside* itself so the port is
-        // closed before ensure_running's fast-path probe, simulating a stale
-        // pidfile with a recycled PID (#300). We store the listener in an Arc
-        // so it stays alive for the post-spawn TCP probe.
-        let held_listener: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-        let held2 = Arc::clone(&held_listener);
-        let bind_clone = bind.clone();
-        let result = ensure_running(&bind, &pid_path, move |_b| {
-            let l = TcpListener::bind(&bind_clone as &str).expect("bind for spawn simulation");
-            *held2.lock().expect("lock") = Some(l);
-            Ok(42_u32)
-        });
-
-        assert!(result.is_ok(), "ensure_running failed: {:?}", result);
-        assert_eq!(
-            result.unwrap(),
-            EnsureOutcome::Spawned,
-            "must spawn when pidfile exists but port is not bound (PID-reuse scenario)"
-        );
-        // Drop the listener.
-        drop(held_listener);
+    /// Spawns a child that stays alive but never binds anything.
+    fn idle_child() -> std::process::Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep")
     }
 
-    /// ensure_running returns AlreadyRunning when the proxy is actually bound (#300).
+    /// A closed port plus a live child means "not yet" — [`wait_for_bind`] must
+    /// keep waiting and report `TimedOut` only once the budget is spent (#1084).
     #[test]
-    fn ensure_running_returns_already_running_when_port_is_bound() {
-        use super::{EnsureOutcome, ensure_running, write_pidfile_atomic};
-        use std::net::TcpListener;
+    fn wait_for_bind_times_out_while_the_child_lives_and_never_binds() {
+        use super::{BindResult, wait_for_bind};
 
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        let bind = format!("127.0.0.1:{port}");
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pid_path = dir.path().join("mcp-proxy.pid");
-        write_pidfile_atomic(&pid_path, 12_345).expect("write pidfile");
-
-        let result = ensure_running(&bind, &pid_path, |_| {
-            panic!("spawn must not be called when proxy is already running")
-        });
-
-        assert_eq!(
-            result.expect("ensure_running"),
-            EnsureOutcome::AlreadyRunning,
-            "must return AlreadyRunning when port is bound"
-        );
-    }
-
-    /// ensure_running surfaces a clear error when the spawn callback succeeds
-    /// but the proxy never binds its port (#301).
-    #[test]
-    fn ensure_running_errors_when_spawn_succeeds_but_port_never_binds() {
-        use super::ensure_running;
-
-        // Use a closed port — spawn returns Ok but nothing ever binds.
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
-            // l drops here, port closed
         };
         let bind = format!("127.0.0.1:{port}");
+        let mut child = idle_child();
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pid_path = dir.path().join("mcp-proxy.pid");
+        let started = std::time::Instant::now();
+        let result = wait_for_bind(&bind, &mut child, 150);
+        let elapsed = started.elapsed();
 
-        let result = ensure_running(&bind, &pid_path, |_| Ok(99_999));
+        let _ = child.kill();
+        let _ = child.wait();
 
         assert!(
-            result.is_err(),
-            "ensure_running must error when spawn succeeds but port never binds"
+            matches!(result, Ok(BindResult::TimedOut)),
+            "expected TimedOut, got {result:?}"
         );
-        let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("did not bind"),
-            "error message should mention bind failure, got: {msg}"
+            elapsed >= std::time::Duration::from_millis(150),
+            "must wait out the whole budget rather than probing once, waited {elapsed:?}"
         );
     }
 
-    /// spawn_mcp_proxy rejects bind strings that have no `:port` suffix (#337).
+    /// A child that dies without binding is reported immediately, rather than
+    /// making the caller wait out the full budget (#1084/#1086).
     #[test]
-    fn spawn_mcp_proxy_rejects_missing_port() {
-        use super::spawn_mcp_proxy;
-        let result = spawn_mcp_proxy("127.0.0.1");
-        assert!(result.is_err(), "must fail without a port");
-        let msg = result.unwrap_err().to_string();
+    fn wait_for_bind_reports_child_exit_without_waiting_out_the_budget() {
+        use super::{BindResult, wait_for_bind};
+
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr").port()
+        };
+        let bind = format!("127.0.0.1:{port}");
+        let mut child = Command::new("false")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn false");
+
+        let started = std::time::Instant::now();
+        let result = wait_for_bind(&bind, &mut child, 10_000);
+        let elapsed = started.elapsed();
+
+        match result {
+            Ok(BindResult::ChildExited(status)) => {
+                assert!(!status.success(), "`false` must report a failing status");
+            }
+            other => panic!("expected ChildExited, got {other:?}"),
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "a dead child must short-circuit the budget, took {elapsed:?}"
+        );
+    }
+
+    /// A bound port returns `Bound` promptly — a fast bind must not be rounded up
+    /// to the full settle window the way the old fixed sleep did (#1084).
+    #[test]
+    fn wait_for_bind_returns_promptly_once_bound() {
+        use super::{BindResult, wait_for_bind};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let bind = listener.local_addr().expect("addr").to_string();
+        let mut child = idle_child();
+
+        let started = std::time::Instant::now();
+        let result = wait_for_bind(&bind, &mut child, 10_000);
+        let elapsed = started.elapsed();
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            matches!(result, Ok(BindResult::Bound)),
+            "expected Bound, got {result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "an already-bound port must return immediately, took {elapsed:?}"
+        );
+    }
+
+    /// End-to-end timeout path: a child that stays alive but never binds must
+    /// fail with the budget and the log path named, and must not leave a pidfile
+    /// claiming a proxy that isn't serving (#1084/#1086).
+    #[test]
+    fn ensure_running_times_out_when_the_child_never_binds() {
+        use super::ensure_running_within;
+
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr").port()
+        };
+        let bind = format!("127.0.0.1:{port}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+
+        let spawned = std::sync::Mutex::new(None);
+        let result = ensure_running_within(
+            &bind,
+            &pid_path,
+            |_| {
+                let child = idle_child();
+                *spawned.lock().expect("lock") = Some(child.id());
+                Ok(child)
+            },
+            150,
+        );
+
+        if let Some(pid) = *spawned.lock().expect("lock") {
+            let _ = Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stderr(Stdio::null())
+                .status();
+        }
+
+        let msg = result
+            .expect_err("must error when the child never binds")
+            .to_string();
+        assert!(
+            msg.contains("did not bind") && msg.contains("150ms"),
+            "error must report the exhausted budget, got: {msg}"
+        );
+        assert!(
+            msg.contains("mcp-proxy.log"),
+            "error must name the stderr log, got: {msg}"
+        );
+        assert!(
+            !pid_path.exists(),
+            "a proxy that never bound must not leave a pidfile"
+        );
+    }
+
+    /// A pidfile naming a live process is left alone; the running pid is the best
+    /// available answer to "who do I signal" (#1085).
+    #[test]
+    fn reconcile_pidfile_keeps_a_live_pid() {
+        use super::{read_pidfile, reconcile_pidfile, write_pidfile_atomic};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+        write_pidfile_atomic(&pid_path, std::process::id()).expect("write");
+
+        reconcile_pidfile(&pid_path);
+
+        assert_eq!(
+            read_pidfile(&pid_path).expect("read"),
+            Some(std::process::id()),
+            "a live pid must survive reconciliation"
+        );
+    }
+
+    /// A pidfile naming a dead process is cleared, so the stale value can't be
+    /// mistaken for the listener or persist forever (#1085).
+    #[test]
+    fn reconcile_pidfile_clears_a_dead_pid() {
+        use super::{is_alive, read_pidfile, reconcile_pidfile, write_pidfile_atomic};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+        // Above the default pid_max on Linux and macOS, so it cannot be in use.
+        let dead = 4_000_003_u32;
+        assert!(!is_alive(dead), "test pid must be dead");
+        write_pidfile_atomic(&pid_path, dead).expect("write");
+
+        reconcile_pidfile(&pid_path);
+
+        assert_eq!(
+            read_pidfile(&pid_path).expect("read"),
+            None,
+            "a dead pid must be cleared"
+        );
+    }
+
+    /// An unparseable pidfile is cleared rather than left to fail every later read.
+    #[test]
+    fn reconcile_pidfile_clears_garbage() {
+        use super::reconcile_pidfile;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+        std::fs::write(&pid_path, "not-a-pid").expect("write");
+
+        reconcile_pidfile(&pid_path);
+
+        assert!(!pid_path.exists(), "garbage pidfile must be removed");
+    }
+
+    /// An absent pidfile is not an error and nothing is created.
+    #[test]
+    fn reconcile_pidfile_tolerates_absent_file() {
+        use super::reconcile_pidfile;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+
+        reconcile_pidfile(&pid_path);
+
+        assert!(!pid_path.exists());
+    }
+
+    /// The log is appended to, and rotated to `.log.1` once it passes the cap
+    /// so it can't grow without bound (#1086).
+    #[test]
+    fn open_proxy_log_appends_then_rotates_past_the_cap() {
+        use super::{PROXY_LOG_MAX_BYTES, open_proxy_log};
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+
+        let mut f = open_proxy_log(&log).expect("open");
+        f.write_all(b"first\n").expect("write");
+        drop(f);
+        let mut f = open_proxy_log(&log).expect("reopen");
+        f.write_all(b"second\n").expect("write");
+        drop(f);
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("read"),
+            "first\nsecond\n",
+            "a below-cap log must be appended to, not truncated"
+        );
+
+        // Push it past the cap, then confirm the next open rotates.
+        let filler = vec![b'x'; usize::try_from(PROXY_LOG_MAX_BYTES).expect("cap fits usize")];
+        std::fs::write(&log, &filler).expect("fill");
+        let mut f = open_proxy_log(&log).expect("open after fill");
+        f.write_all(b"after rotation\n").expect("write");
+        drop(f);
+
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("read"),
+            "after rotation\n",
+            "an over-cap log must be rotated away, leaving a fresh log"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("mcp-proxy.log.1"))
+                .expect("rotated log")
+                .len(),
+            PROXY_LOG_MAX_BYTES,
+            "the previous generation must be preserved as .log.1"
+        );
+    }
+
+    /// The log is created 0o600 — the proxy's stderr can describe the memory
+    /// backend, and the mode is set at creation rather than chmod'd after.
+    #[cfg(unix)]
+    #[test]
+    fn open_proxy_log_is_owner_only() {
+        use super::open_proxy_log;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+        drop(open_proxy_log(&log).expect("open"));
+
+        let mode = std::fs::metadata(&log).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "proxy log must not be group/world readable");
+    }
+
+    /// open_proxy_log creates the state directory rather than failing when the
+    /// pidfile's parent doesn't exist yet.
+    #[test]
+    fn open_proxy_log_creates_missing_parent() {
+        use super::open_proxy_log;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("nested").join("mcp-proxy.log");
+        drop(open_proxy_log(&log).expect("open"));
+        assert!(log.exists());
+    }
+
+    /// The tail quotes the last lines of the log, skipping blank ones.
+    #[test]
+    fn tail_proxy_log_returns_trailing_lines() {
+        use super::{LOG_TAIL_LINES, tail_proxy_log};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+        let body: String = (0..LOG_TAIL_LINES + 5)
+            .map(|i| format!("line {i}\n\n"))
+            .collect();
+        std::fs::write(&log, body).expect("write");
+
+        let tail = tail_proxy_log(&log);
+
+        assert_eq!(
+            tail.lines().count(),
+            LOG_TAIL_LINES,
+            "tail must be capped at LOG_TAIL_LINES, got: {tail}"
+        );
+        assert!(
+            tail.contains(&format!("line {}", LOG_TAIL_LINES + 4)),
+            "tail must include the final line, got: {tail}"
+        );
+        assert!(
+            !tail.contains("line 0"),
+            "tail must not reach back to the first line, got: {tail}"
+        );
+    }
+
+    /// A missing log yields an empty tail — a diagnostic aid must never fail.
+    #[test]
+    fn tail_proxy_log_is_empty_for_missing_or_empty_log() {
+        use super::tail_proxy_log;
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(tail_proxy_log(&dir.path().join("absent.log")), "");
+        let empty = dir.path().join("empty.log");
+        std::fs::write(&empty, b"").expect("write");
+        assert_eq!(tail_proxy_log(&empty), "");
+    }
+
+    /// Non-UTF-8 stderr is decoded lossily rather than dropped or panicking.
+    #[test]
+    fn tail_proxy_log_handles_invalid_utf8() {
+        use super::tail_proxy_log;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+        std::fs::write(&log, b"ImportError: \xff\xfe bad bytes\n").expect("write");
+
+        let tail = tail_proxy_log(&log);
+
+        assert!(
+            tail.contains("ImportError"),
+            "lossy decode must preserve the readable prefix, got: {tail}"
+        );
+    }
+
+    /// The hint names the log path when there is no output to quote, and drops
+    /// the old speculative "port is free / correctly installed" guesses (#1086).
+    #[test]
+    fn proxy_log_hint_names_the_log_path() {
+        use super::proxy_log_hint;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+
+        let hint = proxy_log_hint(&pid_path);
+
+        assert!(
+            hint.contains("mcp-proxy.log"),
+            "hint must name the log path, got: {hint}"
+        );
+        assert!(
+            !hint.contains("correctly installed") && !hint.contains("port is free"),
+            "hint must not restate the old guesses, got: {hint}"
+        );
+    }
+
+    /// When the log has content, the hint quotes it — this is the payload that
+    /// turns an opaque bind failure into a diagnosable one (#1086).
+    #[test]
+    fn proxy_log_hint_quotes_log_contents() {
+        use super::{log_path_for, proxy_log_hint};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+        std::fs::write(
+            log_path_for(&pid_path),
+            b"ImportError: cannot import name 'request_ctx'\n",
+        )
+        .expect("write log");
+
+        let hint = proxy_log_hint(&pid_path);
+
+        assert!(
+            hint.contains("ImportError: cannot import name 'request_ctx'"),
+            "hint must quote the proxy's stderr, got: {hint}"
+        );
+    }
+
+    /// The log sits next to the pidfile, so both resolve under the same state dir.
+    #[test]
+    fn log_path_is_a_sibling_of_the_pidfile() {
+        use super::log_path_for;
+        assert_eq!(
+            log_path_for(Path::new("/var/state/llmenv/mcp-proxy.pid")),
+            Path::new("/var/state/llmenv/mcp-proxy.log")
+        );
+    }
+
+    /// A bind string with no `:port` suffix is rejected (#337).
+    #[test]
+    fn parse_bind_rejects_missing_port() {
+        use super::parse_bind;
+        let msg = parse_bind("127.0.0.1")
+            .expect_err("must fail without a port")
+            .to_string();
         assert!(
             msg.contains("missing :port suffix"),
             "error should mention missing port, got: {msg}"
         );
     }
 
-    /// spawn_mcp_proxy rejects a non-numeric port so it never reaches mcp-proxy (#337).
+    /// A non-numeric port is rejected so it never reaches mcp-proxy's argv (#337).
     #[test]
-    fn spawn_mcp_proxy_rejects_non_numeric_port() {
-        use super::spawn_mcp_proxy;
-        let result = spawn_mcp_proxy("127.0.0.1:notaport");
-        assert!(result.is_err(), "must fail with a non-numeric port");
-        let msg = result.unwrap_err().to_string();
+    fn parse_bind_rejects_non_numeric_port() {
+        use super::parse_bind;
+        let msg = parse_bind("127.0.0.1:notaport")
+            .expect_err("must fail with a non-numeric port")
+            .to_string();
         assert!(
             msg.contains("not a valid u16"),
             "error should mention invalid port, got: {msg}"
         );
     }
 
-    /// spawn_mcp_proxy rejects a hostname host (only IP literals allowed) (#337).
+    /// Hostnames are rejected; mcp-proxy is given an address, not a name (#337).
     #[test]
-    fn spawn_mcp_proxy_rejects_hostname_host() {
-        use super::spawn_mcp_proxy;
-        let result = spawn_mcp_proxy("localhost:7878");
-        assert!(result.is_err(), "must reject a hostname");
-        let msg = result.unwrap_err().to_string();
+    fn parse_bind_rejects_hostname_host() {
+        use super::parse_bind;
+        let msg = parse_bind("localhost:7878")
+            .expect_err("must reject a hostname")
+            .to_string();
         assert!(
             msg.contains("not a valid IP address"),
             "error should mention invalid host, got: {msg}"
         );
     }
 
-    /// #341: property tests for spawn_mcp_proxy bind-string parsing.
+    /// IPv6 literals survive the round trip, including the bracketed form's
+    /// colons — `rsplit_once(':')` must split on the *last* colon, not the first.
+    #[test]
+    fn parse_bind_accepts_ipv6() {
+        use super::parse_bind;
+        let (host, port) = parse_bind("::1:9092").expect("parse ipv6");
+        assert_eq!(host, "::1".parse::<std::net::IpAddr>().expect("ipv6"));
+        assert_eq!(port, 9092);
+    }
+
+    /// #341: property tests for bind-string parsing.
+    ///
+    /// These target [`parse_bind`] rather than `spawn_mcp_proxy`. Driving them
+    /// through the spawner forked a real `mcp-proxy` per generated case — a few
+    /// hundred processes per run, each writing startup noise into the user's
+    /// state directory — while testing nothing the pure parser doesn't.
     mod bind_string_props {
+        use super::super::parse_bind;
         use proptest::prelude::*;
 
         proptest! {
-            /// Any valid IPv4/IPv6 + u16 port pair must not fail at the parse stage.
-            /// The function may still fail at spawn time (binary not on PATH), but
-            /// must not return a parse error.
+            /// Any valid IPv4 + u16 port pair parses, and round-trips to the same
+            /// values the child's argv is built from.
             #[test]
-            fn valid_ip_port_does_not_fail_at_parse(
+            fn valid_ip_port_round_trips(
                 a in 0u8..=255,
                 b in 0u8..=255,
                 c in 0u8..=255,
                 d in 0u8..=255,
                 port in 1u16..=65535,
             ) {
-                use super::super::spawn_mcp_proxy;
                 let bind = format!("{a}.{b}.{c}.{d}:{port}");
-                match spawn_mcp_proxy(&bind) {
-                    Ok(_) => {} // spawned (unlikely in test env, but fine)
-                    Err(e) => {
-                        let msg = e.to_string();
-                        // Parse-stage errors are rejected here; spawn/PATH errors are ok
-                        prop_assert!(
-                            !msg.contains("missing :port") &&
-                            !msg.contains("not a valid u16") &&
-                            !msg.contains("not a valid IP address"),
-                            "parse-stage error for valid bind {bind}: {msg}"
-                        );
-                    }
-                }
+                let (host, parsed_port) = parse_bind(&bind)
+                    .map_err(|e| TestCaseError::fail(format!("valid bind {bind} rejected: {e}")))?;
+                prop_assert_eq!(host.to_string(), format!("{a}.{b}.{c}.{d}"));
+                prop_assert_eq!(parsed_port, port);
             }
 
             /// Arbitrary strings without a colon must always produce a parse error.
             #[test]
             fn no_colon_always_errors(s in "[a-zA-Z0-9]{1,20}") {
-                use super::super::spawn_mcp_proxy;
-                let result = spawn_mcp_proxy(&s);
-                prop_assert!(result.is_err(), "must reject bind without colon: {s}");
+                let err = parse_bind(&s)
+                    .err()
+                    .ok_or_else(|| TestCaseError::fail(format!("must reject bind without colon: {s}")))?;
                 prop_assert!(
-                    result.unwrap_err().to_string().contains("missing :port"),
-                    "error should mention missing port"
+                    err.to_string().contains("missing :port"),
+                    "error should mention missing port, got: {}", err
+                );
+            }
+
+            /// A non-numeric port is always rejected, never coerced into a number.
+            #[test]
+            fn non_numeric_port_always_errors(s in "[a-zA-Z]{1,8}") {
+                let bind = format!("127.0.0.1:{s}");
+                let err = parse_bind(&bind)
+                    .err()
+                    .ok_or_else(|| TestCaseError::fail(format!("must reject port {s:?}")))?;
+                prop_assert!(
+                    err.to_string().contains("not a valid u16"),
+                    "error should mention invalid port, got: {}", err
                 );
             }
         }
