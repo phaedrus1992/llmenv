@@ -37,6 +37,24 @@ A feature with only layer 1 is considered incomplete — there is always some
 platform-specific need (a Claude-only permission grammar, a Codex-only hook
 event) that requires the override.
 
+### Engine keys are validated
+
+(added in v3.8.0)
+
+Every `native_<feature>` map is keyed by an engine id, and each adapter reads
+only its own key. A key naming no registered engine — a typo like
+`native_mcp.opencde` — is therefore never rendered. So is a key naming a real
+engine that has no such feature, e.g. `native_model_providers.claude_code`
+(Claude Code is Anthropic-only, with no provider block to merge into).
+
+`llmenv export`, `llmenv regenerate`, and `llmenv doctor` all warn about both
+cases instead of dropping the block silently. Engine ids are matched exactly, so
+`Claude_Code` is reported as unknown — adapters look the key up verbatim.
+
+`native_permissions` additionally accepts an MCP server name as a key (it doubles
+as the per-server permission map), so a configured server name there is not
+flagged.
+
 ```yaml
 capabilities:
   permissions:

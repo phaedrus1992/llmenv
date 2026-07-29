@@ -785,6 +785,18 @@ fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
 /// isn't run on every export/regenerate/doctor invocation.
 ///
 /// Empty or whitespace-only entries are silently skipped (#566).
+/// Warn about every `native_*.<engine>` key no registered adapter will read
+/// (#1032). `prefix` lets `doctor` use its own warning glyph while `export` and
+/// `regenerate` use the plain `warning:` form.
+///
+/// Called explicitly per command rather than from [`installed_adapters`] so the
+/// warning fires exactly once even in `doctor`, which calls that gate itself.
+pub(super) fn warn_dead_native_keys(config: &Config, prefix: &str) {
+    for dead in crate::adapter::native_keys::dead_native_engine_keys(config) {
+        eprintln!("{prefix} {}", dead.message());
+    }
+}
+
 fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdapter>> + '_ {
     let known_ids = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
@@ -970,6 +982,8 @@ fn run_export(
         Ok(v) => v,
         Err(e) => return Err(e).context("failed to build merged manifest"),
     };
+
+    warn_dead_native_keys(&config, "warning:");
 
     let mut any_adapter_failed = false;
     let mut any_adapter_eligible = false;
@@ -1221,6 +1235,8 @@ fn run_regenerate() -> anyhow::Result<()> {
         Ok(v) => v,
         Err(e) => return Err(e).context("failed to build merged manifest"),
     };
+    warn_dead_native_keys(&config, "warning:");
+
     let mut materialized_any = false;
     let mut any_adapter_failed = false;
     for adapter in installed_adapters(&config) {

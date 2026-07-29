@@ -1419,9 +1419,12 @@ pub struct LspServer {
 /// A custom/self-hosted model provider endpoint (Ollama, vLLM, LM Studio, a
 /// proxy, or an override of a built-in provider). Selected by tag
 /// intersection like `mcp`/`lsp`/`skills`. Engines without a multi-provider
-/// concept (`supports_model_providers() == false`) silently skip these —
-/// declaring one in a shared bundle is legitimate; it is simply a no-op for
-/// such adapters.
+/// concept (`supports_model_providers() == false`) skip these — declaring one in
+/// a shared bundle is legitimate; it is simply a no-op for such adapters. That
+/// is why the skip stays quiet here while a *per-engine*
+/// `native_model_providers.<engine>` key aimed at such an engine is reported as
+/// dead config (#1032): the neutral list is engine-agnostic by design, the
+/// engine-keyed override names one engine explicitly.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct ModelProvider {
     /// Stable identifier, used as the map key when rendered (e.g. "ollama",
