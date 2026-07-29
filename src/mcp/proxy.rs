@@ -67,8 +67,12 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 /// names a process that is not running) whenever the port proves a proxy is up.
 ///
 /// The pid is written only *after* the bind is confirmed and the child is
-/// confirmed still alive, so a child that dies into a port already held by an
-/// orphaned proxy is never recorded as the live listener (#1085).
+/// confirmed still alive, so a child that has *already* exited — losing the port
+/// to an orphaned proxy, say — is never recorded as the live listener (#1085).
+/// A child that is alive at that check and dies immediately afterwards can still
+/// have its pid recorded; that window can't be closed from here, and the next
+/// export reconciles it. What matters is that the record is no longer written
+/// before the bind is known, which is what made a wrong pid the normal outcome.
 ///
 /// Concurrency: a sibling `<pid_path>.lock` file is created with
 /// `O_CREAT|O_EXCL`. The first writer wins the lock and does the
@@ -122,7 +126,8 @@ where
     }
 
     if let Some(parent) = pid_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating state directory {}", parent.display()))?;
     }
 
     // Atomic lock acquisition via O_CREAT|O_EXCL. The lockfile sits next to
@@ -453,8 +458,13 @@ fn lockfile_path(pid_path: &Path) -> PathBuf {
 /// pidfile mid-write.
 fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
     let tmp = pid_path.with_extension(format!("pid.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, pid.to_string())?;
-    std::fs::rename(&tmp, pid_path)?;
+    std::fs::write(&tmp, pid.to_string()).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, pid_path)
+        .inspect_err(|_| {
+            // Don't leave the temp file behind on every failed publish.
+            let _ = std::fs::remove_file(&tmp);
+        })
+        .with_context(|| format!("publishing pidfile {}", pid_path.display()))?;
     Ok(())
 }
 
@@ -510,14 +520,39 @@ pub fn default_log_path() -> anyhow::Result<PathBuf> {
 /// be opened.
 fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating state directory {}", parent.display()))?;
     }
-    if std::fs::metadata(path).is_ok_and(|m| m.len() >= PROXY_LOG_MAX_BYTES) {
-        // Single generation: enough to keep the previous failure's trace around
-        // without unbounded growth. A failed rotation is not worth aborting the
-        // spawn over — the append below still succeeds.
-        let _ = std::fs::rename(path, path.with_extension("log.1"));
+
+    // Refuse anything at this path that isn't a plain file. `symlink_metadata`
+    // rather than `metadata` so a symlink is seen as a symlink: opening one would
+    // append the proxy's stderr to whatever it points at, and a pre-placed FIFO
+    // would block the open — hanging the shell prompt on every export.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            anyhow::bail!(
+                "proxy log path {} is not a regular file ({:?}); refusing to write through it",
+                path.display(),
+                meta.file_type()
+            );
+        }
+        Ok(meta) => {
+            if meta.len() >= PROXY_LOG_MAX_BYTES {
+                // Single generation: enough to keep the previous failure's trace
+                // around without unbounded growth. A failed rotation isn't worth
+                // aborting the spawn over — the append below still succeeds,
+                // though the size bound then depends on the next attempt.
+                let _ = std::fs::rename(path, path.with_extension("log.1"));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("inspecting proxy log {}", path.display()))
+            );
+        }
     }
+
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true).append(true);
     #[cfg(unix)]
@@ -525,12 +560,38 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
-    opts.open(path)
-        .with_context(|| format!("opening proxy log {}", path.display()))
+    let file = opts
+        .open(path)
+        .with_context(|| format!("opening proxy log {}", path.display()))?;
+
+    // `mode()` only applies at creation, so a log left behind with looser
+    // permissions would keep them. The proxy's stderr can describe the memory
+    // backend, so tighten rather than inherit.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Ok(meta) = file.metadata()
+            && meta.permissions().mode() & 0o777 != 0o600
+        {
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    Ok(file)
+}
+
+/// What [`tail_proxy_log`] found.
+///
+/// "Nothing to show" and "couldn't look" have to stay distinguishable: reporting
+/// an unreadable log as though the proxy printed nothing tells the user the
+/// opposite of the truth, and sends them to read a file they can't read.
+enum LogTail {
+    Lines(String),
+    Empty,
+    Unreadable(std::io::Error),
 }
 
 /// Builds the trailing fragment of a startup-failure message: the last few lines
-/// of the proxy log if there are any, otherwise the log's path.
+/// of the proxy log, or why they aren't available.
 ///
 /// Replaces the previous message's guesses ("check that the port is free and
 /// mcp-proxy is correctly installed"), which named two causes that were both
@@ -538,43 +599,76 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
 /// `ImportError` visible only in the discarded stderr.
 fn proxy_log_hint(pid_path: &Path) -> String {
     let log = log_path_for(pid_path);
-    let tail = tail_proxy_log(&log);
-    if tail.is_empty() {
-        format!("; no output in {} either", log.display())
-    } else {
-        format!("; last lines of {}:\n  {tail}", log.display())
+    match tail_proxy_log(&log) {
+        LogTail::Lines(tail) => format!("; last lines of {}:\n  {tail}", log.display()),
+        LogTail::Empty => format!("; no output in {} either", log.display()),
+        LogTail::Unreadable(e) => format!("; cannot read {} ({e})", log.display()),
     }
 }
 
 /// Reads up to [`LOG_TAIL_LINES`] trailing lines from `path`, scanning at most
-/// [`LOG_TAIL_BYTES`] from the end. Returns an empty string when the log is
-/// missing, empty, or unreadable — a diagnostic aid must never itself fail.
+/// [`LOG_TAIL_BYTES`] from the end.
+///
+/// Never fails — a diagnostic aid must not itself become the error — but does
+/// report *why* it has nothing, so the caller can tell "the proxy was silent"
+/// from "I couldn't open the log".
 ///
 /// Decoded lossily: the proxy's stderr is arbitrary bytes, not guaranteed UTF-8.
-fn tail_proxy_log(path: &Path) -> String {
+/// Control characters are stripped, because these lines are third-party output
+/// printed straight to the user's terminal and escape sequences in them would be
+/// interpreted rather than shown.
+fn tail_proxy_log(path: &Path) -> LogTail {
     use std::io::{Read as _, Seek as _, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return String::new();
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LogTail::Empty,
+        Err(e) => return LogTail::Unreadable(e),
     };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    if f.seek(SeekFrom::Start(len.saturating_sub(LOG_TAIL_BYTES)))
-        .is_err()
-    {
-        return String::new();
+    // A stat failure must not be treated as len 0: that would seek to the start
+    // and quote the *first* bytes of the log under a "last lines" label.
+    let len = match f.metadata() {
+        Ok(m) => m.len(),
+        Err(e) => return LogTail::Unreadable(e),
+    };
+    if let Err(e) = f.seek(SeekFrom::Start(len.saturating_sub(LOG_TAIL_BYTES))) {
+        return LogTail::Unreadable(e);
     }
     let mut buf = Vec::new();
-    if (&mut f).take(LOG_TAIL_BYTES).read_to_end(&mut buf).is_err() {
-        return String::new();
+    // The bound matters beyond the seek: this is the proxy's live stderr, so it
+    // can grow between the stat and the read.
+    if let Err(e) = f.take(LOG_TAIL_BYTES).read_to_end(&mut buf) {
+        return LogTail::Unreadable(e);
     }
     let text = String::from_utf8_lossy(&buf);
-    let mut lines: Vec<&str> = text
+    let mut lines: Vec<String> = text
         .lines()
         .rev()
+        .map(sanitize_log_line)
         .filter(|l| !l.trim().is_empty())
         .take(LOG_TAIL_LINES)
         .collect();
+    if lines.is_empty() {
+        return LogTail::Empty;
+    }
     lines.reverse();
-    lines.join("\n  ")
+    LogTail::Lines(lines.join("\n  "))
+}
+
+/// Strips control characters from a log line before it is printed to a terminal.
+///
+/// The line is `mcp-proxy`'s stderr — third-party output that can echo request
+/// data — and the caller writes it straight to the user's terminal, where escape
+/// sequences would be acted on instead of displayed.
+fn sanitize_log_line(line: &str) -> String {
+    line.chars()
+        .map(|c| {
+            if c == '\t' || !c.is_control() {
+                c
+            } else {
+                '\u{fffd}'
+            }
+        })
+        .collect()
 }
 
 /// Builds the `mcp-proxy` invocation, preferring a `mcp-proxy` already on
@@ -685,12 +779,20 @@ pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
     let stderr = match default_log_path().and_then(|p| open_proxy_log(&p)) {
         Ok(file) => Stdio::from(file),
         Err(e) => {
-            tracing::warn!("proxy stderr log unavailable, discarding proxy stderr: {e}");
+            // `eprintln!` rather than `tracing::warn!`: the default subscriber
+            // filter is ERROR-only, so a warn here would reach nobody — leaving
+            // the user in exactly the state #1086 was filed about, silently.
+            // Only stdout feeds `source <(llmenv export)`, so stderr is safe.
+            eprintln!(
+                "llmenv: proxy stderr log unavailable ({e:#}); starting mcp-proxy with its \
+                 stderr discarded, so a startup failure will not be diagnosable"
+            );
             Stdio::null()
         }
     };
     configure_detached(&mut cmd, stderr);
-    cmd.spawn().map_err(Into::into)
+    cmd.spawn()
+        .with_context(|| format!("spawning `{program}` to run mcp-proxy (resolved from PATH)"))
 }
 
 /// Configures `cmd` to run as a detached background daemon rather than a
@@ -1318,10 +1420,81 @@ mod tests {
         assert!(log.exists());
     }
 
+    /// A symlink at the log path must be refused, not followed: opening it would
+    /// append the proxy's stderr to whatever an attacker pointed it at.
+    #[cfg(unix)]
+    #[test]
+    fn open_proxy_log_refuses_a_symlink() {
+        use super::open_proxy_log;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("victim");
+        std::fs::write(&target, b"original\n").expect("write");
+        let log = dir.path().join("mcp-proxy.log");
+        std::os::unix::fs::symlink(&target, &log).expect("symlink");
+
+        let msg = open_proxy_log(&log)
+            .expect_err("a symlink must be refused")
+            .to_string();
+
+        assert!(
+            msg.contains("not a regular file"),
+            "error must say why it refused, got: {msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read"),
+            "original\n",
+            "the symlink target must not be written through"
+        );
+    }
+
+    /// A FIFO at the log path must be refused rather than opened — opening one
+    /// blocks until a reader appears, which would hang the shell prompt.
+    #[cfg(unix)]
+    #[test]
+    fn open_proxy_log_refuses_a_fifo() {
+        use super::open_proxy_log;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+        let made = Command::new("mkfifo")
+            .arg(&log)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            return; // no mkfifo available
+        }
+
+        let msg = open_proxy_log(&log)
+            .expect_err("a FIFO must be refused")
+            .to_string();
+
+        assert!(
+            msg.contains("not a regular file"),
+            "error must say why it refused, got: {msg}"
+        );
+    }
+
+    /// A log left behind with looser permissions is tightened, since `mode()`
+    /// only applies when the file is created.
+    #[cfg(unix)]
+    #[test]
+    fn open_proxy_log_tightens_a_loose_existing_log() {
+        use super::open_proxy_log;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+        std::fs::write(&log, b"old\n").expect("write");
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        drop(open_proxy_log(&log).expect("open"));
+
+        let mode = std::fs::metadata(&log).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "an existing loose log must be tightened");
+    }
+
     /// The tail quotes the last lines of the log, skipping blank ones.
     #[test]
     fn tail_proxy_log_returns_trailing_lines() {
-        use super::{LOG_TAIL_LINES, tail_proxy_log};
+        use super::LOG_TAIL_LINES;
         let dir = tempfile::tempdir().expect("tempdir");
         let log = dir.path().join("mcp-proxy.log");
         let body: String = (0..LOG_TAIL_LINES + 5)
@@ -1329,7 +1502,7 @@ mod tests {
             .collect();
         std::fs::write(&log, body).expect("write");
 
-        let tail = tail_proxy_log(&log);
+        let tail = tail_lines(&log);
 
         assert_eq!(
             tail.lines().count(),
@@ -1346,30 +1519,92 @@ mod tests {
         );
     }
 
-    /// A missing log yields an empty tail — a diagnostic aid must never fail.
+    /// Unwraps a [`LogTail::Lines`], failing the test on any other variant.
+    fn tail_lines(path: &Path) -> String {
+        match super::tail_proxy_log(path) {
+            super::LogTail::Lines(s) => s,
+            super::LogTail::Empty => panic!("expected lines, got Empty"),
+            super::LogTail::Unreadable(e) => panic!("expected lines, got Unreadable({e})"),
+        }
+    }
+
+    /// A missing or empty log reports `Empty`, not a failure — a diagnostic aid
+    /// must never itself become the error.
     #[test]
     fn tail_proxy_log_is_empty_for_missing_or_empty_log() {
-        use super::tail_proxy_log;
+        use super::{LogTail, tail_proxy_log};
         let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(tail_proxy_log(&dir.path().join("absent.log")), "");
+        assert!(matches!(
+            tail_proxy_log(&dir.path().join("absent.log")),
+            LogTail::Empty
+        ));
         let empty = dir.path().join("empty.log");
         std::fs::write(&empty, b"").expect("write");
-        assert_eq!(tail_proxy_log(&empty), "");
+        assert!(matches!(tail_proxy_log(&empty), LogTail::Empty));
+        // Whitespace-only is also "the proxy said nothing".
+        let blank = dir.path().join("blank.log");
+        std::fs::write(&blank, b"\n\n   \n").expect("write");
+        assert!(matches!(tail_proxy_log(&blank), LogTail::Empty));
+    }
+
+    /// A log that exists but can't be read must not be reported as "no output" —
+    /// that states the opposite of the truth and sends the user to `tail` a file
+    /// they have no access to.
+    #[cfg(unix)]
+    #[test]
+    fn tail_proxy_log_distinguishes_unreadable_from_empty() {
+        use super::{LogTail, tail_proxy_log};
+        use std::fs::Permissions;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+        std::fs::write(&log, b"ImportError: boom\n").expect("write");
+        std::fs::set_permissions(&log, Permissions::from_mode(0o000)).expect("chmod");
+
+        let result = tail_proxy_log(&log);
+        let readable_anyway = std::fs::read(&log).is_ok();
+        std::fs::set_permissions(&log, Permissions::from_mode(0o600)).expect("restore");
+        if readable_anyway {
+            return; // running as root / FS ignores perms
+        }
+
+        assert!(
+            matches!(result, LogTail::Unreadable(_)),
+            "an unreadable log must not be reported as Empty"
+        );
     }
 
     /// Non-UTF-8 stderr is decoded lossily rather than dropped or panicking.
     #[test]
     fn tail_proxy_log_handles_invalid_utf8() {
-        use super::tail_proxy_log;
         let dir = tempfile::tempdir().expect("tempdir");
         let log = dir.path().join("mcp-proxy.log");
         std::fs::write(&log, b"ImportError: \xff\xfe bad bytes\n").expect("write");
 
-        let tail = tail_proxy_log(&log);
+        let tail = tail_lines(&log);
 
         assert!(
             tail.contains("ImportError"),
             "lossy decode must preserve the readable prefix, got: {tail}"
+        );
+    }
+
+    /// Escape sequences in the proxy's stderr must not reach the terminal, since
+    /// the caller prints these lines to it verbatim.
+    #[test]
+    fn tail_proxy_log_strips_terminal_escapes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+        std::fs::write(&log, b"GET /\x1b[2J\x1b]0;pwned\x07 HTTP/1.1\n").expect("write");
+
+        let tail = tail_lines(&log);
+
+        assert!(
+            !tail.contains('\u{1b}') && !tail.contains('\u{7}'),
+            "control characters must be stripped, got: {tail:?}"
+        );
+        assert!(
+            tail.contains("GET /") && tail.contains("HTTP/1.1"),
+            "readable text must survive, got: {tail:?}"
         );
     }
 

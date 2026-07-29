@@ -945,12 +945,15 @@ fn run_export(
                         }
                     }
                     Err(e) => {
-                        eprintln!("warning: failed to ensure mcp-proxy running: {e}");
+                        // `{e:#}` so anyhow's context chain is shown: the outermost layer is a
+                        // label like "waiting on mcp-proxy child" and the io::Error
+                        // underneath it is the actual diagnosis.
+                        eprintln!("warning: failed to ensure mcp-proxy running: {e:#}");
                     }
                 }
             }
             Err(e) => {
-                eprintln!("warning: cannot locate mcp-proxy pidfile: {e}");
+                eprintln!("warning: cannot locate mcp-proxy pidfile: {e:#}");
             }
         }
     }
