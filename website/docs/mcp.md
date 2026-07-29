@@ -127,11 +127,23 @@ cold cache) — the direct `PATH` install binds in well under a second. If the
 proxy exits before binding, that's reported at once instead of waiting the budget
 out.
 
+**A spawn is guarded by a lockfile** next to the pidfile, so several shells
+redrawing their prompts at once start one proxy rather than one each. The
+lockfile records the pid that holds it; if that process is gone — killed with
+`^C` mid-start, say — the next export reclaims the lock instead of failing
+against it.
+
+**`listen_host` may be IPv6.** llmenv brackets it when building the bind address
+(`::1` and port 9092 become `[::1]:9092`), which is what both `mcp-proxy` and the
+liveness probe expect. Write the plain address in config; don't bracket it
+yourself.
+
 **The proxy's stderr is kept**, at `$XDG_STATE_HOME/llmenv/mcp-proxy.log`
-(owner-readable only). It rotates to `mcp-proxy.log.1` once it passes 1 MiB, so
-it keeps one generation of history and can't grow without bound. When the proxy
-fails to start, llmenv quotes the last lines of that log in the warning, which is
-usually enough to see the cause directly:
+(owner-readable only, and llmenv refuses to write through a symlink or FIFO left
+at that path). It rotates to `mcp-proxy.log.1` once it passes 1 MiB, keeping one
+generation of history. When the proxy fails to start, llmenv quotes the last
+lines of that log in the warning, which is usually enough to see the cause
+directly:
 
 ```text
 warning: failed to ensure mcp-proxy running: mcp-proxy (pid 32097) exited
