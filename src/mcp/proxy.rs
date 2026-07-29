@@ -64,7 +64,10 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 /// name a pid that is dead or recycled; treating it as evidence of life made a
 /// stale pidfile unrecoverable and let a dead pid be recorded as the listener.
 /// The pidfile answers "who do I signal", and is reconciled (cleared when it
-/// names a process that is not running) whenever the port proves a proxy is up.
+/// names a process that is not running) on the cold-start paths. The fast path
+/// deliberately skips that: it runs on every shell prompt, and judging a pid
+/// costs a fork+exec of `kill` — far more than the probe it would follow — while
+/// a stale pid is inert once liveness no longer consults it.
 ///
 /// The pid is written only *after* the bind is confirmed and the child is
 /// confirmed still alive, so a child that has *already* exited — losing the port
@@ -282,8 +285,8 @@ fn wait_for_port(bind: &str, budget_ms: u64) -> bool {
 
 /// Spawns the proxy and publishes its pid, under the caller-held lockfile.
 ///
-/// Split out of [`ensure_running`] so the lockfile is released on every exit
-/// path without nesting the whole body in a closure.
+/// Split out of [`ensure_running_within`] so the lockfile is released on every
+/// exit path without nesting the whole body in a closure.
 fn spawn_and_publish<F>(
     bind: &str,
     pid_path: &Path,
@@ -504,7 +507,7 @@ fn log_path_for(pid_path: &Path) -> PathBuf {
 ///
 /// # Errors
 /// Returns an error if neither `XDG_STATE_HOME` nor `HOME` is set.
-pub fn default_log_path() -> anyhow::Result<PathBuf> {
+fn default_log_path() -> anyhow::Result<PathBuf> {
     Ok(log_path_for(&default_pid_path()?))
 }
 
@@ -961,7 +964,12 @@ pub fn is_alive(pid: u32) -> Option<bool> {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test scaffolding"
+)]
 mod tests {
     use super::{Command, Path, Stdio, is_executable};
     use std::os::unix::fs::PermissionsExt;

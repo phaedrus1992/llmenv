@@ -61,7 +61,7 @@ fn free_port() -> (u16, String) {
 }
 
 /// What the injected spawn callback should hand back.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default)]
 enum ChildKind {
     /// A process that stays alive for the rest of the test — stands in for a
     /// proxy that started successfully.
@@ -75,8 +75,12 @@ enum ChildKind {
 #[derive(Default)]
 struct SpawnLog {
     bind_args: Mutex<Vec<String>>,
-    /// Optional listener to bind per call, satisfying the post-spawn TCP probe.
-    bind_listener: Mutex<Option<Arc<Mutex<Option<TcpListener>>>>>,
+    /// Whether the spawn callback should bind the port, standing in for a proxy
+    /// that opened its socket.
+    binds_port: bool,
+    /// The listener the callback bound, kept alive for as long as the log so the
+    /// port stays open for the rest of the test.
+    held: Mutex<Option<TcpListener>>,
     child_kind: ChildKind,
     /// Pids handed out, so [`Drop`] can reap them even if a test panics.
     spawned: Mutex<Vec<u32>>,
@@ -87,9 +91,8 @@ impl SpawnLog {
         self.bind_args.lock().expect("lock").len()
     }
 
-    /// Configure the log to bind a listener on each spawn call.
-    fn with_listener_holder(self, holder: Arc<Mutex<Option<TcpListener>>>) -> Self {
-        *self.bind_listener.lock().expect("lock") = Some(holder);
+    fn with_bound_port(mut self) -> Self {
+        self.binds_port = true;
         self
     }
 
@@ -118,27 +121,29 @@ impl Drop for SpawnLog {
 /// bound by the callback itself, mirroring how the real proxy's socket is
 /// independent of the handle `ensure_running` holds.
 fn stand_in_child(kind: ChildKind) -> Child {
-    let mut child = match kind {
-        ChildKind::Live => Command::new("sleep").arg("30").spawn(),
-        ChildKind::Exited => Command::new("false").spawn(),
+    match kind {
+        ChildKind::Live => Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep"),
+        ChildKind::Exited => {
+            let mut child = Command::new("false").spawn().expect("spawn false");
+            // Make the exit observable before ensure_running calls try_wait,
+            // without leaving a zombie that kill -0 would misreport as alive.
+            let _ = child.wait();
+            child
+        }
     }
-    .expect("spawn stand-in child");
-    if kind == ChildKind::Exited {
-        // Make the exit observable before ensure_running calls try_wait, without
-        // leaving a zombie that kill -0 would misreport as alive (#1085).
-        let _ = child.wait();
-    }
-    child
 }
 
 fn spawner(log: Arc<SpawnLog>) -> impl Fn(&str) -> anyhow::Result<Child> {
     move |bind: &str| {
         log.bind_args.lock().expect("lock").push(bind.to_owned());
-        // If a listener holder is configured, bind the port to satisfy the
-        // post-spawn TCP probe in ensure_running.
-        if let Some(holder) = log.bind_listener.lock().expect("lock").as_ref() {
-            let l = TcpListener::bind(bind).expect("bind for spawn");
-            *holder.lock().expect("lock") = Some(l);
+        if log.binds_port {
+            // The listener stands in for the proxy's socket, which the real
+            // ensure_running only ever sees via a TCP probe.
+            *log.held.lock().expect("lock") =
+                Some(TcpListener::bind(bind).expect("bind for spawn"));
         }
         let child = stand_in_child(log.child_kind);
         log.spawned.lock().expect("lock").push(child.id());
@@ -173,9 +178,7 @@ fn ensure_running_spawns_when_no_pidfile() {
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let (_, bind) = free_port();
 
-    // Keep the listener alive so the post-spawn probe succeeds.
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
 
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
 
@@ -191,8 +194,7 @@ fn ensure_running_passes_bind_to_spawner() {
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let (_, bind) = free_port();
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
 
     ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
 
@@ -219,8 +221,7 @@ fn ensure_running_no_op_when_proxy_is_listening() {
 
     std::fs::write(&pid_path, "12345").expect("write pidfile");
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
 
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
 
@@ -243,14 +244,11 @@ fn ensure_running_respawns_when_pidfile_exists_but_port_closed() {
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let (_, bind) = free_port();
 
-    // Write a stale pidfile.
     std::fs::write(&pid_path, "4000001").expect("write stale pidfile");
 
-    // Port is closed (nothing listening) — probe must return false.
     assert!(!probe_tcp(&bind, 50), "port must be closed before test");
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
 
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
 
@@ -267,8 +265,6 @@ fn ensure_running_respawns_when_pidfile_exists_but_port_closed() {
         parsed, 4_000_001,
         "pidfile must be overwritten with new pid"
     );
-
-    drop(held);
 }
 
 // ---------------------------------------------------------------------------
@@ -321,10 +317,9 @@ fn ensure_running_does_not_record_a_pid_that_is_not_the_listener() {
 
     // The callback binds the port (standing in for the orphan) and hands back a
     // child that has already exited (standing in for the one that lost the race).
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
     let log = Arc::new(
         SpawnLog::default()
-            .with_listener_holder(Arc::clone(&held))
+            .with_bound_port()
             .with_child_kind(ChildKind::Exited),
     );
 
@@ -340,8 +335,6 @@ fn ensure_running_does_not_record_a_pid_that_is_not_the_listener() {
         !pid_path.exists(),
         "the dead child's pid must not be written to the pidfile"
     );
-
-    drop(held);
 }
 
 #[test]
@@ -351,8 +344,7 @@ fn ensure_running_records_the_live_child_pid() {
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let (_, bind) = free_port();
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
 
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
     assert_eq!(outcome, EnsureOutcome::Spawned);
@@ -373,8 +365,6 @@ fn ensure_running_records_the_live_child_pid() {
         Some(true),
         "the recorded pid must be a live process"
     );
-
-    drop(held);
 }
 
 // ---------------------------------------------------------------------------
@@ -426,8 +416,7 @@ fn ensure_running_replaces_a_dead_pid_when_it_spawns() {
     assert_eq!(is_alive(dead), Some(false), "fixture pid must be dead");
     std::fs::write(&pid_path, dead.to_string()).expect("write stale pidfile");
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
 
     assert_eq!(outcome, EnsureOutcome::Spawned);
@@ -442,8 +431,6 @@ fn ensure_running_replaces_a_dead_pid_when_it_spawns() {
         Some(true),
         "the recorded pid must be live"
     );
-
-    drop(held);
 }
 
 #[test]
@@ -461,10 +448,9 @@ fn ensure_running_clears_a_dead_pid_when_it_adopts_an_orphaned_proxy() {
     assert_eq!(is_alive(dead), Some(false), "fixture pid must be dead");
     std::fs::write(&pid_path, dead.to_string()).expect("write stale pidfile");
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
     let log = Arc::new(
         SpawnLog::default()
-            .with_listener_holder(Arc::clone(&held))
+            .with_bound_port()
             .with_child_kind(ChildKind::Exited),
     );
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
@@ -474,8 +460,6 @@ fn ensure_running_clears_a_dead_pid_when_it_adopts_an_orphaned_proxy() {
         !pid_path.exists(),
         "a pidfile naming a dead process must be cleared"
     );
-
-    drop(held);
 }
 
 #[test]
@@ -489,8 +473,7 @@ fn ensure_running_does_not_fail_on_an_unparseable_pidfile() {
 
     std::fs::write(&pid_path, "garbage").expect("write pidfile");
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone()))
         .expect("a garbage pidfile must not fail the export");
 
@@ -501,8 +484,6 @@ fn ensure_running_does_not_fail_on_an_unparseable_pidfile() {
         .parse()
         .expect("garbage must be replaced by a real pid");
     assert_eq!(is_alive(written), Some(true));
-
-    drop(held);
 }
 
 // ---------------------------------------------------------------------------
@@ -551,8 +532,7 @@ fn ensure_running_reclaims_a_lock_orphaned_by_a_dead_holder() {
     assert_eq!(is_alive(dead), Some(false), "fixture pid must be dead");
     std::fs::write(&lock_path, dead.to_string()).expect("write orphaned lockfile");
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
 
     let outcome = ensure_running_briefly(&bind, &pid_path, spawner(log.clone()))
         .expect("must reclaim the orphaned lock and spawn");
@@ -563,8 +543,6 @@ fn ensure_running_reclaims_a_lock_orphaned_by_a_dead_holder() {
         !lock_path.exists(),
         "the reclaimed lock must be released again"
     );
-
-    drop(held);
 }
 
 #[test]
@@ -578,16 +556,13 @@ fn ensure_running_reclaims_a_lock_with_no_recorded_holder() {
     let (_, bind) = free_port();
     std::fs::write(&lock_path, "").expect("write empty lockfile");
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
 
     let outcome = ensure_running_briefly(&bind, &pid_path, spawner(log.clone()))
         .expect("must reclaim a holderless lock and spawn");
 
     assert_eq!(outcome, EnsureOutcome::Spawned);
     assert_eq!(log.calls(), 1);
-
-    drop(held);
 }
 
 #[test]
@@ -607,8 +582,7 @@ fn ensure_running_accepts_peer_published_pid_when_listening() {
     std::fs::write(&lock_path, "").expect("write lockfile");
     std::fs::write(&pid_path, "12345").expect("write pid");
 
-    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
-    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let log = Arc::new(SpawnLog::default().with_bound_port());
 
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
 
