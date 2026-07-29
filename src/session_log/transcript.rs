@@ -10,6 +10,10 @@ use crate::session_log::event::SessionLogEvent;
 pub const START_TOOL: &str = "icm_transcript_start_session";
 /// ICM MCP tool: append one message to a session.
 pub const RECORD_TOOL: &str = "icm_transcript_record";
+/// ICM MCP tool: fetch a transcript session's content. Used to verify a
+/// cached session id still exists in ICM rather than trusting the local
+/// correlation record indefinitely (#1090).
+pub const SHOW_TOOL: &str = "icm_transcript_show";
 
 /// Arguments for `icm_transcript_start_session`.
 #[must_use]
@@ -20,6 +24,12 @@ pub fn start_session_args(agent: &str, project: Option<&str>, metadata: &Value) 
         // ICM stores session metadata as a JSON string.
         "metadata": metadata.to_string(),
     })
+}
+
+/// Arguments for `icm_transcript_show`.
+#[must_use]
+pub fn show_session_args(session_id: &str) -> Value {
+    json!({ "session_id": session_id })
 }
 
 /// Arguments for `icm_transcript_record` for `ev` in session `session_id`.
@@ -72,6 +82,12 @@ mod tests {
         assert_eq!(a["project"], "llmenv");
         // metadata is a JSON string, not a nested object.
         assert!(a["metadata"].as_str().unwrap().contains("\"tags\""));
+    }
+
+    #[test]
+    fn show_session_args_shape() {
+        let a = show_session_args("sess-1");
+        assert_eq!(a["session_id"], "sess-1");
     }
 
     #[test]

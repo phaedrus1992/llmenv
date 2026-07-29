@@ -6,15 +6,18 @@
 //! `Env::detect_fresh` would leave those unit tests green while the feature
 //! is dead.
 
-use std::process::Command;
+mod support;
+
 use tempfile::TempDir;
+
+use support::isolated_llmenv_cmd;
 
 #[test]
 fn export_includes_llmenv_extra_tags() {
     let temp = TempDir::new().expect("create temp dir");
     let config_dir = temp.path().to_str().expect("path to string");
 
-    let init = Command::new(env!("CARGO_BIN_EXE_llmenv"))
+    let init = isolated_llmenv_cmd(temp.path())
         .arg("init")
         .arg(config_dir)
         .output()
@@ -25,9 +28,8 @@ fn export_includes_llmenv_extra_tags() {
         String::from_utf8_lossy(&init.stderr)
     );
 
-    let export = Command::new(env!("CARGO_BIN_EXE_llmenv"))
+    let export = isolated_llmenv_cmd(temp.path())
         .arg("export")
-        .env("LLMENV_CONFIG_DIR", config_dir)
         .env("LLMENV_EXTRA_TAGS", "extra-tag-probe")
         .output()
         .expect("run export command");
@@ -51,19 +53,17 @@ fn export_scope_narrowing_still_includes_extra_tags() {
     // active-scope union — extra_tags must be re-added there too, or the
     // narrowed export silently drops tags the unnarrowed export includes.
     let temp = TempDir::new().expect("create temp dir");
-    let config_dir = temp.path().to_str().expect("path to string");
     std::fs::write(
         temp.path().join("config.yaml"),
         "scope:\n  content:\n    - id: c\n      match:\n        glob: \"*\"\n      tags: [always]\n",
     )
     .expect("write config.yaml");
 
-    let export = Command::new(env!("CARGO_BIN_EXE_llmenv"))
+    let export = isolated_llmenv_cmd(temp.path())
         .arg("export")
         .arg("--scope")
         .arg("c")
         .current_dir(temp.path())
-        .env("LLMENV_CONFIG_DIR", config_dir)
         .env("LLMENV_EXTRA_TAGS", "extra-tag-probe")
         .output()
         .expect("run export command");
@@ -89,7 +89,7 @@ fn export_ignores_non_utf8_llmenv_extra_tags() {
         let temp = TempDir::new().expect("create temp dir");
         let config_dir = temp.path().to_str().expect("path to string");
 
-        let init = Command::new(env!("CARGO_BIN_EXE_llmenv"))
+        let init = isolated_llmenv_cmd(temp.path())
             .arg("init")
             .arg(config_dir)
             .output()
@@ -97,9 +97,8 @@ fn export_ignores_non_utf8_llmenv_extra_tags() {
         assert!(init.status.success());
 
         let non_utf8 = std::ffi::OsStr::from_bytes(b"tag\xff\xfe");
-        let export = Command::new(env!("CARGO_BIN_EXE_llmenv"))
+        let export = isolated_llmenv_cmd(temp.path())
             .arg("export")
-            .env("LLMENV_CONFIG_DIR", config_dir)
             .env("LLMENV_EXTRA_TAGS", non_utf8)
             .output()
             .expect("run export command");

@@ -47,6 +47,17 @@ pub struct McpHttpClient {
     session_id: std::sync::Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
+/// Internal result of one [`McpHttpClient::try_call_tool`] attempt: whether a
+/// failure is worth clearing the cached session and retrying once (#1094), or
+/// is fatal on the first try.
+enum CallToolError {
+    /// The server rejected the cached `Mcp-Session-Id` (HTTP 400/404) —
+    /// clearing it and re-initializing may still succeed.
+    StaleSession(anyhow::Error),
+    /// Any other failure — retrying with a fresh session wouldn't help.
+    Fatal(anyhow::Error),
+}
+
 impl McpHttpClient {
     /// Build a client for `url` whose every request is bounded by `timeout`.
     ///
@@ -168,11 +179,35 @@ impl McpHttpClient {
 
     /// Call one MCP tool and return the concatenated text content.
     ///
+    /// A cached `Mcp-Session-Id` the server no longer recognizes (expired, or
+    /// the server restarted) comes back as HTTP 400 or 404 per the MCP
+    /// Streamable HTTP transport (#1094: mcp-proxy itself uses 400 for
+    /// "Bad Request: Missing session ID"). Rather than replaying that dead id
+    /// forever — the only recovery previously being a fresh `llmenv` process —
+    /// this clears the cache and re-initializes exactly once before giving up.
+    ///
     /// # Errors
-    /// Network failure, session negotiation failure, timeout, non-2xx status, a
-    /// JSON-RPC `error` field, or a response missing `result.content[].text`.
+    /// Network failure, session negotiation failure, timeout, non-2xx status
+    /// (after the one stale-session retry), a JSON-RPC `error` field, or a
+    /// response missing `result.content[].text`.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> anyhow::Result<String> {
-        let session_id = self.ensure_session().await?;
+        match self.try_call_tool(name, &arguments).await {
+            Ok(text) => Ok(text),
+            Err(CallToolError::StaleSession(_)) => {
+                *self.session_id.lock().await = None;
+                match self.try_call_tool(name, &arguments).await {
+                    Ok(text) => Ok(text),
+                    Err(CallToolError::StaleSession(e) | CallToolError::Fatal(e)) => Err(e),
+                }
+            }
+            Err(CallToolError::Fatal(e)) => Err(e),
+        }
+    }
+
+    /// One attempt at `call_tool`, distinguishing a stale-session rejection
+    /// (worth clearing the cache and retrying once) from every other failure.
+    async fn try_call_tool(&self, name: &str, arguments: &Value) -> Result<String, CallToolError> {
+        let session_id = self.ensure_session().await.map_err(CallToolError::Fatal)?;
 
         let req = json!({
             "jsonrpc": "2.0",
@@ -198,7 +233,8 @@ impl McpHttpClient {
             .json(&req)
             .send()
             .await
-            .with_context(|| format!("POST {} for tool {name}", self.url))?;
+            .with_context(|| format!("POST {} for tool {name}", self.url))
+            .map_err(CallToolError::Fatal)?;
 
         // Capture status and body for detailed error reporting.
         let status = resp.status();
@@ -214,19 +250,34 @@ impl McpHttpClient {
                     )
                 })
                 .unwrap_or_else(|_| "(failed to read error body)".to_string());
-            return Err(anyhow!("tool {name} returned HTTP {}: {}", status, body));
+            let err = anyhow!("tool {name} returned HTTP {}: {}", status, body);
+            return Err(
+                if status == reqwest::StatusCode::BAD_REQUEST
+                    || status == reqwest::StatusCode::NOT_FOUND
+                {
+                    CallToolError::StaleSession(err)
+                } else {
+                    CallToolError::Fatal(err)
+                },
+            );
         }
 
         let body: Value = resp
             .json()
             .await
-            .with_context(|| format!("decoding JSON response for tool {name}"))?;
+            .with_context(|| format!("decoding JSON response for tool {name}"))
+            .map_err(CallToolError::Fatal)?;
 
         if let Some(err) = body.get("error") {
-            return Err(anyhow!("tool {name} JSON-RPC error: {err}"));
+            return Err(CallToolError::Fatal(anyhow!(
+                "tool {name} JSON-RPC error: {err}"
+            )));
         }
-        extract_text(&body)
-            .ok_or_else(|| anyhow!("tool {name} response missing result.content[].text"))
+        extract_text(&body).ok_or_else(|| {
+            CallToolError::Fatal(anyhow!(
+                "tool {name} response missing result.content[].text"
+            ))
+        })
     }
 }
 
@@ -521,6 +572,103 @@ mod tests {
             .await
             .expect("call_tool ok — session must be negotiated automatically");
         assert_eq!(text, "recalled");
+    }
+
+    /// #1094: the server rejecting a cached `Mcp-Session-Id` (session expired,
+    /// or the server restarted) must be recovered from within the same call —
+    /// clear the cache, re-initialize, retry — rather than replaying the dead
+    /// id on every subsequent call until `llmenv` is restarted.
+    #[tokio::test]
+    async fn call_tool_recovers_from_stale_session_after_one_retry() {
+        let init_response = |sid: &str| {
+            ResponseTemplate::new(200)
+                .insert_header("mcp-session-id", sid)
+                .set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 0, "result": { "protocolVersion": "2025-06-18" }
+                }))
+        };
+        let server = MockServer::start().await;
+        // First initialize hands out the session the cache starts with.
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("initialize"))
+            .respond_with(init_response("sess-stale"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Re-initialize after the cache is cleared hands out a fresh one.
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("initialize"))
+            .respond_with(init_response("sess-fresh"))
+            .mount(&server)
+            .await;
+        // The stale id is rejected — mcp-proxy's own "session not found" shape.
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/call"))
+            .and(wiremock::matchers::header("mcp-session-id", "sess-stale"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        // The re-initialized id succeeds.
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/call"))
+            .and(wiremock::matchers::header("mcp-session-id", "sess-fresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "content": [{ "type": "text", "text": "recovered" }] }
+            })))
+            .mount(&server)
+            .await;
+
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let text = client
+            .call_tool("icm_memory_recall", serde_json::json!({}))
+            .await
+            .expect("call_tool must recover after one retry");
+        assert_eq!(text, "recovered");
+    }
+
+    /// A second stale-session rejection (even after the retry re-initialized)
+    /// is a real error, not retried again — otherwise a server that's
+    /// genuinely down would loop forever instead of surfacing a failure.
+    #[tokio::test]
+    async fn call_tool_gives_up_after_second_stale_session_rejection() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("initialize"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("mcp-session-id", "sess-always-stale")
+                    .set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 0, "result": { "protocolVersion": "2025-06-18" }
+                    })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/call"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let err = client
+            .call_tool("icm_memory_recall", serde_json::json!({}))
+            .await
+            .expect_err("a second rejection must not be retried again");
+        assert!(err.to_string().contains("404"));
+
+        let requests = server.received_requests().await.expect("received requests");
+        let tools_calls = requests
+            .iter()
+            .filter(|r| wiremock::Match::matches(&JsonRpcMethod("tools/call"), r))
+            .count();
+        assert_eq!(
+            tools_calls, 2,
+            "exactly one retry: the original attempt plus one re-initialized retry"
+        );
     }
 
     #[tokio::test]

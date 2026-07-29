@@ -111,25 +111,12 @@ fn session_state_path(state_dir: &Path, session_id: &str) -> PathBuf {
 /// repeat count once `config.threshold` consecutive identical calls have
 /// been observed. Never a `__DENY__:` decision — a false positive (e.g. a
 /// deliberately re-run command) must never block real work, only nudge.
-pub fn handle_pre_tool_use(
-    stdin_payload: &serde_json::Value,
-    session_id: Option<&str>,
-    config: &RepeatDetectConfig,
-) -> String {
-    // `eprintln!`, not `tracing::warn!` — the latter is filtered out under
-    // the default `EnvFilter` (ERROR-only when `RUST_LOG` is unset), which
-    // would silently disable this entire feature with zero visible output,
-    // contradicting the fail-soft-always-logs contract above.
-    let Ok(state_dir) = crate::paths::state_dir().inspect_err(|e| {
-        eprintln!("llmenv: failed to resolve state_dir for repeat-detect pre-tool-use: {e}")
-    }) else {
-        return String::new();
-    };
-    handle_pre_tool_use_inner(stdin_payload, session_id, config, &state_dir)
-}
-
-/// Like [`handle_pre_tool_use`] but with an injectable `state_dir` for testing.
-fn handle_pre_tool_use_inner(
+///
+/// Takes `state_dir` explicitly rather than resolving `crate::paths::state_dir()`
+/// internally, so tests exercise this without touching the developer's real
+/// state dir (#1089) and the sole production caller (`resolve_pre_tool_text`)
+/// resolves it once for the whole PreToolUse decision.
+pub(crate) fn handle_pre_tool_use(
     stdin_payload: &serde_json::Value,
     session_id: Option<&str>,
     config: &RepeatDetectConfig,
@@ -268,15 +255,15 @@ mod tests {
 
     #[test]
     fn no_session_id_passes_through() {
-        let result = handle_pre_tool_use(&bash_payload("ls"), None, &config(3));
+        let dir = TempDir::new().expect("test");
+        let result = handle_pre_tool_use(&bash_payload("ls"), None, &config(3), dir.path());
         assert!(result.is_empty());
     }
 
     #[test]
     fn zero_threshold_is_clamped_to_one_not_warn_every_call() {
         let dir = TempDir::new().expect("test");
-        let out =
-            handle_pre_tool_use_inner(&bash_payload("ls"), Some("s1"), &config(0), dir.path());
+        let out = handle_pre_tool_use(&bash_payload("ls"), Some("s1"), &config(0), dir.path());
         assert!(
             !out.is_empty(),
             "threshold 0 must clamp to 1, warning on the very first call"
@@ -343,13 +330,12 @@ mod tests {
     fn pre_tool_use_streak_and_stop_streak_are_independent() {
         let dir = TempDir::new().expect("test");
         // Drive the PreToolUse tracker to just below its own threshold...
-        handle_pre_tool_use_inner(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
+        handle_pre_tool_use(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
         // ...then a Stop event with a fresh reminder must not be affected by
         // (or reset) the PreToolUse streak, and vice versa.
         let out = handle_stop_inner(WIP_REMINDER, Some("s1"), &config(2), dir.path());
         assert_eq!(out, WIP_REMINDER);
-        let tool_out =
-            handle_pre_tool_use_inner(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
+        let tool_out = handle_pre_tool_use(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
         assert!(
             !tool_out.is_empty(),
             "PreToolUse streak must have kept counting: {tool_out}"
@@ -360,8 +346,7 @@ mod tests {
     fn unsafe_session_id_passes_through_without_escaping_state_dir() {
         let dir = TempDir::new().expect("test");
         for evil in ["../../victim/pwn", "/tmp/llmenv-abs-escape", "..", "a/b"] {
-            let out =
-                handle_pre_tool_use_inner(&bash_payload("ls"), Some(evil), &config(1), dir.path());
+            let out = handle_pre_tool_use(&bash_payload("ls"), Some(evil), &config(1), dir.path());
             assert!(
                 out.is_empty(),
                 "unsafe session_id {evil:?} must pass through: {out}"
@@ -374,7 +359,7 @@ mod tests {
     #[test]
     fn no_tool_name_passes_through() {
         let dir = TempDir::new().expect("test");
-        let result = handle_pre_tool_use_inner(
+        let result = handle_pre_tool_use(
             &json!({ "tool_input": {} }),
             Some("s1"),
             &config(3),
@@ -388,7 +373,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let payload = bash_payload("cargo test");
         for _ in 0..2 {
-            let out = handle_pre_tool_use_inner(&payload, Some("s1"), &config(3), dir.path());
+            let out = handle_pre_tool_use(&payload, Some("s1"), &config(3), dir.path());
             assert!(out.is_empty(), "should pass through below threshold");
         }
     }
@@ -398,9 +383,9 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let payload = bash_payload("sed -n '1,10p' foo.rs");
         for _ in 0..2 {
-            handle_pre_tool_use_inner(&payload, Some("s1"), &config(3), dir.path());
+            handle_pre_tool_use(&payload, Some("s1"), &config(3), dir.path());
         }
-        let out = handle_pre_tool_use_inner(&payload, Some("s1"), &config(3), dir.path());
+        let out = handle_pre_tool_use(&payload, Some("s1"), &config(3), dir.path());
         assert!(!out.is_empty(), "3rd identical call should warn");
         assert!(!out.starts_with("__DENY__"), "must be advisory, not a deny");
         assert!(out.contains("Bash"));
@@ -412,9 +397,9 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let payload = bash_payload("sed -n '1,10p' foo.rs");
         for _ in 0..5 {
-            handle_pre_tool_use_inner(&payload, Some("s1"), &config(3), dir.path());
+            handle_pre_tool_use(&payload, Some("s1"), &config(3), dir.path());
         }
-        let out = handle_pre_tool_use_inner(&payload, Some("s1"), &config(3), dir.path());
+        let out = handle_pre_tool_use(&payload, Some("s1"), &config(3), dir.path());
         assert!(
             !out.is_empty(),
             "should keep warning on every call past threshold"
@@ -425,11 +410,10 @@ mod tests {
     #[test]
     fn different_input_resets_counter() {
         let dir = TempDir::new().expect("test");
-        handle_pre_tool_use_inner(&bash_payload("ls -la"), Some("s1"), &config(3), dir.path());
-        handle_pre_tool_use_inner(&bash_payload("ls -la"), Some("s1"), &config(3), dir.path());
+        handle_pre_tool_use(&bash_payload("ls -la"), Some("s1"), &config(3), dir.path());
+        handle_pre_tool_use(&bash_payload("ls -la"), Some("s1"), &config(3), dir.path());
         // Different command breaks the streak.
-        let out =
-            handle_pre_tool_use_inner(&bash_payload("pwd"), Some("s1"), &config(3), dir.path());
+        let out = handle_pre_tool_use(&bash_payload("pwd"), Some("s1"), &config(3), dir.path());
         assert!(out.is_empty(), "different input must reset the streak");
     }
 
@@ -438,8 +422,8 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let input = json!({ "tool_name": "Bash", "tool_input": { "command": "x" } });
         let other = json!({ "tool_name": "Grep", "tool_input": { "command": "x" } });
-        handle_pre_tool_use_inner(&input, Some("s1"), &config(2), dir.path());
-        let out = handle_pre_tool_use_inner(&other, Some("s1"), &config(2), dir.path());
+        handle_pre_tool_use(&input, Some("s1"), &config(2), dir.path());
+        let out = handle_pre_tool_use(&other, Some("s1"), &config(2), dir.path());
         assert!(out.is_empty(), "different tool name must reset the streak");
     }
 
@@ -447,9 +431,9 @@ mod tests {
     fn separate_sessions_track_independently() {
         let dir = TempDir::new().expect("test");
         let payload = bash_payload("loop-cmd");
-        handle_pre_tool_use_inner(&payload, Some("s1"), &config(2), dir.path());
+        handle_pre_tool_use(&payload, Some("s1"), &config(2), dir.path());
         // A different session's first call must not inherit s1's streak.
-        let out = handle_pre_tool_use_inner(&payload, Some("s2"), &config(2), dir.path());
+        let out = handle_pre_tool_use(&payload, Some("s2"), &config(2), dir.path());
         assert!(out.is_empty(), "sessions must not share state");
     }
 
@@ -460,8 +444,7 @@ mod tests {
         std::fs::create_dir_all(&rd_dir).expect("test");
         std::fs::write(rd_dir.join("s1.json"), b"not valid json{}").expect("test");
 
-        let out =
-            handle_pre_tool_use_inner(&bash_payload("ls"), Some("s1"), &config(3), dir.path());
+        let out = handle_pre_tool_use(&bash_payload("ls"), Some("s1"), &config(3), dir.path());
         assert!(
             out.is_empty(),
             "corrupt state should fail-soft to a fresh streak"

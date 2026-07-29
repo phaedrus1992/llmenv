@@ -29,7 +29,7 @@ use std::hash::{Hash, Hasher};
 use action::Action;
 use mcp_client::McpHttpClient;
 use serde_json::json;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::config::SessionLog;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
@@ -516,6 +516,7 @@ fn resolve_pre_tool_text(
     claude_session_id: Option<&str>,
     config: &crate::config::Config,
     task_tracker_enabled: bool,
+    state_dir: &std::path::Path,
 ) -> Option<String> {
     let primary = if task_tracker_enabled
         && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
@@ -529,6 +530,7 @@ fn resolve_pre_tool_text(
             stdin_payload,
             claude_session_id,
             read_once,
+            state_dir,
         );
         (!ro_text.is_empty()).then_some(ro_text)
     } else {
@@ -547,6 +549,7 @@ fn resolve_pre_tool_text(
             stdin_payload,
             claude_session_id,
             &repeat_detect_cfg,
+            state_dir,
         )
     });
     let repeat_detect_text = repeat_detect_text.filter(|t| !t.is_empty());
@@ -624,11 +627,13 @@ fn run_inner(
     // session logging for every PreToolUse event (the #231/#864
     // early-return-drops-logging bug class).
     let pre_tool_text = if event == HookEvent::PreToolUse {
+        let state_dir = crate::paths::state_dir()?;
         let text = resolve_pre_tool_text(
             stdin_payload,
             claude_session_id,
             &config,
             task_tracker_enabled,
+            &state_dir,
         );
         match text {
             Some(t) => {
@@ -1174,7 +1179,24 @@ async fn ensure_transcript_session(
 ) -> Option<String> {
     let path = state_path?;
     if let Some(existing) = state::lookup_session_at(path, csid) {
-        return Some(existing);
+        // #1090: a recorded id is a cache, not proof the ICM session is
+        // still live — verify before trusting it. Falling through to start a
+        // fresh session on a failed verification avoids the #1085 failure
+        // mode (a wrong cached value trusted forever because the only check
+        // that would notice consulted the record itself).
+        match client {
+            Some(client) => match transcript_dispatch::verify_session(client, &existing).await {
+                Ok(()) => return Some(existing),
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        session_id = %existing,
+                        "cached ICM transcript session id failed verification, re-establishing"
+                    );
+                }
+            },
+            None => return Some(existing),
+        }
     }
     let (true, Some(client)) = (cfg.transcript_wants(LogLevel::Info), client) else {
         return None;
@@ -1190,12 +1212,12 @@ async fn ensure_transcript_session(
     {
         Ok(id) => {
             if let Err(e) = state::record_session_at(path, csid, &id) {
-                warn!(error = %e, "failed to persist transcript session correlation");
+                error!(error = %e, "failed to persist transcript session correlation");
             }
             Some(id)
         }
         Err(e) => {
-            warn!(error = %e, "failed to start ICM transcript session");
+            error!(error = %e, "failed to start ICM transcript session");
             None
         }
     }
@@ -1564,6 +1586,26 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
 /// Spawn a detached child to run post-session consolidation. Best-effort
 /// fire-and-forget — spawn failures are logged at debug level and the caller
 /// never waits on the child.
+/// Where codebase-memory-mcp's index cache lives for `cm`/`state_dir`: the
+/// configured `index_path` override, or `state_dir/codebase-memory` by
+/// default. Single source of truth for both the spawned child's
+/// `CBM_CACHE_DIR` and the indexer's own diagnostic log (#1091), so they
+/// can't drift apart.
+fn codebase_memory_cache_dir(
+    cm: &crate::config::CodebaseMemory,
+    state_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    cm.index_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state_dir.join("codebase-memory"))
+}
+
+/// Rotation bound for the indexer's diagnostic log — smaller than the
+/// mcp-proxy log (#1086/#1091 share the "size-bounded" shape, not the exact
+/// size: indexing runs are far less frequent than proxy restarts).
+const CODEBASE_MEMORY_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
+
 /// Builds the `codebase-memory-mcp cli index_repository` subprocess command
 /// for `project_root`, without spawning it — kept separate so tests can
 /// assert on the command shape without launching a real process (#365).
@@ -1577,15 +1619,11 @@ fn build_index_repository_command(
     // below, which can carry the raw OsStr straight through.
     let args_json =
         serde_json::json!({ "repo_path": project_root.display().to_string() }).to_string();
-    let cache_dir: std::ffi::OsString = cm
-        .index_path
-        .clone()
-        .map(std::ffi::OsString::from)
-        .unwrap_or_else(|| state_dir.join("codebase-memory").into_os_string());
+    let cache_dir = codebase_memory_cache_dir(cm, state_dir);
     let mut cmd = std::process::Command::new("codebase-memory-mcp");
     cmd.args(["cli", "index_repository", &args_json])
         .env("CBM_ALLOWED_ROOT", project_root.as_os_str())
-        .env("CBM_CACHE_DIR", cache_dir)
+        .env("CBM_CACHE_DIR", cache_dir.as_os_str())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1598,12 +1636,31 @@ fn build_index_repository_command(
 /// Linux kernel takes ~3, per upstream benchmarks), so this must never block
 /// SessionStart. Best-effort: spawn failures (e.g. binary not installed —
 /// `llmenv doctor` already flags that) are logged at debug level only.
+///
+/// The child's stderr is redirected to a bounded log rather than discarded
+/// (#1091, same remedy as #1087's mcp-proxy stderr fix): a multi-minute
+/// indexer that fails partway through used to leave nothing to diagnose —
+/// only the spawn error was recorded, at a level the default `EnvFilter`
+/// drops. If the log can't be opened, indexing still proceeds — a missing
+/// diagnostic is a smaller problem than skipping indexing — but stderr then
+/// falls back to discarded.
 fn trigger_codebase_memory_index(
     project_root: &std::path::Path,
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
 ) {
     let mut cmd = build_index_repository_command(project_root, cm, state_dir);
+    let log_path = codebase_memory_cache_dir(cm, state_dir).join("index.log");
+    match crate::mcp::proxy::open_bounded_log(&log_path, CODEBASE_MEMORY_LOG_MAX_BYTES) {
+        Ok(file) => {
+            cmd.stderr(std::process::Stdio::from(file));
+        }
+        Err(e) => {
+            tracing::debug!(
+                "codebase-memory-mcp index_repository: log unavailable ({e:#}), stderr discarded"
+            );
+        }
+    }
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
@@ -1632,29 +1689,6 @@ fn post_session_consolidation() {
 mod tests {
     use super::*;
 
-    /// `resolve_pre_tool_text` calls the public `read_once`/`repeat_detect`
-    /// entry points, which resolve the real global state dir (not an
-    /// injectable one) — so these tests use a distinctly-named session id
-    /// and clean up after themselves rather than touching real session data.
-    fn test_session_id(label: &str) -> String {
-        format!("llmenv-test-{label}")
-    }
-
-    fn cleanup_test_session_state(session_id: &str) {
-        if let Ok(state_dir) = crate::paths::state_dir() {
-            let _ = std::fs::remove_file(
-                state_dir
-                    .join("read_once")
-                    .join(format!("{session_id}.json")),
-            );
-            let _ = std::fs::remove_file(
-                state_dir
-                    .join("repeat_detect")
-                    .join(format!("{session_id}.json")),
-            );
-        }
-    }
-
     /// #1006: `resolve_pre_tool_text` must not let an enabled `read_once`
     /// permanently mask `repeat_detect` for tool calls `read_once` doesn't
     /// cover — regression test for the exact bug fp-check confirmed during
@@ -1662,7 +1696,8 @@ mod tests {
     /// tools used to still count as "a decision was made").
     #[test]
     fn repeat_detect_fires_even_when_read_once_is_also_enabled() {
-        let session_id = test_session_id("mask");
+        let session_id = "mask";
+        let state_dir = tempfile::tempdir().expect("test");
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 read_once: Some(crate::config::ReadOnce {
@@ -1682,8 +1717,8 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "echo hi" },
         });
-        let text = resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
-        cleanup_test_session_state(&session_id);
+        let text =
+            resolve_pre_tool_text(&payload, Some(session_id), &config, false, state_dir.path());
         assert!(
             text.is_some_and(|t| !t.is_empty()),
             "repeat_detect must still fire for a non-Read tool when read_once is also enabled"
@@ -1695,7 +1730,7 @@ mod tests {
         // Both features want to say something about the 2nd identical Read
         // (read_once: "already read"; repeat_detect, threshold 1: fires on
         // every call). read_once is checked first, so its message must win.
-        let session_id = test_session_id("rw");
+        let session_id = "rw";
         let dir = tempfile::tempdir().expect("test");
         let file_path = dir.path().join("f.txt");
         std::fs::write(&file_path, "hello").expect("test");
@@ -1718,9 +1753,8 @@ mod tests {
             "tool_name": "Read",
             "tool_input": { "file_path": file_path.to_str().unwrap() },
         });
-        resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
-        let second = resolve_pre_tool_text(&payload, Some(&session_id), &config, false);
-        cleanup_test_session_state(&session_id);
+        resolve_pre_tool_text(&payload, Some(session_id), &config, false, dir.path());
+        let second = resolve_pre_tool_text(&payload, Some(session_id), &config, false, dir.path());
         assert!(
             second.is_some_and(|t| t.contains("already read")),
             "read_once's advisory must win over repeat_detect for a Read tool call"
@@ -1793,6 +1827,54 @@ mod tests {
             envs.get("CBM_CACHE_DIR").map(String::as_str),
             Some("/custom/path")
         );
+    }
+
+    #[test]
+    fn codebase_memory_cache_dir_defaults_under_state_dir() {
+        let cm = crate::config::CodebaseMemory {
+            when: vec!["proj".to_string()],
+            index_path: None,
+        };
+        assert_eq!(
+            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")),
+            std::path::PathBuf::from("/state/codebase-memory")
+        );
+    }
+
+    #[test]
+    fn codebase_memory_cache_dir_honors_index_path_override() {
+        let cm = crate::config::CodebaseMemory {
+            when: vec!["proj".to_string()],
+            index_path: Some("/custom/path".to_string()),
+        };
+        assert_eq!(
+            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")),
+            std::path::PathBuf::from("/custom/path")
+        );
+    }
+
+    /// #1091: the indexer's stderr must land in a size-bounded, owner-only
+    /// log file rather than `/dev/null`, so a failing multi-minute index run
+    /// is diagnosable. Exercises the real `trigger_codebase_memory_index`
+    /// entry point — the `codebase-memory-mcp` binary need not actually be
+    /// installed: whether `spawn()` succeeds or fails soft, the log file
+    /// must already exist with the right properties, since it's opened
+    /// before the spawn is attempted.
+    #[cfg(unix)]
+    #[test]
+    fn trigger_codebase_memory_index_creates_owner_only_bounded_log() {
+        use std::os::unix::fs::PermissionsExt;
+        let state_dir = tempfile::tempdir().unwrap();
+        let cm = crate::config::CodebaseMemory {
+            when: vec!["proj".to_string()],
+            index_path: None,
+        };
+        trigger_codebase_memory_index(std::path::Path::new("/repos/proj"), &cm, state_dir.path());
+
+        let log_path = state_dir.path().join("codebase-memory").join("index.log");
+        let meta = std::fs::metadata(&log_path)
+            .unwrap_or_else(|e| panic!("expected {} to exist: {e}", log_path.display()));
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
     // PRELOADED_CONFIG is a process-global cache; these two tests populate and
@@ -2583,7 +2665,7 @@ mod tests {
 mod session_log_tests {
     use super::*;
     use std::time::Duration;
-    use wiremock::matchers::method;
+    use wiremock::matchers::{body_string_contains, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn ctx() -> ScopeContext {
@@ -2732,14 +2814,28 @@ mod session_log_tests {
     }
 
     #[tokio::test]
-    async fn ensure_transcript_session_reuses_existing_without_calling_start_session() {
+    async fn ensure_transcript_session_reuses_existing_after_verifying_it_is_live() {
         let state_dir = tempfile::tempdir().unwrap();
         let state_path = state_dir.path().join("transcript-sessions.json");
         state::record_session_at(&state_path, "claude-2", "icm-sess-2").unwrap();
-        // No mock mounted: a `start_session` call here would 404 and the
-        // function would have to handle/propagate that, which the assertion
-        // below would catch via a mismatched id.
         let server = MockServer::start().await;
+        // Only `initialize` and the `icm_transcript_show` verification call
+        // are mocked. If `ensure_transcript_session` fell through to
+        // `start_session` instead of trusting a verified cached id, that
+        // call would hit an unmocked request and the id assertion below
+        // would fail.
+        Mock::given(method("POST"))
+            .and(body_string_contains("initialize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                crate::session_log::transcript::SHOW_TOOL,
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("[]")))
+            .mount(&server)
+            .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let cfg = SessionLog {
             transcript: Some(llmenv_config::TranscriptSinkConfig {
@@ -2755,9 +2851,58 @@ mod session_log_tests {
                 .await;
 
         assert_eq!(id.as_deref(), Some("icm-sess-2"));
-        assert!(
-            server.received_requests().await.unwrap().is_empty(),
-            "reusing a correlated session must not call start_session"
+    }
+
+    #[tokio::test]
+    async fn ensure_transcript_session_reestablishes_when_cached_id_fails_verification() {
+        // #1090: a cached icm_session_id must be revalidated against ICM, not
+        // trusted forever — a stale one is cleared and replaced.
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+        state::record_session_at(&state_path, "claude-4", "icm-stale").unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("initialize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                crate::session_log::transcript::SHOW_TOOL,
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                crate::session_log::transcript::START_TOOL,
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-fresh")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let cfg = SessionLog {
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                retention_days: None,
+            }),
+            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
+        };
+
+        let id =
+            ensure_transcript_session(&cfg, Some(&client), "claude-4", &ctx(), Some(&state_path))
+                .await;
+
+        assert_eq!(
+            id.as_deref(),
+            Some("icm-fresh"),
+            "a cached id that fails verification must be replaced"
+        );
+        assert_eq!(
+            state::lookup_session_at(&state_path, "claude-4").as_deref(),
+            Some("icm-fresh"),
+            "the correlation map must be updated to the fresh id"
         );
     }
 
