@@ -95,11 +95,12 @@ where
 }
 
 /// [`ensure_running`] with an explicit bind budget, so tests can exercise the
-/// timeout path without spending the production deadline.
+/// waiting paths without spending the production deadline.
 ///
 /// # Errors
 /// See [`ensure_running`].
-fn ensure_running_within<F>(
+#[doc(hidden)]
+pub fn ensure_running_within<F>(
     bind: &str,
     pid_path: &Path,
     spawn: F,
@@ -110,8 +111,13 @@ where
 {
     // Fast path: the port is the source of truth. Something serving `bind` means
     // the proxy is up regardless of what the pidfile says (#1085).
+    //
+    // Deliberately does not reconcile the pidfile. This runs on every shell
+    // prompt on the server host, and `is_alive` costs a fork+exec of `kill`
+    // (~7 ms measured) — far more than the loopback probe it would follow. A
+    // stale pid is harmless now that nothing reads it for liveness, so it is
+    // reconciled on the paths that are already paying for a spawn instead.
     if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
-        reconcile_pidfile(pid_path);
         return Ok(EnsureOutcome::AlreadyRunning);
     }
 
@@ -122,30 +128,150 @@ where
     // Atomic lock acquisition via O_CREAT|O_EXCL. The lockfile sits next to
     // the pidfile so it shares the same parent directory ACLs.
     let lock_path = lockfile_path(pid_path);
-    match std::fs::OpenOptions::new()
+    if try_lock(&lock_path)?.is_some() {
+        let result = spawn_and_publish(bind, pid_path, spawn, budget_ms);
+        release_lock(&lock_path);
+        return result;
+    }
+    adopt_or_reclaim(bind, pid_path, spawn, budget_ms, &lock_path)
+}
+
+/// Takes the spawn lock, recording the holder's pid in it.
+///
+/// Returns `Ok(None)` when someone else already holds it. The pid is recorded so
+/// a lock left behind by an export that died mid-spawn can be recognized as
+/// stale — see [`adopt_or_reclaim`].
+///
+/// # Errors
+/// Returns an error if the lockfile can't be created for a reason other than
+/// already existing.
+fn try_lock(lock_path: &Path) -> anyhow::Result<Option<()>> {
+    use std::io::Write as _;
+    let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&lock_path)
+        .open(lock_path)
     {
-        Ok(_) => {
-            let result = spawn_and_publish(bind, pid_path, spawn, budget_ms);
-            let _ = std::fs::remove_file(&lock_path);
-            result
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("creating proxy lockfile {}", lock_path.display())));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another caller is mid-spawn. Re-probe the port; if their proxy is
-            // up we're done, otherwise surface it rather than racing them.
-            if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
-                reconcile_pidfile(pid_path);
-                Ok(EnsureOutcome::AlreadyRunning)
-            } else {
-                Err(anyhow::anyhow!(
-                    "another process holds {} but nothing is serving {bind}",
-                    lock_path.display()
-                ))
-            }
+    };
+    // Best-effort: an unrecorded holder is treated as stale, which is the safe
+    // direction — it can be reclaimed rather than blocking forever.
+    let _ = file.write_all(std::process::id().to_string().as_bytes());
+    Ok(Some(()))
+}
+
+/// Releases the spawn lock, complaining loudly if it can't.
+///
+/// A lock that won't release makes every later export fail, so unlike most
+/// cleanup here this is not silently discarded.
+fn release_lock(lock_path: &Path) {
+    if let Err(e) = std::fs::remove_file(lock_path) {
+        eprintln!(
+            "llmenv: could not release proxy lockfile {} ({e}); remove it manually if \
+             mcp-proxy stops starting",
+            lock_path.display()
+        );
+    }
+}
+
+/// Reads the pid recorded in the lockfile, if it holds one.
+fn lock_holder(lock_path: &Path) -> Option<u32> {
+    std::fs::read_to_string(lock_path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+/// Handles the case where a peer already holds the spawn lock: wait for their
+/// proxy, and if it never appears, decide whether the lock is simply busy or was
+/// orphaned by an export that died holding it.
+///
+/// The peer needs the whole bind budget to get its proxy listening, so this polls
+/// rather than probing once. Probing once meant the loser of a normal cold-start
+/// race almost always lost, and printed an alarming message about a lockfile
+/// during entirely correct operation.
+///
+/// Reclaiming matters because there is no other way out: `llmenv export` runs in
+/// the shell's foreground process group, so `^C` (or SIGHUP on a dropped SSH
+/// session) during the multi-second wait for a slow `uvx mcp-proxy` kills it with
+/// the lockfile in place. Without reclamation every later export failed forever
+/// on a file the user had never heard of.
+///
+/// # Errors
+/// Returns an error if the lock is held by a live process and nothing is serving
+/// `bind`, if a stale lock can't be removed, or if the reclaimed spawn fails.
+fn adopt_or_reclaim<F>(
+    bind: &str,
+    pid_path: &Path,
+    spawn: F,
+    budget_ms: u64,
+    lock_path: &Path,
+) -> anyhow::Result<EnsureOutcome>
+where
+    F: FnOnce(&str) -> anyhow::Result<Child>,
+{
+    // Check the holder before waiting on it. A lock whose holder is gone has
+    // nothing to wait for, so reclaiming it immediately keeps a wedged lock from
+    // costing the full budget on every prompt.
+    if let Some(holder) = lock_holder(lock_path).filter(|pid| is_alive(*pid) != Some(false)) {
+        if wait_for_port(bind, budget_ms) {
+            reconcile_pidfile(pid_path);
+            return Ok(EnsureOutcome::AlreadyRunning);
         }
-        Err(e) => Err(e.into()),
+        anyhow::bail!(
+            "another llmenv process (pid {holder}) holds {} but nothing is serving {bind} \
+             after {budget_ms}ms",
+            lock_path.display()
+        );
+    }
+
+    // No live holder — but its proxy may have outlived it, in which case there is
+    // nothing to start.
+    if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+        reconcile_pidfile(pid_path);
+        return Ok(EnsureOutcome::AlreadyRunning);
+    }
+
+    tracing::debug!(
+        "reclaiming stale proxy lockfile {} (holder is gone)",
+        lock_path.display()
+    );
+    std::fs::remove_file(lock_path)
+        .with_context(|| format!("removing stale proxy lockfile {}", lock_path.display()))?;
+
+    // Single bounded retry: whoever wins the reclaimed lock does the spawn, and
+    // the loser is told to retry rather than recursing.
+    if try_lock(lock_path)?.is_some() {
+        let result = spawn_and_publish(bind, pid_path, spawn, budget_ms);
+        release_lock(lock_path);
+        return result;
+    }
+    anyhow::bail!(
+        "lost the race to reclaim stale proxy lockfile {}; the next export will retry",
+        lock_path.display()
+    )
+}
+
+/// Polls `bind` until something is serving it or `budget_ms` elapses.
+///
+/// The child-free counterpart to [`wait_for_bind`], for waiting on a proxy that
+/// another process is starting.
+fn wait_for_port(bind: &str, budget_ms: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    loop {
+        if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(BIND_POLL_INTERVAL_MS));
     }
 }
 
@@ -172,36 +298,69 @@ where
     let mut child = spawn(bind)?;
     let pid = child.id();
 
-    match wait_for_bind(bind, &mut child, budget_ms)? {
-        BindResult::Bound => {}
-        BindResult::ChildExited(status) => {
+    match wait_for_bind(bind, &mut child, budget_ms) {
+        Ok(BindResult::Bound) => {}
+        Ok(BindResult::ChildExited(status)) => {
             anyhow::bail!(
                 "mcp-proxy (pid {pid}) exited ({status}) before binding to {bind}{}",
                 proxy_log_hint(pid_path)
             );
         }
-        BindResult::TimedOut => {
+        Ok(BindResult::TimedOut) => {
             anyhow::bail!(
-                "mcp-proxy (pid {pid}) did not bind to {bind} within {budget_ms}ms{}",
+                "mcp-proxy (pid {pid}) did not bind to {bind} within {budget_ms}ms{}{}",
+                reap(&mut child),
                 proxy_log_hint(pid_path)
             );
+        }
+        Err(e) => {
+            // We can't tell whether it's running, so don't leave it behind to
+            // find out — `llmenv export` runs per prompt and would accumulate one
+            // per run.
+            let reaped = reap(&mut child);
+            return Err(e.context(format!("waiting for mcp-proxy (pid {pid}) to bind{reaped}")));
         }
     }
 
     // The port is serving — but confirm *our* child is what's serving it before
     // recording its pid (#1085). A child that died into a port already held by
     // an orphaned proxy would otherwise be published as the live listener.
-    if child
-        .try_wait()
-        .context("waiting on mcp-proxy child")?
-        .is_some()
-    {
-        reconcile_pidfile(pid_path);
-        return Ok(EnsureOutcome::AlreadyRunning);
+    match child.try_wait() {
+        Ok(Some(_)) => {
+            reconcile_pidfile(pid_path);
+            return Ok(EnsureOutcome::AlreadyRunning);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let reaped = reap(&mut child);
+            return Err(anyhow::Error::new(e).context(format!(
+                "checking whether mcp-proxy (pid {pid}) is still running{reaped}"
+            )));
+        }
     }
 
     write_pidfile_atomic(pid_path, pid)?;
     Ok(EnsureOutcome::Spawned)
+}
+
+/// Kills and reaps `child`, returning a fragment naming the outcome for the
+/// error being built.
+///
+/// A child that is still running when we give up on it must not be left behind:
+/// it is detached into its own process group with its stdio nulled, so nothing
+/// else will clean it up, and `llmenv export` runs on every shell prompt — a
+/// proxy that stays alive without ever binding would otherwise accumulate one
+/// orphan per prompt, indefinitely.
+fn reap(child: &mut Child) -> String {
+    match child.kill().and_then(|()| child.wait()) {
+        Ok(_) => "; killed it".to_owned(),
+        // Already gone between the check and the kill — nothing was leaked.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => String::new(),
+        Err(e) => format!(
+            "; it is STILL RUNNING (could not kill pid {}: {e})",
+            child.id()
+        ),
+    }
 }
 
 /// Why [`wait_for_bind`] stopped waiting.
@@ -257,18 +416,29 @@ fn wait_for_bind(bind: &str, child: &mut Child, budget_ms: u64) -> anyhow::Resul
 fn reconcile_pidfile(pid_path: &Path) {
     match read_pidfile(pid_path) {
         Ok(None) => {}
-        Ok(Some(pid)) if is_alive(pid) => {}
+        // Only a definite "not running" justifies deleting the record. `None`
+        // means the check itself failed, and deleting on a guess would discard a
+        // valid pid.
         Ok(Some(pid)) => {
-            tracing::debug!("clearing proxy pidfile: pid {pid} is not running");
-            let _ = std::fs::remove_file(pid_path);
+            if is_alive(pid) == Some(false) {
+                tracing::debug!("clearing proxy pidfile: pid {pid} is not running");
+                let _ = std::fs::remove_file(pid_path);
+            }
         }
-        Err(e) => {
-            tracing::warn!(
-                "clearing unreadable proxy pidfile {}: {e}",
+        Err(PidfileError::Unparseable(e)) => {
+            tracing::debug!(
+                "clearing unparseable proxy pidfile {}: {e}",
                 pid_path.display()
             );
             let _ = std::fs::remove_file(pid_path);
         }
+        // An I/O error is not evidence the contents are wrong, and deleting would
+        // fail for the same reason. Say so instead — `eprintln!` because the
+        // default tracing filter is ERROR-only, so a `warn!` would reach nobody.
+        Err(PidfileError::Io(e)) => eprintln!(
+            "llmenv: cannot read proxy pidfile {} ({e}); fix its permissions or remove it",
+            pid_path.display()
+        ),
     }
 }
 
@@ -572,13 +742,36 @@ pub(crate) fn detach_process_group(cmd: &mut Command) {
     }
 }
 
-fn read_pidfile(pid_path: &Path) -> anyhow::Result<Option<u32>> {
+/// Why a pidfile couldn't be turned into a pid.
+///
+/// The two cases call for opposite responses — bad contents should be discarded,
+/// an unreadable file must be left alone — so they can't be collapsed into one
+/// error.
+#[derive(Debug)]
+enum PidfileError {
+    /// The file was read but doesn't contain a pid.
+    Unparseable(String),
+    /// The file couldn't be read at all (permissions, I/O).
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for PidfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unparseable(s) => write!(f, "{s}"),
+            Self::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+fn read_pidfile(pid_path: &Path) -> Result<Option<u32>, PidfileError> {
     // #893: a single read that distinguishes NotFound (→ absent) from other I/O
-    // errors (→ propagate), rather than an exists() stat that masked every stat
+    // errors (→ report), rather than an exists() stat that masked every stat
     // failure (e.g. EACCES) as "no pidfile".
     let s = match std::fs::read_to_string(pid_path) {
+        Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        r => r.with_context(|| format!("reading {}", pid_path.display()))?,
+        Err(e) => return Err(PidfileError::Io(e)),
     };
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -586,7 +779,14 @@ fn read_pidfile(pid_path: &Path) -> anyhow::Result<Option<u32>> {
     }
     let pid: u32 = trimmed
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid pid {trimmed:?} in {}: {e}", pid_path.display()))?;
+        .map_err(|e| PidfileError::Unparseable(format!("invalid pid {trimmed:?}: {e}")))?;
+    // pid 0 is not a process: `kill 0` signals the caller's own process group, so
+    // a 0 here would turn "signal the proxy" into "signal my own shell".
+    if pid == 0 {
+        return Err(PidfileError::Unparseable(
+            "pid 0 is not a process".to_owned(),
+        ));
+    }
     Ok(Some(pid))
 }
 
@@ -611,32 +811,41 @@ pub fn probe_tcp(bind: &str, timeout_ms: u64) -> bool {
     TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(timeout_ms)).is_ok()
 }
 
-/// True if `pid` is a live process via a `kill -0` signal-0 check.
+/// Whether `pid` is a live process, via a `kill -0` signal-0 check.
+///
+/// `Some(true)` alive, `Some(false)` definitely not running, `None` when the
+/// check itself couldn't be performed. The three-way answer matters because
+/// callers act destructively on "not running": collapsing an unusable `kill` (not
+/// on `PATH`, or `fork` failing under process exhaustion) into `false` would make
+/// them treat every live process as dead.
 ///
 /// # Note on TOCTOU
-/// This check is subject to PID-reuse races: a recycled PID that belongs to an
-/// unrelated process returns `true` even though the proxy is no longer running
-/// (#300). Callers that have access to the bind address should prefer
-/// [`probe_tcp`], which proves the proxy is actually serving.
+/// Subject to PID-reuse races: a recycled pid belonging to an unrelated process
+/// answers `Some(true)` even though the proxy is gone (#300). Callers with access
+/// to the bind address should prefer [`probe_tcp`], which proves the proxy is
+/// actually serving.
 ///
-/// On non-Unix platforms this conservatively returns `false` so callers always
-/// re-spawn.
+/// Returns `None` on non-Unix platforms, where there is no `kill` to consult.
 #[must_use]
-pub fn is_alive(pid: u32) -> bool {
+pub fn is_alive(pid: u32) -> Option<bool> {
     #[cfg(unix)]
     {
+        // Out-of-range pids can't be asked about: `kill` takes an i32, and
+        // clamping would silently probe a different process. `kill -0 0` targets
+        // the caller's whole process group, so 0 is not a question either.
+        let pid_i32 = i32::try_from(pid).ok()?;
+        if pid_i32 <= 0 {
+            return None;
+        }
         // We avoid pulling libc as a dependency by going through std::process
         // — std doesn't expose kill(2) with sig=0 directly.
-        let pid_i32 = i32::try_from(pid).unwrap_or(i32::MAX);
-        let status = Command::new("kill")
+        Command::new("kill")
             .arg("-0")
             .arg(pid_i32.to_string())
             .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) => s.success(),
-            Err(_) => false,
-        }
+            .status()
+            .ok()
+            .map(|s| s.success())
     }
     #[cfg(not(unix))]
     {
@@ -645,7 +854,7 @@ pub fn is_alive(pid: u32) -> bool {
             reason = "pid is only used on Unix for the kill(2) signal-0 liveness check"
         )]
         let _ = pid;
-        false
+        None
     }
 }
 
@@ -960,6 +1169,19 @@ mod tests {
             !pid_path.exists(),
             "a proxy that never bound must not leave a pidfile"
         );
+
+        // The child was alive when we gave up on it, so it must have been killed
+        // rather than detached and forgotten: `llmenv export` runs per prompt, so
+        // leaving it would accumulate one orphan per prompt.
+        let pid = spawned.lock().expect("lock").expect("spawn recorded a pid");
+        assert!(
+            msg.contains("killed it"),
+            "error must say the child was killed, got: {msg}"
+        );
+        assert!(
+            super::is_alive(pid) == Some(false),
+            "the timed-out child (pid {pid}) must not be left running"
+        );
     }
 
     /// A pidfile naming a live process is left alone; the running pid is the best
@@ -989,7 +1211,7 @@ mod tests {
         let pid_path = dir.path().join("mcp-proxy.pid");
         // Above the default pid_max on Linux and macOS, so it cannot be in use.
         let dead = 4_000_003_u32;
-        assert!(!is_alive(dead), "test pid must be dead");
+        assert_eq!(is_alive(dead), Some(false), "test pid must be dead");
         write_pidfile_atomic(&pid_path, dead).expect("write");
 
         reconcile_pidfile(&pid_path);

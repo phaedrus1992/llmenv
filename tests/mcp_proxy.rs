@@ -18,7 +18,9 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use llmenv::mcp::proxy::{EnsureOutcome, ensure_running, is_alive, probe_tcp};
+use llmenv::mcp::proxy::{
+    EnsureOutcome, ensure_running, ensure_running_within, is_alive, probe_tcp,
+};
 use tempfile::tempdir;
 
 /// Serializes every test that allocates an ephemeral port. cargo runs the tests
@@ -142,6 +144,22 @@ fn spawner(log: Arc<SpawnLog>) -> impl Fn(&str) -> anyhow::Result<Child> {
         log.spawned.lock().expect("lock").push(child.id());
         Ok(child)
     }
+}
+
+/// `ensure_running` with a short bind budget.
+///
+/// The peer-lock paths wait for a peer's proxy to appear, which in production is
+/// the multi-second `BIND_DEADLINE_MS`. Tests assert the decision, not the
+/// duration, so they spend 150ms instead of 5s.
+fn ensure_running_briefly<F>(
+    bind: &str,
+    pid_path: &std::path::Path,
+    spawn: F,
+) -> anyhow::Result<EnsureOutcome>
+where
+    F: FnOnce(&str) -> anyhow::Result<Child>,
+{
+    ensure_running_within(bind, pid_path, spawn, 150)
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +368,11 @@ fn ensure_running_records_the_live_child_pid() {
         &[written],
         "the pidfile must name the child we spawned"
     );
-    assert!(is_alive(written), "the recorded pid must be a live process");
+    assert_eq!(
+        is_alive(written),
+        Some(true),
+        "the recorded pid must be a live process"
+    );
 
     drop(held);
 }
@@ -360,10 +382,12 @@ fn ensure_running_records_the_live_child_pid() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ensure_running_clears_a_dead_pid_when_the_port_is_serving() {
-    // The state #1084 + #1085 leave behind: a live proxy plus a pidfile naming a
-    // process that no longer exists. The pidfile must not survive as a permanent
-    // lie — the old fast path read any non-empty pidfile as proof of life.
+fn ensure_running_leaves_the_pidfile_alone_on_the_fast_path() {
+    // The fast path deliberately does not reconcile: it runs on every shell
+    // prompt on the server host, and judging a pid costs a fork+exec of `kill`
+    // (~7ms) against a loopback probe that costs under 1ms. A stale pid is inert
+    // now that liveness never consults it, so it's reconciled on the spawn paths
+    // — which are already paying for a fork — rather than per prompt.
     let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
@@ -372,7 +396,7 @@ fn ensure_running_clears_a_dead_pid_when_the_port_is_serving() {
     let bind = listener.local_addr().expect("addr").to_string();
 
     let dead = 4_000_004_u32;
-    assert!(!is_alive(dead), "fixture pid must be dead");
+    assert_eq!(is_alive(dead), Some(false), "fixture pid must be dead");
     std::fs::write(&pid_path, dead.to_string()).expect("write stale pidfile");
 
     let log = Arc::new(SpawnLog::default());
@@ -381,60 +405,104 @@ fn ensure_running_clears_a_dead_pid_when_the_port_is_serving() {
     assert_eq!(outcome, EnsureOutcome::AlreadyRunning);
     assert_eq!(log.calls(), 0, "must not spawn while the port is served");
     assert!(
-        !pid_path.exists(),
-        "a pidfile naming a dead process must be cleared"
+        pid_path.exists(),
+        "the fast path must not fork just to tidy an inert pidfile"
     );
 
     drop(listener);
 }
 
 #[test]
-fn ensure_running_keeps_a_live_pid_when_the_port_is_serving() {
+fn ensure_running_replaces_a_dead_pid_when_it_spawns() {
+    // A stale pid never survives a spawn: the pidfile is rewritten with the pid
+    // of the child that was confirmed bound and alive. The old code could leave
+    // the *dead* child's pid here instead.
     let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
+    let (_, bind) = free_port();
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let bind = listener.local_addr().expect("addr").to_string();
+    let dead = 4_000_004_u32;
+    assert_eq!(is_alive(dead), Some(false), "fixture pid must be dead");
+    std::fs::write(&pid_path, dead.to_string()).expect("write stale pidfile");
 
-    let live = std::process::id();
-    std::fs::write(&pid_path, live.to_string()).expect("write pidfile");
-
-    let log = Arc::new(SpawnLog::default());
+    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
+    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
 
-    assert_eq!(outcome, EnsureOutcome::AlreadyRunning);
-    let kept: u32 = std::fs::read_to_string(&pid_path)
+    assert_eq!(outcome, EnsureOutcome::Spawned);
+    let written: u32 = std::fs::read_to_string(&pid_path)
         .expect("read pidfile")
         .trim()
         .parse()
         .expect("parse pid");
-    assert_eq!(kept, live, "a live pid must be left alone");
+    assert_ne!(written, dead, "the stale pid must not survive a spawn");
+    assert_eq!(
+        is_alive(written),
+        Some(true),
+        "the recorded pid must be live"
+    );
 
-    drop(listener);
+    drop(held);
 }
 
 #[test]
-fn ensure_running_clears_an_unparseable_pidfile_instead_of_failing() {
-    // A garbage pidfile used to abort the whole export with a parse error, even
-    // though the proxy was up and the pidfile is not what proves liveness (#1085).
+fn ensure_running_clears_a_dead_pid_when_it_adopts_an_orphaned_proxy() {
+    // The pidfile must not survive as a permanent lie — the old fast path read any
+    // non-empty pidfile as proof of life, so a wrong pid could never be recovered
+    // from. Here our child loses the port to an orphan and dies, so there is no
+    // new pid to record and the stale one has to go.
     let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
+    let (_, bind) = free_port();
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let bind = listener.local_addr().expect("addr").to_string();
+    let dead = 4_000_004_u32;
+    assert_eq!(is_alive(dead), Some(false), "fixture pid must be dead");
+    std::fs::write(&pid_path, dead.to_string()).expect("write stale pidfile");
 
-    std::fs::write(&pid_path, "garbage").expect("write pidfile");
-
-    let log = Arc::new(SpawnLog::default());
+    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
+    let log = Arc::new(
+        SpawnLog::default()
+            .with_listener_holder(Arc::clone(&held))
+            .with_child_kind(ChildKind::Exited),
+    );
     let outcome = ensure_running(&bind, &pid_path, spawner(log.clone())).expect("ensure_running");
 
     assert_eq!(outcome, EnsureOutcome::AlreadyRunning);
-    assert_eq!(log.calls(), 0);
-    assert!(!pid_path.exists(), "garbage pidfile must be cleared");
+    assert!(
+        !pid_path.exists(),
+        "a pidfile naming a dead process must be cleared"
+    );
 
-    drop(listener);
+    drop(held);
+}
+
+#[test]
+fn ensure_running_does_not_fail_on_an_unparseable_pidfile() {
+    // A garbage pidfile used to abort the whole export with a parse error, even
+    // though the pidfile is not what proves liveness (#1085).
+    let _guard = port_guard();
+    let tmp = tempdir().expect("tempdir");
+    let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
+    let (_, bind) = free_port();
+
+    std::fs::write(&pid_path, "garbage").expect("write pidfile");
+
+    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
+    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+    let outcome = ensure_running(&bind, &pid_path, spawner(log.clone()))
+        .expect("a garbage pidfile must not fail the export");
+
+    assert_eq!(outcome, EnsureOutcome::Spawned);
+    let written: u32 = std::fs::read_to_string(&pid_path)
+        .expect("read pidfile")
+        .trim()
+        .parse()
+        .expect("garbage must be replaced by a real pid");
+    assert_eq!(is_alive(written), Some(true));
+
+    drop(held);
 }
 
 // ---------------------------------------------------------------------------
@@ -442,26 +510,84 @@ fn ensure_running_clears_an_unparseable_pidfile_instead_of_failing() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ensure_running_errors_when_lock_is_held_and_port_closed() {
-    // Simulate a peer holding the lockfile mid-spawn: pidfile is stale and
-    // port is not bound. ensure_running must NOT spawn and must surface an error.
+fn ensure_running_errors_when_a_live_peer_holds_the_lock_and_nothing_serves() {
+    // A peer really is mid-spawn: it holds the lock and is still alive. We must
+    // not race it, and must not steal its lock.
     let _guard = port_guard();
     let tmp = tempdir().expect("tempdir");
     let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
     let lock_path: PathBuf = tmp.path().join("mcp-proxy.pid.lock");
     let (_, bind) = free_port();
-    std::fs::write(&lock_path, "").expect("write lockfile");
+    // Our own pid stands in for a live holder.
+    std::fs::write(&lock_path, std::process::id().to_string()).expect("write lockfile");
+
+    let log = Arc::new(SpawnLog::default());
+    let result = ensure_running_briefly(&bind, &pid_path, spawner(log.clone()));
+
+    let msg = result
+        .expect_err("must error while a live peer holds the lock")
+        .to_string();
+    assert!(
+        msg.contains("holds") && msg.contains(&std::process::id().to_string()),
+        "error must name the holder, got: {msg}"
+    );
+    assert_eq!(log.calls(), 0, "must not spawn while a live peer holds it");
+    assert!(lock_path.exists(), "a live peer's lock must not be removed");
+}
+
+#[test]
+fn ensure_running_reclaims_a_lock_orphaned_by_a_dead_holder() {
+    // `llmenv export` runs in the shell's foreground process group, so ^C or a
+    // dropped SSH session during a multi-second `uvx mcp-proxy` start kills it
+    // with the lockfile still on disk. Without reclamation every later export
+    // failed forever on a file the user had never heard of.
+    let _guard = port_guard();
+    let tmp = tempdir().expect("tempdir");
+    let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
+    let lock_path: PathBuf = tmp.path().join("mcp-proxy.pid.lock");
+    let (_, bind) = free_port();
+
+    let dead = 4_000_005_u32;
+    assert_eq!(is_alive(dead), Some(false), "fixture pid must be dead");
+    std::fs::write(&lock_path, dead.to_string()).expect("write orphaned lockfile");
 
     let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
     let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
 
-    let result = ensure_running(&bind, &pid_path, spawner(log.clone()));
+    let outcome = ensure_running_briefly(&bind, &pid_path, spawner(log.clone()))
+        .expect("must reclaim the orphaned lock and spawn");
 
+    assert_eq!(outcome, EnsureOutcome::Spawned);
+    assert_eq!(log.calls(), 1, "must spawn after reclaiming a stale lock");
     assert!(
-        result.is_err(),
-        "should error when peer holds lock and port is closed"
+        !lock_path.exists(),
+        "the reclaimed lock must be released again"
     );
-    assert_eq!(log.calls(), 0, "must not spawn while lock is held");
+
+    drop(held);
+}
+
+#[test]
+fn ensure_running_reclaims_a_lock_with_no_recorded_holder() {
+    // A lockfile from a version that didn't record its holder, or one truncated
+    // before the pid was written, must not wedge the backend either.
+    let _guard = port_guard();
+    let tmp = tempdir().expect("tempdir");
+    let pid_path: PathBuf = tmp.path().join("mcp-proxy.pid");
+    let lock_path: PathBuf = tmp.path().join("mcp-proxy.pid.lock");
+    let (_, bind) = free_port();
+    std::fs::write(&lock_path, "").expect("write empty lockfile");
+
+    let held: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
+    let log = Arc::new(SpawnLog::default().with_listener_holder(Arc::clone(&held)));
+
+    let outcome = ensure_running_briefly(&bind, &pid_path, spawner(log.clone()))
+        .expect("must reclaim a holderless lock and spawn");
+
+    assert_eq!(outcome, EnsureOutcome::Spawned);
+    assert_eq!(log.calls(), 1);
+
+    drop(held);
 }
 
 #[test]
@@ -499,13 +625,13 @@ fn ensure_running_accepts_peer_published_pid_when_listening() {
 #[test]
 fn is_alive_returns_false_for_almost_certainly_dead_pid() {
     // is_alive still available for non-proxy callers; must not panic.
-    assert!(!is_alive(4_000_002));
+    assert_eq!(is_alive(4_000_002), Some(false));
 }
 
 #[test]
 fn is_alive_returns_true_for_self() {
     let my_pid = std::process::id();
-    assert!(is_alive(my_pid));
+    assert_eq!(is_alive(my_pid), Some(true));
 }
 
 #[test]
