@@ -822,6 +822,10 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> Option<PrInfo> 
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(e) => {
+                // Same cleanup as the timeout arm: the child's state is
+                // unknown, so don't abandon it still running.
+                let _ = child.kill();
+                let _ = child.wait();
                 tracing::debug!("gh pr view: wait failed (non-fatal): {e}");
                 return None;
             }

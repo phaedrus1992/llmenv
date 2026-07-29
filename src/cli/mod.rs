@@ -1247,6 +1247,10 @@ fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
     let loaded = paths::config_path().and_then(|path| crate::hook_run::load_cached_config(&path));
     let config = match loaded {
         Ok(config) => config,
+        // An absent config takes this arm too, and shares the row deliberately:
+        // `llmenv doctor` is the right next step either way, so distinguishing
+        // them would add a second row variant for a state that only exists
+        // before the first `llmenv sync`.
         Err(e) => {
             tracing::warn!("statusline: config unavailable, rendering error row: {e:#}");
             print!("{}", statusline::render_config_error(use_color));
