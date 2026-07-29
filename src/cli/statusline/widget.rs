@@ -1609,8 +1609,7 @@ mod tests {
             "workspace": { "current_dir": repo_dir.path().to_string_lossy() }
         }))
         .unwrap();
-        let gh_bin = gh.to_string_lossy();
-        let out = render_branch_with(&data, None, true, fake_gh(&gh_bin));
+        let out = render_branch_with(&data, None, true, fake_gh(&gh.to_string_lossy()));
         assert!(
             out.contains("\x1b]8;;https://github.com/o/r/pull/973"),
             "expected branch→derived-PR link: {out:?}"
@@ -1643,9 +1642,8 @@ mod tests {
             "workspace": { "current_dir": repo_dir.path().to_string_lossy() }
         }))
         .unwrap();
-        let gh_bin = gh.to_string_lossy();
         assert_eq!(
-            resolve_pr_with(&data, fake_gh(&gh_bin)),
+            resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())),
             Some(PrInfo {
                 number: Some(834),
                 url: Some("https://github.com/o/r/pull/834".to_string()),
@@ -1673,9 +1671,8 @@ mod tests {
             "pr": { "number": 5, "url": "https://github.com/o/r/pull/5" }
         }))
         .unwrap();
-        let gh_bin = gh.to_string_lossy();
         assert_eq!(
-            resolve_pr_with(&data, fake_gh(&gh_bin)),
+            resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())),
             Some(PrInfo {
                 number: Some(5),
                 url: Some("https://github.com/o/r/pull/5".to_string()),
@@ -1702,8 +1699,7 @@ mod tests {
             "workspace": { "current_dir": dir.path().to_string_lossy() }
         }))
         .unwrap();
-        let gh_bin = gh.to_string_lossy();
-        assert_eq!(resolve_pr_with(&data, fake_gh(&gh_bin)), None);
+        assert_eq!(resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())), None);
     }
 
     #[test]
@@ -1778,8 +1774,7 @@ mod tests {
             bin_dir.path(),
             "#!/bin/sh\necho '{\"number\":834,\"url\":\"https://github.com/o/r/pull/834\",\"reviewDecision\":\"CHANGES_REQUESTED\"}'\n",
         );
-        let gh_bin = gh.to_string_lossy();
-        let pr = gh_pr_view(fake_gh(&gh_bin), repo_dir.path(), "feat/x").unwrap();
+        let pr = gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x").unwrap();
         assert_eq!(pr.number, Some(834));
         assert_eq!(render_pr_info(&pr, None, false), "#834");
         assert_eq!(pr.review_state.as_deref(), Some("changes_requested"));
@@ -1799,8 +1794,7 @@ mod tests {
             "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > argv.log\necho '{\"number\":1}'\n",
         );
         let branch = "--json";
-        let gh_bin = gh.to_string_lossy();
-        let _ = gh_pr_view(fake_gh(&gh_bin), repo_dir.path(), branch);
+        let _ = gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), branch);
         let argv = std::fs::read_to_string(repo_dir.path().join("argv.log")).unwrap();
         let args: Vec<&str> = argv.lines().collect();
         let dash_dash = args
@@ -1820,9 +1814,12 @@ mod tests {
         // Simulates "gh isn't installed": spawn itself fails.
         let repo_dir = tempfile::tempdir().unwrap();
         let missing = repo_dir.path().join("no-such-gh-binary");
-        let gh_bin = missing.to_string_lossy();
         assert_eq!(
-            gh_pr_view(fake_gh(&gh_bin), repo_dir.path(), "feat/x"),
+            gh_pr_view(
+                fake_gh(&missing.to_string_lossy()),
+                repo_dir.path(),
+                "feat/x"
+            ),
             None
         );
     }
@@ -1839,9 +1836,8 @@ mod tests {
             bin_dir.path(),
             "#!/bin/sh\necho 'no pull requests found' >&2\nexit 1\n",
         );
-        let gh_bin = gh.to_string_lossy();
         assert_eq!(
-            gh_pr_view(fake_gh(&gh_bin), repo_dir.path(), "feat/x"),
+            gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
             None
         );
     }
@@ -1884,9 +1880,8 @@ mod tests {
             bin_dir.path(),
             "#!/bin/sh\necho called >> gh-calls.log\necho '{\"number\":1,\"url\":null,\"reviewDecision\":null}'\n",
         );
-        let gh_bin = gh.to_string_lossy();
         let pr = derive_pr(
-            fake_gh(&gh_bin),
+            fake_gh(&gh.to_string_lossy()),
             repo_dir.path(),
             "feat/x",
             Some(cache_dir.path()),
@@ -1920,9 +1915,8 @@ mod tests {
             1_000,
         );
         // now=1_030 is within the 60s TTL of the ts=1_000 cache entry.
-        let gh_bin = gh.to_string_lossy();
         let pr = derive_pr(
-            fake_gh(&gh_bin),
+            fake_gh(&gh.to_string_lossy()),
             repo_dir.path(),
             "feat/x",
             Some(cache_dir.path()),
@@ -1961,9 +1955,8 @@ mod tests {
         );
         // now=1_000+PR_CACHE_TTL_SECS+1 is past the cache entry's TTL.
         let now = 1_000 + PR_CACHE_TTL_SECS + 1;
-        let gh_bin = gh.to_string_lossy();
         let pr = derive_pr(
-            fake_gh(&gh_bin),
+            fake_gh(&gh.to_string_lossy()),
             repo_dir.path(),
             "feat/x",
             Some(cache_dir.path()),
