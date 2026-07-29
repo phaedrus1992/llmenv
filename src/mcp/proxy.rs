@@ -453,13 +453,18 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Splits a `host:port` bind string into a validated IP address and port.
+/// Parses a `host:port` bind string into a socket address.
 ///
-/// Parse-don't-validate: both values are forwarded into the child's argv
-/// (`--host <host> --port <port>`), so a value with embedded spaces or
-/// flag-like content would be misread by `mcp-proxy`. Returning the parsed
-/// types means the caller reformats from `IpAddr`/`u16` rather than passing the
-/// original text through, so nothing unvalidated can reach the argv.
+/// Delegates to `SocketAddr`'s own parser instead of splitting on the last colon,
+/// so this accepts exactly what [`probe_tcp`] accepts. Hand-rolling the split
+/// made the two disagree on every IPv6 address — `::1:9092` parsed here but not
+/// there, `[::1]:9092` the reverse — so an IPv6 `listen_host` spawned a proxy
+/// that the liveness probe could then never see, and every subsequent export
+/// spawned another one.
+///
+/// Parse-don't-validate: the caller reformats the child's argv from the parsed
+/// `SocketAddr` rather than passing the original text through, so nothing
+/// unvalidated reaches `--host`/`--port`.
 ///
 /// Kept separate from [`spawn_mcp_proxy`] so bind-string parsing is testable
 /// without launching a real proxy — exhaustively testing it through the spawner
@@ -467,20 +472,15 @@ fn is_executable(path: &Path) -> bool {
 /// stderr into the user's real state directory.
 ///
 /// # Errors
-/// Returns an error if `bind` has no `:port` suffix, the port is not a `u16`, or
-/// the host is not an IP address literal (hostnames included — `mcp-proxy` is
-/// given an address to bind, not a name to resolve).
-fn parse_bind(bind: &str) -> anyhow::Result<(std::net::IpAddr, u16)> {
-    let (host, port) = bind
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("bind missing :port suffix: {bind}"))?;
-    let port: u16 = port
-        .parse()
-        .map_err(|e| anyhow::anyhow!("bind port {port:?} is not a valid u16: {e}"))?;
-    let host: std::net::IpAddr = host
-        .parse()
-        .map_err(|e| anyhow::anyhow!("bind host {host:?} is not a valid IP address: {e}"))?;
-    Ok((host, port))
+/// Returns an error if `bind` is not an IP literal plus a port. Hostnames are
+/// rejected: `mcp-proxy` is given an address to bind, not a name to resolve.
+fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
+    bind.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "bind {bind:?} is not a valid <ip>:<port> address \
+             (an IP literal with a port, IPv6 bracketed as [::1]:9092 — not a hostname): {e}"
+        )
+    })
 }
 
 /// Production spawner: launches `mcp-proxy --host <host> --port <port> -- icm serve` (or
@@ -496,14 +496,16 @@ fn parse_bind(bind: &str) -> anyhow::Result<(std::net::IpAddr, u16)> {
 /// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor
 /// `uvx` is on `PATH`, or if the child cannot be spawned.
 pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
-    let (host, port) = parse_bind(bind)?;
+    let addr = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
     let mut cmd = Command::new(program);
     cmd.args(leading)
+        // `--host` takes a bare address; `ip()` drops the brackets an IPv6
+        // SocketAddr renders with, which mcp-proxy would reject.
         .arg("--host")
-        .arg(host.to_string())
+        .arg(addr.ip().to_string())
         .arg("--port")
-        .arg(port.to_string())
+        .arg(addr.port().to_string())
         .arg("--")
         .arg("icm")
         .arg("serve");
@@ -1200,53 +1202,57 @@ mod tests {
         );
     }
 
-    /// A bind string with no `:port` suffix is rejected (#337).
+    /// Malformed bind strings are rejected before they can reach mcp-proxy's
+    /// argv: no port, a non-numeric port, and a hostname rather than an IP (#337).
     #[test]
-    fn parse_bind_rejects_missing_port() {
+    fn parse_bind_rejects_malformed_addresses() {
         use super::parse_bind;
-        let msg = parse_bind("127.0.0.1")
-            .expect_err("must fail without a port")
-            .to_string();
+        for bad in ["127.0.0.1", "127.0.0.1:notaport", "localhost:7878", ""] {
+            let msg = parse_bind(bad)
+                .expect_err("must reject {bad:?}")
+                .to_string();
+            assert!(
+                msg.contains(bad) && msg.contains("<ip>:<port>"),
+                "error should quote the input and name the expected form, got: {msg}"
+            );
+        }
+    }
+
+    /// parse_bind must accept exactly what probe_tcp accepts. They used to
+    /// disagree on every IPv6 address: a bare `::1:9092` parsed here (so a proxy
+    /// was spawned) but not there (so the probe never saw it), and each export
+    /// spawned another one. Both now go through SocketAddr.
+    #[test]
+    fn parse_bind_agrees_with_probe_tcp_on_ipv6() {
+        use super::parse_bind;
+        let bracketed = "[::1]:9092";
+        let addr = parse_bind(bracketed).expect("bracketed ipv6 must parse");
+        assert_eq!(addr.port(), 9092);
+        assert_eq!(addr.ip(), "::1".parse::<std::net::IpAddr>().expect("ipv6"));
+        assert_eq!(
+            addr,
+            bracketed
+                .parse::<std::net::SocketAddr>()
+                .expect("probe_tcp parses the same form"),
+            "parse_bind and probe_tcp must agree"
+        );
+
+        // The unbracketed form is what `format!(\"{host}:{port}\")` used to
+        // produce; it is rejected here so the mismatch can't come back.
         assert!(
-            msg.contains("missing :port suffix"),
-            "error should mention missing port, got: {msg}"
+            parse_bind("::1:9092").is_err(),
+            "unbracketed IPv6 must be rejected — probe_tcp cannot parse it"
         );
     }
 
-    /// A non-numeric port is rejected so it never reaches mcp-proxy's argv (#337).
+    /// `--host` gets a bare address: an IPv6 SocketAddr renders bracketed, and
+    /// mcp-proxy would reject `[::1]` as a host.
     #[test]
-    fn parse_bind_rejects_non_numeric_port() {
+    fn ipv6_host_argument_is_unbracketed() {
         use super::parse_bind;
-        let msg = parse_bind("127.0.0.1:notaport")
-            .expect_err("must fail with a non-numeric port")
-            .to_string();
-        assert!(
-            msg.contains("not a valid u16"),
-            "error should mention invalid port, got: {msg}"
-        );
-    }
-
-    /// Hostnames are rejected; mcp-proxy is given an address, not a name (#337).
-    #[test]
-    fn parse_bind_rejects_hostname_host() {
-        use super::parse_bind;
-        let msg = parse_bind("localhost:7878")
-            .expect_err("must reject a hostname")
-            .to_string();
-        assert!(
-            msg.contains("not a valid IP address"),
-            "error should mention invalid host, got: {msg}"
-        );
-    }
-
-    /// IPv6 literals survive the round trip, including the bracketed form's
-    /// colons — `rsplit_once(':')` must split on the *last* colon, not the first.
-    #[test]
-    fn parse_bind_accepts_ipv6() {
-        use super::parse_bind;
-        let (host, port) = parse_bind("::1:9092").expect("parse ipv6");
-        assert_eq!(host, "::1".parse::<std::net::IpAddr>().expect("ipv6"));
-        assert_eq!(port, 9092);
+        let addr = parse_bind("[::1]:9092").expect("parse");
+        assert_eq!(addr.to_string(), "[::1]:9092");
+        assert_eq!(addr.ip().to_string(), "::1");
     }
 
     /// #341: property tests for bind-string parsing.
@@ -1271,21 +1277,50 @@ mod tests {
                 port in 1u16..=65535,
             ) {
                 let bind = format!("{a}.{b}.{c}.{d}:{port}");
-                let (host, parsed_port) = parse_bind(&bind)
+                let addr = parse_bind(&bind)
                     .map_err(|e| TestCaseError::fail(format!("valid bind {bind} rejected: {e}")))?;
-                prop_assert_eq!(host.to_string(), format!("{a}.{b}.{c}.{d}"));
-                prop_assert_eq!(parsed_port, port);
+                prop_assert_eq!(addr.ip().to_string(), format!("{a}.{b}.{c}.{d}"));
+                prop_assert_eq!(addr.port(), port);
+            }
+
+            /// Any IPv6 address the config layer accepts must round-trip once the
+            /// caller renders it through SocketAddr — the bracketing that the
+            /// bare `{host}:{port}` form got wrong.
+            #[test]
+            fn ipv6_round_trips_through_socket_addr(
+                segs in proptest::collection::vec(0u16..=0xffff, 8),
+                port in 1u16..=65535,
+            ) {
+                let octets: [u16; 8] = segs.try_into().map_err(|_| {
+                    TestCaseError::fail("strategy must yield exactly 8 segments")
+                })?;
+                let ip = std::net::IpAddr::from(std::net::Ipv6Addr::from(octets));
+                let bind = std::net::SocketAddr::new(ip, port).to_string();
+                let addr = parse_bind(&bind)
+                    .map_err(|e| TestCaseError::fail(format!("valid bind {bind} rejected: {e}")))?;
+                prop_assert_eq!(addr.ip(), ip);
+                prop_assert_eq!(addr.port(), port);
+            }
+
+            /// parse_bind and probe_tcp must never disagree about what a bind
+            /// address is. Anything one accepts, the other must accept.
+            #[test]
+            fn parse_bind_matches_socket_addr_exactly(s in "[0-9a-fA-F:.\\[\\]]{1,30}") {
+                let ours = parse_bind(&s).is_ok();
+                let theirs = s.parse::<std::net::SocketAddr>().is_ok();
+                prop_assert_eq!(
+                    ours, theirs,
+                    "parse_bind and SocketAddr disagree on {:?} (parse_bind={}, SocketAddr={})",
+                    s, ours, theirs
+                );
             }
 
             /// Arbitrary strings without a colon must always produce a parse error.
             #[test]
             fn no_colon_always_errors(s in "[a-zA-Z0-9]{1,20}") {
-                let err = parse_bind(&s)
-                    .err()
-                    .ok_or_else(|| TestCaseError::fail(format!("must reject bind without colon: {s}")))?;
                 prop_assert!(
-                    err.to_string().contains("missing :port"),
-                    "error should mention missing port, got: {}", err
+                    parse_bind(&s).is_err(),
+                    "must reject bind without a port: {}", s
                 );
             }
 
@@ -1293,13 +1328,7 @@ mod tests {
             #[test]
             fn non_numeric_port_always_errors(s in "[a-zA-Z]{1,8}") {
                 let bind = format!("127.0.0.1:{s}");
-                let err = parse_bind(&bind)
-                    .err()
-                    .ok_or_else(|| TestCaseError::fail(format!("must reject port {s:?}")))?;
-                prop_assert!(
-                    err.to_string().contains("not a valid u16"),
-                    "error should mention invalid port, got: {}", err
-                );
+                prop_assert!(parse_bind(&bind).is_err(), "must reject port {:?}", s);
             }
         }
     }
