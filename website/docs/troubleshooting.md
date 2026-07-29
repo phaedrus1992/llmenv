@@ -84,6 +84,9 @@ llmenv doctor --gc                # diagnostics + GC in one pass
   the port is open: `nc -vz <addr> <port>`.
 - **`mcp-proxy` missing** — the server host needs `mcp-proxy` or `uvx` on
   `PATH`. `llmenv export` errors with an install hint if neither is present.
+- **`mcp-proxy` won't start** (added in v3.8.0) — the warning quotes the tail of
+  the proxy's stderr log; read the whole thing at
+  `${XDG_STATE_HOME:-$HOME/.local/state}/llmenv/mcp-proxy.log`.
 
 See [MCP & Memory](mcp.md) for the full topology and security model.
 

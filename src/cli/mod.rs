@@ -945,12 +945,15 @@ fn run_export(
                         }
                     }
                     Err(e) => {
-                        eprintln!("warning: failed to ensure mcp-proxy running: {e}");
+                        // `{e:#}` so anyhow's context chain is shown: the outermost layer is a
+                        // label like "waiting on mcp-proxy child" and the io::Error
+                        // underneath it is the actual diagnosis.
+                        eprintln!("warning: failed to ensure mcp-proxy running: {e:#}");
                     }
                 }
             }
             Err(e) => {
-                eprintln!("warning: cannot locate mcp-proxy pidfile: {e}");
+                eprintln!("warning: cannot locate mcp-proxy pidfile: {e:#}");
             }
         }
     }
@@ -3671,7 +3674,16 @@ fn find_local_memory_entry<'a>(
 
 /// The `listen_host:port` address a local memory server binds to.
 fn memory_bind_address(mem: &crate::config::Memory) -> String {
-    format!("{}:{}", mem.listen_host, mem.port)
+    // Built through SocketAddr so an IPv6 listen_host comes out bracketed.
+    // `format!("{host}:{port}")` yields `::1:9092`, which is not parseable as a
+    // socket address — so the liveness probe could never match the proxy it had
+    // just spawned, and each export spawned another one. An unparseable
+    // listen_host falls through to the naive form; config validation rejects it,
+    // and `ensure_running` then reports it by name.
+    mem.listen_host.parse::<std::net::IpAddr>().map_or_else(
+        |_| format!("{}:{}", mem.listen_host, mem.port),
+        |ip| std::net::SocketAddr::new(ip, mem.port).to_string(),
+    )
 }
 
 /// Annotation suffix for a listing row, colored when `use_color` is set.
@@ -5220,6 +5232,24 @@ mod tests {
         let active = active_as_server();
         let bind = local_memory_server_bind(config_memory(&config), &active);
         assert_eq!(bind, Some("0.0.0.0:9000".to_string()));
+    }
+
+    #[test]
+    fn local_memory_server_bind_brackets_ipv6() {
+        // An IPv6 listen_host must come out as a parseable socket address. The
+        // bare `{host}:{port}` form produced `::1:9092`, which the liveness probe
+        // could not parse — so it never matched the proxy llmenv had just
+        // spawned, and every export spawned another one.
+        let config = memory_config("::1", 9092);
+        let active = active_as_server();
+        let bind = local_memory_server_bind(config_memory(&config), &active);
+        assert_eq!(bind, Some("[::1]:9092".to_string()));
+        assert!(
+            bind.as_deref()
+                .and_then(|b| b.parse::<std::net::SocketAddr>().ok())
+                .is_some(),
+            "the bind address must parse as a SocketAddr, or probe_tcp can never match it"
+        );
     }
 
     #[test]
