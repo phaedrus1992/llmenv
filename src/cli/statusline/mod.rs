@@ -19,6 +19,31 @@ pub use widget::{EngineData, render_engine_widget};
 
 const DEFAULT_ROW: &str = "{model} │ {folder} │ {branch} │ {context} │ {budget}";
 
+/// The single row rendered when `config.yaml` can't be loaded or parsed
+/// (#1052).
+///
+/// Without this the statusline just vanishes from every open terminal: the
+/// command exits non-zero with empty stdout and the parse error goes to
+/// stderr, which the engine discards. A blank statusline reads as "nothing to
+/// show," not "your config is broken," so the user has no signal at all until
+/// they happen to run another `llmenv` command.
+///
+/// Deliberately does *not* interpolate the underlying error. The statusline is
+/// one short line of a shared prompt, and a serde YAML error is multi-line,
+/// arbitrarily long, and derived from file contents — naming the remedy is
+/// both more actionable and free of the truncation and control-character
+/// concerns that embedding it would carry. `llmenv doctor` reports the real
+/// error.
+#[must_use]
+pub fn render_config_error(use_color: bool) -> String {
+    let row = crate::cli::style::apply_style(
+        "\u{26a0}\u{fe0f} llmenv: config error \u{2014} run 'llmenv doctor'", // ⚠️ … —
+        "bold red",
+        use_color,
+    );
+    format!("{row}\n")
+}
+
 /// Strip C0 (`\x00`-`\x1F`, `\x7F`) and C1 (`\u{80}`-`\u{9F}`) control
 /// characters from **untrusted free-text** (engine JSON fields, filesystem
 /// paths/basenames, git branch names, PR URLs, tag/backend names). A stray
@@ -351,6 +376,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "\n");
+    }
+
+    #[test]
+    fn config_error_row_states_the_problem_and_the_remedy() {
+        let out = render_config_error(false);
+        assert!(out.contains("config error"), "{out:?}");
+        assert!(out.contains("llmenv doctor"), "{out:?}");
+        assert!(out.ends_with('\n'), "must terminate its row: {out:?}");
+        assert_eq!(out.lines().count(), 1, "must stay one row: {out:?}");
+        assert!(!out.contains('\u{1b}'), "no ANSI when color off: {out:?}");
+    }
+
+    #[test]
+    fn config_error_row_is_colored_when_color_is_on() {
+        let out = render_config_error(true);
+        assert!(out.contains('\u{1b}'), "expected ANSI styling: {out:?}");
+        assert!(out.contains("config error"), "{out:?}");
     }
 
     #[test]

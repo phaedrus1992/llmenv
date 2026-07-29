@@ -812,6 +812,11 @@ session JSON from stdin, llmenv's own stats from the materialized
 line per row to stdout. See [`statusline`](commands.md#statusline) for how
 it's wired into an engine.
 
+If `config.yaml` itself fails to parse, the statusline can't read this section
+at all and renders an error row instead — see
+[Broken config renders an error row](commands.md#broken-config-renders-an-error-row)
+(added in v3.8.0).
+
 ```yaml
 statusline:
   rows:
