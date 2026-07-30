@@ -41,6 +41,18 @@
     'cargoLockPackages',
   ],
 
+  // vulnerabilityAlerts (below) only remediates dependencies Renovate has
+  // extracted from a manifest (package.json/Cargo.toml) — it can't attach a
+  // fix to a purely transitive/indirect dependency that's only pinned in the
+  // lockfile, even though that's exactly what most GitHub security alerts
+  // turn out to be (e.g. postcss/svgo/brace-expansion pulled in by Docusaurus,
+  // quinn-proto pulled in by quinn). A periodic full lockfile regen bumps
+  // those transitive versions to the latest one already permitted by their
+  // parents' existing semver ranges, which is where most of these fixes live.
+  "lockFileMaintenance": {
+    "enabled": true,
+  },
+
   // The pre-commit manager is disabled by default; .pre-commit-config.yaml
   // exists in this repo, so opt in to keep hook versions updated too.
   "pre-commit": {
@@ -64,7 +76,7 @@
     },
     {
       "description": "Automerge every non-major update once its branch is green",
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "lockFileMaintenance"],
       "automerge": true,
     },
     {
