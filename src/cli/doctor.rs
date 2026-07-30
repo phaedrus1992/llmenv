@@ -776,13 +776,17 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             }
         }
 
-        for name in
-            memory_orphaned_by_disable_bundles(&config, &config_dir, &active, &doctor_bundle_caps)
-        {
+        let orphaned_memory_bundles =
+            memory_orphaned_by_disable_bundles(&config, &config_dir, &active, &doctor_bundle_caps);
+        if !orphaned_memory_bundles.is_empty() {
+            // One message naming every supplier (#1139): a per-name loop each
+            // saying "only supplied by bundle X" is self-contradictory the
+            // moment there are two.
             eprintln!(
-                "{warn} features.memory is only supplied by bundle {name}, which this \
-                 project disables via disable_bundles — memory recall/store and \
-                 session logging are inactive here"
+                "{warn} features.memory is supplied only by disabled bundle(s) {}, which this \
+                 project turns off via disable_bundles — memory recall/store and session \
+                 logging are inactive here",
+                orphaned_memory_bundles.join(", ")
             );
             orphan_count += 1;
         }
