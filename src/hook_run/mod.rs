@@ -785,37 +785,7 @@ fn run_inner(
         // cheap — reqwest::Client is internally Arc, and the MCP session_id is
         // shared via Arc so re-initialization is also avoided.
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-        // No backend is not fatal: memory actions are simply skipped below, but
-        // session logging (independent of the memory backend) still proceeds.
-        // `into_url` names *which* of the inactive states applies (#1131), so
-        // the user isn't sent to read their scope config when the cause is a
-        // `disable_bundles` entry or a bundle with no content directory.
-        let client: Option<McpHttpClient> = match memory_url(&config, config_dir, &active)?
-            .into_url()
-        {
-            Err(e) => {
-                eprintln!("llmenv: memory {event} skipped: {e}");
-                None
-            }
-            Ok(u) => {
-                let clients = MCP_CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-                let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
-                match clients.entry(u) {
-                    std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
-                            Ok(client) => Some(entry.insert(client).clone()),
-                            Err(e) => {
-                                eprintln!(
-                                    "llmenv: memory {event} skipped: invalid memory backend URL: {e}"
-                                );
-                                None
-                            }
-                        }
-                    }
-                }
-            }
-        };
+        let client = resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
             &active,
@@ -1401,6 +1371,45 @@ impl MemoryEndpoint {
                  this project turns off via disable_bundles",
                 names.join(", ")
             )),
+        }
+    }
+}
+
+/// Resolve (or reuse from `cache`) the MCP client for the active memory
+/// backend, for lifecycle-hook events. Returns `Option`, never `Result`: no
+/// cause of an unresolved backend — including a bundle-merge failure
+/// (#1132) — is fatal to the hook event. Memory actions are simply skipped;
+/// session logging (independent of the memory backend) still proceeds. A
+/// caller that instead wrote `memory_url(...)?.into_url()` would propagate
+/// `memory_url`'s own `Err` via that leading `?` before `.into_url()` ever
+/// ran, silently reintroducing the abort this function exists to prevent
+/// (#1139).
+fn resolve_memory_client(
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+    event: impl std::fmt::Display,
+    cache: &'static OnceLock<Mutex<HashMap<String, McpHttpClient>>>,
+) -> Option<McpHttpClient> {
+    let url = match memory_url(config, config_dir, active).and_then(MemoryEndpoint::into_url) {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("llmenv: memory {event} skipped: {e}");
+            return None;
+        }
+    };
+    let clients = cache.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
+    match clients.entry(url) {
+        std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
+                Ok(client) => Some(entry.insert(client).clone()),
+                Err(e) => {
+                    eprintln!("llmenv: memory {event} skipped: invalid memory backend URL: {e}");
+                    None
+                }
+            }
         }
     }
 }
@@ -2180,6 +2189,26 @@ mod tests {
         assert!(
             body.contains("merge signature"),
             "a signature failure must be logged before falling back to a live merge: {body}"
+        );
+    }
+
+    // #1139: `memory_url(...)?.into_url()` at the call site put `?` directly
+    // after `memory_url`, propagating *its* Err (a bundle-merge failure, #1132)
+    // out of the enclosing function before `.into_url()` ever ran — bypassing
+    // the fail-soft handling and aborting the whole hook event (session
+    // logging included) on a merge failure. `resolve_memory_client` returns
+    // `Option`, not `Result`, so it cannot repeat that mistake by construction.
+    #[test]
+    fn resolve_memory_client_does_not_propagate_a_bundle_merge_failure() {
+        let (config_root, _cache, config, active) = unreadable_bundle_fixture();
+        static CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
+
+        let client =
+            resolve_memory_client(&config, config_root.path(), &active, "test-event", &CACHE);
+
+        assert!(
+            client.is_none(),
+            "a bundle merge failure must degrade to no client, never propagate"
         );
     }
 
