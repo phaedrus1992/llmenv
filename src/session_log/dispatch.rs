@@ -5,7 +5,9 @@ use serde_json::Value;
 
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::session_log::event::SessionLogEvent;
-use crate::session_log::transcript::{RECORD_TOOL, START_TOOL, record_args, start_session_args};
+use crate::session_log::transcript::{
+    RECORD_TOOL, SHOW_TOOL, START_TOOL, record_args, show_session_args, start_session_args,
+};
 
 /// Start a transcript session; returns its id (the tool's text result, trimmed).
 ///
@@ -49,6 +51,24 @@ pub async fn start_session(
         anyhow::bail!("{START_TOOL} returned a malformed session id: {id:?}");
     }
     Ok(id)
+}
+
+/// Verify that `session_id` still exists in ICM.
+///
+/// A recorded session id is a cache, not proof of liveness (#1090) — ICM may
+/// have pruned or restarted since it was recorded. This has no dedicated
+/// "not found" signal to distinguish from a transient network failure; any
+/// `call_tool` error is treated as "don't trust this id", which is the safe
+/// default (worst case: an extra session gets started when ICM was merely
+/// unreachable for a moment).
+///
+/// # Errors
+/// Any `call_tool` failure, including ICM reporting the session doesn't exist.
+pub async fn verify_session(client: &McpHttpClient, session_id: &str) -> anyhow::Result<()> {
+    client
+        .call_tool(SHOW_TOOL, show_session_args(session_id))
+        .await?;
+    Ok(())
 }
 
 /// Record one event into `session_id`.
@@ -201,5 +221,31 @@ mod tests {
             trace_fields: None,
         };
         record(&client, "sess-42", &ev).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verify_session_succeeds_when_icm_returns_the_session() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text_result("[]")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        verify_session(&client, "sess-42").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verify_session_errors_when_icm_reports_a_jsonrpc_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc":"2.0","id":1,
+                "error":{"code":-32602,"message":"session not found"}
+            })))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let err = verify_session(&client, "stale-session").await.unwrap_err();
+        assert!(err.to_string().contains("session not found"));
     }
 }

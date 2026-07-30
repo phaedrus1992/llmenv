@@ -441,6 +441,12 @@ features:
       index_path: null          # optional override; default <state_dir>/codebase-memory
 ```
 
+(added in v3.8.0) A failed `index_repository` run's stderr is captured to
+`<index_path (or its default)>/index.log` — size-bounded (rotated past 512
+KiB, one prior generation kept) and owner-only (`0o600`) — so a failing
+multi-minute index build is diagnosable instead of silently discarding its
+output.
+
 | Field | Required | Notes |
 | ------- | ---------- | ------- |
 | `when` | yes | Activation tags; an entry with none is rejected at validate time |
