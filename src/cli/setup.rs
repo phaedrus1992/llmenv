@@ -256,29 +256,18 @@ fn engine_handoff_prompt(
 /// Probe PATH for supported engines.
 /// Returns adapter IDs of engines found (e.g. "claude_code", "crush").
 fn probe_engines() -> Vec<String> {
-    let mut found = Vec::new();
-    let probes: &[(&str, &str)] = &[
-        ("claude", "claude_code"),
-        ("crush", "crush"),
-        ("opencode", "opencode"),
-    ];
-    for (binary, engine_id) in probes {
-        if let Ok(out) = std::process::Command::new("which").arg(binary).output()
-            && out.status.success()
-        {
-            found.push(engine_id.to_string());
-        }
-    }
-    found
+    crate::adapter::registered_adapters()
+        .iter()
+        .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
+        .map(|a| crate::adapter::engine_id(a.as_ref()))
+        .collect()
 }
 
 /// Compute which engines should be disabled given which are available.
 fn compute_disabled_engines(available: &[String]) -> Vec<String> {
-    const ALL_SUPPORTED: &[&str] = &["claude_code", "crush", "opencode"];
-    ALL_SUPPORTED
-        .iter()
-        .filter(|e| !available.contains(&e.to_string()))
-        .map(|e| e.to_string())
+    crate::adapter::known_engine_ids()
+        .into_iter()
+        .filter(|e| !available.contains(e))
         .collect()
 }
 
@@ -518,7 +507,14 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
     // Probe engines
     let available = probe_engines();
     if available.is_empty() {
-        eprintln!("  No supported AI engines found on PATH (claude, crush).");
+        eprintln!(
+            "  No supported AI engines found on PATH ({}).",
+            crate::adapter::registered_adapters()
+                .iter()
+                .map(|a| a.binary_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     // --- Phase 2: Refresh enumeration JSON ---
@@ -614,7 +610,14 @@ pub(super) fn run_setup(
     // Probe engines and set up disabled_engines
     let available = probe_engines();
     if available.is_empty() {
-        eprintln!("  No supported AI engines found on PATH (claude, crush).");
+        eprintln!(
+            "  No supported AI engines found on PATH ({}).",
+            crate::adapter::registered_adapters()
+                .iter()
+                .map(|a| a.binary_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     // --- Phase 2: Enumeration JSON ---
@@ -751,29 +754,29 @@ mod tests {
 
     #[test]
     fn test_compute_disabled_engines_none_available() {
-        let disabled = compute_disabled_engines(&[]);
-        assert_eq!(disabled.len(), 3);
-        assert!(disabled.contains(&"claude_code".to_string()));
-        assert!(disabled.contains(&"crush".to_string()));
-        assert!(disabled.contains(&"opencode".to_string()));
+        // Regression guard for #1074: the universe of "supported" engines must
+        // derive from the adapter registry, not a locally hardcoded list that
+        // can silently drift when a new adapter is registered.
+        assert_eq!(
+            compute_disabled_engines(&[]),
+            crate::adapter::known_engine_ids()
+        );
     }
 
     #[test]
     fn test_compute_disabled_engines_all_available() {
-        let disabled = compute_disabled_engines(&[
-            "claude_code".to_string(),
-            "crush".to_string(),
-            "opencode".to_string(),
-        ]);
+        let disabled = compute_disabled_engines(&crate::adapter::known_engine_ids());
         assert!(disabled.is_empty());
     }
 
     #[test]
     fn test_compute_disabled_engines_partial() {
         let disabled = compute_disabled_engines(&["claude_code".to_string()]);
-        assert_eq!(disabled.len(), 2);
-        assert_eq!(disabled[0], "crush");
-        assert_eq!(disabled[1], "opencode");
+        let expected: Vec<String> = crate::adapter::known_engine_ids()
+            .into_iter()
+            .filter(|e| e != "claude_code")
+            .collect();
+        assert_eq!(disabled, expected);
     }
 
     #[test]
@@ -799,11 +802,9 @@ mod tests {
     #[test]
     fn test_probe_engines_does_not_panic() {
         let engines = probe_engines();
+        let known = crate::adapter::known_engine_ids();
         for e in &engines {
-            assert!(
-                e == "claude_code" || e == "crush" || e == "opencode",
-                "unexpected engine: {e}"
-            );
+            assert!(known.contains(e), "unexpected engine: {e}");
         }
     }
 
