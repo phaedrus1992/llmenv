@@ -513,15 +513,24 @@ fn default_log_path() -> anyhow::Result<PathBuf> {
 
 /// Opens the proxy's stderr log for appending, rotating it to `mcp-proxy.log.1`
 /// first if it has reached [`PROXY_LOG_MAX_BYTES`].
+fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
+    open_bounded_log(path, PROXY_LOG_MAX_BYTES)
+}
+
+/// Opens `path` for appending as a size-bounded diagnostic log, rotating it to
+/// `<path>.1` first if it has reached `max_bytes`. Shared by the mcp-proxy
+/// stderr log (`open_proxy_log`, fixed to [`PROXY_LOG_MAX_BYTES`]) and other
+/// spawned-child stderr redirection that wants the same "diagnosable but
+/// bounded" treatment (#1091) rather than duplicating the hardening below.
 ///
-/// Created `0o600` on Unix: the proxy's stderr can carry details of the memory
-/// backend it bridges, and the mode is set at creation rather than chmod'd after
-/// so there is no window in which the file is world-readable.
+/// Created `0o600` on Unix: log content can carry details of whatever backend
+/// the child talks to, and the mode is set at creation rather than chmod'd
+/// after so there is no window in which the file is world-readable.
 ///
 /// # Errors
 /// Returns an error if the parent directory cannot be created or the log cannot
 /// be opened.
-fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
+pub(crate) fn open_bounded_log(path: &Path, max_bytes: u64) -> anyhow::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating state directory {}", parent.display()))?;
@@ -529,18 +538,18 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
 
     // Refuse anything at this path that isn't a plain file. `symlink_metadata`
     // rather than `metadata` so a symlink is seen as a symlink: opening one would
-    // append the proxy's stderr to whatever it points at, and a pre-placed FIFO
+    // append the child's stderr to whatever it points at, and a pre-placed FIFO
     // would block the open — hanging the shell prompt on every export.
     match std::fs::symlink_metadata(path) {
         Ok(meta) if !meta.is_file() => {
             anyhow::bail!(
-                "proxy log path {} is not a regular file ({:?}); refusing to write through it",
+                "log path {} is not a regular file ({:?}); refusing to write through it",
                 path.display(),
                 meta.file_type()
             );
         }
         Ok(meta) => {
-            if meta.len() >= PROXY_LOG_MAX_BYTES {
+            if meta.len() >= max_bytes {
                 // Single generation: enough to keep the previous failure's trace
                 // around without unbounded growth. A failed rotation isn't worth
                 // aborting the spawn over — the append below still succeeds,
@@ -550,9 +559,7 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("inspecting proxy log {}", path.display()))
-            );
+            return Err(anyhow::Error::new(e).context(format!("inspecting log {}", path.display())));
         }
     }
 
@@ -565,7 +572,7 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
     }
     let file = opts
         .open(path)
-        .with_context(|| format!("opening proxy log {}", path.display()))?;
+        .with_context(|| format!("opening log {}", path.display()))?;
 
     // `mode()` only applies at creation, so a log left behind with looser
     // permissions would keep them. The proxy's stderr can describe the memory
@@ -582,7 +589,7 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
     Ok(file)
 }
 
-/// What [`tail_proxy_log`] found.
+/// What [`tail_bounded_log`] found.
 ///
 /// "Nothing to show" and "couldn't look" have to stay distinguishable: reporting
 /// an unreadable log as though the proxy printed nothing tells the user the
@@ -601,26 +608,26 @@ enum LogTail {
 /// wrong in the incident that prompted #1086 — the real cause was an
 /// `ImportError` visible only in the discarded stderr.
 fn proxy_log_hint(pid_path: &Path) -> String {
-    let log = log_path_for(pid_path);
-    match tail_proxy_log(&log) {
-        LogTail::Lines(tail) => format!("; last lines of {}:\n  {tail}", log.display()),
-        LogTail::Empty => format!("; no output in {} either", log.display()),
-        LogTail::Unreadable(e) => format!("; cannot read {} ({e})", log.display()),
+    let log_path = log_path_for(pid_path);
+    match tail_bounded_log(&log_path, LOG_TAIL_LINES, LOG_TAIL_BYTES) {
+        LogTail::Lines(tail) => format!("; last lines of {}:\n  {tail}", log_path.display()),
+        LogTail::Empty => format!("; no output in {} either", log_path.display()),
+        LogTail::Unreadable(e) => format!("; cannot read {} ({e})", log_path.display()),
     }
 }
 
-/// Reads up to [`LOG_TAIL_LINES`] trailing lines from `path`, scanning at most
-/// [`LOG_TAIL_BYTES`] from the end.
+/// Reads up to `max_lines` trailing lines from `path`, scanning at most
+/// `max_bytes` from the end.
 ///
 /// Never fails — a diagnostic aid must not itself become the error — but does
-/// report *why* it has nothing, so the caller can tell "the proxy was silent"
+/// report *why* it has nothing, so the caller can tell "the child was silent"
 /// from "I couldn't open the log".
 ///
-/// Decoded lossily: the proxy's stderr is arbitrary bytes, not guaranteed UTF-8.
-/// Control characters are stripped, because these lines are third-party output
-/// printed straight to the user's terminal and escape sequences in them would be
-/// interpreted rather than shown.
-fn tail_proxy_log(path: &Path) -> LogTail {
+/// Decoded lossily: the child's stderr is arbitrary bytes, not guaranteed
+/// UTF-8. Control characters are stripped, because these lines are
+/// third-party output printed straight to the user's terminal and escape
+/// sequences in them would be interpreted rather than shown.
+fn tail_bounded_log(path: &Path, max_lines: usize, max_bytes: u64) -> LogTail {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let mut f = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -633,13 +640,13 @@ fn tail_proxy_log(path: &Path) -> LogTail {
         Ok(m) => m.len(),
         Err(e) => return LogTail::Unreadable(e),
     };
-    if let Err(e) = f.seek(SeekFrom::Start(len.saturating_sub(LOG_TAIL_BYTES))) {
+    if let Err(e) = f.seek(SeekFrom::Start(len.saturating_sub(max_bytes))) {
         return LogTail::Unreadable(e);
     }
     let mut buf = Vec::new();
-    // The bound matters beyond the seek: this is the proxy's live stderr, so it
-    // can grow between the stat and the read.
-    if let Err(e) = f.take(LOG_TAIL_BYTES).read_to_end(&mut buf) {
+    // The bound matters beyond the seek: this is the child's live stderr, so
+    // it can grow between the stat and the read.
+    if let Err(e) = f.take(max_bytes).read_to_end(&mut buf) {
         return LogTail::Unreadable(e);
     }
     let text = String::from_utf8_lossy(&buf);
@@ -648,7 +655,7 @@ fn tail_proxy_log(path: &Path) -> LogTail {
         .rev()
         .map(sanitize_log_line)
         .filter(|l| !l.trim().is_empty())
-        .take(LOG_TAIL_LINES)
+        .take(max_lines)
         .collect();
     if lines.is_empty() {
         return LogTail::Empty;
@@ -1529,7 +1536,7 @@ mod tests {
 
     /// Unwraps a [`LogTail::Lines`], failing the test on any other variant.
     fn tail_lines(path: &Path) -> String {
-        match super::tail_proxy_log(path) {
+        match super::tail_bounded_log(path, super::LOG_TAIL_LINES, super::LOG_TAIL_BYTES) {
             super::LogTail::Lines(s) => s,
             super::LogTail::Empty => panic!("expected lines, got Empty"),
             super::LogTail::Unreadable(e) => panic!("expected lines, got Unreadable({e})"),
@@ -1540,19 +1547,29 @@ mod tests {
     /// must never itself become the error.
     #[test]
     fn tail_proxy_log_is_empty_for_missing_or_empty_log() {
-        use super::{LogTail, tail_proxy_log};
+        use super::{LOG_TAIL_BYTES, LOG_TAIL_LINES, LogTail, tail_bounded_log};
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(matches!(
-            tail_proxy_log(&dir.path().join("absent.log")),
+            tail_bounded_log(
+                &dir.path().join("absent.log"),
+                LOG_TAIL_LINES,
+                LOG_TAIL_BYTES
+            ),
             LogTail::Empty
         ));
         let empty = dir.path().join("empty.log");
         std::fs::write(&empty, b"").expect("write");
-        assert!(matches!(tail_proxy_log(&empty), LogTail::Empty));
+        assert!(matches!(
+            tail_bounded_log(&empty, LOG_TAIL_LINES, LOG_TAIL_BYTES),
+            LogTail::Empty
+        ));
         // Whitespace-only is also "the proxy said nothing".
         let blank = dir.path().join("blank.log");
         std::fs::write(&blank, b"\n\n   \n").expect("write");
-        assert!(matches!(tail_proxy_log(&blank), LogTail::Empty));
+        assert!(matches!(
+            tail_bounded_log(&blank, LOG_TAIL_LINES, LOG_TAIL_BYTES),
+            LogTail::Empty
+        ));
     }
 
     /// A log that exists but can't be read must not be reported as "no output" —
@@ -1561,14 +1578,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tail_proxy_log_distinguishes_unreadable_from_empty() {
-        use super::{LogTail, tail_proxy_log};
+        use super::{LOG_TAIL_BYTES, LOG_TAIL_LINES, LogTail, tail_bounded_log};
         use std::fs::Permissions;
         let dir = tempfile::tempdir().expect("tempdir");
         let log = dir.path().join("mcp-proxy.log");
         std::fs::write(&log, b"ImportError: boom\n").expect("write");
         std::fs::set_permissions(&log, Permissions::from_mode(0o000)).expect("chmod");
 
-        let result = tail_proxy_log(&log);
+        let result = tail_bounded_log(&log, LOG_TAIL_LINES, LOG_TAIL_BYTES);
         let readable_anyway = std::fs::read(&log).is_ok();
         std::fs::set_permissions(&log, Permissions::from_mode(0o600)).expect("restore");
         if readable_anyway {

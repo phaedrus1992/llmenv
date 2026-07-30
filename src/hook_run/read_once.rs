@@ -140,23 +140,11 @@ fn unix_now() -> i64 {
 /// - Advisory text → warn mode, the read is allowed but we emit an advisory.
 /// - `"__DENY__:<reason>"` → deny mode, caller should emit a deny envelope.
 ///
-/// This function is extracted so unit tests can drive it directly without
-/// needing a full hook-run invocation.
-pub fn handle_pre_tool_use(
-    stdin_payload: &serde_json::Value,
-    session_id: Option<&str>,
-    config: &ReadOnceConfig,
-) -> String {
-    let Ok(state_dir) = crate::paths::state_dir().inspect_err(|e| {
-        tracing::warn!("failed to resolve state_dir for read-once pre-tool-use: {e}")
-    }) else {
-        return String::new();
-    };
-    handle_pre_tool_use_inner(stdin_payload, session_id, config, &state_dir)
-}
-
-/// Like [`handle_pre_tool_use`] but with an injectable `state_dir` for testing.
-pub(crate) fn handle_pre_tool_use_inner(
+/// Takes `state_dir` explicitly rather than resolving `crate::paths::state_dir()`
+/// internally, so tests exercise this without touching the developer's real
+/// state dir (#1089) and the sole production caller (`resolve_pre_tool_text`)
+/// resolves it once for the whole PreToolUse decision.
+pub(crate) fn handle_pre_tool_use(
     stdin_payload: &serde_json::Value,
     session_id: Option<&str>,
     config: &ReadOnceConfig,
@@ -351,10 +339,12 @@ mod tests {
 
     #[test]
     fn non_read_tool_passes_through() {
+        let dir = TempDir::new().expect("test");
         let result = handle_pre_tool_use(
             &non_read_payload(),
             Some("test-session"),
             &test_config_warn(),
+            dir.path(),
         );
         assert!(result.is_empty());
     }
@@ -369,16 +359,19 @@ mod tests {
             &partial_read_payload(file_path.to_str().expect("test"), 0, 10),
             Some("test-session"),
             &test_config_warn(),
+            dir.path(),
         );
         assert!(result.is_empty(), "partial read should pass through");
     }
 
     #[test]
     fn missing_file_passes_through() {
+        let dir = TempDir::new().expect("test");
         let result = handle_pre_tool_use(
             &read_payload("/nonexistent/file.txt"),
             Some("test-session"),
             &test_config_warn(),
+            dir.path(),
         );
         assert!(result.is_empty(), "missing file should pass through");
     }
@@ -391,8 +384,7 @@ mod tests {
         let payload = read_payload(file_path.to_str().expect("test"));
 
         for evil in ["../../victim/pwn", "/tmp/llmenv-abs-escape", "..", "a/b"] {
-            let out =
-                handle_pre_tool_use_inner(&payload, Some(evil), &test_config_warn(), dir.path());
+            let out = handle_pre_tool_use(&payload, Some(evil), &test_config_warn(), dir.path());
             assert!(
                 out.is_empty(),
                 "unsafe session_id {evil:?} must pass through: {out}"
@@ -411,6 +403,7 @@ mod tests {
             &read_payload(file_path.to_str().expect("test")),
             None,
             &test_config_warn(),
+            dir.path(),
         );
         assert!(result.is_empty(), "no session id should pass through");
     }
@@ -421,7 +414,7 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, b"hello").expect("test");
 
-        let result = handle_pre_tool_use_inner(
+        let result = handle_pre_tool_use(
             &read_payload(file_path.to_str().expect("test")),
             Some("test-session"),
             &test_config_warn(),
@@ -440,12 +433,12 @@ mod tests {
 
         // First read passes through
         let result1 =
-            handle_pre_tool_use_inner(&payload, Some("test-warn"), &test_config_warn(), dir.path());
+            handle_pre_tool_use(&payload, Some("test-warn"), &test_config_warn(), dir.path());
         assert!(result1.is_empty(), "first read should pass through");
 
         // Second read warns
         let result2 =
-            handle_pre_tool_use_inner(&payload, Some("test-warn"), &test_config_warn(), dir.path());
+            handle_pre_tool_use(&payload, Some("test-warn"), &test_config_warn(), dir.path());
         assert!(!result2.is_empty(), "second read should warn");
         assert!(
             !result2.contains("__DENY__"),
@@ -467,12 +460,12 @@ mod tests {
 
         // First read passes through
         let result1 =
-            handle_pre_tool_use_inner(&payload, Some("test-deny"), &test_config_deny(), dir.path());
+            handle_pre_tool_use(&payload, Some("test-deny"), &test_config_deny(), dir.path());
         assert!(result1.is_empty(), "first read should pass through");
 
         // Second read denies
         let result2 =
-            handle_pre_tool_use_inner(&payload, Some("test-deny"), &test_config_deny(), dir.path());
+            handle_pre_tool_use(&payload, Some("test-deny"), &test_config_deny(), dir.path());
         assert!(!result2.is_empty(), "second read should deny");
         assert!(
             result2.starts_with("__DENY__:"),
@@ -489,7 +482,7 @@ mod tests {
         let payload = read_payload(file_path.to_str().expect("test"));
 
         // First read
-        let result1 = handle_pre_tool_use_inner(
+        let result1 = handle_pre_tool_use(
             &payload,
             Some("test-mtime"),
             &test_config_warn(),
@@ -505,7 +498,7 @@ mod tests {
         fs::write(&file_path, b"v2").expect("test");
 
         // Read again — mtime changed, should pass through even in deny mode
-        let result2 = handle_pre_tool_use_inner(
+        let result2 = handle_pre_tool_use(
             &payload,
             Some("test-mtime"),
             &test_config_deny(),
@@ -529,11 +522,11 @@ mod tests {
         };
 
         // First read
-        let result1 = handle_pre_tool_use_inner(&payload, Some("test-ttl"), &config, dir.path());
+        let result1 = handle_pre_tool_use(&payload, Some("test-ttl"), &config, dir.path());
         assert!(result1.is_empty());
 
         // Second read beyond TTL (0 seconds) — passes through
-        let result2 = handle_pre_tool_use_inner(&payload, Some("test-ttl"), &config, dir.path());
+        let result2 = handle_pre_tool_use(&payload, Some("test-ttl"), &config, dir.path());
         assert!(result2.is_empty(), "expired TTL should pass through");
     }
 
@@ -551,7 +544,7 @@ mod tests {
         // Even with corrupt cache, the first read should pass through.
         // Uses the inner function with injectable state_dir so the corrupt file
         // in the TempDir is actually consulted.
-        let result = handle_pre_tool_use_inner(
+        let result = handle_pre_tool_use(
             &read_payload(file_path.to_str().expect("test")),
             Some("test-session"),
             &test_config_warn(),
