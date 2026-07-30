@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [3.7.0] - 2026-07-28
 
+Mostly config-schema hardening: `native.<engine>` fragments now reject malformed
+shapes and point at the right escape hatch instead of silently dropping config,
+and tags/bundle names are validated instead of failing silently deep in ICM.
+Also ships opencode model-provider rendering parity with Crush, an on-by-default
+repeat-loop guard (`features.repeat_detect`), `LLMENV_EXTRA_TAGS` for
+tag-activation without a committed marker file, and a 1997 GeoCities-style
+retro skin for the docs site.
+
 ### Added
 
 - Give the docs site (`website/`) a 1997 GeoCities-style retro skin — dark black-and-gold theme, tiled background, marquee banner, under-construction badge, and a per-browser hit counter, all checked against WCAG AA contrast. Site-only change; no `llmenv` CLI/config behavior affected. (#1027)
