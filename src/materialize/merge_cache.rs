@@ -30,21 +30,25 @@ fn cache_file(cache_root: &Path) -> PathBuf {
 }
 
 /// Persist the bundle-only memory/host slice, keyed on `key`
-/// ([`crate::merge::merge_signature`]).
+/// ([`crate::merge::merge_signature`]). Written atomically and owner-only
+/// (0600), matching every other persisted state artifact in this codebase
+/// (`materialize::manifest::CacheManifest`, `icm.rs`, `task/`, `auth/`, …) —
+/// the memory/host slice carries the same sensitivity (memory-backend
+/// hostnames/ports) as those, and a torn write would otherwise be readable
+/// as a false hit or corrupt-but-parseable value by a concurrent `hook-run`.
 pub fn write(
     cache_root: &Path,
     key: &str,
     bundle_memory: &[Memory],
     bundle_host: &BTreeMap<String, HostEntry>,
 ) -> anyhow::Result<()> {
-    std::fs::create_dir_all(cache_root)?;
     let entry = PersistedMergeCache {
         key: key.to_string(),
         bundle_memory: bundle_memory.to_vec(),
         bundle_host: bundle_host.clone(),
     };
     let json = serde_json::to_vec(&entry)?;
-    std::fs::write(cache_file(cache_root), json)?;
+    crate::paths::write_owner_only_atomic(&cache_file(cache_root), &json)?;
     Ok(())
 }
 

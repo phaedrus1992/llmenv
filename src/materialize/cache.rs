@@ -190,7 +190,11 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
-fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
+/// `pub(crate)`: shared length-prefix hashing convention, also used by
+/// `merge::merge_signature` (#920) — length-prefixing every field before its
+/// bytes so concatenation can't ambiguate boundaries, same rationale as
+/// [`hash_manifest`].
+pub(crate) fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
     h.update((data.len() as u64).to_le_bytes());
     h.update(data);
 }

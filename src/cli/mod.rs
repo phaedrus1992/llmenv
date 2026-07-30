@@ -1902,15 +1902,8 @@ fn build_manifest(
         .collect();
     crate::util::dedup(&mut all_memory);
 
-    // Captured before `all_host` mixes in top-level config.host below (#920):
-    // this is the exact bundle-only slice `hook_run::memory_url` also computes,
-    // persisted to disk keyed on `merge_signature` so hook-run can reuse it
-    // instead of redoing the full merge on every invocation.
-    let bundle_memory_for_cache: Vec<crate::config::Memory> = bundle_memory.to_vec();
-    let bundle_host_for_cache = manifest.capabilities.host.clone();
-
     // Combine host tables: bundle contributions first, top-level wins on collision.
-    let mut all_host = bundle_host_for_cache.clone();
+    let mut all_host = manifest.capabilities.host.clone();
     for (k, v) in &config.host {
         all_host.insert(k.clone(), v.clone());
     }
@@ -1979,16 +1972,25 @@ fn build_manifest(
 
     // #920: persist the bundle-only memory/host slice so `hook_run::memory_url`
     // can reuse it instead of redoing this merge on every hook-run invocation.
-    // Best-effort — a write failure only costs a cache miss on the hook-run
-    // side (it falls back to a live merge), never a correctness issue, so it
-    // must not fail `regenerate`/`export`.
+    // Recomputed here rather than captured earlier (neither `manifest.capabilities
+    // .features`/`.host` is mutated between the `bundle_memory`/`all_host`
+    // computation above and here — verified: only `manifest.mcps`/`.plugins`/
+    // `.marketplaces` are assigned in between). Best-effort — a write failure
+    // only costs a cache miss on the hook-run side (it falls back to a live
+    // merge), never a correctness issue, so it must not fail `regenerate`/`export`.
+    let bundle_memory_slice = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
     match crate::merge::merge_signature(&config.capabilities, &config.native, &refs) {
         Ok(key) => {
             if let Err(e) = crate::materialize::merge_cache::write(
                 &cache_root,
                 &key,
-                &bundle_memory_for_cache,
-                &bundle_host_for_cache,
+                bundle_memory_slice,
+                &manifest.capabilities.host,
             ) {
                 tracing::warn!("failed to persist bundle-merge cache: {e}");
             }
@@ -2523,7 +2525,12 @@ fn sync_plugin_payloads(
 /// (network → host → user → project), then unscoped tags in declaration
 /// order. Bundles with no content directory under `<config_dir>/bundles/<name>/`
 /// are dropped silently — tag-only bundles (no content directory) are valid.
-fn build_bundle_refs(
+/// `pub(crate)`: also called by `hook_run::memory_url`, which needs the same
+/// scope-kind precedence assignment as `regenerate`/`export` — a bundle firing
+/// via a `host`/`user`/`network` scope must get the same rank in both places,
+/// or a persisted merge-cache entry keyed on that precedence (`merge_signature`)
+/// would never match hook-run's own recomputation (#920).
+pub(crate) fn build_bundle_refs(
     config_dir: &Path,
     active: &ActiveScopes,
     firing: &[&Bundle],
@@ -4365,6 +4372,51 @@ mod tests {
             firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
             vec!["rust-dev"]
         );
+    }
+
+    // #920: `hook_run::memory_url` recomputes its own firing-bundle set
+    // inline (tag match or manual-enable, no `disable_bundles` handling)
+    // rather than calling `firing_bundles` — so the persisted merge-cache key
+    // `build_manifest` writes only agrees with the key `memory_url` reads
+    // back when the two selections produce the same set. This pins that
+    // agreement for the common case (no `disable_bundles`); it does NOT hold
+    // when `disable_bundles` is set — filed separately, that's a pre-existing
+    // discrepancy between hook-run's live resolution and the materialized
+    // manifest, not something #920 introduces.
+    #[test]
+    fn firing_bundles_matches_hook_run_inline_filter_without_disable_bundles() {
+        let bundles = vec![
+            bundle("rust-dev", &["rust"]),
+            bundle("web-dev", &["typescript"]),
+            bundle("manual-only", &[]),
+        ];
+        let active = active(vec![
+            active_scope("host", &["rust"], &[], &[]),
+            active_scope("project", &["typescript"], &["manual-only"], &[]),
+        ]);
+
+        let via_firing_bundles: std::collections::BTreeSet<&str> =
+            firing_bundles(&bundles, &active, None)
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect();
+
+        // Mirrors `hook_run::memory_url`'s inline filter exactly.
+        let manually_enabled: std::collections::BTreeSet<&str> = active
+            .scopes
+            .iter()
+            .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
+            .collect();
+        let via_hook_run_inline: std::collections::BTreeSet<&str> = bundles
+            .iter()
+            .filter(|b| {
+                b.when.iter().any(|bt| active.tags.contains(bt))
+                    || manually_enabled.contains(b.name.as_str())
+            })
+            .map(|b| b.name.as_str())
+            .collect();
+
+        assert_eq!(via_firing_bundles, via_hook_run_inline);
     }
 
     #[test]

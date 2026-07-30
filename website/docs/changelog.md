@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- `hook-run` reuses the bundle-merge result from the last `regenerate`/`export` instead of redoing it on every invocation. The prior in-process merge cache (#813) never actually hit in real usage — each `hook-run` is a fresh subprocess — so the disk I/O and YAML parsing behind memory-backend resolution ran on every `SessionStart`/`TurnStart`/`SessionEnd`. It's now persisted to a small cache file keyed on bundle/config content, with a live merge as the fallback whenever that key doesn't match. See `docs/design/hot-path-optimizations.md` (#920)
+- `hook-run` reuses the bundle-merge result from the last `regenerate`/`export` instead of redoing it on every invocation. The prior in-process merge cache (#813) never actually hit in real usage — each `hook-run` is a fresh subprocess — so the disk I/O and YAML parsing behind memory-backend resolution ran on every `SessionStart`/`TurnStart`/`SessionEnd`. It's now persisted to a small cache file keyed on bundle/config content, with a live merge as the fallback whenever that key doesn't match. See [Materialize](https://phaedrus1992.github.io/llmenv/docs/concepts#materialize) (#920)
 
 ### Fixed
 

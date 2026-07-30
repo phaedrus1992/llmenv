@@ -165,17 +165,22 @@ pub fn merge(
 /// A signature match does not guarantee the *rest* of the manifest (files,
 /// mcps, plugins, …) is unchanged — only that the memory/host-relevant inputs
 /// are. Callers that need the full manifest must still call [`merge`].
+///
+/// `precedence` is hashed per bundle (not just `name`/`bundle.yaml` bytes):
+/// `merge_capabilities` uses it to resolve `host`-key collisions across
+/// bundles firing at different scope tiers, so a config edit that only
+/// reassigns which scope kind fires a bundle (network/host/user/project —
+/// see `cli::build_bundle_refs`) can flip the resolved `host` entry without
+/// touching any `bundle.yaml` content. Without hashing precedence, that edit
+/// would leave the signature unchanged and a stale cache entry would be
+/// served as a hit — silently resolving to the wrong `host` address.
 pub fn merge_signature(
     top_level: &Capabilities,
     native: &BTreeMap<String, serde_yaml::Value>,
     bundles: &[BundleRef],
 ) -> anyhow::Result<String> {
+    use crate::materialize::cache::update_len_prefixed;
     use sha2::{Digest, Sha256};
-
-    fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
-        h.update((data.len() as u64).to_le_bytes());
-        h.update(data);
-    }
 
     let mut h = Sha256::new();
     let top_yaml = serde_yaml::to_string(top_level)
@@ -190,14 +195,16 @@ pub fn merge_signature(
         update_len_prefixed(&mut h, serialized.as_bytes());
     }
 
-    // Sort by name: `bundles` order reflects scope precedence, but the
-    // memory/host-relevant content is order-independent for hashing purposes
-    // here — callers pass the same bundle set regardless of precedence order.
+    // Sort by name so the signature doesn't depend on the order the caller's
+    // ref-builder happened to enumerate bundles in (`cli::build_bundle_refs`
+    // and `hook_run`'s caller may not agree on order) — `precedence` is
+    // hashed per-bundle below, so this sort does not discard it.
     let mut sorted: Vec<&BundleRef> = bundles.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     h.update((sorted.len() as u64).to_le_bytes());
     for b in sorted {
         update_len_prefixed(&mut h, b.name.as_bytes());
+        h.update([b.precedence]);
         let bytes = match std::fs::read(b.path.join("bundle.yaml")) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
