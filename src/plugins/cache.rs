@@ -813,6 +813,10 @@ mod tests {
             assert!(status.success(), "git {args:?} failed");
         };
         run(&["init", "-q"]);
+        // Without this the fixture inherits a developer's global
+        // `commit.gpgsign = true` and every commit below fails on a signer
+        // that can't prompt. Same guard `tests/sync.rs` already uses.
+        run(&["config", "commit.gpgsign", "false"]);
         std::fs::write(src.path().join("f"), "one").unwrap();
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "one"]);
