@@ -87,6 +87,17 @@ llmenv doctor --gc                # diagnostics + GC in one pass
 - **`mcp-proxy` won't start** (added in v3.8.0) — the warning quotes the tail of
   the proxy's stderr log; read the whole thing at
   `${XDG_STATE_HOME:-$HOME/.local/state}/llmenv/mcp-proxy.log`.
+- **`no memory backend active for this scope`** (added in v3.8.0) — the message
+  names which of the four causes applies: no bundles fired, nothing declares
+  `features.memory`, a firing bundle has no content directory (so its
+  `bundle.yaml` was never read), or the only bundle supplying memory is turned
+  off via `disable_bundles`. `llmenv doctor --all` flags that last case too.
+- **Web-fetch stores, consolidation, or transcript records go missing**
+  (added in v3.8.0) — those run in detached children with no terminal. Their
+  stderr is captured to
+  `${XDG_STATE_HOME:-$HOME/.local/state}/llmenv/detached-hook.log` (owner-only,
+  rotated at 512 KiB), and their failures log at error level so the default
+  log filter doesn't drop them.
 
 See [MCP & Memory](mcp.md) for the full topology and security model.
 

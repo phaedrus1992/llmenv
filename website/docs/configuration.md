@@ -1249,9 +1249,18 @@ Disabling a bundle withdraws *everything* it contributes, not just its
 permissions and instruction files. That includes any `features.memory` or
 `host:` entry declared in its `bundle.yaml` — so if the ICM memory backend is
 declared only by a bundle you disable, memory recall/store and session logging
-are inactive in that project, and lifecycle hooks report
-`no memory backend active for this scope`. Declare `features.memory` at the top
-level of `config.yaml` if it should survive a bundle being turned off.
+are inactive in that project. Declare `features.memory` at the top level of
+`config.yaml` if it should survive a bundle being turned off.
+
+(added in v3.8.0) llmenv names `disable_bundles` as the cause rather than
+leaving you to guess. Lifecycle hooks report `no memory backend active for this
+scope: features.memory is supplied only by bundle(s) <name>, which this project
+turns off via disable_bundles`, and `llmenv doctor --all` warns about the same thing —
+previously both were silent, so memory worked in `~/` and stopped the moment you
+`cd`'d into the project with a green `doctor`. If a *top-level*
+`features.memory` entry's `server_host` was declared in the disabled bundle's
+`host:` table, the resulting error names the bundle too instead of only the
+missing host key.
 
 Each tag (and each `enable_bundles`/`disable_bundles` entry) must be
 alphanumeric plus `-`/`_` and no longer than 64 bytes; entries outside that
