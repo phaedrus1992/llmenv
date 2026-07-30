@@ -170,36 +170,26 @@ pub(crate) fn handle_pre_tool_use(
     }
 }
 
-/// Handle a `Stop` event's task-tracker reminder text.
+/// Handle a `Stop` event's task-tracker reminder text under `state_dir`.
 ///
 /// Returns `reminder` unchanged below `config.threshold` repeats; once the
 /// identical reminder has fired that many times in a row for this session,
 /// appends a pointer to `llmenv task wait` instead of just repeating the
 /// same "keep working" imperative forever. Empty `reminder` passes through
 /// untouched — nothing to track when there's no nag to begin with.
+///
+/// `state_dir` is caller-supplied, matching `handle_pre_tool_use` — resolving
+/// it here instead would put every test of this path on the developer's real
+/// state dir (#1109).
 pub fn handle_stop(
-    reminder: &str,
-    session_id: Option<&str>,
-    config: &RepeatDetectConfig,
-) -> String {
-    if reminder.is_empty() {
-        return String::new();
-    }
-    let Ok(state_dir) = crate::paths::state_dir().inspect_err(|e| {
-        eprintln!("llmenv: failed to resolve state_dir for repeat-detect stop event: {e}")
-    }) else {
-        return reminder.to_string();
-    };
-    handle_stop_inner(reminder, session_id, config, &state_dir)
-}
-
-/// Like [`handle_stop`] but with an injectable `state_dir` for testing.
-fn handle_stop_inner(
     reminder: &str,
     session_id: Option<&str>,
     config: &RepeatDetectConfig,
     state_dir: &Path,
 ) -> String {
+    if reminder.is_empty() {
+        return String::new();
+    }
     let Some(session_id) = session_id else {
         return reminder.to_string();
     };
@@ -277,14 +267,14 @@ mod tests {
     #[test]
     fn empty_reminder_passes_through() {
         let dir = TempDir::new().expect("test");
-        let out = handle_stop_inner("", Some("s1"), &config(3), dir.path());
+        let out = handle_stop("", Some("s1"), &config(3), dir.path());
         assert!(out.is_empty());
     }
 
     #[test]
     fn no_session_id_passes_reminder_through_unchanged() {
         let dir = TempDir::new().expect("test");
-        let out = handle_stop_inner(WIP_REMINDER, None, &config(3), dir.path());
+        let out = handle_stop(WIP_REMINDER, None, &config(3), dir.path());
         assert_eq!(out, WIP_REMINDER);
     }
 
@@ -292,7 +282,7 @@ mod tests {
     fn below_threshold_reminder_unchanged() {
         let dir = TempDir::new().expect("test");
         for _ in 0..2 {
-            let out = handle_stop_inner(WIP_REMINDER, Some("s1"), &config(3), dir.path());
+            let out = handle_stop(WIP_REMINDER, Some("s1"), &config(3), dir.path());
             assert_eq!(
                 out, WIP_REMINDER,
                 "below threshold must not append anything"
@@ -304,9 +294,9 @@ mod tests {
     fn at_threshold_appends_task_wait_pointer() {
         let dir = TempDir::new().expect("test");
         for _ in 0..2 {
-            handle_stop_inner(WIP_REMINDER, Some("s1"), &config(3), dir.path());
+            handle_stop(WIP_REMINDER, Some("s1"), &config(3), dir.path());
         }
-        let out = handle_stop_inner(WIP_REMINDER, Some("s1"), &config(3), dir.path());
+        let out = handle_stop(WIP_REMINDER, Some("s1"), &config(3), dir.path());
         assert!(
             out.starts_with(WIP_REMINDER),
             "original reminder must still be present"
@@ -320,9 +310,9 @@ mod tests {
     #[test]
     fn different_reminder_resets_stop_streak() {
         let dir = TempDir::new().expect("test");
-        handle_stop_inner(WIP_REMINDER, Some("s1"), &config(2), dir.path());
+        handle_stop(WIP_REMINDER, Some("s1"), &config(2), dir.path());
         let other = "You still have task(s) in progress:\n- bar\nkeep working";
-        let out = handle_stop_inner(other, Some("s1"), &config(2), dir.path());
+        let out = handle_stop(other, Some("s1"), &config(2), dir.path());
         assert_eq!(out, other, "a different reminder must reset the streak");
     }
 
@@ -333,7 +323,7 @@ mod tests {
         handle_pre_tool_use(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
         // ...then a Stop event with a fresh reminder must not be affected by
         // (or reset) the PreToolUse streak, and vice versa.
-        let out = handle_stop_inner(WIP_REMINDER, Some("s1"), &config(2), dir.path());
+        let out = handle_stop(WIP_REMINDER, Some("s1"), &config(2), dir.path());
         assert_eq!(out, WIP_REMINDER);
         let tool_out = handle_pre_tool_use(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
         assert!(

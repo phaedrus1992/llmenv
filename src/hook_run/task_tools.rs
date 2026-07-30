@@ -23,7 +23,11 @@ use crate::task::{self, session};
 const TASK_TOOLS: [&str; 3] = ["TaskCreate", "TaskList", "TaskUpdate"];
 
 /// Intercept a Claude Code task-tool `PreToolUse` call and redirect it to the
-/// `llmenv task` tracker.
+/// `llmenv task` tracker under `state_dir`.
+///
+/// `state_dir` is caller-supplied, the way `read_once`/`repeat_detect` take
+/// theirs — resolving it here instead would put every test that enables the
+/// tracker on the developer's real tracker (#1109).
 ///
 /// Returns `Some(text)` for a task tool (always a `__DENY__:` decision — the
 /// native tool is suppressed either way), or `None` when `tool_name` isn't one
@@ -32,19 +36,8 @@ const TASK_TOOLS: [&str; 3] = ["TaskCreate", "TaskList", "TaskUpdate"];
 /// Fail-soft: resolution/tracker errors become a `deny` with a diagnostic +
 /// manual fallback rather than propagating (which would let the native tool run
 /// and re-diverge from the tracker) or wedging the agent.
-pub(crate) fn handle_pre_tool_use(payload: &Value) -> Option<String> {
-    let tool = payload.get("tool_name").and_then(Value::as_str)?;
-    if !TASK_TOOLS.contains(&tool) {
-        return None;
-    }
-    let state_dir = match crate::paths::state_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            return Some(deny(&format!(
-                "the llmenv task tracker is unavailable ({e}); track this with `llmenv task` manually."
-            )));
-        }
-    };
+pub(crate) fn handle_pre_tool_use(payload: &Value, state_dir: &Path) -> Option<String> {
+    let tool = task_tool_name(payload)?;
     let project = match task::project::current_tag() {
         Ok(p) => p,
         Err(e) => {
@@ -57,18 +50,35 @@ pub(crate) fn handle_pre_tool_use(payload: &Value) -> Option<String> {
     Some(handle_inner(
         tool,
         payload.get("tool_input"),
-        &state_dir,
+        state_dir,
         &project,
     ))
 }
 
-/// Testable core: dispatch on the (already-validated) task tool name.
+/// The redirect's answer when the caller couldn't resolve a state dir at all:
+/// still deny, so the native tool can't run and diverge from the tracker, and
+/// name the `error` the caller already has rather than re-deriving one.
+pub(crate) fn deny_tracker_unavailable(payload: &Value, error: &anyhow::Error) -> Option<String> {
+    task_tool_name(payload)?;
+    Some(deny(&format!(
+        "the llmenv task tracker is unavailable ({error}); track this with `llmenv task` manually."
+    )))
+}
+
+/// The intercepted tool's name, or `None` when this isn't a task tool.
+fn task_tool_name(payload: &Value) -> Option<&str> {
+    let tool = payload.get("tool_name").and_then(Value::as_str)?;
+    TASK_TOOLS.contains(&tool).then_some(tool)
+}
+
+/// Testable core: perform the tracker operation for an already-validated task
+/// tool name.
 fn handle_inner(tool: &str, input: Option<&Value>, state_dir: &Path, project: &str) -> String {
     match tool {
         "TaskCreate" => create(input, state_dir, project),
         "TaskList" => list(state_dir),
         "TaskUpdate" => update(input, state_dir),
-        // Unreachable: `handle_pre_tool_use` only calls this for TASK_TOOLS.
+        // Unreachable: `task_tool_name` admits only TASK_TOOLS.
         other => deny(&format!(
             "unhandled task tool '{other}'; use `llmenv task`."
         )),
@@ -220,10 +230,44 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
+    /// A `Some` here would mask `read_once`/`repeat_detect` for every non-task
+    /// tool call whenever the tracker is enabled — `resolve_pre_tool_text`
+    /// treats any `Some` as the primary decision.
     #[test]
     fn non_task_tool_passes_through() {
+        let dir = tmp();
         assert_eq!(
-            handle_pre_tool_use(&json!({ "tool_name": "Read", "tool_input": {} })),
+            handle_pre_tool_use(
+                &json!({ "tool_name": "Read", "tool_input": {} }),
+                dir.path()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn unavailable_tracker_denies_task_tools_and_names_the_error() {
+        let err = anyhow::anyhow!("HOME is not set");
+        let out = deny_tracker_unavailable(&json!({ "tool_name": "TaskCreate" }), &err)
+            .expect("a task tool must still get a decision");
+        assert!(out.starts_with("__DENY__:"), "{out}");
+        assert!(
+            out.contains("HOME is not set"),
+            "names the real error: {out}"
+        );
+        assert!(
+            out.contains("llmenv task"),
+            "keeps the manual fallback: {out}"
+        );
+    }
+
+    /// Degrading to a deny must not swallow non-task tools — they still belong
+    /// to the rest of the pipeline.
+    #[test]
+    fn unavailable_tracker_passes_non_task_tools_through() {
+        let err = anyhow::anyhow!("HOME is not set");
+        assert_eq!(
+            deny_tracker_unavailable(&json!({ "tool_name": "Read" }), &err),
             None
         );
     }

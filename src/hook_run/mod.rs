@@ -519,7 +519,7 @@ fn resolve_pre_tool_text(
     state_dir: &std::path::Path,
 ) -> Option<String> {
     let primary = if task_tracker_enabled
-        && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
+        && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload, state_dir)
     {
         Some(t)
     } else if let Some(ref features) = config.features
@@ -584,6 +584,7 @@ fn resolve_stop_reminder(
             &reminder,
             claude_session_id,
             &repeat_detect_cfg,
+            state_dir,
         )
     } else {
         reminder
@@ -645,10 +646,13 @@ fn run_inner(
             Err(e) => {
                 error!(
                     error = %e,
-                    "failed to resolve state_dir; read_once/repeat_detect skipped for this call"
+                    "failed to resolve state_dir; read_once/repeat_detect skipped for this call \
+                     and the task-tool redirect degraded to a deny"
                 );
                 task_tracker_enabled
-                    .then(|| crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload))
+                    .then(|| {
+                        crate::hook_run::task_tools::deny_tracker_unavailable(stdin_payload, &e)
+                    })
                     .flatten()
             }
         };
@@ -1794,6 +1798,31 @@ mod tests {
         assert!(
             second.is_some_and(|t| t.contains("already read")),
             "read_once's advisory must win over repeat_detect for a Read tool call"
+        );
+    }
+
+    /// #1109: the task-tracker branch must honor the injected `state_dir`,
+    /// matching the isolation #1089 gave `read_once`/`repeat_detect`. Without
+    /// it this test writes a task into the developer's real `llmenv task`
+    /// tracker instead of the tempdir.
+    #[test]
+    fn task_tracker_redirect_writes_only_to_injected_state_dir() {
+        let dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config::default();
+        let payload = serde_json::json!({
+            "tool_name": "TaskCreate",
+            "tool_input": { "subject": "isolated task" },
+        });
+        let text = resolve_pre_tool_text(&payload, Some("iso"), &config, true, dir.path())
+            .expect("the task-tool redirect always decides");
+        let tasks = crate::task::list_tasks(dir.path());
+        assert_eq!(tasks.len(), 1, "task must land in the injected state_dir");
+        assert_eq!(tasks[0].title, "isolated task");
+        // Pins the success arm specifically: every failure arm also denies, so
+        // the `__DENY__:` prefix alone wouldn't tell them apart.
+        assert!(
+            text.starts_with("__DENY__:") && text.contains(&tasks[0].slug),
+            "deny must name the created task: {text}"
         );
     }
 
