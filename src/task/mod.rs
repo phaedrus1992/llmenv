@@ -2168,6 +2168,18 @@ mod tests {
                     prop_assert_eq!(kept.len(), expected);
                 }
             }
+
+            #[test]
+            fn resolve_next_task_never_returns_done_or_waiting(
+                tasks in arb_forest(),
+                idx in 0usize..8,
+            ) {
+                let current = tasks[idx % tasks.len()].clone();
+                if let Some(next) = resolve_next_task(&tasks, &tasks, &current) {
+                    prop_assert_ne!(next.state, TaskState::Done);
+                    prop_assert_ne!(next.state, TaskState::Waiting);
+                }
+            }
         }
     }
 }
