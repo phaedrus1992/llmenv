@@ -1351,20 +1351,11 @@ pub(crate) fn memory_url(
         .map(|f| f.memory.as_slice())
         .unwrap_or_default();
 
-    // Collect bundle-contributed memory and host entries.
-    let manually_enabled: std::collections::BTreeSet<&str> = active
-        .scopes
-        .iter()
-        .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-        .collect();
-    let firing: Vec<&crate::config::Bundle> = config
-        .bundle
-        .iter()
-        .filter(|b| {
-            b.when.iter().any(|bt| active.tags.contains(bt))
-                || manually_enabled.contains(b.name.as_str())
-        })
-        .collect();
+    // Collect bundle-contributed memory and host entries. Bundle selection goes
+    // through `cli::firing_bundles` — the same selector `build_manifest` uses —
+    // so `disable_bundles` suppression can't drift between hook-run's live
+    // resolution and the materialized manifest (#1125).
+    let firing = crate::cli::firing_bundles(&config.bundle, active, None);
 
     let bundle_refs = crate::cli::build_bundle_refs(config_dir, active, &firing);
     let (bundle_memory, bundle_host) = resolve_bundle_memory_host(config, &bundle_refs)?;
@@ -1737,11 +1728,7 @@ mod tests {
         // independently recompute for this config/bundle set — derived via
         // `crate::cli::build_bundle_refs`, the same ref-builder `memory_url`
         // itself calls, so this test can't drift from production behavior.
-        let firing: Vec<&crate::config::Bundle> = config
-            .bundle
-            .iter()
-            .filter(|b| b.when.iter().any(|t| active.tags.contains(t)))
-            .collect();
+        let firing = crate::cli::firing_bundles(&config.bundle, &active, None);
         let bundle_refs = crate::cli::build_bundle_refs(config_root.path(), &active, &firing);
         let key = crate::merge::merge_signature(&config.capabilities, &config.native, &bundle_refs)
             .expect("test");
@@ -1846,6 +1833,85 @@ mod tests {
             url.as_deref(),
             Some("http://still.local:7878/mcp"),
             "a key mismatch must fall back to a correct live merge, never the stale cache"
+        );
+    }
+
+    // #1125: `memory_url` used to compute its firing-bundle set with an inline
+    // filter that checked tag-match and `enable_bundles` but never
+    // `disable_bundles`, so a bundle a project scope explicitly turns off still
+    // contributed its `features.memory`/`host` entries to ICM endpoint
+    // resolution — diverging from the materialized manifest, which excludes it.
+    #[test]
+    fn memory_url_ignores_bundle_disabled_by_project_scope() {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).expect("test");
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 7878\n",
+                "      when: [network-home]\n",
+                "host:\n",
+                "  still:\n",
+                "    addr: still.local\n",
+            ),
+        )
+        .expect("test");
+
+        let cache_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            cache: crate::config::Cache {
+                cache_dir: cache_dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // A broader scope's tag fires the bundle; the project scope disables it.
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![
+                crate::scope::ActiveScope {
+                    id: "host".into(),
+                    kind: "host",
+                    tags: vec!["mytag".into(), "network-home".into()],
+                    project_root: None,
+                    enable_bundles: vec![],
+                    disable_bundles: vec![],
+                    name: None,
+                    description: None,
+                    unknown_fields: vec![],
+                },
+                crate::scope::ActiveScope {
+                    id: "project".into(),
+                    kind: "project",
+                    tags: vec![],
+                    project_root: None,
+                    enable_bundles: vec![],
+                    disable_bundles: vec!["b".into()],
+                    name: None,
+                    description: None,
+                    unknown_fields: vec![],
+                },
+            ],
+            tags: std::collections::BTreeSet::from([
+                "mytag".to_string(),
+                "network-home".to_string(),
+            ]),
+            extra_tags: std::collections::BTreeSet::new(),
+        };
+
+        let url = memory_url(&config, config_root.path(), &active).expect("test");
+        assert_eq!(
+            url, None,
+            "a bundle disabled via `disable_bundles` must not contribute its \
+             memory/host entries to memory_url resolution"
         );
     }
 
