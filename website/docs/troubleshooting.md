@@ -91,7 +91,7 @@ llmenv doctor --gc                # diagnostics + GC in one pass
   names which of the four causes applies: no bundles fired, nothing declares
   `features.memory`, a firing bundle has no content directory (so its
   `bundle.yaml` was never read), or the only bundle supplying memory is turned
-  off via `disable_bundles`. `llmenv doctor` flags that last case too.
+  off via `disable_bundles`. `llmenv doctor --all` flags that last case too.
 - **Web-fetch stores, consolidation, or transcript records go missing**
   (added in v3.8.0) — those run in detached children with no terminal. Their
   stderr is captured to

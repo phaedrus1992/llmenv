@@ -1255,7 +1255,7 @@ are inactive in that project. Declare `features.memory` at the top level of
 (added in v3.8.0) llmenv names `disable_bundles` as the cause rather than
 leaving you to guess. Lifecycle hooks report `no memory backend active for this
 scope: features.memory is supplied only by bundle(s) <name>, which this project
-turns off via disable_bundles`, and `llmenv doctor` warns about the same thing —
+turns off via disable_bundles`, and `llmenv doctor --all` warns about the same thing —
 previously both were silent, so memory worked in `~/` and stopped the moment you
 `cd`'d into the project with a green `doctor`. If a *top-level*
 `features.memory` entry's `server_host` was declared in the disabled bundle's
