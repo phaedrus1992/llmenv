@@ -1047,4 +1047,59 @@ mod tests {
         let sig = merge_signature(&Capabilities::default(), &BTreeMap::new(), &[bundle]);
         assert!(sig.is_ok());
     }
+
+    mod merge_signature_proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // #920: identified during pre-pr-review as the highest-value property
+        // to check — `merge_signature` is a cache key, so non-determinism
+        // across arbitrary inputs (not just the hand-picked example cases
+        // above) would silently make the persisted cache never reliably hit.
+        proptest! {
+            #[test]
+            fn signature_is_deterministic(
+                body in ".{0,64}",
+                precedence in any::<u8>(),
+                native_key in "[a-z]{1,8}",
+                native_val in "[a-z]{0,16}",
+            ) {
+                let tmp = tempdir().unwrap();
+                let bundle_dir = tmp.path().join("b");
+                std::fs::create_dir_all(&bundle_dir).unwrap();
+                std::fs::write(bundle_dir.join("bundle.yaml"), &body).unwrap();
+                let bundle = BundleRef {
+                    name: "b".into(),
+                    path: bundle_dir,
+                    precedence,
+                };
+                let mut native: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+                native.insert(native_key, serde_yaml::Value::String(native_val));
+
+                let sig1 = merge_signature(&Capabilities::default(), &native, std::slice::from_ref(&bundle));
+                let sig2 = merge_signature(&Capabilities::default(), &native, std::slice::from_ref(&bundle));
+                prop_assert_eq!(sig1.unwrap(), sig2.unwrap());
+            }
+
+            #[test]
+            fn signature_is_order_independent_over_bundle_set(
+                name_a in "[a-z]{1,8}", name_b in "[a-z]{1,8}",
+            ) {
+                prop_assume!(name_a != name_b);
+                let tmp = tempdir().unwrap();
+                let mk = |name: &str| {
+                    let dir = tmp.path().join(name);
+                    std::fs::create_dir_all(&dir).unwrap();
+                    std::fs::write(dir.join("bundle.yaml"), "features:\n  memory: []\n").unwrap();
+                    BundleRef { name: name.into(), path: dir, precedence: 1 }
+                };
+                let a = mk(&name_a);
+                let b = mk(&name_b);
+
+                let forward = merge_signature(&Capabilities::default(), &BTreeMap::new(), &[a.clone(), b.clone()]);
+                let backward = merge_signature(&Capabilities::default(), &BTreeMap::new(), &[b, a]);
+                prop_assert_eq!(forward.unwrap(), backward.unwrap());
+            }
+        }
+    }
 }
