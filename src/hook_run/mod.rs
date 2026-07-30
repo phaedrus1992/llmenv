@@ -519,7 +519,8 @@ fn resolve_pre_tool_text(
     state_dir: &std::path::Path,
 ) -> Option<String> {
     let primary = if task_tracker_enabled
-        && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload)
+        && let Some(t) =
+            crate::hook_run::task_tools::handle_pre_tool_use_in(stdin_payload, state_dir)
     {
         Some(t)
     } else if let Some(ref features) = config.features
@@ -1795,6 +1796,26 @@ mod tests {
             second.is_some_and(|t| t.contains("already read")),
             "read_once's advisory must win over repeat_detect for a Read tool call"
         );
+    }
+
+    /// #1109: the task-tracker branch must honor the injected `state_dir`,
+    /// matching the isolation #1089 gave `read_once`/`repeat_detect`. Without
+    /// it this test writes a task into the developer's real `llmenv task`
+    /// tracker instead of the tempdir.
+    #[test]
+    fn task_tracker_redirect_writes_only_to_injected_state_dir() {
+        let dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config::default();
+        let payload = serde_json::json!({
+            "tool_name": "TaskCreate",
+            "tool_input": { "subject": "isolated task" },
+        });
+        let text = resolve_pre_tool_text(&payload, Some("iso"), &config, true, dir.path())
+            .expect("the task-tool redirect always decides");
+        assert!(text.starts_with("__DENY__:"), "must deny: {text}");
+        let tasks = crate::task::list_tasks(dir.path());
+        assert_eq!(tasks.len(), 1, "task must land in the injected state_dir");
+        assert_eq!(tasks[0].title, "isolated task");
     }
 
     #[test]

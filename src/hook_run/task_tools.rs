@@ -23,7 +23,12 @@ use crate::task::{self, session};
 const TASK_TOOLS: [&str; 3] = ["TaskCreate", "TaskList", "TaskUpdate"];
 
 /// Intercept a Claude Code task-tool `PreToolUse` call and redirect it to the
-/// `llmenv task` tracker.
+/// `llmenv task` tracker, resolving the global state dir itself.
+///
+/// Only for callers that have no state dir of their own — everything on the
+/// normal `PreToolUse` path already resolved one and must pass it to
+/// [`handle_pre_tool_use_in`] instead, so tests stay off the developer's real
+/// tracker (#1109).
 ///
 /// Returns `Some(text)` for a task tool (always a `__DENY__:` decision — the
 /// native tool is suppressed either way), or `None` when `tool_name` isn't one
@@ -33,10 +38,7 @@ const TASK_TOOLS: [&str; 3] = ["TaskCreate", "TaskList", "TaskUpdate"];
 /// manual fallback rather than propagating (which would let the native tool run
 /// and re-diverge from the tracker) or wedging the agent.
 pub(crate) fn handle_pre_tool_use(payload: &Value) -> Option<String> {
-    let tool = payload.get("tool_name").and_then(Value::as_str)?;
-    if !TASK_TOOLS.contains(&tool) {
-        return None;
-    }
+    let tool = task_tool_name(payload)?;
     let state_dir = match crate::paths::state_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -45,30 +47,43 @@ pub(crate) fn handle_pre_tool_use(payload: &Value) -> Option<String> {
             )));
         }
     };
+    Some(dispatch(tool, payload, &state_dir))
+}
+
+/// [`handle_pre_tool_use`] against a caller-supplied `state_dir`, matching how
+/// `read_once`/`repeat_detect` take theirs (#1109).
+pub(crate) fn handle_pre_tool_use_in(payload: &Value, state_dir: &Path) -> Option<String> {
+    let tool = task_tool_name(payload)?;
+    Some(dispatch(tool, payload, state_dir))
+}
+
+/// The intercepted tool's name, or `None` when this isn't a task tool.
+fn task_tool_name(payload: &Value) -> Option<&str> {
+    let tool = payload.get("tool_name").and_then(Value::as_str)?;
+    TASK_TOOLS.contains(&tool).then_some(tool)
+}
+
+fn dispatch(tool: &str, payload: &Value, state_dir: &Path) -> String {
     let project = match task::project::current_tag() {
         Ok(p) => p,
         Err(e) => {
-            return Some(deny(&format!(
+            return deny(&format!(
                 "couldn't resolve the project for the llmenv task tracker ({e}); \
                  track this with `llmenv task` manually."
-            )));
+            ));
         }
     };
-    Some(handle_inner(
-        tool,
-        payload.get("tool_input"),
-        &state_dir,
-        &project,
-    ))
+    handle_inner(tool, payload.get("tool_input"), state_dir, &project)
 }
 
-/// Testable core: dispatch on the (already-validated) task tool name.
+/// Testable core: perform the tracker operation for an already-validated task
+/// tool name.
 fn handle_inner(tool: &str, input: Option<&Value>, state_dir: &Path, project: &str) -> String {
     match tool {
         "TaskCreate" => create(input, state_dir, project),
         "TaskList" => list(state_dir),
         "TaskUpdate" => update(input, state_dir),
-        // Unreachable: `handle_pre_tool_use` only calls this for TASK_TOOLS.
+        // Unreachable: `task_tool_name` admits only TASK_TOOLS.
         other => deny(&format!(
             "unhandled task tool '{other}'; use `llmenv task`."
         )),
@@ -224,6 +239,21 @@ mod tests {
     fn non_task_tool_passes_through() {
         assert_eq!(
             handle_pre_tool_use(&json!({ "tool_name": "Read", "tool_input": {} })),
+            None
+        );
+    }
+
+    /// A `Some` here would mask `read_once`/`repeat_detect` for every non-task
+    /// tool call whenever the tracker is enabled — `resolve_pre_tool_text`
+    /// treats any `Some` as the primary decision.
+    #[test]
+    fn non_task_tool_passes_through_with_injected_state_dir() {
+        let dir = tmp();
+        assert_eq!(
+            handle_pre_tool_use_in(
+                &json!({ "tool_name": "Bash", "tool_input": {} }),
+                dir.path()
+            ),
             None
         );
     }
