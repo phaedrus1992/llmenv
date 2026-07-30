@@ -105,6 +105,12 @@ Where `shape` is a 12-hex SHA-256 over the active tags ∪ enabled bundles.
   marketplace update re-renders.
 - Partial writes (strict mode) stage as `*.tmp` directories and are cleaned by
   `prune` / `doctor --gc`.
+- `<cache_dir>/merge-cache.json` persists the bundle-merge result's
+  memory/host slice from the last `regenerate`/`export`, so hook lifecycle
+  events (`SessionStart`, `TurnStart`, `SessionEnd`) can resolve the ICM
+  memory endpoint without redoing that merge on every invocation. Keyed on
+  bundle/config content — an edit that changes the result invalidates it
+  automatically, falling back to a live merge (added in v3.8.0).
 
 ## Adapter emit
 

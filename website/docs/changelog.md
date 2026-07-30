@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Flag `capabilities.permissions` patterns that use Claude Code's colon-prefix syntax (a trailing `:*` command prefix, or a `domain:`/`url:` filter) when opencode is also installed and enabled. opencode matches a pattern as a plain glob, so the rule never applies there — and a dead `deny` fails open, which the warning calls out specifically. Reported by `llmenv doctor`, `llmenv export`, and `llmenv regenerate`, for bundle-contributed rules as well as top-level ones. See [`doctor`](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#838)
 - Add `llmenv task ls --current-project` to narrow a task listing to the current project's tasks (any session ever tagged to it, open or closed), and `llmenv task show --current`/`--next` to jump straight to the task in progress (or the next actionable one after it) without hunting through `task ls` first. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#927, #928)
 
+### Changed
+
+- `hook-run` reuses the bundle-merge result from the last `regenerate`/`export` instead of redoing it on every invocation. The prior in-process merge cache (#813) never actually hit in real usage — each `hook-run` is a fresh subprocess — so the disk I/O and YAML parsing behind memory-backend resolution ran on every `SessionStart`/`TurnStart`/`SessionEnd`. It's now persisted to a small cache file keyed on bundle/config content, with a live merge as the fallback whenever that key doesn't match. See [Materialize](https://phaedrus1992.github.io/llmenv/docs/concepts#materialize) (#920)
+
 ### Fixed
 
 - `llmenv doctor` no longer reports `native_permissions.opencode` and `native_permissions.crush` as orphaned keys. The orphan check hardcoded `claude_code` as the only engine name, so the two newer adapters' own permission overrides were flagged even though both adapters read them. It also no longer treats an MCP server name as a valid `native_permissions` key — that map is keyed by engine, so such a key was itself dead config. (#1032)

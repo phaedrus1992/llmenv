@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod inherit;
 pub mod manifest;
+pub mod merge_cache;
 pub mod schema_gen;
 pub mod state;
 mod status_data;
