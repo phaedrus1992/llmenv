@@ -1818,9 +1818,15 @@ fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
 
 /// Point `cmd`'s stderr at `log_path` as a size-bounded diagnostic log.
 ///
-/// If the log can't be opened the child still runs with stderr discarded — a
-/// missing diagnostic is a smaller problem than skipping the work.
+/// Sets the null baseline first, unconditionally (#1139): `Command`'s default
+/// for an unset stdio is `Stdio::inherit()`, not discarded, so a caller that
+/// only overrode stderr on the `Ok` branch would leave the child holding
+/// whichever fd this process's own stderr happens to be on a log-open
+/// failure — the exact hang/leak this redirect exists to prevent. If the log
+/// can't be opened the child still runs with stderr discarded — a missing
+/// diagnostic is a smaller problem than skipping the work.
 fn redirect_stderr_to_bounded_log(cmd: &mut std::process::Command, log_path: &std::path::Path) {
+    cmd.stderr(std::process::Stdio::null());
     match crate::mcp::proxy::open_bounded_log(log_path, DETACHED_CHILD_LOG_MAX_BYTES) {
         Ok(file) => {
             cmd.stderr(std::process::Stdio::from(file));
@@ -1841,6 +1847,7 @@ pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
     match detached_child_log_path() {
         Ok(path) => redirect_stderr_to_bounded_log(cmd, &path),
         Err(e) => {
+            cmd.stderr(std::process::Stdio::null());
             tracing::debug!("detached child: cannot resolve log path ({e:#}), stderr discarded");
         }
     }
