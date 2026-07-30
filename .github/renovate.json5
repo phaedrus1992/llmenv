@@ -49,8 +49,13 @@
   // quinn-proto pulled in by quinn). A periodic full lockfile regen bumps
   // those transitive versions to the latest one already permitted by their
   // parents' existing semver ranges, which is where most of these fixes live.
+  // Default schedule is "before 4am on monday" — every other update in this
+  // repo runs on Renovate's normal cadence with no schedule restriction, so
+  // an unset schedule here would leave transitive security fixes waiting up
+  // to a week behind everything else. Empty schedule matches that cadence.
   "lockFileMaintenance": {
     "enabled": true,
+    "schedule": [],
   },
 
   // The pre-commit manager is disabled by default; .pre-commit-config.yaml
