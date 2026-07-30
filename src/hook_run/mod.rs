@@ -1609,7 +1609,11 @@ fn resolve_bundle_memory_host(
 
     let disk_hit = crate::merge::merge_signature(&config.capabilities, &config.native, bundle_refs)
         .inspect_err(|e| {
-            tracing::warn!("failed to compute merge signature for cache lookup: {e}");
+            // `error!`, not `warn!` (#1139): the process's own `EnvFilter` is
+            // ERROR-only by default, same as the three detached children this
+            // diff fixes for the identical reason — a `warn!` here would be
+            // silently dropped, same as theirs was.
+            tracing::error!("failed to compute merge signature for cache lookup: {e}");
         })
         .ok()
         .and_then(|key| {
@@ -2175,10 +2179,14 @@ mod tests {
         let (config_root, _cache, config, active) = unreadable_bundle_fixture();
         let log_dir = tempfile::tempdir().expect("test");
         let log = log_dir.path().join("events.jsonl");
+        // ERROR-only, matching main.rs's `EnvFilter::from_default_env()` with
+        // `RUST_LOG` unset (#1139): a `warn!` here would prove nothing about
+        // what an operator actually sees by default.
         let sub = tracing_subscriber::registry().with(
             crate::session_log::tracing_layer::FileLogLayer::new(
                 crate::session_log::file_sink::FileSink::new(log.clone()),
-            ),
+            )
+            .with_filter(tracing_subscriber::filter::LevelFilter::ERROR),
         );
         let result = tracing::subscriber::with_default(sub, || {
             memory_url(&config, config_root.path(), &active)
@@ -2195,7 +2203,8 @@ mod tests {
         let body = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(
             body.contains("merge signature"),
-            "a signature failure must be logged before falling back to a live merge: {body}"
+            "a signature failure must be logged at a level the default EnvFilter \
+             passes, before falling back to a live merge: {body}"
         );
     }
 
