@@ -3718,7 +3718,10 @@ fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
 /// Bundle names any active scope disables via marker `disable_bundles`
 /// (#194). Currently populated only by the project marker; see
 /// `ActiveScope::disable_bundles`.
-fn marker_disabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
+///
+/// `pub(crate)`: also called by `hook_run`, whose recall-keyword/context-chunk
+/// bundle list must honor the same suppression rule.
+pub(crate) fn marker_disabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
     active
         .scopes
         .iter()
