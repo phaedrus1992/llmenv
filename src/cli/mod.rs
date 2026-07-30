@@ -3718,7 +3718,10 @@ fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
 /// Bundle names any active scope disables via marker `disable_bundles`
 /// (#194). Currently populated only by the project marker; see
 /// `ActiveScope::disable_bundles`.
-fn marker_disabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
+///
+/// `pub(crate)`: also called by `hook_run`, whose recall-keyword/context-chunk
+/// bundle list must honor the same suppression rule.
+pub(crate) fn marker_disabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
     active
         .scopes
         .iter()
@@ -3736,7 +3739,10 @@ fn marker_disabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
 /// `tag_filter` (the CLI `--tag` flag) additionally gates a bundle's `when`
 /// list when present. Shared by every call site that needs "what bundles are
 /// actually selected" so the suppression rule can't drift between them.
-fn firing_bundles<'a>(
+///
+/// `pub(crate)`: also called by `hook_run::memory_url`, which resolves the ICM
+/// memory endpoint from the same bundle set the materialized manifest uses.
+pub(crate) fn firing_bundles<'a>(
     bundles: &'a [Bundle],
     active: &ActiveScopes,
     tag_filter: Option<&str>,
@@ -4372,51 +4378,6 @@ mod tests {
             firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
             vec!["rust-dev"]
         );
-    }
-
-    // #920: `hook_run::memory_url` recomputes its own firing-bundle set
-    // inline (tag match or manual-enable, no `disable_bundles` handling)
-    // rather than calling `firing_bundles` — so the persisted merge-cache key
-    // `build_manifest` writes only agrees with the key `memory_url` reads
-    // back when the two selections produce the same set. This pins that
-    // agreement for the common case (no `disable_bundles`); it does NOT hold
-    // when `disable_bundles` is set — filed separately, that's a pre-existing
-    // discrepancy between hook-run's live resolution and the materialized
-    // manifest, not something #920 introduces.
-    #[test]
-    fn firing_bundles_matches_hook_run_inline_filter_without_disable_bundles() {
-        let bundles = vec![
-            bundle("rust-dev", &["rust"]),
-            bundle("web-dev", &["typescript"]),
-            bundle("manual-only", &[]),
-        ];
-        let active = active(vec![
-            active_scope("host", &["rust"], &[], &[]),
-            active_scope("project", &["typescript"], &["manual-only"], &[]),
-        ]);
-
-        let via_firing_bundles: std::collections::BTreeSet<&str> =
-            firing_bundles(&bundles, &active, None)
-                .iter()
-                .map(|b| b.name.as_str())
-                .collect();
-
-        // Mirrors `hook_run::memory_url`'s inline filter exactly.
-        let manually_enabled: std::collections::BTreeSet<&str> = active
-            .scopes
-            .iter()
-            .flat_map(|s| s.enable_bundles.iter().map(String::as_str))
-            .collect();
-        let via_hook_run_inline: std::collections::BTreeSet<&str> = bundles
-            .iter()
-            .filter(|b| {
-                b.when.iter().any(|bt| active.tags.contains(bt))
-                    || manually_enabled.contains(b.name.as_str())
-            })
-            .map(|b| b.name.as_str())
-            .collect();
-
-        assert_eq!(via_firing_bundles, via_hook_run_inline);
     }
 
     #[test]
