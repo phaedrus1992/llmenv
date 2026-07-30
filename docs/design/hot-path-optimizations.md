@@ -206,6 +206,101 @@ llmenv's fail-soft contract (exit 0, warning on stderr).
 
 ---
 
+## Item 5: `hash_manifest` Profiling (#742)
+
+**Problem:** `cache::hash_manifest` reads every file's *contents* on every
+`materialize` call to compute the cache key — flagged in the original
+comprehensive audit (#56) as a hotspot worth profiling, with an open question:
+could an mtime+size fast path (skip the content read when neither changed
+since the last hash) be a safe substitute?
+
+**What was measured:** `benches/cli_benchmark.rs`'s `hash_manifest` group,
+three fixtures:
+
+| Fixture | Shape | Time |
+| --- | --- | --- |
+| `realistic_20_files_2kb` | 20 files × 2 KB (~40 KB total) | ~265 µs |
+| `stress_2000_files_200b` | 2000 files × 200 B (~400 KB, syscall-bound) | ~29 ms |
+| `stress_5_files_5mb` | 5 files × 5 MB (~25 MB, bytes-bound) | ~14 ms |
+
+**Decision: no fast path.** A realistic bundle hashes in a few hundred
+microseconds — well under any user-perceptible threshold, and `materialize`
+only runs on `regenerate`/`export`, not on every hook-run event (see Item 2
+above: `hook-run` avoids the merge/hash path entirely for
+`memory_url`-only calls). Even the stress cases (2000 files, or 25 MB of
+content) stay in the tens-of-milliseconds range for an operation that isn't
+in the per-event hot path.
+
+Against that small win, an mtime+size fast path buys correctness risk that
+isn't worth it: `hash_manifest` is a cache-*correctness* key (folder reuse in
+`strict` mode short-circuits entirely on a hash match — see `materialize()`),
+so a false "unchanged" positive would silently serve stale bundle content.
+mtime-preserving operations are common enough to make this a real risk, not
+a theoretical one — `git checkout` across branches, `rsync -t`, archive
+extraction, and editors that restore the original mtime after a save can all
+change file content without bumping mtime. A cache-key computation that can
+be fooled by any of those isn't a safe default.
+
+**Conclusion:** closed as won't-fix for the fast path; the profiling data
+above is the durable record of why. `hash_manifest` keeps reading full file
+content.
+
+## Item 6: Persisted Bundle-Merge Cache (#920)
+
+**Problem:** Item 2's in-process `MERGE_CACHE` (in `src/hook_run/mod.rs`)
+never actually hits in real usage — every `hook-run` invocation is a fresh
+subprocess, so the process-local cache is empty on every call. The real cost
+(disk I/O + YAML parsing across every firing bundle's `AGENTS.md`,
+`skills`/`plugins`/`hooks` subdirs, and `bundle.yaml`) still runs on every
+`SessionStart`/`TurnStart`/`SessionEnd`.
+
+**What changed:** `regenerate`/`export` (`build_manifest` in `src/cli/mod.rs`)
+already runs the same bundle merge and already has the resulting
+`capabilities.features.memory` / `capabilities.host` slice in hand. It now
+persists that slice to `<cache_dir>/merge-cache.json`, keyed by
+[`crate::merge::merge_signature`] — a signature computed *without* doing the
+full merge: it hashes the top-level `capabilities`, the `native` map (both
+already in memory — no extra I/O), and each firing bundle's raw `bundle.yaml`
+bytes (one read per bundle, no `AGENTS.md`, no subdirectory walk, no YAML
+parse into the full capability tree). `hook_run::memory_url` recomputes the
+same cheap signature and reads the persisted slice on a match, skipping
+`merge()` entirely; on a miss (no artifact yet, or the signature changed
+because config/bundle content changed since the last regenerate) it falls
+through to the existing in-process-cache-then-live-merge path unchanged.
+
+**Why a separate signature, not `hash_manifest`'s hash:** `hash_manifest`
+does not hash `capabilities.features.memory` or `capabilities.host` at all —
+it only covers `agents_md`, `files`, `rules`, `mcps`, `plugins`,
+`marketplaces`, `native`, and the native capability maps, because those are
+the fields that determine the *materialized files*, which is `hash_manifest`'s
+actual job. Reusing it as the persisted merge-cache's key would mean two
+merges that differ only in memory/host contributions hash identically —
+exactly the "stale read silently changes which ICM endpoint hook-run resolves
+to" correctness bug this feature exists to avoid, not just a missed perf win.
+
+**Invalidation:** the signature changes whenever top-level `capabilities`,
+`native`, the firing bundle name set, or any firing bundle's `bundle.yaml`
+bytes change — a strict superset of what the in-process cache's mtime+names
+key catches, closing the gap called out in #920: a disk cache spanning
+multiple `regenerate` runs needs to catch bundle *content* edits, not just
+config.yaml edits.
+
+**Where the artifact lives:** `cache_dir` (not `state_dir`) — it's a derived,
+reproducible artifact. Deleting it, or never having run `regenerate`, is
+never a correctness issue: `hook_run::memory_url` treats a missing or
+non-matching artifact as a cache miss and falls back to a live `merge()`,
+identical to pre-#920 behavior.
+
+**Files modified:**
+
+- `src/merge/mod.rs` — added `merge_signature()`
+- `src/materialize/merge_cache.rs` (new) — `write()` / `read_if_matching()`
+  for the persisted artifact
+- `src/cli/mod.rs` — `build_manifest` persists the bundle-only memory/host
+  slice after computing it
+- `src/hook_run/mod.rs` — `memory_url()` checks the persisted cache before
+  falling back to the existing in-process-cache-then-live-merge path
+
 ## Verification
 
 All existing tests pass:
