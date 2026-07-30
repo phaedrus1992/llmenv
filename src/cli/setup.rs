@@ -274,11 +274,9 @@ fn probe_engines() -> Vec<String> {
 
 /// Compute which engines should be disabled given which are available.
 fn compute_disabled_engines(available: &[String]) -> Vec<String> {
-    const ALL_SUPPORTED: &[&str] = &["claude_code", "crush", "opencode"];
-    ALL_SUPPORTED
-        .iter()
-        .filter(|e| !available.contains(&e.to_string()))
-        .map(|e| e.to_string())
+    crate::adapter::known_engine_ids()
+        .into_iter()
+        .filter(|e| !available.contains(e))
         .collect()
 }
 
@@ -759,6 +757,19 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_disabled_engines_tracks_adapter_registry() {
+        // Regression guard for #1074: the universe of "supported" engines must
+        // derive from the adapter registry, not a locally hardcoded list that
+        // can silently drift when a new adapter is registered.
+        let disabled = compute_disabled_engines(&[]);
+        let mut known = crate::adapter::known_engine_ids();
+        let mut disabled_sorted = disabled;
+        known.sort();
+        disabled_sorted.sort();
+        assert_eq!(disabled_sorted, known);
+    }
+
+    #[test]
     fn test_compute_disabled_engines_all_available() {
         let disabled = compute_disabled_engines(&[
             "claude_code".to_string(),
@@ -799,11 +810,9 @@ mod tests {
     #[test]
     fn test_probe_engines_does_not_panic() {
         let engines = probe_engines();
+        let known = crate::adapter::known_engine_ids();
         for e in &engines {
-            assert!(
-                e == "claude_code" || e == "crush" || e == "opencode",
-                "unexpected engine: {e}"
-            );
+            assert!(known.contains(e), "unexpected engine: {e}");
         }
     }
 
