@@ -152,6 +152,63 @@ pub fn merge(
     })
 }
 
+/// Cheap, disk-cacheable signature of exactly the [`merge`] inputs that
+/// determine `capabilities.features.memory` and `capabilities.host` (#920).
+///
+/// Reads only each bundle's `bundle.yaml` — not `AGENTS.md`, not the
+/// `skills`/`plugins`/`hooks` subdirectories, not `rules/*.md` — so
+/// recomputing it is far cheaper than a full [`merge`] call. Callers persist
+/// the memory/host slice keyed on this signature and use a fresh computation
+/// to check whether that persisted slice is still valid, without paying for
+/// the full merge just to find out.
+///
+/// A signature match does not guarantee the *rest* of the manifest (files,
+/// mcps, plugins, …) is unchanged — only that the memory/host-relevant inputs
+/// are. Callers that need the full manifest must still call [`merge`].
+pub fn merge_signature(
+    top_level: &Capabilities,
+    native: &BTreeMap<String, serde_yaml::Value>,
+    bundles: &[BundleRef],
+) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+
+    fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
+        h.update((data.len() as u64).to_le_bytes());
+        h.update(data);
+    }
+
+    let mut h = Sha256::new();
+    let top_yaml = serde_yaml::to_string(top_level)
+        .map_err(|e| anyhow::anyhow!("serializing top-level capabilities: {e}"))?;
+    update_len_prefixed(&mut h, top_yaml.as_bytes());
+
+    h.update((native.len() as u64).to_le_bytes());
+    for (key, value) in native {
+        update_len_prefixed(&mut h, key.as_bytes());
+        let serialized = serde_yaml::to_string(value)
+            .map_err(|e| anyhow::anyhow!("serializing native key '{key}': {e}"))?;
+        update_len_prefixed(&mut h, serialized.as_bytes());
+    }
+
+    // Sort by name: `bundles` order reflects scope precedence, but the
+    // memory/host-relevant content is order-independent for hashing purposes
+    // here — callers pass the same bundle set regardless of precedence order.
+    let mut sorted: Vec<&BundleRef> = bundles.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    h.update((sorted.len() as u64).to_le_bytes());
+    for b in sorted {
+        update_len_prefixed(&mut h, b.name.as_bytes());
+        let bytes = match std::fs::read(b.path.join("bundle.yaml")) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        update_len_prefixed(&mut h, &bytes);
+    }
+
+    Ok(hex::encode(h.finalize()))
+}
+
 /// Keys that a `bundle.yaml` fragment is allowed to declare. Any other top-level
 /// key is rejected with a hard error rather than silently dropped.
 const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
@@ -807,5 +864,180 @@ mod tests {
             Some("low"),
             "direct effort_level must win over slippage-derived effort_level"
         );
+    }
+
+    // #920: same inputs must produce the same signature — required for the
+    // persisted merge-cache lookup to ever hit.
+    #[test]
+    fn merge_signature_stable_for_identical_inputs() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "features:\n  memory:\n    - server_host: h\n      port: 1\n",
+        )
+        .unwrap();
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let sig1 = merge_signature(
+            &Capabilities::default(),
+            &BTreeMap::new(),
+            std::slice::from_ref(&bundle),
+        )
+        .unwrap();
+        let sig2 = merge_signature(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+        assert_eq!(sig1, sig2);
+    }
+
+    // #920: a persisted cache spanning multiple `regenerate` runs must catch
+    // bundle *content* edits, not just config.yaml edits (unlike the
+    // in-process `merge_cache_key` in hook_run, which only needs mtime+names
+    // because it never survives a bundle edit within a single session).
+    #[test]
+    fn merge_signature_changes_when_bundle_yaml_content_changes() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "features:\n  memory:\n    - server_host: h\n      port: 1\n",
+        )
+        .unwrap();
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir.clone(),
+            precedence: 1,
+        };
+        let before = merge_signature(
+            &Capabilities::default(),
+            &BTreeMap::new(),
+            std::slice::from_ref(&bundle),
+        )
+        .unwrap();
+
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "features:\n  memory:\n    - server_host: h\n      port: 2\n",
+        )
+        .unwrap();
+        let after = merge_signature(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+
+        assert_ne!(
+            before, after,
+            "editing bundle.yaml content must invalidate the signature"
+        );
+    }
+
+    // #920: a different firing bundle set must produce a different signature —
+    // otherwise a hook-run in a project scope (extra project-tagged bundles
+    // firing) could reuse a signature computed for a narrower scope.
+    #[test]
+    fn merge_signature_changes_when_firing_bundle_set_changes() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("bundle.yaml"), "features:\n  memory: []\n").unwrap();
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let other_dir = tmp.path().join("c");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("bundle.yaml"), "features:\n  memory: []\n").unwrap();
+        let other = BundleRef {
+            name: "c".into(),
+            path: other_dir,
+            precedence: 1,
+        };
+
+        let one = merge_signature(
+            &Capabilities::default(),
+            &BTreeMap::new(),
+            std::slice::from_ref(&bundle),
+        )
+        .unwrap();
+        let two =
+            merge_signature(&Capabilities::default(), &BTreeMap::new(), &[bundle, other]).unwrap();
+
+        assert_ne!(
+            one, two,
+            "adding a firing bundle must invalidate the signature"
+        );
+    }
+
+    // #920: top-level `capabilities.host`/`features.memory` changes must
+    // invalidate the signature even with no bundles at all.
+    #[test]
+    fn merge_signature_changes_when_top_level_capabilities_change() {
+        let mut host_a = BTreeMap::new();
+        host_a.insert(
+            "srv".to_string(),
+            crate::config::HostEntry {
+                addr: "1.1.1.1".into(),
+            },
+        );
+        let caps_a = Capabilities {
+            host: host_a,
+            ..Default::default()
+        };
+        let mut host_b = BTreeMap::new();
+        host_b.insert(
+            "srv".to_string(),
+            crate::config::HostEntry {
+                addr: "2.2.2.2".into(),
+            },
+        );
+        let caps_b = Capabilities {
+            host: host_b,
+            ..Default::default()
+        };
+
+        let sig_a = merge_signature(&caps_a, &BTreeMap::new(), &[]).unwrap();
+        let sig_b = merge_signature(&caps_b, &BTreeMap::new(), &[]).unwrap();
+        assert_ne!(sig_a, sig_b);
+    }
+
+    // #920: the `native:` map feeds into the merge too — a change there must
+    // also invalidate the signature.
+    #[test]
+    fn merge_signature_changes_when_native_map_changes() {
+        let mut native_a: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        native_a.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: a").unwrap(),
+        );
+        let mut native_b: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+        native_b.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("key: b").unwrap(),
+        );
+
+        let sig_a = merge_signature(&Capabilities::default(), &native_a, &[]).unwrap();
+        let sig_b = merge_signature(&Capabilities::default(), &native_b, &[]).unwrap();
+        assert_ne!(sig_a, sig_b);
+    }
+
+    // #920: a missing bundle.yaml is a legitimate state (bundles carry
+    // capabilities only if they choose to, per `read_bundle_yaml`) — the
+    // signature must not error, matching `merge`'s own tolerance.
+    #[test]
+    fn merge_signature_tolerates_missing_bundle_yaml() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("no-yaml");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        let bundle = BundleRef {
+            name: "no-yaml".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let sig = merge_signature(&Capabilities::default(), &BTreeMap::new(), &[bundle]);
+        assert!(sig.is_ok());
     }
 }

@@ -1902,8 +1902,15 @@ fn build_manifest(
         .collect();
     crate::util::dedup(&mut all_memory);
 
+    // Captured before `all_host` mixes in top-level config.host below (#920):
+    // this is the exact bundle-only slice `hook_run::memory_url` also computes,
+    // persisted to disk keyed on `merge_signature` so hook-run can reuse it
+    // instead of redoing the full merge on every invocation.
+    let bundle_memory_for_cache: Vec<crate::config::Memory> = bundle_memory.to_vec();
+    let bundle_host_for_cache = manifest.capabilities.host.clone();
+
     // Combine host tables: bundle contributions first, top-level wins on collision.
-    let mut all_host = manifest.capabilities.host.clone();
+    let mut all_host = bundle_host_for_cache.clone();
     for (k, v) in &config.host {
         all_host.insert(k.clone(), v.clone());
     }
@@ -1969,6 +1976,25 @@ fn build_manifest(
     }
 
     let cache_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
+
+    // #920: persist the bundle-only memory/host slice so `hook_run::memory_url`
+    // can reuse it instead of redoing this merge on every hook-run invocation.
+    // Best-effort — a write failure only costs a cache miss on the hook-run
+    // side (it falls back to a live merge), never a correctness issue, so it
+    // must not fail `regenerate`/`export`.
+    match crate::merge::merge_signature(&config.capabilities, &config.native, &refs) {
+        Ok(key) => {
+            if let Err(e) = crate::materialize::merge_cache::write(
+                &cache_root,
+                &key,
+                &bundle_memory_for_cache,
+                &bundle_host_for_cache,
+            ) {
+                tracing::warn!("failed to persist bundle-merge cache: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("failed to compute merge signature for cache: {e}"),
+    }
 
     let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags)
         .context("resolving plugins")?;

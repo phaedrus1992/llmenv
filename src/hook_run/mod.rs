@@ -1396,34 +1396,61 @@ pub(crate) fn memory_url(
         .collect();
 
     let bundle_refs = build_hook_bundle_refs(config_dir, &firing);
-    // ponytail: merge cache keyed on config mtime + firing bundle names. Does not
-    // detect bundle file content edits (AGENTS.md, subdir files) — acceptable
-    // since they never change mid-session. Config mtime covers config.yaml edits.
+    // ponytail: in-process merge cache keyed on config mtime + firing bundle
+    // names. Does not detect bundle file content edits (AGENTS.md, subdir
+    // files) — acceptable since they never change mid-session. Config mtime
+    // covers config.yaml edits. Only ever hits on a second call within the
+    // same hook-run process (rare — most events call memory_url once), which
+    // is why the disk-persisted cache below (#920) exists: it's the one that
+    // actually survives across hook-run's fresh-subprocess-per-invocation
+    // model.
     static MERGE_CACHE: Mutex<Option<MergeCacheEntry>> = Mutex::new(None);
     let (bundle_memory, bundle_host) = if bundle_refs.is_empty() {
         (Vec::new(), std::collections::BTreeMap::new())
     } else {
-        let cache_key = merge_cache_key(&firing)?;
-        let mut cache = MERGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = cache.as_ref()
-            && entry.key == cache_key
-        {
-            (entry.bundle_memory.clone(), entry.bundle_host.clone())
-        } else {
-            let merged = crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
-                .unwrap_or_default();
-            let mem = merged
-                .capabilities
-                .features
-                .map(|f| f.memory)
-                .unwrap_or_default();
-            let host = merged.capabilities.host;
-            *cache = Some(MergeCacheEntry {
-                key: cache_key,
-                bundle_memory: mem.clone(),
-                bundle_host: host.clone(),
-            });
+        // #920: try the disk-persisted cache first — written by `regenerate`/
+        // `export` (`build_manifest` in `cli/mod.rs`) — keyed on
+        // `merge_signature`, which is cheap to recompute here (reads only
+        // each firing bundle's `bundle.yaml`, not the full merge). A hit
+        // skips the in-process cache and the full `merge()` call entirely; a
+        // miss (no artifact yet, or the signature changed because config or
+        // bundle content changed since the last regenerate) falls through to
+        // the existing in-process-cache-then-live-merge path unchanged.
+        let disk_hit =
+            crate::merge::merge_signature(&config.capabilities, &config.native, &bundle_refs)
+                .ok()
+                .and_then(|key| {
+                    let cache_root = std::path::PathBuf::from(crate::paths::expand_tilde(
+                        &config.cache.cache_dir,
+                    ));
+                    crate::materialize::merge_cache::read_if_matching(&cache_root, &key)
+                });
+        if let Some((mem, host)) = disk_hit {
             (mem, host)
+        } else {
+            let cache_key = merge_cache_key(&firing)?;
+            let mut cache = MERGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = cache.as_ref()
+                && entry.key == cache_key
+            {
+                (entry.bundle_memory.clone(), entry.bundle_host.clone())
+            } else {
+                let merged =
+                    crate::merge::merge(&config.capabilities, &config.native, &bundle_refs)
+                        .unwrap_or_default();
+                let mem = merged
+                    .capabilities
+                    .features
+                    .map(|f| f.memory)
+                    .unwrap_or_default();
+                let host = merged.capabilities.host;
+                *cache = Some(MergeCacheEntry {
+                    key: cache_key,
+                    bundle_memory: mem.clone(),
+                    bundle_host: host.clone(),
+                });
+                (mem, host)
+            }
         }
     };
 
@@ -1728,6 +1755,163 @@ fn post_session_consolidation() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    // #920: `memory_url` must use the disk-persisted merge cache when its key
+    // matches, instead of redoing the live merge. Proven behaviorally (not by
+    // spying on `merge()`): the bundle's `bundle.yaml` declares no memory/host
+    // at all, so a live merge would yield `all_memory = []`, `all_host = {}`,
+    // and `memory_url` would resolve to `Ok(None)` (no `still` entry to
+    // select). The persisted cache is seeded — under the exact key
+    // `memory_url` will independently recompute — with a `still` memory/host
+    // pair a live merge could never produce from this bundle. If `memory_url`
+    // returns that persisted URL, the disk-cache path was taken.
+    #[test]
+    fn memory_url_uses_persisted_cache_when_key_matches() {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).expect("test");
+        // No `features`/`host` block — a live merge of this bundle contributes
+        // no memory/host entries at all.
+        std::fs::write(bundle_dir.join("bundle.yaml"), "permissions: {}\n").expect("test");
+
+        let cache_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            cache: crate::config::Cache {
+                cache_dir: cache_dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![],
+            tags: std::collections::BTreeSet::from([
+                "mytag".to_string(),
+                "network-home".to_string(),
+            ]),
+            extra_tags: std::collections::BTreeSet::new(),
+        };
+
+        // Seed the persisted cache under the exact key `memory_url` will
+        // independently recompute for this config/bundle set.
+        let bundle_ref = crate::merge::BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let key = crate::merge::merge_signature(
+            &config.capabilities,
+            &config.native,
+            std::slice::from_ref(&bundle_ref),
+        )
+        .expect("test");
+        let persisted_memory = vec![crate::config::Memory {
+            server_host: "still".into(),
+            port: 7878,
+            listen_host: "127.0.0.1".into(),
+            when: vec!["network-home".into()],
+            default_topics: vec![],
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            retention: None,
+            auto_prune: false,
+            consolidation: None,
+            mcp_permissions: None,
+        }];
+        let mut persisted_host = std::collections::BTreeMap::new();
+        persisted_host.insert(
+            "still".to_string(),
+            crate::config::HostEntry {
+                addr: "still.local".into(),
+            },
+        );
+        crate::materialize::merge_cache::write(
+            cache_dir.path(),
+            &key,
+            &persisted_memory,
+            &persisted_host,
+        )
+        .expect("test");
+
+        let url = memory_url(&config, config_root.path(), &active).expect("test");
+        assert_eq!(
+            url.as_deref(),
+            Some("http://still.local:7878/mcp"),
+            "memory_url must read the persisted merge cache instead of falling \
+             back to a live merge of a bundle that declares no memory/host"
+        );
+    }
+
+    // #920: a stale/mismatched persisted cache must never be trusted — a false
+    // hit here would silently resolve to the wrong ICM memory endpoint. This
+    // seeds a persisted cache under a key that does NOT match the live
+    // signature (bundle.yaml content differs from what was hashed) and
+    // confirms `memory_url` falls back to a correct live merge instead.
+    #[test]
+    fn memory_url_ignores_persisted_cache_on_key_mismatch() {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).expect("test");
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 7878\n",
+                "      when: [network-home]\n",
+                "host:\n",
+                "  still:\n",
+                "    addr: still.local\n",
+            ),
+        )
+        .expect("test");
+
+        let cache_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            cache: crate::config::Cache {
+                cache_dir: cache_dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![],
+            tags: std::collections::BTreeSet::from([
+                "mytag".to_string(),
+                "network-home".to_string(),
+            ]),
+            extra_tags: std::collections::BTreeSet::new(),
+        };
+
+        // Seed a cache entry under a deliberately wrong key, pointing at a
+        // host a correct live merge would never resolve to.
+        let mut bogus_host = std::collections::BTreeMap::new();
+        bogus_host.insert(
+            "still".to_string(),
+            crate::config::HostEntry {
+                addr: "bogus.invalid".into(),
+            },
+        );
+        crate::materialize::merge_cache::write(cache_dir.path(), "wrong-key", &[], &bogus_host)
+            .expect("test");
+
+        let url = memory_url(&config, config_root.path(), &active).expect("test");
+        assert_eq!(
+            url.as_deref(),
+            Some("http://still.local:7878/mcp"),
+            "a key mismatch must fall back to a correct live merge, never the stale cache"
+        );
+    }
 
     /// #1006: `resolve_pre_tool_text` must not let an enabled `read_once`
     /// permanently mask `repeat_detect` for tool calls `read_once` doesn't
