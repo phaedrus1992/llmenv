@@ -1245,6 +1245,14 @@ appearing in both lists. Malformed YAML degrades to defaults derived from the
 folder basename. See [Concepts → Project markers](concepts.md#project-markers)
 for discovery rules.
 
+Disabling a bundle withdraws *everything* it contributes, not just its
+permissions and instruction files. That includes any `features.memory` or
+`host:` entry declared in its `bundle.yaml` — so if the ICM memory backend is
+declared only by a bundle you disable, memory recall/store and session logging
+are inactive in that project, and lifecycle hooks report
+`no memory backend active for this scope`. Declare `features.memory` at the top
+level of `config.yaml` if it should survive a bundle being turned off.
+
 Each tag (and each `enable_bundles`/`disable_bundles` entry) must be
 alphanumeric plus `-`/`_` and no longer than 64 bytes; entries outside that
 charset or length, and any beyond the first 64 from a given source, are
