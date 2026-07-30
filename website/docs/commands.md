@@ -292,8 +292,8 @@ llmenv task add <title> [--parent SLUG] [--session <id>]
 llmenv task start <id>
 llmenv task done <id>
 llmenv task wait <id> [reason]
-llmenv task ls [--format json] [--session <id>]
-llmenv task show <id>
+llmenv task ls [--format json] [--session <id>] [--current-project]
+llmenv task show <id> | --current | --next
 llmenv task note <id> [text]
 llmenv task block <id> --on <other>
 llmenv task clear <id>... | --session <id>
@@ -327,17 +327,31 @@ unambiguous prefix of one.
   behavior is to wait for the reason to clear, not keep retrying (and
   re-injecting the FYI every turn would just nag about a state meant to be
   quiet).
-- `task ls [--format json] [--session <id>] [--state <s>]... [--hide-done]` —
-  list tasks. The default human output groups tasks by session (current-project
-  sessions first), indents subtasks under their parent, prefixes each row with a
-  state glyph + label (`open`/`wip`/`waiting`/`done`), and annotates blocked
-  tasks with their `blocked_on` refs; color follows TTY / `NO_COLOR` /
-  `CLICOLOR_FORCE`. `--format json` is the stable machine format. `--session
-  <id>` narrows to one session; `--state <open|wip|waiting|done>` (repeatable)
-  keeps only those states; `--hide-done` (alias `--active`) drops completed
-  tasks. Filters compose with each other and with `--session`, and apply to the
-  JSON output too when passed.
+- `task ls [--format json] [--session <id>] [--state <s>]... [--hide-done]
+  [--current-project]` — list tasks. The default human output groups tasks by
+  session (current-project sessions first), indents subtasks under their
+  parent, prefixes each row with a state glyph + label
+  (`open`/`wip`/`waiting`/`done`), and annotates blocked tasks with their
+  `blocked_on` refs; color follows TTY / `NO_COLOR` / `CLICOLOR_FORCE`.
+  `--format json` is the stable machine format. `--session <id>` narrows to
+  one session; `--state <open|wip|waiting|done>` (repeatable) keeps only
+  those states; `--hide-done` (alias `--active`) drops completed tasks;
+  `--current-project` (added in v3.8.0) narrows to tasks whose session is
+  tagged to the current project — any session ever tagged to it, open or
+  closed, so a finished session's tasks still show. Tasks with no session are
+  excluded under `--current-project`. Filters compose with each other, and
+  apply to the JSON output too when passed.
 - `task show <id>` — full detail for one task (notes, parent, blockers).
+  `task show --current` / `task show --next` (added in v3.8.0, mutually
+  exclusive with each other and with `<id>`) resolve the task in progress for
+  the current project instead of naming one: `--current` is the `wip` task
+  (falling back to the most recently updated non-`done` task) in each open
+  session for the current project; `--next` is the next actionable task after
+  it, in the same parent-before-children order `task ls` displays, skipping
+  `done` tasks and any task whose `blocked_on` refs aren't all `done`. A
+  single open session prints the same bare JSON as `task show <id>`; two or
+  more each get a `# <name> (<id>)` header, separated by a `---` rule. Errors
+  if no session is open for the current project.
 - `task note <id> [text]` — append a progress note; reads from stdin if
   `text` is omitted.
 - `task block <id> --on <other>` — record that `id` is blocked on `other`.

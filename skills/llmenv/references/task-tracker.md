@@ -31,5 +31,10 @@ TODOs.
   and memory writes draw on these notes.
 - Lost your session id after a compaction? `llmenv task session ls` — one
   match for this project in the common case; use it.
+- "What am I on / what's next?" — `llmenv task show --current` resolves your
+  `wip` task for this project without naming it; `llmenv task show --next`
+  resolves the next actionable task after it (skipping `done`/`waiting` and
+  anything still `blocked_on`). `llmenv task ls --current-project` narrows a
+  full listing to this project's tasks.
 - `llmenv task session finish [<id>]` / `session show [<id>]` to close out —
   `finish` auto-resolves if exactly one session is open.

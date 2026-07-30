@@ -150,6 +150,22 @@ pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session
         .collect()
 }
 
+/// Every session id ever tagged with `project`, open or closed — the basis
+/// for "this project's tasks" ([`super::filter_tasks_for_project`], #1117),
+/// which is deliberately broader than [`open_sessions_for_project`]: a
+/// finished session's tasks still belong to the project that ran them.
+#[must_use]
+pub(crate) fn session_ids_for_project(
+    state_dir: &Path,
+    project: &str,
+) -> std::collections::HashSet<String> {
+    list_sessions(state_dir)
+        .into_iter()
+        .filter(|s| s.project == project)
+        .map(|s| s.id)
+        .collect()
+}
+
 /// Update a session's `last_activity` to now. No-op (returns `Ok`) if the
 /// session doesn't exist or isn't open — a dangling `task.session` reference
 /// (deleted session file) must never fail the task mutation that triggered
@@ -778,6 +794,28 @@ mod tests {
         let open = open_sessions_for_project(dir.path(), PROJECT_A);
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].name.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn session_ids_for_project_includes_closed_sessions_but_excludes_other_projects() {
+        let dir = TempDir::new().expect("test");
+        let StartOutcome::Created(a) =
+            start_session(dir.path(), Some("a"), None, PROJECT_A, StartDecision::Auto)
+                .expect("test")
+        else {
+            panic!("expected Created");
+        };
+        finish_session(dir.path(), &a.id).expect("test");
+        start_session(dir.path(), Some("b"), None, PROJECT_A, StartDecision::New).expect("test");
+        start_session(dir.path(), Some("c"), None, PROJECT_B, StartDecision::Auto).expect("test");
+
+        let ids = session_ids_for_project(dir.path(), PROJECT_A);
+        assert_eq!(
+            ids.len(),
+            2,
+            "both the closed and open project-A sessions should be included"
+        );
+        assert!(ids.contains(&a.id));
     }
 
     #[test]

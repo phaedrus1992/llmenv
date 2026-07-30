@@ -385,7 +385,8 @@ enum TaskCommand {
     /// Mark a task done.
     Done { id: String },
     /// List all tasks. Unfiltered by default; `--session` narrows to one
-    /// session's tasks, `--state`/`--hide-done` filter by lifecycle state.
+    /// session's tasks, `--state`/`--hide-done` filter by lifecycle state,
+    /// `--current-project` narrows to the current project's tasks.
     Ls {
         #[arg(long, value_enum)]
         format: Option<TaskListFormat>,
@@ -398,9 +399,26 @@ enum TaskCommand {
         /// Hide completed (`done`) tasks. Alias: `--active`.
         #[arg(long, visible_alias = "active")]
         hide_done: bool,
+        /// Only show tasks whose session is tagged to the current project
+        /// (open or closed sessions). Tasks with no session are excluded.
+        /// Composes with `--session` and `--state`.
+        #[arg(long)]
+        current_project: bool,
     },
-    /// Show full detail for one task.
-    Show { id: String },
+    /// Show full detail for one task, or `--current`/`--next` for the task
+    /// currently being worked on (per open session) in the current project.
+    Show {
+        id: Option<String>,
+        /// The `wip` task (or most recently updated non-done task) in each
+        /// open session for the current project.
+        #[arg(long, conflicts_with_all = ["next", "id"])]
+        current: bool,
+        /// The next actionable task after `--current` in each open session
+        /// for the current project — skips `done` tasks and tasks whose
+        /// `blocked_on` refs aren't all done.
+        #[arg(long, conflicts_with_all = ["current", "id"])]
+        next: bool,
+    },
     /// Append a progress note. Reads from stdin if `text` is omitted.
     Note { id: String, text: Option<String> },
     /// Mark a task `waiting` on external input (e.g. a human review) rather
@@ -3013,8 +3031,13 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             session,
             state,
             hide_done,
+            current_project,
         } => {
             let mut tasks = crate::task::list_tasks(&state_dir);
+            if current_project {
+                let project = current_project_tag()?;
+                tasks = crate::task::filter_tasks_for_project(&state_dir, &project, tasks);
+            }
             if let Some(session_id) = &session {
                 tasks.retain(|t| t.session.as_deref() == Some(session_id.as_str()));
             }
@@ -3042,10 +3065,22 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 }
             }
         }
-        TaskCommand::Show { id } => {
-            let slug = crate::task::resolve_identifier(&state_dir, &id)?;
-            let task = crate::task::load_task(&state_dir, &slug)?;
-            println!("{}", serde_json::to_string_pretty(&task)?);
+        TaskCommand::Show { id, current, next } => {
+            let target = match (current, next) {
+                (true, _) => Some(ShowTarget::Current),
+                (_, true) => Some(ShowTarget::Next),
+                (false, false) => None,
+            };
+            match target {
+                Some(target) => run_task_show_current_or_next(&state_dir, target)?,
+                None => {
+                    let id = id
+                        .ok_or_else(|| anyhow::anyhow!("provide a task id, or --current/--next"))?;
+                    let slug = crate::task::resolve_identifier(&state_dir, &id)?;
+                    let task = crate::task::load_task(&state_dir, &slug)?;
+                    println!("{}", serde_json::to_string_pretty(&task)?);
+                }
+            }
         }
         TaskCommand::Note { id, text } => {
             let text = match text {
@@ -3107,6 +3142,71 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
 /// task` invocation runs with cwd set to wherever the agent invoked it from.
 fn current_project_tag() -> anyhow::Result<String> {
     Ok(crate::task::project::current_tag()?)
+}
+
+/// What `task show --current`/`--next` resolves to (#1117).
+#[derive(Clone, Copy)]
+enum ShowTarget {
+    Current,
+    Next,
+}
+
+impl ShowTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Next => "next",
+        }
+    }
+}
+
+/// `task show --current`/`--next` (#1117): for every open session tagged to
+/// the current project, resolve and print the current (`wip`, or most
+/// recently updated non-done) task, or — with `--next` — the next actionable
+/// task after it. A single open session prints exactly like `task show
+/// <id>` (bare pretty JSON); two or more each get a `# <label> (<id>)`
+/// header, separated by a `---` rule, so a multi-session project's status
+/// is visible in one call.
+fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow::Result<()> {
+    let project = current_project_tag()?;
+    let open_sessions = crate::task::session::open_sessions_for_project(state_dir, &project);
+    if open_sessions.is_empty() {
+        anyhow::bail!("no open session for this project");
+    }
+    let all_tasks = crate::task::list_tasks(state_dir);
+    let multi = open_sessions.len() > 1;
+    for (i, session) in open_sessions.iter().enumerate() {
+        if multi {
+            if i > 0 {
+                println!("---");
+            }
+            // Session names come from `--description`-adjacent, agent- or
+            // user-supplied text (unlike the id, which is slugified) — must
+            // not carry raw control sequences into a header that otherwise
+            // looks like trusted CLI output.
+            let label = style::sanitize_for_terminal(
+                session.name.as_deref().unwrap_or(session.id.as_str()),
+            );
+            println!("# {label} ({})", session.id);
+        }
+        let session_tasks: Vec<crate::task::Task> = all_tasks
+            .iter()
+            .filter(|t| t.session.as_deref() == Some(session.id.as_str()))
+            .cloned()
+            .collect();
+        let resolved =
+            crate::task::resolve_current_task(&session_tasks).and_then(|cur| match target {
+                ShowTarget::Current => Some(cur),
+                ShowTarget::Next => {
+                    crate::task::resolve_next_task(&all_tasks, &session_tasks, &cur)
+                }
+            });
+        match resolved {
+            Some(task) => println!("{}", serde_json::to_string_pretty(&task)?),
+            None => println!("No {} task.", target.label()),
+        }
+    }
+    Ok(())
 }
 
 /// Handle `llmenv task session <subcommand>` (#905, reworked for mandatory
