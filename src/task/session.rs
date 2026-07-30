@@ -151,11 +151,11 @@ pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session
 }
 
 /// Every session id ever tagged with `project`, open or closed — the basis
-/// for "this project's tasks" (`task ls --current-project`, #1117), which is
-/// deliberately broader than [`open_sessions_for_project`]: a finished
-/// session's tasks still belong to the project that ran them.
+/// for "this project's tasks" ([`super::filter_tasks_for_project`], #1117),
+/// which is deliberately broader than [`open_sessions_for_project`]: a
+/// finished session's tasks still belong to the project that ran them.
 #[must_use]
-pub fn session_ids_for_project(
+pub(crate) fn session_ids_for_project(
     state_dir: &Path,
     project: &str,
 ) -> std::collections::HashSet<String> {

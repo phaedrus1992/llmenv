@@ -1429,6 +1429,92 @@ fn show_next_prefers_child_over_next_sibling() {
 }
 
 #[test]
+fn show_next_skips_a_waiting_task() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Task 1 current"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "task-1-current"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task 2 waiting"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "task-2-waiting"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args([
+            "task",
+            "wait",
+            "task-2-waiting",
+            "blocked on a human review",
+        ])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task 3 actionable"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "show", "--next"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        task["slug"], "task-3-actionable",
+        "a waiting task must not be handed back as the next actionable step"
+    );
+}
+
+#[test]
+fn show_current_sanitizes_a_control_character_in_the_session_name() {
+    let dir = TempDir::new().unwrap();
+    // A session name containing a control character (here, a raw escape)
+    // must not reach the terminal unsanitized in the multi-session header.
+    llmenv(dir.path())
+        .args(["task", "session", "start", "evil\u{1b}[31mred"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "task-one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "second session", "--new"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task two", "--session", "second-session"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "task-two"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "show", "--current"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.stdout.contains(&0x1b),
+        "raw control byte leaked into the session header:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn show_current_with_no_qualifying_task_reports_none_without_erroring() {
     let dir = TempDir::new().unwrap();
     start_session(dir.path(), "sprint");
