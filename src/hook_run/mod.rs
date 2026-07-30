@@ -24,6 +24,7 @@ use std::time::Duration;
 use std::collections::HashMap;
 
 use action::Action;
+use anyhow::Context as _;
 use mcp_client::McpHttpClient;
 use serde_json::json;
 use tracing::{debug, error, warn};
@@ -778,20 +779,25 @@ fn run_inner(
         // marker is present in the generated chunk.
         chunk = apply_memory_config_defaults(chunk, &config, &active);
 
-        let url = memory_url(&config, config_dir, &active)?;
-        if url.is_none() {
-            // Not fatal: memory actions are simply skipped below, but session
-            // logging (independent of the memory backend) still proceeds.
-            eprintln!("llmenv: memory {event} skipped: no memory backend active for this scope");
-        }
         // Reuse MCP HTTP client across events: the memory backend URL doesn't
         // change mid-session, so the reqwest Client (connection pool, TLS state,
         // DNS cache) is only built once. Cloning the cached McpHttpClient is
         // cheap — reqwest::Client is internally Arc, and the MCP session_id is
         // shared via Arc so re-initialization is also avoided.
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-        let client: Option<McpHttpClient> = match url {
-            Some(u) => {
+        // No backend is not fatal: memory actions are simply skipped below, but
+        // session logging (independent of the memory backend) still proceeds.
+        // `into_url` names *which* of the inactive states applies (#1131), so
+        // the user isn't sent to read their scope config when the cause is a
+        // `disable_bundles` entry or a bundle with no content directory.
+        let client: Option<McpHttpClient> = match memory_url(&config, config_dir, &active)?
+            .into_url()
+        {
+            Err(e) => {
+                eprintln!("llmenv: memory {event} skipped: {e}");
+                None
+            }
+            Ok(u) => {
                 let clients = MCP_CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
                 let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
                 match clients.entry(u) {
@@ -809,7 +815,6 @@ fn run_inner(
                     }
                 }
             }
-            None => None,
         };
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
@@ -1342,7 +1347,66 @@ fn recall_bundle_names(active: &crate::scope::ActiveScopes) -> Vec<String> {
         .collect()
 }
 
-/// Find the resolved memory backend's HTTP URL for the active tags, if any.
+/// What memory-backend resolution found for the active scope.
+///
+/// Replaces the `Option<String>` that collapsed four distinguishable states
+/// into `None` (#1131/#1132): a caller could not tell a project that simply
+/// declares no memory from one whose only memory-carrying bundle is suppressed
+/// by `disable_bundles`. The fourth state — a failed bundle merge — is an `Err`
+/// from [`memory_url`] rather than a variant here, because a backend may well
+/// be configured and merely unparseable: that is a failure, not an absence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemoryEndpoint {
+    /// The memory backend resolved to this HTTP URL.
+    Active(String),
+    /// No bundle fired for the active scopes and no top-level `features.memory`
+    /// entry matched — nothing could have supplied a backend.
+    NoBundlesFired,
+    /// Bundles fired, but neither they nor the top-level config declare a
+    /// `features.memory` entry active for these tags. `skipped_bundles` names
+    /// firing bundles that `build_bundle_refs` dropped for having no content
+    /// directory, so their `bundle.yaml` was never read (#1133).
+    NotDeclared { skipped_bundles: Vec<String> },
+    /// `features.memory` is supplied only by these bundles, which the active
+    /// scopes suppress via `disable_bundles` (#194).
+    SuppressedByDisableBundles(Vec<String>),
+}
+
+impl MemoryEndpoint {
+    /// The resolved URL, or an error naming why no backend is active.
+    ///
+    /// # Errors
+    /// Every non-[`MemoryEndpoint::Active`] variant, rendered as the
+    /// user-facing reason it is inactive.
+    pub(crate) fn into_url(self) -> anyhow::Result<String> {
+        const PREFIX: &str = "no memory backend active for this scope";
+        match self {
+            Self::Active(url) => Ok(url),
+            Self::NoBundlesFired => Err(anyhow::anyhow!(
+                "{PREFIX}: no bundles fired and config.yaml declares no features.memory"
+            )),
+            Self::NotDeclared { skipped_bundles } if skipped_bundles.is_empty() => {
+                Err(anyhow::anyhow!(
+                    "{PREFIX}: no active bundle or config.yaml declares features.memory"
+                ))
+            }
+            Self::NotDeclared { skipped_bundles } => Err(anyhow::anyhow!(
+                "{PREFIX}: bundle(s) {} fired but have no content directory under \
+                 the config dir's bundles/, so any features.memory they declare \
+                 was never loaded",
+                skipped_bundles.join(", ")
+            )),
+            Self::SuppressedByDisableBundles(names) => Err(anyhow::anyhow!(
+                "{PREFIX}: features.memory is supplied only by bundle(s) {}, which \
+                 this project turns off via disable_bundles",
+                names.join(", ")
+            )),
+        }
+    }
+}
+
+/// Find the resolved memory backend's HTTP URL for the active tags, or the
+/// reason none resolved.
 ///
 /// Mirrors the `build_manifest` merge strategy: top-level config memory is
 /// combined with bundle-contributed memory entries so a daemon declared only
@@ -1351,11 +1415,14 @@ fn recall_bundle_names(active: &crate::scope::ActiveScopes) -> Vec<String> {
 /// `pub(crate)`: also called by `session_log::detached::run_record`, the
 /// detached transcript-record child, which re-resolves the same MCP endpoint
 /// independently rather than receiving it as a (process-list-visible) CLI arg.
+///
+/// # Errors
+/// A bundle merge failure (#1132) or an unresolvable MCP/memory declaration.
 pub(crate) fn memory_url(
     config: &crate::config::Config,
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<MemoryEndpoint> {
     let top_memory = config
         .features
         .as_ref()
@@ -1392,11 +1459,117 @@ pub(crate) fn memory_url(
     // must exclude project-only tags (#696/#979). Do not "align" this with
     // build_manifest's host_tags; that would break recall in project scopes.
     let resolved = resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
-        .map_err(|e| anyhow::anyhow!("failed to resolve MCP servers: {e}"))?;
-    Ok(resolved.into_iter().find_map(|m| match m.kind {
+        .map_err(|e| annotate_resolve_error(e, config, config_dir, active))?;
+    let url = resolved.into_iter().find_map(|m| match m.kind {
         ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some(url),
         _ => None,
-    }))
+    });
+    Ok(match url {
+        Some(url) => MemoryEndpoint::Active(url),
+        None => classify_missing_memory(config, config_dir, active, &firing, &bundle_refs),
+    })
+}
+
+/// Explain why no memory endpoint resolved (#1131).
+///
+/// Only reached once resolution has already come up empty, so the extra
+/// `bundle.yaml` reads it does to attribute a cause stay off the hot path that
+/// every hook event takes.
+fn classify_missing_memory(
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+    firing: &[&crate::config::Bundle],
+    bundle_refs: &[crate::merge::BundleRef],
+) -> MemoryEndpoint {
+    let suppressed: Vec<String> = suppressed_bundle_capabilities(config, config_dir, active)
+        .into_iter()
+        .filter(|(_, caps)| caps.features.as_ref().is_some_and(|f| !f.memory.is_empty()))
+        .map(|(name, _)| name)
+        .collect();
+    if !suppressed.is_empty() {
+        return MemoryEndpoint::SuppressedByDisableBundles(suppressed);
+    }
+    if firing.is_empty() {
+        return MemoryEndpoint::NoBundlesFired;
+    }
+    let loaded: std::collections::HashSet<&str> =
+        bundle_refs.iter().map(|r| r.name.as_str()).collect();
+    MemoryEndpoint::NotDeclared {
+        skipped_bundles: firing
+            .iter()
+            .map(|b| b.name.as_str())
+            .filter(|n| !loaded.contains(n))
+            .map(str::to_owned)
+            .collect(),
+    }
+}
+
+/// Name `disable_bundles` in a resolution failure when that is what withdrew
+/// the `host:` entry the memory block points at (#1131). Without it the user
+/// sees a `server_host` they can read in their own `config.yaml` and nothing
+/// connecting it to the bundle they turned off.
+fn annotate_resolve_error(
+    err: crate::mcp::resolve::ResolveError,
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+) -> anyhow::Error {
+    if let crate::mcp::resolve::ResolveError::MemoryUnknownServerHost(host) = &err {
+        let suppliers: Vec<String> = suppressed_bundle_capabilities(config, config_dir, active)
+            .into_iter()
+            .filter(|(_, caps)| caps.host.contains_key(host))
+            .map(|(name, _)| name)
+            .collect();
+        if !suppliers.is_empty() {
+            return anyhow::anyhow!(
+                "failed to resolve MCP servers: {err} — it is declared in bundle(s) \
+                 {}, which this project turns off via disable_bundles",
+                suppliers.join(", ")
+            );
+        }
+    }
+    anyhow::anyhow!("failed to resolve MCP servers: {err}")
+}
+
+/// `bundle.yaml` capabilities of every bundle the active scopes suppress via
+/// `disable_bundles` (#194) but that would otherwise have fired, in config
+/// declaration order.
+///
+/// Diagnostic-only, read on the failure path so llmenv can say *why* no
+/// endpoint resolved rather than only *that* none did. A suppressed bundle
+/// whose own `bundle.yaml` is missing or unreadable contributes nothing here —
+/// a failed explanation must not replace the failure being explained.
+///
+/// `pub(crate)`: also called by `cli::doctor`, whose orphaned-memory check must
+/// see the same suppressed declarations this diagnostic does.
+pub(crate) fn suppressed_bundle_capabilities(
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+) -> Vec<(String, crate::config::Capabilities)> {
+    let disabled = crate::cli::marker_disabled_bundle_names(active);
+    if disabled.is_empty() {
+        return Vec::new();
+    }
+    let manually_enabled = crate::cli::marker_enabled_bundle_names(active);
+    let would_fire: Vec<&crate::config::Bundle> = config
+        .bundle
+        .iter()
+        .filter(|b| disabled.contains(&b.name))
+        .filter(|b| {
+            b.when.iter().any(|t| active.tags.contains(t)) || manually_enabled.contains(&b.name)
+        })
+        .collect();
+    crate::cli::build_bundle_refs(config_dir, active, &would_fire)
+        .into_iter()
+        .filter_map(|r| {
+            crate::merge::read_bundle_yaml(&r.path, &r.name)
+                .ok()
+                .flatten()
+                .map(|caps| (r.name, caps))
+        })
+        .collect()
 }
 
 /// Resolve the bundle-only memory/host slice for `bundle_refs` (#920).
@@ -1406,10 +1579,14 @@ pub(crate) fn memory_url(
 /// cheap to recompute here (reads only each firing bundle's `bundle.yaml`,
 /// not the full merge). A hit skips the full `merge()` call entirely; a miss
 /// (no artifact yet, or the signature changed because config or bundle
-/// content changed since the last regenerate) falls back to a live merge. A
-/// live-merge failure is treated as "no bundle contributions" rather than
-/// propagated — memory resolution is best-effort, not a hard requirement for
-/// the hook event to proceed.
+/// content changed since the last regenerate) falls back to a live merge.
+///
+/// Both failure modes are reported rather than swallowed (#1132). A signature
+/// failure only costs the optimization, so it logs and falls through to the
+/// live merge; a live-merge failure means a backend may well be configured and
+/// unparseable, so it propagates — the lifecycle hook's fail-soft wrapper turns
+/// it into `llmenv: memory <event> skipped: {e}`, which names the real cause
+/// instead of the misleading "no memory backend active for this scope".
 fn resolve_bundle_memory_host(
     config: &crate::config::Config,
     bundle_refs: &[crate::merge::BundleRef],
@@ -1422,6 +1599,9 @@ fn resolve_bundle_memory_host(
     }
 
     let disk_hit = crate::merge::merge_signature(&config.capabilities, &config.native, bundle_refs)
+        .inspect_err(|e| {
+            tracing::warn!("failed to compute merge signature for cache lookup: {e}");
+        })
         .ok()
         .and_then(|key| {
             let cache_root =
@@ -1432,8 +1612,8 @@ fn resolve_bundle_memory_host(
         return Ok(hit);
     }
 
-    let merged =
-        crate::merge::merge(&config.capabilities, &config.native, bundle_refs).unwrap_or_default();
+    let merged = crate::merge::merge(&config.capabilities, &config.native, bundle_refs)
+        .context("failed to merge bundle capabilities for memory-backend resolution")?;
     let mem = merged
         .capabilities
         .features
@@ -1560,7 +1740,9 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
 /// that stores the fetched content in ICM with fast-falloff memory
 /// (importance: low, topic: web-fetch). The hook returns immediately instead of
 /// blocking on the MCP round trip. Best-effort — failures are logged at debug
-/// level and never propagated to the caller.
+/// level and never propagated to the caller. The child's stderr goes to the
+/// shared bounded log rather than `/dev/null` so its own failures are
+/// diagnosable (#1133).
 fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
     let Some(args) = web_fetch_store_args(payload) else {
         return;
@@ -1576,8 +1758,8 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("icm-store")
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::null());
+    redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::debug!("icm-store: failed to spawn detached store child");
@@ -1610,6 +1792,50 @@ fn codebase_memory_cache_dir(
 /// mcp-proxy log (#1086/#1091 share the "size-bounded" shape, not the exact
 /// size: indexing runs are far less frequent than proxy restarts).
 const CODEBASE_MEMORY_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
+
+/// Rotation bound for the detached hook children's shared stderr log. Same
+/// size as the indexer log for the same reason: these children run often but
+/// write nothing unless they fail.
+const DETACHED_CHILD_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
+
+/// Path of the stderr log shared by llmenv's detached hook children —
+/// `<state_dir>/detached-hook.log`.
+///
+/// # Errors
+/// Propagates `state_dir()` resolution failure.
+fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
+    Ok(crate::paths::state_dir()?.join("detached-hook.log"))
+}
+
+/// Point `cmd`'s stderr at `log_path` as a size-bounded diagnostic log.
+///
+/// If the log can't be opened the child still runs with stderr discarded — a
+/// missing diagnostic is a smaller problem than skipping the work.
+fn redirect_stderr_to_bounded_log(cmd: &mut std::process::Command, log_path: &std::path::Path) {
+    match crate::mcp::proxy::open_bounded_log(log_path, DETACHED_CHILD_LOG_MAX_BYTES) {
+        Ok(file) => {
+            cmd.stderr(std::process::Stdio::from(file));
+        }
+        Err(e) => {
+            tracing::debug!("detached child: log unavailable ({e:#}), stderr discarded");
+        }
+    }
+}
+
+/// Send a detached child's stderr to the shared bounded log instead of
+/// discarding it (#1133, the same remedy as #1091).
+///
+/// `Stdio::null()` leaves such a child with no report channel whatsoever: its
+/// own `tracing` events go to a fmt layer writing to that same null stderr, so
+/// a failure is discarded twice over.
+pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
+    match detached_child_log_path() {
+        Ok(path) => redirect_stderr_to_bounded_log(cmd, &path),
+        Err(e) => {
+            tracing::debug!("detached child: cannot resolve log path ({e:#}), stderr discarded");
+        }
+    }
+}
 
 /// Builds the `codebase-memory-mcp cli index_repository` subprocess command
 /// for `project_root`, without spawning it — kept separate so tests can
@@ -1674,7 +1900,8 @@ fn trigger_codebase_memory_index(
 
 /// Spawn a detached child to run post-session consolidation. Best-effort
 /// fire-and-forget — spawn failures are logged at debug level and the caller
-/// never waits on the child.
+/// never waits on the child. The child's stderr goes to the shared bounded log
+/// rather than `/dev/null` so its own failures are diagnosable (#1133).
 fn post_session_consolidation() {
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("consolidation-run: cannot resolve current_exe");
@@ -1683,8 +1910,8 @@ fn post_session_consolidation() {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("consolidation-run")
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::null());
+    redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
@@ -1776,8 +2003,8 @@ mod tests {
 
         let url = memory_url(&config, config_root.path(), &active).expect("test");
         assert_eq!(
-            url.as_deref(),
-            Some("http://still.local:7878/mcp"),
+            url,
+            MemoryEndpoint::Active("http://still.local:7878/mcp".into()),
             "memory_url must read the persisted merge cache instead of falling \
              back to a live merge of a bundle that declares no memory/host"
         );
@@ -1843,9 +2070,116 @@ mod tests {
 
         let url = memory_url(&config, config_root.path(), &active).expect("test");
         assert_eq!(
-            url.as_deref(),
-            Some("http://still.local:7878/mcp"),
+            url,
+            MemoryEndpoint::Active("http://still.local:7878/mcp".into()),
             "a key mismatch must fall back to a correct live merge, never the stale cache"
+        );
+    }
+
+    // #1133: the detached memory children were spawned with
+    // `stderr(Stdio::null())`, so nothing they reported could reach anyone —
+    // including the `tracing` events meant to compensate, whose sink is that
+    // same discarded stderr.
+    #[test]
+    fn redirect_stderr_to_bounded_log_captures_child_stderr() {
+        let dir = tempfile::tempdir().expect("test");
+        let log = dir.path().join("detached-hook.log");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("echo boom >&2");
+        redirect_stderr_to_bounded_log(&mut cmd, &log);
+
+        assert!(cmd.status().expect("test").success());
+        let body = std::fs::read_to_string(&log)
+            .expect("a detached child's stderr must reach a file, not /dev/null");
+        assert!(body.contains("boom"), "stderr not captured: {body}");
+    }
+
+    // Pins the shared log name: the three detached children, the docs, and any
+    // operator told where to look must all agree on one path.
+    #[test]
+    fn detached_child_log_path_is_named_under_the_state_dir() {
+        let path = detached_child_log_path().expect("test");
+        assert_eq!(
+            path.file_name().and_then(std::ffi::OsStr::to_str),
+            Some("detached-hook.log")
+        );
+        assert!(path.starts_with(crate::paths::state_dir().expect("test")));
+    }
+
+    /// Fixture for the two #1132 failure modes: a firing bundle whose
+    /// `bundle.yaml` is a *directory*, so every read of it fails with something
+    /// other than NotFound — the portable stand-in for the unreadable or
+    /// permission-denied bundle file whose error used to be swallowed.
+    fn unreadable_bundle_fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::config::Config,
+        crate::scope::ActiveScopes,
+    ) {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(bundle_dir.join("bundle.yaml")).expect("test");
+
+        let cache_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            cache: crate::config::Cache {
+                cache_dir: cache_dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![],
+            tags: std::collections::BTreeSet::from(["mytag".to_string()]),
+            extra_tags: std::collections::BTreeSet::new(),
+        };
+        (config_root, cache_dir, config, active)
+    }
+
+    // #1132: both of `resolve_bundle_memory_host`'s failure modes used to be
+    // discarded — the live merge via `unwrap_or_default()` (so a malformed or
+    // unreadable `bundle.yaml` collapsed to "no bundle memory" and the user was
+    // told `no memory backend active for this scope`, pointing them at their
+    // scope config, the one place the problem wasn't), and the cache-key
+    // computation via `.ok()` (so the #920 optimization silently never engaged,
+    // visible only as unexplained hook latency).
+    //
+    // Both are asserted in one test on purpose: `tracing` caches a callsite's
+    // interest globally on first hit, so a sibling test reaching the same
+    // `warn!` outside any subscriber would make a separate log-capture test
+    // order-dependent.
+    #[test]
+    fn memory_url_reports_both_bundle_merge_failure_modes() {
+        use tracing_subscriber::prelude::*;
+
+        let (config_root, _cache, config, active) = unreadable_bundle_fixture();
+        let log_dir = tempfile::tempdir().expect("test");
+        let log = log_dir.path().join("events.jsonl");
+        let sub = tracing_subscriber::registry().with(
+            crate::session_log::tracing_layer::FileLogLayer::new(
+                crate::session_log::file_sink::FileSink::new(log.clone()),
+            ),
+        );
+        let result = tracing::subscriber::with_default(sub, || {
+            memory_url(&config, config_root.path(), &active)
+        });
+
+        let err = result
+            .expect_err("a bundle merge failure must reach the caller, not be defaulted away");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bundle 'b'"),
+            "the error must name the bundle whose merge failed: {msg}"
+        );
+
+        let body = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            body.contains("merge signature"),
+            "a signature failure must be logged before falling back to a live merge: {body}"
         );
     }
 
@@ -1908,6 +2242,207 @@ mod tests {
         );
     }
 
+    /// A project scope that disables every bundle in `disable`.
+    fn disabling_project_scope(disable: &[&str]) -> crate::scope::ActiveScope {
+        crate::scope::ActiveScope {
+            id: "project".into(),
+            kind: "project",
+            tags: vec![],
+            project_root: None,
+            enable_bundles: vec![],
+            disable_bundles: disable.iter().map(|s| (*s).to_string()).collect(),
+            name: None,
+            description: None,
+            unknown_fields: vec![],
+        }
+    }
+
+    // #1131: with no bundles and no `features.memory` at all, nothing could have
+    // supplied a backend — distinct from "a bundle would have, but is disabled".
+    #[test]
+    fn memory_url_reports_no_bundles_fired_when_nothing_is_configured() {
+        let config_root = tempfile::tempdir().expect("test");
+        let config = crate::config::Config::default();
+        let active = crate::scope::ActiveScopes::default();
+
+        assert_eq!(
+            memory_url(&config, config_root.path(), &active).expect("test"),
+            MemoryEndpoint::NoBundlesFired
+        );
+    }
+
+    // #1131: bundles fired, they just declare no memory — the benign case, and
+    // the only one the old `Ok(None)` reading was ever right about.
+    #[test]
+    fn memory_url_reports_not_declared_when_firing_bundle_has_no_memory() {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).expect("test");
+        std::fs::write(bundle_dir.join("bundle.yaml"), "permissions: {}\n").expect("test");
+
+        let cache_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            cache: crate::config::Cache {
+                cache_dir: cache_dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            tags: std::collections::BTreeSet::from(["mytag".to_string()]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            memory_url(&config, config_root.path(), &active).expect("test"),
+            MemoryEndpoint::NotDeclared {
+                skipped_bundles: vec![]
+            }
+        );
+    }
+
+    // #1133: a firing bundle with no content directory is dropped by
+    // `build_bundle_refs` with a `warn!` the default `EnvFilter` discards — a
+    // third unlit road to "no memory backend". Named here instead, where it has
+    // a consequence the user can see.
+    #[test]
+    fn memory_url_names_firing_bundles_skipped_for_missing_content_dir() {
+        let config_root = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "ghost".into(),
+                when: vec!["mytag".into()],
+            }],
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            tags: std::collections::BTreeSet::from(["mytag".to_string()]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            memory_url(&config, config_root.path(), &active).expect("test"),
+            MemoryEndpoint::NotDeclared {
+                skipped_bundles: vec!["ghost".to_string()]
+            }
+        );
+    }
+
+    // #1131: the disabled-bundle case must name the bundle that would have
+    // supplied the backend, so the resulting message can point at
+    // `disable_bundles` instead of the user's scope/tag config.
+    #[test]
+    fn memory_url_reports_disable_bundles_as_the_cause() {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).expect("test");
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 7878\n",
+                "      when: [network-home]\n",
+                "host:\n",
+                "  still:\n",
+                "    addr: still.local\n",
+            ),
+        )
+        .expect("test");
+
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![disabling_project_scope(&["b"])],
+            tags: std::collections::BTreeSet::from([
+                "mytag".to_string(),
+                "network-home".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let resolved = memory_url(&config, config_root.path(), &active).expect("test");
+        assert_eq!(
+            resolved,
+            MemoryEndpoint::SuppressedByDisableBundles(vec!["b".to_string()]),
+            "the sole source of features.memory being disabled must be reported \
+             as such, not collapsed into `no memory backend active`"
+        );
+        let msg = resolved
+            .into_url()
+            .expect_err("test")
+            .to_string()
+            .to_lowercase();
+        assert!(
+            msg.contains("disable_bundles") && msg.contains('b'),
+            "the message must name disable_bundles and the bundle: {msg}"
+        );
+    }
+
+    // #1131: a top-level `features.memory` whose `server_host` lives only in a
+    // disabled bundle's `host:` table hard-errors with a host the user can see
+    // in their own config and nothing pointing at `disable_bundles`.
+    #[test]
+    fn memory_url_unknown_server_host_error_mentions_disable_bundles() {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).expect("test");
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "host:\n  still:\n    addr: still.local\n",
+        )
+        .expect("test");
+
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            features: Some(crate::config::Features {
+                memory: vec![crate::config::Memory {
+                    server_host: "still".into(),
+                    port: 7878,
+                    listen_host: "127.0.0.1".into(),
+                    when: vec!["mytag".into()],
+                    default_topics: vec![],
+                    default_type: None,
+                    default_importance: None,
+                    type_importance: std::collections::BTreeMap::new(),
+                    retention: None,
+                    auto_prune: false,
+                    consolidation: None,
+                    mcp_permissions: None,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![disabling_project_scope(&["b"])],
+            tags: std::collections::BTreeSet::from(["mytag".to_string()]),
+            ..Default::default()
+        };
+
+        let msg = format!(
+            "{:#}",
+            memory_url(&config, config_root.path(), &active).expect_err("test")
+        );
+        assert!(
+            msg.contains("disable_bundles") && msg.contains("still"),
+            "an unknown server_host supplied by a disabled bundle must say so: {msg}"
+        );
+    }
+
     // #1125: `memory_url` used to compute its firing-bundle set with an inline
     // filter that checked tag-match and `enable_bundles` but never
     // `disable_bundles`, so a bundle a project scope explicitly turns off still
@@ -1967,10 +2502,10 @@ mod tests {
         };
 
         let url = memory_url(&config, config_root.path(), &active).expect("test");
-        assert_eq!(
-            url, None,
+        assert!(
+            !matches!(url, MemoryEndpoint::Active(_)),
             "a bundle disabled via `disable_bundles` must not contribute its \
-             memory/host entries to memory_url resolution"
+             memory/host entries to memory_url resolution, got {url:?}"
         );
     }
 

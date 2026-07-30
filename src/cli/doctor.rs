@@ -151,6 +151,31 @@ pub(super) fn orphan_codebase_memory_entries<'a>(
         .collect()
 }
 
+/// Returns the bundles that declare `features.memory` but that the active
+/// scopes suppress via `disable_bundles`, when nothing else supplies a backend.
+///
+/// Every other memory check builds from the post-disable firing set, so the
+/// entry is already gone before doctor looks: memory works in `~/` and silently
+/// stops inside the project, with a green doctor (#1131).
+pub(super) fn memory_orphaned_by_disable_bundles(
+    config: &Config,
+    config_dir: &Path,
+    active: &crate::scope::ActiveScopes,
+    bundle_caps: &Capabilities,
+) -> Vec<String> {
+    let declares_memory = |caps: &Option<crate::config::Features>| {
+        caps.as_ref().is_some_and(|f| !f.memory.is_empty())
+    };
+    if declares_memory(&config.features) || declares_memory(&bundle_caps.features) {
+        return Vec::new();
+    }
+    crate::hook_run::suppressed_bundle_capabilities(config, config_dir, active)
+        .into_iter()
+        .filter(|(_, caps)| declares_memory(&caps.features))
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// Check whether a host address string is a loopback / local-only address.
 fn is_local_addr(addr: &str) -> bool {
     matches!(addr, "localhost" | "0.0.0.0" | "::" | "::0")
@@ -751,6 +776,17 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             }
         }
 
+        for name in
+            memory_orphaned_by_disable_bundles(&config, &config_dir, &active, &doctor_bundle_caps)
+        {
+            eprintln!(
+                "{warn} features.memory is only supplied by bundle {name}, which this \
+                 project disables via disable_bundles — memory recall/store and \
+                 session logging are inactive here"
+            );
+            orphan_count += 1;
+        }
+
         // Check codebase_memory entries (top-level + bundle-contributed).
         for when in orphan_codebase_memory_entries(&config, &doctor_bundle_caps, &emitted) {
             eprintln!("{warn} orphan codebase_memory: no scope emits its tags {when:?}");
@@ -960,6 +996,106 @@ mod tests {
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+
+    // -- memory_orphaned_by_disable_bundles --
+
+    /// Config root with one bundle `b` whose `bundle.yaml` declares a memory
+    /// backend, plus the `Config` selecting it and an active project scope that
+    /// disables it.
+    fn disabled_memory_bundle_fixture() -> (tempfile::TempDir, Config, crate::scope::ActiveScopes) {
+        let root = tempfile::tempdir().unwrap();
+        let bundle_dir = root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 7878\n",
+                "      when: [mytag]\n",
+                "host:\n",
+                "  still:\n",
+                "    addr: still.local\n",
+            ),
+        )
+        .unwrap();
+
+        let config = Config {
+            bundle: vec![Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![crate::scope::ActiveScope {
+                id: "project".into(),
+                kind: "project",
+                tags: vec![],
+                project_root: None,
+                enable_bundles: vec![],
+                disable_bundles: vec!["b".into()],
+                name: None,
+                description: None,
+                unknown_fields: vec![],
+            }],
+            tags: std::collections::BTreeSet::from(["mytag".to_string()]),
+            ..Default::default()
+        };
+        (root, config, active)
+    }
+
+    // #1131: memory works in `~/` and silently stops the moment you `cd` into a
+    // project that disables the only bundle supplying it — with a green doctor,
+    // because every other check builds from the post-disable firing set.
+    #[test]
+    fn doctor_flags_memory_orphaned_by_disable_bundles() {
+        let (root, config, active) = disabled_memory_bundle_fixture();
+        assert_eq!(
+            memory_orphaned_by_disable_bundles(
+                &config,
+                root.path(),
+                &active,
+                &Capabilities::default()
+            ),
+            vec!["b".to_string()]
+        );
+    }
+
+    // An active source of memory means nothing is orphaned, even though the
+    // same bundle is still disabled.
+    #[test]
+    fn doctor_does_not_flag_disabled_bundle_when_memory_is_active_anyway() {
+        let (root, mut config, active) = disabled_memory_bundle_fixture();
+        config.features = Some(Features {
+            memory: vec![Memory {
+                server_host: "still".into(),
+                port: 7878,
+                listen_host: "127.0.0.1".into(),
+                when: vec!["mytag".into()],
+                default_topics: vec![],
+                default_type: None,
+                default_importance: None,
+                type_importance: BTreeMap::new(),
+                retention: None,
+                auto_prune: false,
+                consolidation: None,
+                mcp_permissions: None,
+            }],
+            ..Default::default()
+        });
+        assert!(
+            memory_orphaned_by_disable_bundles(
+                &config,
+                root.path(),
+                &active,
+                &Capabilities::default()
+            )
+            .is_empty(),
+            "a top-level features.memory entry still supplies the backend"
+        );
+    }
 
     // -- bundles_with_missing_dirs --
 

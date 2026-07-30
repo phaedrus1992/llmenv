@@ -13,15 +13,17 @@ const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Child entrypoint: load config from disk, resolve the active memory backend
 /// the same way a hook process would, and run post-session consolidation. The
-/// child's stdout/stderr are null-redirected by the parent, so errors log via
-/// `tracing::warn!` for observability.
+/// parent points this child's stderr at a bounded log, and errors log via
+/// `tracing::error!` rather than `warn!` because the default `EnvFilter`
+/// (`RUST_LOG` unset) is ERROR-only and dropped the warning before it could
+/// reach that log (#1133).
 ///
 /// # Errors
 /// Malformed or missing config, no active memory backend, invalid backend URL,
 /// or an MCP call failure.
 pub fn run_consolidation() -> anyhow::Result<()> {
     run_consolidation_inner().inspect_err(|e| {
-        tracing::warn!("consolidation-run: detached consolidation failed: {e}");
+        tracing::error!("consolidation-run: detached consolidation failed: {e}");
     })
 }
 
@@ -33,8 +35,7 @@ fn run_consolidation_inner() -> anyhow::Result<()> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?
-        .ok_or_else(|| anyhow::anyhow!("no memory backend active for this scope"))?;
+    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
     let client = McpHttpClient::new(url, CONSOLIDATION_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
 

@@ -242,7 +242,16 @@ const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
 /// Read an optional `bundle.yaml` capability fragment from a bundle directory.
 /// Returns `None` when the file is absent — bundles carry capabilities only if
 /// they choose to.
-fn read_bundle_yaml(bundle_root: &Path, name: &str) -> anyhow::Result<Option<Capabilities>> {
+///
+/// `pub(crate)`: also called by `hook_run`'s memory diagnostics, which need one
+/// suppressed bundle's declarations without merging it into the manifest.
+///
+/// # Errors
+/// An unreadable file, invalid YAML, or an unknown top-level key.
+pub(crate) fn read_bundle_yaml(
+    bundle_root: &Path,
+    name: &str,
+) -> anyhow::Result<Option<Capabilities>> {
     let path = bundle_root.join("bundle.yaml");
     let s = match std::fs::read_to_string(&path) {
         Ok(s) => s,

@@ -2552,6 +2552,13 @@ pub(crate) fn build_bundle_refs(
             }
             let path = bundles_dir.join(name);
             if !path.exists() {
+                // Stays at `warn!` (which the default `EnvFilter` drops)
+                // because a content-less bundle is a documented, valid
+                // configuration and this runs on every hook event — promoting
+                // it would make a legitimate setup log an error continuously.
+                // The one place it silently changed an outcome, memory-endpoint
+                // resolution, names the skipped bundles itself instead
+                // (`hook_run::MemoryEndpoint::NotDeclared`, #1133).
                 tracing::warn!(
                     "bundle '{}' has no content directory at {}; \
                      skipping (tag-only bundle, or missing/deleted directory)",
@@ -3707,7 +3714,10 @@ fn all_consumed_tags(config: &Config) -> HashSet<String> {
 
 /// Bundle names referenced via marker `enable_bundles` in the currently
 /// active scopes.
-fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
+///
+/// `pub(crate)`: also called by `hook_run`, which must apply the same
+/// "would this bundle have fired?" rule when attributing a suppressed one.
+pub(crate) fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
     active
         .scopes
         .iter()
