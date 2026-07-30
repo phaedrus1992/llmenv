@@ -13,17 +13,18 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Child entrypoint: parse the `{content, topic, importance}` stdin payload,
 /// resolve the active memory backend the same way a hook process would, and
-/// store the memory. The child's stdout/stderr are null-redirected by the parent
-/// (`handle_web_fetch_post_tool_use`), so on error this also logs via
-/// `tracing::warn!` — otherwise the failure would be invisible even with
-/// `RUST_LOG=debug`, since there's no terminal to write to.
+/// store the memory. There's no terminal to write to, so on error this logs via
+/// `tracing::error!` and the parent (`handle_web_fetch_post_tool_use`) points
+/// the child's stderr at a bounded log — `error!` rather than `warn!` because
+/// the default `EnvFilter` (`RUST_LOG` unset) is ERROR-only and dropped the
+/// warning before it could reach that log (#1133).
 ///
 /// # Errors
 /// Malformed payload, no active memory backend, an invalid backend URL, or
 /// the MCP call itself failing.
 pub fn run_icm_store(payload_json: &str) -> anyhow::Result<()> {
     run_icm_store_inner(payload_json).inspect_err(|e| {
-        tracing::warn!("icm-store: detached store failed: {e}");
+        tracing::error!("icm-store: detached store failed: {e}");
     })
 }
 
@@ -37,8 +38,7 @@ fn run_icm_store_inner(payload_json: &str) -> anyhow::Result<()> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?
-        .ok_or_else(|| anyhow::anyhow!("no memory backend active for this scope"))?;
+    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
     let client = McpHttpClient::new(url, STORE_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
 
@@ -54,9 +54,33 @@ fn run_icm_store_inner(payload_json: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    // #1133: this child's only report channel is its (now log-redirected)
+    // stderr, and the default `EnvFilter` with `RUST_LOG` unset is ERROR-only —
+    // a `warn!` here was dropped before it could reach that log.
+    //
+    // The malformed-payload rejection is asserted in the same test on purpose:
+    // `tracing` caches a callsite's interest globally on first hit, so a
+    // sibling test reaching this `error!` outside any subscriber would make the
+    // capture order-dependent.
     #[test]
-    fn run_icm_store_rejects_malformed_payload_json() {
-        let err = run_icm_store("not json").unwrap_err();
+    fn run_icm_store_rejects_malformed_payload_json_and_logs_at_error_level() {
+        use tracing_subscriber::prelude::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        let sub = tracing_subscriber::registry().with(
+            crate::session_log::tracing_layer::FileLogLayer::new(
+                crate::session_log::file_sink::FileSink::new(log.clone()),
+            )
+            .with_filter(tracing_subscriber::filter::LevelFilter::ERROR),
+        );
+        let err = tracing::subscriber::with_default(sub, || run_icm_store("not json").unwrap_err());
+
         assert!(err.to_string().to_lowercase().contains("expected"));
+        let body = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            body.contains("detached store failed"),
+            "the failure must log at a level the default EnvFilter passes: {body}"
+        );
     }
 }
