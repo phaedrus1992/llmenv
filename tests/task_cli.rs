@@ -1116,3 +1116,380 @@ fn ls_respects_color_flag_over_tty_detection() {
         "unexpected ANSI with --color never:\n{never:?}"
     );
 }
+
+// --- task ls --current-project (#1117, #927) ---
+
+fn ls_json(dir: &std::path::Path, extra: &[&str]) -> Vec<serde_json::Value> {
+    let mut args = vec!["task", "ls", "--format", "json"];
+    args.extend_from_slice(extra);
+    let out = llmenv(dir).args(&args).output().unwrap();
+    assert!(out.status.success());
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn ls_current_project_matches_a_task_in_the_current_projects_session() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "in this project");
+    llmenv(dir.path())
+        .args(["task", "add", "My task"])
+        .assert()
+        .success();
+
+    let tasks = ls_json(dir.path(), &["--current-project"]);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["title"], "My task");
+}
+
+#[test]
+fn ls_current_project_excludes_a_task_from_a_different_project() {
+    let dir = TempDir::new().unwrap();
+    let other_project = TempDir::new().unwrap();
+    start_session(dir.path(), "in this project");
+    llmenv(dir.path())
+        .args(["task", "add", "My task"])
+        .assert()
+        .success();
+
+    // A session (and task) started from a different cwd resolves to a
+    // different project tag, even against the same LLMENV_STATE_DIR.
+    llmenv(dir.path())
+        .current_dir(other_project.path())
+        .args(["task", "session", "start", "elsewhere"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .current_dir(other_project.path())
+        .args(["task", "add", "Someone else's task"])
+        .assert()
+        .success();
+
+    let tasks = ls_json(dir.path(), &["--current-project"]);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["title"], "My task");
+}
+
+#[test]
+fn ls_current_project_excludes_a_task_with_no_session() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Tagged"])
+        .assert()
+        .success();
+
+    // Simulate a legacy task predating mandatory sessions (`session: null`).
+    let legacy_path = dir.path().join("tasks").join("legacy-task.json");
+    std::fs::write(
+        &legacy_path,
+        r#"{"slug":"legacy-task","title":"Legacy","state":"open",
+            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+
+    let tasks = ls_json(dir.path(), &["--current-project"]);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["title"], "Tagged");
+}
+
+#[test]
+fn ls_current_project_includes_a_task_from_a_finished_session() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "old sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Old task"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish", "old-sprint"])
+        .assert()
+        .success();
+
+    // No open session for this project at all — --current-project must
+    // still surface a finished session's task, not require an open one.
+    let tasks = ls_json(dir.path(), &["--current-project"]);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["title"], "Old task");
+}
+
+#[test]
+fn ls_current_project_with_no_sessions_at_all_is_empty_not_an_error() {
+    let dir = TempDir::new().unwrap();
+    let tasks = ls_json(dir.path(), &["--current-project"]);
+    assert_eq!(tasks.len(), 0);
+}
+
+#[test]
+fn ls_current_project_composes_with_session_and_state_filters() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint 1");
+    llmenv(dir.path())
+        .args(["task", "add", "Task one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "task-one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task two"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "sprint 2", "--new"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task three", "--session", "sprint-2"])
+        .assert()
+        .success();
+
+    let tasks = ls_json(
+        dir.path(),
+        &[
+            "--current-project",
+            "--session",
+            "sprint-1",
+            "--state",
+            "wip",
+        ],
+    );
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["title"], "Task one");
+}
+
+// --- task show --current / --next (#1117, #928) ---
+
+#[test]
+fn show_current_resolves_the_wip_task() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Task one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task two"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "task-one"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "show", "--current"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let task: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(task["slug"], "task-one");
+}
+
+#[test]
+fn show_current_falls_back_to_most_recently_updated_non_done_task_without_a_wip_task() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Task one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task two"])
+        .assert()
+        .success();
+    // now_rfc3339() is second-precision — sleep past the second boundary so
+    // task-two's post-note updated_at is unambiguously later than task-one's.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    llmenv(dir.path())
+        .args(["task", "note", "task-two", "a note"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "show", "--current"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(task["slug"], "task-two");
+}
+
+#[test]
+fn show_current_with_no_open_session_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "show", "--current"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no open session"));
+}
+
+#[test]
+fn show_current_and_next_are_mutually_exclusive() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "show", "--current", "--next"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn show_current_conflicts_with_a_positional_id() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "show", "some-id", "--current"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn show_neither_id_nor_current_nor_next_errors() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "show"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--current"));
+}
+
+#[test]
+fn show_next_skips_blocked_and_done_tasks() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    // Slugs are numbered so their alphabetical order matches creation order
+    // even if two tasks land in the same second-precision `created_at`.
+    llmenv(dir.path())
+        .args(["task", "add", "Task 1 current"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "task-1-current"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task 2 blocked"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "block", "task-2-blocked", "--on", "task-1-current"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task 3 finished"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "done", "task-3-finished"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Task 4 actionable"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "show", "--next"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(task["slug"], "task-4-actionable");
+}
+
+#[test]
+fn show_next_prefers_child_over_next_sibling() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Parent epic"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "parent-epic"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Child step", "--parent", "parent-epic"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Sibling task"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "show", "--next"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(task["slug"], "child-step");
+}
+
+#[test]
+fn show_current_with_no_qualifying_task_reports_none_without_erroring() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Only task"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "done", "only-task"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "show", "--current"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No current task."));
+}
+
+#[test]
+fn show_current_shows_a_separate_block_per_open_session_for_the_project() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint 1");
+    llmenv(dir.path())
+        .args(["task", "add", "First"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "first"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "start", "sprint 2", "--new"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Second", "--session", "sprint-2"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "second"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "show", "--current"])
+        .output()
+        .unwrap();
+    let out = String::from_utf8(out.stdout).unwrap();
+    assert!(out.contains("sprint 1"), "expected sprint 1 header:\n{out}");
+    assert!(out.contains("sprint 2"), "expected sprint 2 header:\n{out}");
+    assert!(
+        out.contains("\"slug\": \"first\""),
+        "expected first task:\n{out}"
+    );
+    assert!(
+        out.contains("\"slug\": \"second\""),
+        "expected second task:\n{out}"
+    );
+    assert!(
+        out.contains("---"),
+        "expected a separator between session blocks:\n{out}"
+    );
+}

@@ -710,23 +710,95 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
             return Vec::new();
         }
     };
-    let session_ids: std::collections::HashSet<String> = session::list_sessions(state_dir)
-        .into_iter()
-        .filter(|s| s.project == project)
-        .map(|s| s.id)
-        .collect();
+    let session_ids = session::session_ids_for_project(state_dir, &project);
+    filter_tasks_by_session_ids(tasks, &session_ids)
+}
+
+/// Keep only tasks whose `session` is one of `session_ids` — the shared
+/// filter behind `task ls --current-project` (#1117) and the
+/// SessionStart/Stop hook reminders ([`tasks_for_current_project`]). Legacy
+/// tasks with no `session` (predate mandatory sessions) are dropped: they
+/// can't be attributed to any project, and the conservative default is to
+/// never surface a task we can't attribute.
+#[must_use]
+pub fn filter_tasks_by_session_ids(
+    tasks: Vec<Task>,
+    session_ids: &std::collections::HashSet<String>,
+) -> Vec<Task> {
     tasks
         .into_iter()
-        // Legacy tasks with no `session` (predate mandatory sessions) are
-        // dropped here rather than surfaced cross-project: they can't be
-        // attributed to any project, and the conservative default is to
-        // never nag about a task we can't attribute.
         .filter(|t| {
             t.session
                 .as_deref()
                 .is_some_and(|sid| session_ids.contains(sid))
         })
         .collect()
+}
+
+/// Resolve the "current" task for `task show --current`/`--next` (#1117):
+/// the `wip` task (most recently updated, if somehow more than one),
+/// falling back to the most recently updated non-`done` task when nothing
+/// is `wip`. `tasks` is expected to already be scoped to one session — this
+/// makes no session judgment of its own.
+#[must_use]
+pub fn resolve_current_task(tasks: &[Task]) -> Option<Task> {
+    tasks
+        .iter()
+        .filter(|t| t.state == TaskState::Wip)
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+        .or_else(|| {
+            tasks
+                .iter()
+                .filter(|t| t.state != TaskState::Done)
+                .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+        })
+        .cloned()
+}
+
+/// Resolve the next actionable task after `current`, in the same
+/// parent-before-children execution order `task ls` displays (#926): walk
+/// forward from `current`'s position among `session_tasks`, skipping `done`
+/// tasks and any task whose `blocked_on` refs aren't all `done` (resolved
+/// against `all_tasks`, since a blocker can live in a different session than
+/// the task it blocks). `None` if `current` isn't found in `session_tasks`,
+/// or nothing after it qualifies.
+#[must_use]
+pub fn resolve_next_task(
+    all_tasks: &[Task],
+    session_tasks: &[Task],
+    current: &Task,
+) -> Option<Task> {
+    let by_slug: std::collections::HashMap<&str, &Task> =
+        all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+    let order = execution_order(session_tasks);
+    let pos = order.iter().position(|t| t.slug == current.slug)?;
+    order
+        .into_iter()
+        .skip(pos + 1)
+        .find(|t| is_actionable(t, &by_slug))
+}
+
+/// True when `task` isn't `done` and every one of its `blocked_on` refs
+/// resolves (via `by_slug`) to a `done` task. A dangling or not-yet-done
+/// blocker keeps the task non-actionable — fail closed rather than treat an
+/// unresolvable reference as satisfied.
+fn is_actionable(task: &Task, by_slug: &std::collections::HashMap<&str, &Task>) -> bool {
+    task.state != TaskState::Done
+        && task.blocked_on.iter().all(|b| {
+            by_slug
+                .get(b.as_str())
+                .is_some_and(|blocker| blocker.state == TaskState::Done)
+        })
+}
+
+/// Parent-before-children execution order for a single session's tasks — the
+/// same forest ordering [`display_rows`] uses for `task ls`, reused as the
+/// walk order for `task show --next`'s parent/child chaining.
+fn execution_order(tasks: &[Task]) -> Vec<Task> {
+    let refs: Vec<&Task> = tasks.iter().collect();
+    let mut rows = Vec::new();
+    append_forest(&refs, &mut rows);
+    rows.into_iter().map(|r| r.task).collect()
 }
 
 /// For every session open for the current project (resolved from the
@@ -1547,6 +1619,119 @@ mod tests {
             kept.iter().map(|x| x.slug.as_str()).collect::<Vec<_>>(),
             ["b", "c"]
         );
+    }
+
+    // --- task ls --current-project / task show --current/--next (#1117) ---
+
+    /// Like `t`, but with an explicit `updated_at` — needed to exercise
+    /// [`resolve_current_task`]'s "most recently updated" tiebreak, which
+    /// `t`'s fixed timestamp can't.
+    fn t_updated(slug: &str, state: TaskState, session: Option<&str>, updated_at: &str) -> Task {
+        Task {
+            updated_at: updated_at.to_string(),
+            ..t(slug, state, None, session)
+        }
+    }
+
+    #[test]
+    fn filter_tasks_by_session_ids_keeps_only_matching_sessions() {
+        let tasks = vec![
+            t("a", TaskState::Open, None, Some("s1")),
+            t("b", TaskState::Open, None, Some("s2")),
+            t("c", TaskState::Open, None, None),
+        ];
+        let ids: std::collections::HashSet<String> = ["s1".to_string()].into_iter().collect();
+        let kept = filter_tasks_by_session_ids(tasks, &ids);
+        assert_eq!(
+            kept.iter().map(|x| x.slug.as_str()).collect::<Vec<_>>(),
+            ["a"]
+        );
+    }
+
+    #[test]
+    fn resolve_current_task_prefers_wip_over_open() {
+        let tasks = vec![
+            t_updated("open", TaskState::Open, Some("s"), "2026-01-01T00:00:02Z"),
+            t_updated("wip", TaskState::Wip, Some("s"), "2026-01-01T00:00:01Z"),
+        ];
+        let current = resolve_current_task(&tasks).expect("test");
+        assert_eq!(current.slug, "wip");
+    }
+
+    #[test]
+    fn resolve_current_task_falls_back_to_most_recently_updated_non_done_task() {
+        let tasks = vec![
+            t_updated("older", TaskState::Open, Some("s"), "2026-01-01T00:00:01Z"),
+            t_updated(
+                "newer",
+                TaskState::Waiting,
+                Some("s"),
+                "2026-01-01T00:00:02Z",
+            ),
+            t_updated("done", TaskState::Done, Some("s"), "2026-01-01T00:00:03Z"),
+        ];
+        let current = resolve_current_task(&tasks).expect("test");
+        assert_eq!(current.slug, "newer");
+    }
+
+    #[test]
+    fn resolve_current_task_none_when_everything_is_done() {
+        let tasks = vec![t("done", TaskState::Done, None, Some("s"))];
+        assert!(resolve_current_task(&tasks).is_none());
+    }
+
+    #[test]
+    fn resolve_next_task_skips_done_and_blocked_tasks() {
+        let current = t("a", TaskState::Wip, None, Some("s"));
+        let mut blocked = t("b", TaskState::Open, None, Some("s"));
+        blocked.blocked_on = vec!["a".to_string()]; // "a" (current) isn't done yet
+        let done = t("c", TaskState::Done, None, Some("s"));
+        let actionable = t("d", TaskState::Open, None, Some("s"));
+        let session_tasks = vec![current.clone(), blocked, done, actionable.clone()];
+
+        let next = resolve_next_task(&session_tasks, &session_tasks, &current).expect("test");
+        assert_eq!(next.slug, "d");
+    }
+
+    #[test]
+    fn resolve_next_task_resolves_blockers_against_all_tasks_not_just_the_session() {
+        let current = t("a", TaskState::Wip, None, Some("s"));
+        // Blocker lives in a different session than the blocked task.
+        let mut blocked = t("b", TaskState::Open, None, Some("s"));
+        blocked.blocked_on = vec!["elsewhere".to_string()];
+        let blocker = t("elsewhere", TaskState::Open, None, Some("other-session"));
+        let session_tasks = vec![current.clone(), blocked];
+        let all_tasks = vec![current.clone(), session_tasks[1].clone(), blocker];
+
+        assert!(resolve_next_task(&all_tasks, &session_tasks, &current).is_none());
+    }
+
+    #[test]
+    fn resolve_next_task_prefers_child_over_next_sibling() {
+        let parent = t("p", TaskState::Wip, None, Some("s"));
+        let child = t("c", TaskState::Open, Some("p"), Some("s"));
+        let sibling = t("sib", TaskState::Open, None, Some("s"));
+        let session_tasks = vec![parent.clone(), child, sibling];
+
+        let next = resolve_next_task(&session_tasks, &session_tasks, &parent).expect("test");
+        assert_eq!(
+            next.slug, "c",
+            "next after a parent must be its child, not a sibling"
+        );
+    }
+
+    #[test]
+    fn resolve_next_task_none_when_current_not_found() {
+        let stray = t("stray", TaskState::Wip, None, Some("s"));
+        let session_tasks = vec![t("a", TaskState::Open, None, Some("s"))];
+        assert!(resolve_next_task(&session_tasks, &session_tasks, &stray).is_none());
+    }
+
+    #[test]
+    fn resolve_next_task_none_when_current_is_last() {
+        let current = t("a", TaskState::Wip, None, Some("s"));
+        let session_tasks = vec![current.clone()];
+        assert!(resolve_next_task(&session_tasks, &session_tasks, &current).is_none());
     }
 
     #[test]
