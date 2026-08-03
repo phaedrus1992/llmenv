@@ -392,28 +392,40 @@ fn keychain_account() -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("USER is unset; cannot address the keychain credential item"))
 }
 
+/// `security find-generic-password`'s exit code for "no matching item"
+/// (errSecItemNotFound, OSStatus -25300) — verified empirically, since
+/// `security` does not document its exit codes. Classifying on this rather
+/// than on stderr text matters (#1092): `security` localizes its error
+/// strings via `SecCopyErrorMessageString`, so on a non-English system a
+/// string match would silently miss every failure and collapse back to the
+/// same "absent" outcome the classification exists to avoid.
+#[cfg(target_os = "macos")]
+const SECURITY_ITEM_NOT_FOUND_EXIT_CODE: i32 = 44;
+
 /// Why `security find-generic-password` failed — distinguishing these matters
-/// because "locked" and "absent" call for different user-facing responses
-/// (#1092): a locked keychain should surface as a distinct, actionable error,
-/// not collapse into the same "no credential stored" outcome as a genuinely
-/// missing item.
+/// because "genuinely absent" and "everything else" call for different
+/// user-facing responses (#1092): a real problem (locked keychain,
+/// permission error, …) should surface as an error, not collapse into the
+/// same "no credential stored" outcome as a missing item.
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeychainReadFailure {
-    /// The keychain needs unlocking before it can be searched
-    /// (errSecInteractionNotAllowed, -25308).
-    Locked,
-    /// No matching item exists (the common, expected case).
+    /// No matching item exists — the common, expected case
+    /// ([`SECURITY_ITEM_NOT_FOUND_EXIT_CODE`]).
     Absent,
+    /// Any other failure: locked keychain, permission error, I/O error, etc.
+    /// Treated as a real problem rather than "no credential stored".
+    Other,
 }
 
 /// Classify a failed `security find-generic-password` invocation from its
-/// stderr. Pure string matching so it's testable without a real keychain.
-fn classify_keychain_read_failure(stderr: &str) -> KeychainReadFailure {
-    let lower = stderr.to_ascii_lowercase();
-    if lower.contains("interaction is not allowed") || lower.contains("-25308") {
-        KeychainReadFailure::Locked
-    } else {
+/// exit status. Pure function so it's testable without a real keychain.
+#[cfg(target_os = "macos")]
+fn classify_keychain_read_failure(status: &std::process::ExitStatus) -> KeychainReadFailure {
+    if status.code() == Some(SECURITY_ITEM_NOT_FOUND_EXIT_CODE) {
         KeychainReadFailure::Absent
+    } else {
+        KeychainReadFailure::Other
     }
 }
 
@@ -434,15 +446,17 @@ fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<Credentials>> {
         .map_err(|e| anyhow::anyhow!("running `security find-generic-password`: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return match classify_keychain_read_failure(&stderr) {
-            KeychainReadFailure::Locked => Err(anyhow::anyhow!(
-                "keychain is locked; unlock it (e.g. `security unlock-keychain`) and retry \
-                 (service {service})"
-            )),
+        return match classify_keychain_read_failure(&out.status) {
             KeychainReadFailure::Absent => {
                 tracing::debug!("keychain item {service} not found: {}", stderr.trim());
                 Ok(None)
             }
+            KeychainReadFailure::Other => Err(anyhow::anyhow!(
+                "keychain lookup failed for service {service} (status {}): {}. If the \
+                 keychain is locked, unlock it (e.g. `security unlock-keychain`) and retry.",
+                out.status,
+                stderr.trim()
+            )),
         };
     }
     // Deliberately not logged or surfaced — stdout is the token itself.
@@ -497,13 +511,22 @@ fn keychain_write(config_dir: &Path, creds: &Credentials) -> anyhow::Result<()> 
         .stdout(std::process::Stdio::null())
         .output()
         .map_err(|e| anyhow::anyhow!("running `security add-generic-password`: {e}"))?;
+    let stderr = redact_blob_from_stderr(&String::from_utf8_lossy(&out.stderr), &blob);
     anyhow::ensure!(
         out.status.success(),
         "`security add-generic-password` failed for service {service} (status {}): {}",
         out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
+        stderr.trim()
     );
     Ok(())
+}
+
+/// `blob` must never reach a log line or error message (see [`keychain_write`]'s
+/// doc comment): redact it from `stderr` on the off chance a future `security`
+/// diagnostic echoes back its own argv.
+#[cfg(target_os = "macos")]
+fn redact_blob_from_stderr(stderr: &str, blob: &str) -> String {
+    stderr.replace(blob, "<redacted>")
 }
 
 /// Wall clock in epoch milliseconds — the unit Claude Code's expiry fields use.
@@ -522,39 +545,49 @@ mod tests {
 
     // -- keychain_read failure classification (#1092) --
 
-    #[test]
-    fn classifies_interaction_not_allowed_stderr_as_locked() {
-        let stderr = "security: SecKeychainSearchCopyNext: User interaction is not allowed.\n";
-        assert_eq!(
-            classify_keychain_read_failure(stderr),
-            KeychainReadFailure::Locked
-        );
+    #[cfg(target_os = "macos")]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        std::os::unix::process::ExitStatusExt::from_raw(code << 8)
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn classifies_error_code_25308_stderr_as_locked() {
-        let stderr = "security: SecKeychainItemCopyContent: -25308\n";
+    fn classifies_item_not_found_exit_code_as_absent() {
         assert_eq!(
-            classify_keychain_read_failure(stderr),
-            KeychainReadFailure::Locked
-        );
-    }
-
-    #[test]
-    fn classifies_item_not_found_stderr_as_absent() {
-        let stderr = "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n";
-        assert_eq!(
-            classify_keychain_read_failure(stderr),
+            classify_keychain_read_failure(&exit_status(SECURITY_ITEM_NOT_FOUND_EXIT_CODE)),
             KeychainReadFailure::Absent
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn classifies_empty_stderr_as_absent() {
-        assert_eq!(
-            classify_keychain_read_failure(""),
-            KeychainReadFailure::Absent
-        );
+    fn classifies_any_other_exit_code_as_other() {
+        for code in [1, 36, 51, 2] {
+            assert_eq!(
+                classify_keychain_read_failure(&exit_status(code)),
+                KeychainReadFailure::Other,
+                "exit code {code} should classify as Other"
+            );
+        }
+    }
+
+    // -- keychain_write stderr redaction (#1092) --
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn redacts_blob_from_stderr_when_present() {
+        let blob = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-TESTONLY"}}"#;
+        let stderr = format!("security: usage error near argument `{blob}`\n");
+        let redacted = redact_blob_from_stderr(&stderr, blob);
+        assert!(!redacted.contains(blob), "blob leaked into: {redacted}");
+        assert!(redacted.contains("<redacted>"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn redact_blob_from_stderr_is_a_noop_when_blob_absent() {
+        let stderr = "security: SecKeychainAddGenericPassword: Permission denied\n";
+        assert_eq!(redact_blob_from_stderr(stderr, "some-blob"), stderr);
     }
 
     /// Comfortably in the past, so a blob using it is expired under any real clock.
