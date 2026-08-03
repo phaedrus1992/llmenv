@@ -9,7 +9,7 @@
 //! fire on every turn, are detached.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -38,10 +38,15 @@ struct RecordPayload {
 /// mirroring every other session-log sink. The child's stderr goes to the
 /// shared bounded log rather than `/dev/null` so its own failures are
 /// diagnosable (#1133).
-pub fn spawn_record(session_id: &str, ev: &SessionLogEvent) {
+///
+/// Returns the spawned [`Child`] purely so callers such as tests can reap it
+/// (#1095) — production intentionally drops it unwaited, identical to the
+/// previous behavior, since the child is process-group-detached and outlives
+/// this process regardless.
+pub fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Child> {
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("session_log: cannot resolve current_exe for detached record");
-        return;
+        return None;
     };
     let payload = RecordPayload {
         session_id: session_id.to_string(),
@@ -49,7 +54,7 @@ pub fn spawn_record(session_id: &str, ev: &SessionLogEvent) {
     };
     let Ok(payload_json) = serde_json::to_string(&payload) else {
         tracing::debug!("session_log: cannot serialize event for detached record");
-        return;
+        return None;
     };
     let mut cmd = Command::new(exe);
     cmd.arg("session-log-record")
@@ -59,7 +64,7 @@ pub fn spawn_record(session_id: &str, ev: &SessionLogEvent) {
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::debug!("session_log: failed to spawn detached record child");
-        return;
+        return None;
     };
     if let Some(mut stdin) = child.stdin.take()
         // Small, already-truncated payload: this write fits the pipe buffer
@@ -68,7 +73,9 @@ pub fn spawn_record(session_id: &str, ev: &SessionLogEvent) {
     {
         tracing::debug!("session_log: failed to pipe event to detached child: {e}");
     }
-    // Not waited on: the child is process-group-detached and outlives us.
+    // Not waited on by the caller: the child is process-group-detached and
+    // outlives us.
+    Some(child)
 }
 
 /// Child entrypoint: parse the `{session_id, event}` stdin payload, resolve
@@ -144,11 +151,38 @@ mod tests {
         // 5-second timeout to tolerate high parallel test load while still
         // catching any actual blocking behavior.
         let start = std::time::Instant::now();
-        spawn_record("sess-1", &ev());
+        let child = spawn_record("sess-1", &ev());
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
             "spawn_record must not block on the child"
         );
+        // Reap: production deliberately never waits (the child is
+        // process-group-detached), but this test process is still its OS
+        // parent — leaving it un-waited leaks a zombie for the rest of the
+        // cargo-test run (#1095).
+        if let Some(mut child) = child {
+            reap(&mut child, std::time::Duration::from_secs(5));
+        }
+    }
+
+    /// Wait for `child` to exit, bounded by `timeout`; force-kill and wait
+    /// again if it doesn't exit in time. Used only to keep test-spawned
+    /// children from outliving the test run (#1095).
+    fn reap(child: &mut std::process::Child, timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if start.elapsed() < timeout => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+            }
+        }
     }
 
     // #1133: this child's only report channel is its (now log-redirected)
