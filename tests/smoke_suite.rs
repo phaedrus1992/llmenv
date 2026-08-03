@@ -200,8 +200,9 @@ fn llmenv_cmd(
 /// genuine hang (the DNS-resolution hang in #547, the multi-minute backend
 /// crash in #548).
 const SHORT_TIMEOUT_SECS: u64 = 15;
-/// Budget for heavier operations (`export`, `regenerate`) that do more I/O.
-/// Same contention-tolerance rationale as `SHORT_TIMEOUT_SECS` (#1096).
+/// Budget for heavier operations (anything other than a single hook event —
+/// `export`, `regenerate`, `doctor`, `status`). Same contention-tolerance
+/// rationale as `SHORT_TIMEOUT_SECS` (#1096).
 const LONG_TIMEOUT_SECS: u64 = 30;
 
 /// Run a command with an explicit timeout and assert it completes within that time.
