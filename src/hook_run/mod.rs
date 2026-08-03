@@ -877,7 +877,8 @@ fn run_inner(
                 // with fast-falloff memory (topic: web-fetch, importance: low) so it
                 // survives session compactions but decays quickly. (#579)
                 if event == HookEvent::PostToolUse {
-                    handle_web_fetch_post_tool_use(stdin_payload);
+                    // Detached: process-group-detached and outlives us regardless.
+                    let _detached_child = handle_web_fetch_post_tool_use(stdin_payload);
                 }
             }
             run_session_log(event, &session_log, stdin_payload).await;
@@ -1249,7 +1250,8 @@ fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id: Option<&s
         && ev.scope == EventScope::AgentSession
         && let Some(sid) = session_id
     {
-        crate::session_log::detached::spawn_record(sid, &ev);
+        // Detached: process-group-detached and outlives us regardless.
+        let _detached_child = crate::session_log::detached::spawn_record(sid, &ev);
     }
 }
 
@@ -1756,17 +1758,20 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
 /// level and never propagated to the caller. The child's stderr goes to the
 /// shared bounded log rather than `/dev/null` so its own failures are
 /// diagnosable (#1133).
-fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
-    let Some(args) = web_fetch_store_args(payload) else {
-        return;
-    };
+///
+/// Returns the spawned [`std::process::Child`] purely so callers such as
+/// tests can reap it (#1095) — production intentionally drops it unwaited,
+/// identical to the previous behavior, since the child is
+/// process-group-detached and outlives this process regardless.
+fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::process::Child> {
+    let args = web_fetch_store_args(payload)?;
     let Ok(payload_json) = serde_json::to_string(&args) else {
         tracing::debug!("icm-store: failed to serialize store args");
-        return;
+        return None;
     };
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("icm-store: cannot resolve current_exe for detached store");
-        return;
+        return None;
     };
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("icm-store")
@@ -1776,14 +1781,16 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) {
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::debug!("icm-store: failed to spawn detached store child");
-        return;
+        return None;
     };
     if let Some(mut stdin) = child.stdin.take()
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
         tracing::debug!("icm-store: failed to pipe args to detached child: {e}");
     }
-    // Not waited on: the child is process-group-detached and outlives us.
+    // Not waited on by the caller: the child is process-group-detached and
+    // outlives us.
+    Some(child)
 }
 
 /// Where codebase-memory-mcp's index cache lives for `cm`/`state_dir`: the
@@ -3543,11 +3550,38 @@ mod tests {
         // instantly; the parent never waits on it, so this call itself must
         // return promptly.
         let start = std::time::Instant::now();
-        handle_web_fetch_post_tool_use(&payload);
+        let child = handle_web_fetch_post_tool_use(&payload);
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
             "handle_web_fetch_post_tool_use must not block on the child"
         );
+        // Reap: production deliberately never waits (the child is
+        // process-group-detached), but this test process is still its OS
+        // parent — leaving it un-waited leaks a zombie for the rest of the
+        // cargo-test run (#1095).
+        if let Some(mut child) = child {
+            reap_test_child(&mut child, std::time::Duration::from_secs(5));
+        }
+    }
+
+    /// Wait for `child` to exit, bounded by `timeout`; force-kill and wait
+    /// again if it doesn't exit in time. Used only to keep test-spawned
+    /// children from outliving the test run (#1095).
+    fn reap_test_child(child: &mut std::process::Child, timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if start.elapsed() < timeout => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+            }
+        }
     }
 }
 #[cfg(test)]
