@@ -121,7 +121,7 @@ fn build_prompt(config: &crate::config::Config, summaries: &[String]) -> String 
 async fn call_claude(prompt: &str) -> anyhow::Result<String> {
     let mut cmd = tokio::process::Command::new("claude");
     cmd.arg("-p");
-    let mut child = build_child(cmd)?;
+    let mut child = spawn_with_kill_on_drop(cmd)?;
 
     // Write prompt to stdin and close it
     if let Some(mut stdin) = child.stdin.take() {
@@ -148,7 +148,9 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
 /// [`call_claude`]'s [`LLM_TIMEOUT`]) keeps running as an orphan — dropping a
 /// `Child` handle is not termination (#1093, same root cause as the
 /// `mcp-proxy` orphan fixed in #1087).
-fn build_child(mut cmd: tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+fn spawn_with_kill_on_drop(
+    mut cmd: tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -374,7 +376,6 @@ pub async fn run(config: &crate::config::Config, client: &McpHttpClient) -> anyh
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "test code")]
-#[expect(clippy::panic, reason = "test assertion failure message")]
 mod tests {
     use proptest::prelude::*;
 
@@ -478,29 +479,30 @@ mod tests {
     /// installed.
     #[tokio::test]
     async fn timeout_kills_the_child_instead_of_orphaning_it() {
-        let mut cmd = build_child(tokio_command("sleep", &["30"])).expect("spawn sleep 30");
-        let pid = cmd.id().expect("child has a pid");
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("30");
+        let mut child = spawn_with_kill_on_drop(cmd).expect("spawn sleep 30");
+        let pid = child.id().expect("child has a pid");
 
-        let result = tokio::time::timeout(Duration::from_millis(50), cmd.wait()).await;
+        let result = tokio::time::timeout(Duration::from_millis(50), child.wait()).await;
         assert!(result.is_err(), "`sleep 30` should not exit within 50ms");
 
-        drop(cmd); // triggers kill_on_drop if set
+        drop(child); // triggers kill_on_drop if set
 
         // kill_on_drop's SIGKILL + async reap isn't instantaneous — poll with
         // a generous bound rather than asserting immediately after drop.
+        let mut still_alive = true;
         for _ in 0..100 {
             if crate::mcp::proxy::is_alive(pid) != Some(true) {
-                return;
+                still_alive = false;
+                break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("pid {pid} was still alive 2s after dropping the timed-out child");
-    }
-
-    fn tokio_command(program: &str, args: &[&str]) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(program);
-        cmd.args(args);
-        cmd
+        assert!(
+            !still_alive,
+            "pid {pid} was still alive 2s after dropping the timed-out child"
+        );
     }
 
     proptest! {
