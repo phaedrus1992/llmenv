@@ -877,7 +877,8 @@ fn run_inner(
                 // with fast-falloff memory (topic: web-fetch, importance: low) so it
                 // survives session compactions but decays quickly. (#579)
                 if event == HookEvent::PostToolUse {
-                    handle_web_fetch_post_tool_use(stdin_payload);
+                    // Detached: process-group-detached and outlives us regardless.
+                    let _detached_child = handle_web_fetch_post_tool_use(stdin_payload);
                 }
             }
             run_session_log(event, &session_log, stdin_payload).await;
@@ -1249,7 +1250,8 @@ fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id: Option<&s
         && ev.scope == EventScope::AgentSession
         && let Some(sid) = session_id
     {
-        crate::session_log::detached::spawn_record(sid, &ev);
+        // Detached: process-group-detached and outlives us regardless.
+        let _detached_child = crate::session_log::detached::spawn_record(sid, &ev);
     }
 }
 
