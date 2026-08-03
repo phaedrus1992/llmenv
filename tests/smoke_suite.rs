@@ -193,6 +193,18 @@ fn llmenv_cmd(
     cmd
 }
 
+/// Budget for cheap operations (a single hook event). Contention-tolerant
+/// (#1096): the binary runs all ~28 of this suite's tests in parallel, and
+/// under load any one of them can lose the race against a fixed 5s budget —
+/// this isn't specific to any one test. Still tight enough to fail fast on a
+/// genuine hang (the DNS-resolution hang in #547, the multi-minute backend
+/// crash in #548).
+const SHORT_TIMEOUT_SECS: u64 = 15;
+/// Budget for heavier operations (anything other than a single hook event —
+/// `export`, `regenerate`, `doctor`, `status`). Same contention-tolerance
+/// rationale as `SHORT_TIMEOUT_SECS` (#1096).
+const LONG_TIMEOUT_SECS: u64 = 30;
+
 /// Run a command with an explicit timeout and assert it completes within that time.
 /// Returns the assert result for further validation.
 fn assert_completes_within(mut cmd: Command, timeout_secs: u64) -> assert_cmd::assert::Assert {
@@ -208,7 +220,7 @@ fn assert_completes_within(mut cmd: Command, timeout_secs: u64) -> assert_cmd::a
 fn smoke_claude_code_basic_export() {
     let (dir, config_path) = setup_config(&config_base("claude-code"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "export");
-    assert_completes_within(cmd, 10)
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS)
         .success()
         .stdout(predicate::str::contains("export "));
 }
@@ -217,7 +229,7 @@ fn smoke_claude_code_basic_export() {
 fn smoke_crush_basic_export() {
     let (dir, config_path) = setup_config(&config_base("crush"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "export");
-    assert_completes_within(cmd, 10)
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS)
         .success()
         .stdout(predicate::str::contains("export "));
 }
@@ -226,14 +238,14 @@ fn smoke_crush_basic_export() {
 fn smoke_claude_code_basic_regenerate() {
     let (dir, config_path) = setup_config(&config_base("claude-code"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "regenerate");
-    assert_completes_within(cmd, 10).success();
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_crush_basic_regenerate() {
     let (dir, config_path) = setup_config(&config_base("crush"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "regenerate");
-    assert_completes_within(cmd, 10).success();
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS).success();
 }
 
 // ============================================================================
@@ -244,42 +256,42 @@ fn smoke_crush_basic_regenerate() {
 fn smoke_claude_code_hook_session_start() {
     let (dir, config_path) = setup_config(&config_base("claude-code"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_claude_code_hook_turn_start() {
     let (dir, config_path) = setup_config(&config_base("claude-code"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run turn_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_claude_code_hook_session_end() {
     let (dir, config_path) = setup_config(&config_base("claude-code"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_end");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_crush_hook_session_start() {
     let (dir, config_path) = setup_config(&config_base("crush"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_crush_hook_turn_start() {
     let (dir, config_path) = setup_config(&config_base("crush"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run turn_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_crush_hook_session_end() {
     let (dir, config_path) = setup_config(&config_base("crush"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_end");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 // ============================================================================
@@ -292,14 +304,14 @@ fn smoke_claude_code_memory_unreachable_host() {
     // The memory backend should timeout/failsoft without hanging.
     let (dir, config_path) = setup_config(&config_with_memory("claude-code", "192.0.2.1", 9));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_crush_memory_unreachable_host() {
     let (dir, config_path) = setup_config(&config_with_memory("crush", "192.0.2.1", 9));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
@@ -313,14 +325,14 @@ fn smoke_claude_code_memory_invalid_dns() {
         9,
     ));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_crush_memory_invalid_dns() {
     let (dir, config_path) = setup_config(&config_with_memory("crush", "no-such-host.invalid", 9));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
@@ -329,14 +341,14 @@ fn smoke_claude_code_memory_loopback_unreachable() {
     // is listening, the connection should fail gracefully within the timeout.
     let (dir, config_path) = setup_config(&config_with_memory("claude-code", "127.0.0.1", 9));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_crush_memory_loopback_unreachable() {
     let (dir, config_path) = setup_config(&config_with_memory("crush", "127.0.0.1", 9));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 // ============================================================================
@@ -347,14 +359,14 @@ fn smoke_crush_memory_loopback_unreachable() {
 fn smoke_claude_code_doctor_succeeds() {
     let (dir, config_path) = setup_config(&config_base("claude-code"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "doctor");
-    assert_completes_within(cmd, 10).success();
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_crush_doctor_succeeds() {
     let (dir, config_path) = setup_config(&config_base("crush"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "doctor");
-    assert_completes_within(cmd, 10).success();
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS).success();
 }
 
 // ============================================================================
@@ -365,7 +377,7 @@ fn smoke_crush_doctor_succeeds() {
 fn smoke_claude_code_status_succeeds() {
     let (dir, config_path) = setup_config(&config_base("claude-code"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "status");
-    assert_completes_within(cmd, 10)
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS)
         .success()
         .stderr(predicate::str::contains("Scopes"));
 }
@@ -374,7 +386,7 @@ fn smoke_claude_code_status_succeeds() {
 fn smoke_crush_status_succeeds() {
     let (dir, config_path) = setup_config(&config_base("crush"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "status");
-    assert_completes_within(cmd, 10)
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS)
         .success()
         .stderr(predicate::str::contains("Scopes"));
 }
@@ -393,7 +405,7 @@ fn smoke_crush_status_succeeds() {
 fn smoke_opencode_basic_export() {
     let (dir, config_path) = setup_config(&config_base("opencode"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "export");
-    assert_completes_within(cmd, 10)
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS)
         .success()
         .stdout(predicate::str::contains("export "));
 }
@@ -402,28 +414,28 @@ fn smoke_opencode_basic_export() {
 fn smoke_opencode_basic_regenerate() {
     let (dir, config_path) = setup_config(&config_base("opencode"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "regenerate");
-    assert_completes_within(cmd, 10).success();
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_opencode_hook_session_start() {
     let (dir, config_path) = setup_config(&config_base("opencode"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "hook-run session_start");
-    assert_completes_within(cmd, 5).success();
+    assert_completes_within(cmd, SHORT_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_opencode_doctor_succeeds() {
     let (dir, config_path) = setup_config(&config_base("opencode"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "doctor");
-    assert_completes_within(cmd, 10).success();
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS).success();
 }
 
 #[test]
 fn smoke_opencode_status_succeeds() {
     let (dir, config_path) = setup_config(&config_base("opencode"));
     let cmd = llmenv_cmd(dir.path(), &config_path, "status");
-    assert_completes_within(cmd, 10)
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS)
         .success()
         .stderr(predicate::str::contains("Scopes"));
 }
@@ -451,7 +463,7 @@ fn smoke_claude_code_export_with_bundle() {
     fs::create_dir_all(&bundle_dir).unwrap();
     fs::write(bundle_dir.join("bundle.yaml"), "{}").unwrap();
     let cmd = llmenv_cmd(dir.path(), &config_path, "export");
-    assert_completes_within(cmd, 10)
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS)
         .success()
         .stdout(predicate::str::contains(
             "LLMENV_ACTIVE_BUNDLES='test-bundle'",
@@ -465,7 +477,7 @@ fn smoke_claude_code_regenerate_with_bundle() {
     fs::create_dir_all(&bundle_dir).unwrap();
     fs::write(bundle_dir.join("bundle.yaml"), "{}").unwrap();
     let cmd = llmenv_cmd(dir.path(), &config_path, "regenerate");
-    assert_completes_within(cmd, 10).success();
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS).success();
 }
 
 // #365: features.codebase_memory materializes without error (and without
@@ -480,5 +492,5 @@ fn smoke_claude_code_export_with_codebase_memory() {
     fs::create_dir_all(&bundle_dir).unwrap();
     fs::write(bundle_dir.join("bundle.yaml"), "{}").unwrap();
     let cmd = llmenv_cmd(dir.path(), &config_path, "export");
-    assert_completes_within(cmd, 10).success();
+    assert_completes_within(cmd, LONG_TIMEOUT_SECS).success();
 }

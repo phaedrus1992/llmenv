@@ -1114,6 +1114,10 @@ into the current folder when one is active.
 
 `llmenv doctor` reports whether a token is cached and whether it has expired.
 
+On macOS, a keychain lookup that fails for any reason other than "no matching
+item" (most commonly a locked keychain) surfaces as an explicit error rather
+than being treated as "no credential stored" (added in v3.8.0).
+
 #### Third-party MCP server logins
 
 (added in v3.8.0)

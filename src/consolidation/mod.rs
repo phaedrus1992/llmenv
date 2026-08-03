@@ -119,12 +119,9 @@ fn build_prompt(config: &crate::config::Config, summaries: &[String]) -> String 
 /// Returns `anyhow::Error` if the process fails to start, times out, or exits
 /// with a non-zero status.
 async fn call_claude(prompt: &str) -> anyhow::Result<String> {
-    let mut child = tokio::process::Command::new("claude")
-        .arg("-p")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.arg("-p");
+    let mut child = spawn_with_kill_on_drop(cmd)?;
 
     // Write prompt to stdin and close it
     if let Some(mut stdin) = child.stdin.take() {
@@ -144,6 +141,21 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
 
     let stdout = String::from_utf8(output.stdout)?;
     Ok(stdout.trim().to_string())
+}
+
+/// Spawn `cmd` with piped stdio and `kill_on_drop` set. Without it, a child
+/// whose future is dropped on timeout (e.g. `tokio::time::timeout` firing on
+/// [`call_claude`]'s [`LLM_TIMEOUT`]) keeps running as an orphan — dropping a
+/// `Child` handle is not termination (#1093, same root cause as the
+/// `mcp-proxy` orphan fixed in #1087).
+fn spawn_with_kill_on_drop(
+    mut cmd: tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
 }
 
 /// Make a non-streaming call to the Anthropic Messages API.
@@ -456,6 +468,41 @@ mod tests {
              consolidation:\n        max_rules_per_session: {max_rules_per_session}\n"
         );
         serde_yaml::from_str(&yaml).expect("valid Config fixture YAML")
+    }
+
+    // -- child-process timeout lifecycle (#1093) --
+
+    /// A timed-out LLM-backend child must not be orphaned: dropping the
+    /// timeout future (which drops the `Child`) has to actually kill the
+    /// process, not just close our handle to it. Uses `sleep 30` in place of
+    /// `claude` so the test doesn't depend on the `claude` binary being
+    /// installed.
+    #[tokio::test]
+    async fn timeout_kills_the_child_instead_of_orphaning_it() {
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("30");
+        let mut child = spawn_with_kill_on_drop(cmd).expect("spawn sleep 30");
+        let pid = child.id().expect("child has a pid");
+
+        let result = tokio::time::timeout(Duration::from_millis(50), child.wait()).await;
+        assert!(result.is_err(), "`sleep 30` should not exit within 50ms");
+
+        drop(child); // triggers kill_on_drop if set
+
+        // kill_on_drop's SIGKILL + async reap isn't instantaneous — poll with
+        // a generous bound rather than asserting immediately after drop.
+        let mut still_alive = true;
+        for _ in 0..100 {
+            if crate::mcp::proxy::is_alive(pid) != Some(true) {
+                still_alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !still_alive,
+            "pid {pid} was still alive 2s after dropping the timed-out child"
+        );
     }
 
     proptest! {
