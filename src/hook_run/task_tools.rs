@@ -41,6 +41,7 @@ pub(crate) fn handle_pre_tool_use(payload: &Value, state_dir: &Path) -> Option<S
     let project = match task::project::current_tag() {
         Ok(p) => p,
         Err(e) => {
+            tracing::error!(error = %e, "task redirect: couldn't resolve project");
             return Some(deny(&format!(
                 "couldn't resolve the project for the llmenv task tracker ({e}); \
                  track this with `llmenv task` manually."
@@ -60,6 +61,7 @@ pub(crate) fn handle_pre_tool_use(payload: &Value, state_dir: &Path) -> Option<S
 /// name the `error` the caller already has rather than re-deriving one.
 pub(crate) fn deny_tracker_unavailable(payload: &Value, error: &anyhow::Error) -> Option<String> {
     task_tool_name(payload)?;
+    tracing::error!(error = %error, "task redirect: tracker state dir unavailable");
     Some(deny(&format!(
         "the llmenv task tracker is unavailable ({error}); track this with `llmenv task` manually."
     )))
@@ -95,10 +97,26 @@ fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
     // Auto-start a session when none is open. Without this the first task of a
     // session fails ("no open session — run `llmenv task session start` first"),
     // which is exactly what made the manual fallback unusable (#985).
-    if session::open_sessions_for_project(state_dir, project).is_empty()
+    //
+    // Uses the fallible `try_open_sessions_for_project` rather than the
+    // tolerant `open_sessions_for_project`: an unreadable store must deny
+    // with the real error, not be misread as "no sessions open" and auto-start
+    // a second session on top of an existing-but-unreadable one (#1112).
+    let open_sessions = match session::try_open_sessions_for_project(state_dir, project) {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            tracing::error!(error = %e, "task redirect: couldn't read existing sessions");
+            return deny(&format!(
+                "couldn't read the llmenv task tracker's sessions ({e}); \
+                 track this with `llmenv task` manually."
+            ));
+        }
+    };
+    if open_sessions.is_empty()
         && let Err(e) =
             session::start_session(state_dir, None, None, project, session::StartDecision::Auto)
     {
+        tracing::error!(error = %e, "task redirect: couldn't auto-start a session");
         return deny(&format!(
             "couldn't auto-start a task session ({e}); run `llmenv task session start`."
         ));
@@ -128,12 +146,27 @@ fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
         // `e` already carries actionable guidance (e.g. ">1 open sessions — pass
         // --session <id>"), so surface it rather than re-suggesting a bare `add`
         // that would hit the same error.
-        Err(e) => deny(&format!("couldn't record the task ({e}).")),
+        Err(e) => {
+            tracing::error!(error = %e, "task redirect: couldn't record the task");
+            deny(&format!("couldn't record the task ({e})."))
+        }
     }
 }
 
 fn list(state_dir: &Path) -> String {
-    let tasks = task::list_tasks(state_dir);
+    // Uses the fallible `try_list_tasks` rather than the tolerant `list_tasks`:
+    // an unreadable store must deny with the real error, not be misreported as
+    // "(no tasks tracked yet)" — an affirmative claim that is false and can
+    // make the agent re-create tasks that already exist (#1112).
+    let tasks = match task::try_list_tasks(state_dir) {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            tracing::error!(error = %e, "task redirect: couldn't read the task store");
+            return deny(&format!(
+                "couldn't read the llmenv task tracker ({e}); track this with `llmenv task` manually."
+            ));
+        }
+    };
     let refs: Vec<&task::Task> = tasks.iter().collect();
     let rendered = task::render_task_list(&refs);
     let body = if rendered.trim().is_empty() {
@@ -164,6 +197,7 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
         // that matched several tasks) — flattening all three to "no match" would
         // misreport a too-many-matches case as zero.
         Err(e) => {
+            tracing::error!(error = %e, id = %id, "task redirect: couldn't resolve task id");
             return deny(&format!(
                 "couldn't resolve task '{id}' ({e}); run `llmenv task ls` for the current ids."
             ));
@@ -203,7 +237,10 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
         Ok(msg) => deny(&format!(
             "{msg}{note_warning} — llmenv task tracker (TaskUpdate redirected)."
         )),
-        Err(e) => deny(&format!("couldn't update '{slug}' ({e}).")),
+        Err(e) => {
+            tracing::error!(error = %e, slug = %slug, "task redirect: couldn't update task");
+            deny(&format!("couldn't update '{slug}' ({e})."))
+        }
     }
 }
 
@@ -287,6 +324,74 @@ mod tests {
         assert_eq!(tasks[0].title, "Fix the auth bug");
         // The created slug is surfaced so the agent can update it.
         assert!(out.contains(&tasks[0].slug), "deny names the slug: {out}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_denies_with_real_error_on_unreadable_store_not_empty_message() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tmp();
+        // Seed a task so the store exists before making it unreadable.
+        handle_inner(
+            "TaskCreate",
+            Some(&json!({ "subject": "seed" })),
+            dir.path(),
+            PROJECT,
+        );
+        let tasks_dir = task::tasks_dir(dir.path());
+        std::fs::set_permissions(&tasks_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let readable_anyway = std::fs::read_dir(&tasks_dir).is_ok();
+        let out = handle_inner("TaskList", None, dir.path(), PROJECT);
+
+        std::fs::set_permissions(&tasks_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(out.starts_with("__DENY__:"), "{out}");
+        assert!(
+            !out.contains("(no tasks tracked yet)"),
+            "must not claim the store is empty when it's actually unreadable: {out}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_does_not_auto_start_second_session_when_store_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tmp();
+        // Seed one real session for PROJECT.
+        handle_inner(
+            "TaskCreate",
+            Some(&json!({ "subject": "seed" })),
+            dir.path(),
+            PROJECT,
+        );
+        assert_eq!(session::list_sessions(dir.path()).len(), 1);
+
+        let sessions_dir = task::tasks_dir(dir.path()).join("sessions");
+        std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let readable_anyway = std::fs::read_dir(&sessions_dir).is_ok();
+        let out = handle_inner(
+            "TaskCreate",
+            Some(&json!({ "subject": "second task" })),
+            dir.path(),
+            PROJECT,
+        );
+
+        std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(out.starts_with("__DENY__:"), "{out}");
+        assert_eq!(
+            session::list_sessions(dir.path()).len(),
+            1,
+            "must not auto-start a second session over an unreadable store: {out}"
+        );
     }
 
     #[test]

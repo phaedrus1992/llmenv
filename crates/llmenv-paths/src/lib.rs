@@ -91,10 +91,23 @@ pub fn cwd_under_prefix(cwd: &str, prefix: &str) -> bool {
 }
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(dir) = std::env::var("LLMENV_CONFIG_DIR") {
+    config_dir_with_env(&|name| std::env::var(name).ok())
+}
+
+/// [`config_dir`] with an injectable env-var provider so tests can exercise
+/// the set-but-empty override case without mutating real process env vars.
+fn config_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
+    // A set-but-empty override (`LLMENV_CONFIG_DIR=`) must fall through to the
+    // `$HOME` default rather than resolving to a relative `PathBuf::from("")` (#1111).
+    if let Some(dir) = get_env("LLMENV_CONFIG_DIR").filter(|d| !d.is_empty()) {
         Ok(PathBuf::from(dir))
     } else {
-        let home = std::env::var("HOME")?;
+        // A set-but-empty `HOME` has the identical failure mode as the override
+        // above (a relative `PathBuf::from("")`-derived path) — treat it as
+        // unset too rather than fixing only the override branch.
+        let home = get_env("HOME")
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("environment variable not found: HOME"))?;
         Ok(PathBuf::from(home).join(".config/llmenv"))
     }
 }
@@ -104,11 +117,47 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn state_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(dir) = std::env::var("LLMENV_STATE_DIR") {
+    state_dir_with_env(&|name| std::env::var(name).ok())
+}
+
+/// [`state_dir`] with an injectable env-var provider so tests can exercise
+/// the set-but-empty override case without mutating real process env vars.
+fn state_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
+    // A set-but-empty override (`LLMENV_STATE_DIR=`) must fall through to the
+    // `$HOME` default rather than resolving to a relative `PathBuf::from("")` (#1111).
+    if let Some(dir) = get_env("LLMENV_STATE_DIR").filter(|d| !d.is_empty()) {
         Ok(PathBuf::from(dir))
     } else {
-        let home = std::env::var("HOME")?;
+        // Same reasoning as `config_dir_with_env`: a set-but-empty `HOME` must
+        // also be treated as unset, not just the override.
+        let home = get_env("HOME")
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("environment variable not found: HOME"))?;
         Ok(PathBuf::from(home).join(".local/state/llmenv"))
+    }
+}
+
+/// Create a directory (and any missing parent components) with owner-only
+/// permissions (mode 0o700 on Unix) from the moment of creation. On Windows
+/// falls back to `create_dir_all`'s default permissions.
+///
+/// Use instead of `create_dir_all` followed by a separate `set_permissions`
+/// call for any directory that must never be world-readable even briefly —
+/// the two-call version leaves the directory at the umask default (typically
+/// 0o755) between creation and the chmod, a TOCTOU window (#1113). A no-op
+/// (`Ok(())`) if the directory already exists, matching `create_dir_all`.
+pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
     }
 }
 
@@ -260,6 +309,134 @@ fn write_owner_only_atomic_in_dir(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_owner_only_is_0o700_from_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested").join("store");
+        create_dir_owner_only(&dir).unwrap();
+
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "dir must be born owner-only, got {mode:o}");
+    }
+
+    #[test]
+    fn create_dir_owner_only_is_idempotent_on_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        create_dir_owner_only(&dir).unwrap();
+        create_dir_owner_only(&dir).unwrap();
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn state_dir_with_env_empty_override_falls_through_to_home() {
+        let get_env = |name: &str| match name {
+            "LLMENV_STATE_DIR" => Some(String::new()),
+            "HOME" => Some("/home/testuser".to_string()),
+            _ => None,
+        };
+        let result = state_dir_with_env(&get_env).unwrap();
+        assert_eq!(result, PathBuf::from("/home/testuser/.local/state/llmenv"));
+    }
+
+    #[test]
+    fn state_dir_with_env_empty_equals_unset() {
+        let unset = |name: &str| match name {
+            "HOME" => Some("/home/testuser".to_string()),
+            _ => None,
+        };
+        let empty = |name: &str| match name {
+            "LLMENV_STATE_DIR" => Some(String::new()),
+            "HOME" => Some("/home/testuser".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            state_dir_with_env(&unset).unwrap(),
+            state_dir_with_env(&empty).unwrap()
+        );
+    }
+
+    #[test]
+    fn state_dir_with_env_non_empty_override_used_verbatim() {
+        let get_env = |name: &str| match name {
+            "LLMENV_STATE_DIR" => Some("/custom/state".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            state_dir_with_env(&get_env).unwrap(),
+            PathBuf::from("/custom/state")
+        );
+    }
+
+    #[test]
+    fn state_dir_with_env_empty_home_errors_instead_of_relative_path() {
+        let get_env = |name: &str| match name {
+            "HOME" => Some(String::new()),
+            _ => None,
+        };
+        let result = state_dir_with_env(&get_env);
+        assert!(
+            result.is_err(),
+            "a set-but-empty HOME must error, not resolve to a relative path: {result:?}"
+        );
+    }
+
+    #[test]
+    fn config_dir_with_env_empty_override_falls_through_to_home() {
+        let get_env = |name: &str| match name {
+            "LLMENV_CONFIG_DIR" => Some(String::new()),
+            "HOME" => Some("/home/testuser".to_string()),
+            _ => None,
+        };
+        let result = config_dir_with_env(&get_env).unwrap();
+        assert_eq!(result, PathBuf::from("/home/testuser/.config/llmenv"));
+    }
+
+    #[test]
+    fn config_dir_with_env_empty_equals_unset() {
+        let unset = |name: &str| match name {
+            "HOME" => Some("/home/testuser".to_string()),
+            _ => None,
+        };
+        let empty = |name: &str| match name {
+            "LLMENV_CONFIG_DIR" => Some(String::new()),
+            "HOME" => Some("/home/testuser".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            config_dir_with_env(&unset).unwrap(),
+            config_dir_with_env(&empty).unwrap()
+        );
+    }
+
+    #[test]
+    fn config_dir_with_env_non_empty_override_used_verbatim() {
+        let get_env = |name: &str| match name {
+            "LLMENV_CONFIG_DIR" => Some("/custom/config".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            config_dir_with_env(&get_env).unwrap(),
+            PathBuf::from("/custom/config")
+        );
+    }
+
+    #[test]
+    fn config_dir_with_env_empty_home_errors_instead_of_relative_path() {
+        let get_env = |name: &str| match name {
+            "HOME" => Some(String::new()),
+            _ => None,
+        };
+        let result = config_dir_with_env(&get_env);
+        assert!(
+            result.is_err(),
+            "a set-but-empty HOME must error, not resolve to a relative path: {result:?}"
+        );
+    }
 
     #[test]
     fn read_dir_optional_returns_none_for_missing_dir() {

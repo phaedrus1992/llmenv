@@ -96,7 +96,7 @@ fn session_path(state_dir: &Path, id: &str) -> PathBuf {
 }
 
 fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
-    std::fs::create_dir_all(sessions_dir(state_dir))?;
+    crate::paths::create_dir_owner_only(&sessions_dir(state_dir))?;
     let json = serde_json::to_string_pretty(session)?;
     crate::paths::write_owner_only_atomic(&session_path(state_dir, &session.id), json.as_bytes())?;
     Ok(())
@@ -107,22 +107,53 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     Ok(serde_json::from_str(&content)?)
 }
 
-/// Every session in the store, corrupt/unreadable files skipped with a
-/// stderr warning — same tolerance policy as [`super::list_tasks`], a single
-/// bad file must never block `session ls` or a hook.
+/// Every session in the store, tolerating a missing or unreadable store by
+/// treating it as empty (logging the cause via `tracing::warn!`) — same
+/// tolerance policy as [`super::list_tasks`], a single bad file must never
+/// block `session ls` or a hook. Callers that must distinguish "genuinely
+/// empty" from "couldn't read the store" should use [`try_list_sessions`]
+/// instead (#1112).
 #[must_use]
 pub fn list_sessions(state_dir: &Path) -> Vec<Session> {
+    match try_list_sessions(state_dir) {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read sessions dir; treating as empty");
+            Vec::new()
+        }
+    }
+}
+
+/// Fallible sibling of [`list_sessions`]: propagates a genuine read error on
+/// the sessions directory itself instead of collapsing it to an empty `Vec`
+/// indistinguishable from "no sessions yet" (#1112). A missing directory
+/// still resolves to `Ok(vec![])`. Per-entry `DirEntry` errors and corrupt
+/// session files are logged via `tracing::warn!` and skipped, never silently
+/// dropped.
+///
+/// # Errors
+/// Returns an error if the sessions directory exists but can't be read (e.g.
+/// permission denied).
+pub fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
     let dir = sessions_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
-            eprintln!("llmenv: failed to read sessions dir {}: {e}", dir.display());
-            return Vec::new();
+            return Err(
+                anyhow::Error::new(e).context(format!("reading sessions dir {}", dir.display()))
+            );
         }
     };
     let mut sessions = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "skipping unreadable directory entry");
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -132,22 +163,50 @@ pub fn list_sessions(state_dir: &Path) -> Vec<Session> {
             .and_then(|content| Ok(serde_json::from_str::<Session>(&content)?))
         {
             Ok(session) => sessions.push(session),
-            Err(e) => eprintln!(
-                "llmenv: skipping corrupt session file {}: {e}",
-                path.display()
-            ),
+            // Distinguish a genuine read failure (e.g. permission denied on
+            // this one file) from corrupt JSON content — same reasoning as
+            // `try_list_tasks` (#1112).
+            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
+                tracing::warn!(error = %e, path = %path.display(), "skipping unreadable session file");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "skipping corrupt session file");
+            }
         }
     }
-    sessions
+    Ok(sessions)
 }
 
-/// Every currently open session tagged with `project`.
+/// Every currently open session tagged with `project`, tolerating a missing
+/// or unreadable store by treating it as empty. Callers that must distinguish
+/// "genuinely empty" from "couldn't read the store" should use
+/// [`try_open_sessions_for_project`] instead (#1112).
 #[must_use]
 pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session> {
-    list_sessions(state_dir)
+    match try_open_sessions_for_project(state_dir, project) {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read sessions dir; treating as empty");
+            Vec::new()
+        }
+    }
+}
+
+/// Fallible sibling of [`open_sessions_for_project`]: propagates a genuine
+/// read error on the sessions directory instead of reporting "no open
+/// sessions", which would make `TaskCreate`'s auto-start auto-create a
+/// second session over an existing-but-unreadable store (#1112).
+///
+/// # Errors
+/// Returns an error if the sessions directory exists but can't be read.
+pub fn try_open_sessions_for_project(
+    state_dir: &Path,
+    project: &str,
+) -> anyhow::Result<Vec<Session>> {
+    Ok(try_list_sessions(state_dir)?
         .into_iter()
         .filter(|s| s.is_open() && s.project == project)
-        .collect()
+        .collect())
 }
 
 /// Every session id ever tagged with `project`, open or closed — the basis
@@ -185,9 +244,9 @@ pub fn touch_last_activity(state_dir: &Path, session_id: &str) -> anyhow::Result
             Ok(session) => session,
             Err(e) if is_not_found(&e) => return Ok(()),
             Err(e) => {
-                eprintln!(
-                    "llmenv: could not load session '{session_id}' to update \
-                     last_activity (skipping the touch): {e}"
+                tracing::warn!(
+                    error = %e, session_id = %session_id,
+                    "could not load session to update last_activity (skipping the touch)"
                 );
                 return Ok(());
             }
@@ -269,7 +328,7 @@ fn create_session(
     project: &str,
 ) -> anyhow::Result<Session> {
     let dir = sessions_dir(state_dir);
-    std::fs::create_dir_all(&dir)?;
+    crate::paths::create_dir_owner_only(&dir)?;
     let base_slug = name
         .map(slugify)
         .filter(|s| !s.is_empty())
@@ -421,6 +480,39 @@ mod tests {
     fn list_sessions_empty_store_is_empty() {
         let dir = TempDir::new().expect("test");
         assert!(list_sessions(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn try_list_sessions_missing_store_is_empty_not_error() {
+        let dir = TempDir::new().expect("test");
+        assert_eq!(try_list_sessions(dir.path()).unwrap(), Vec::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_open_sessions_for_project_unreadable_store_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("test");
+        start_session(dir.path(), None, None, PROJECT_A, StartDecision::Auto).expect("test");
+        let sessions = sessions_dir(dir.path());
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let readable_anyway = std::fs::read_dir(&sessions).is_ok();
+        let result = try_open_sessions_for_project(dir.path(), PROJECT_A);
+        // The tolerant wrapper must degrade to empty (not panic/propagate) while
+        // the store is still unreadable — check before restoring permissions.
+        let tolerant_empty = open_sessions_for_project(dir.path(), PROJECT_A).is_empty();
+
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "an unreadable sessions dir must be a genuine error, not 'no sessions open': {result:?}"
+        );
+        assert!(tolerant_empty);
     }
 
     #[test]

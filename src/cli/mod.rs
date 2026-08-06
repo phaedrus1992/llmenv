@@ -1292,7 +1292,11 @@ fn statusline_data_path_with_env(
     config: &Config,
     get_env: &impl Fn(&str) -> Option<String>,
 ) -> PathBuf {
+    // A set-but-empty `CLAUDE_CONFIG_DIR=` must fall back to the configured
+    // cache dir like an unset one, not resolve relative to cwd (#1111 sibling —
+    // same bug as `statusline::widget::usage_state_dir`).
     get_env("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)))
         .join("llmenv-status.json")
@@ -2126,6 +2130,7 @@ fn concat_dedup<T: PartialEq + Clone>(mut lead: Vec<T>, rest: Vec<T>) -> Vec<T> 
 fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
     let booted = std::env::var("CLAUDE_CONFIG_DIR")
         .ok()
+        .filter(|d| !d.is_empty())
         .map(PathBuf::from)
         .and_then(|dir| {
             // The booted content hash lives in the folder's manifest dotfile,
@@ -4426,6 +4431,20 @@ mod tests {
         assert_eq!(
             path,
             std::path::PathBuf::from("/configured/cache/llmenv-status.json")
+        );
+    }
+
+    #[test]
+    fn statusline_data_path_treats_empty_claude_config_dir_as_unset() {
+        let mut config = Config::default();
+        config.cache.cache_dir = "/configured/cache".to_string();
+        let empty_env =
+            |name: &str| -> Option<String> { (name == "CLAUDE_CONFIG_DIR").then(String::new) };
+        let path = statusline_data_path_with_env(&config, &empty_env);
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/configured/cache/llmenv-status.json"),
+            "a set-but-empty CLAUDE_CONFIG_DIR must fall back like an unset one"
         );
     }
 
