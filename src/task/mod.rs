@@ -90,12 +90,15 @@ fn with_store_lock<T>(
     f: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     let dir = tasks_dir(state_dir);
-    std::fs::create_dir_all(&dir)?;
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join(".lock"))?;
+    crate::paths::create_dir_owner_only(&dir)?;
+    let mut open_options = std::fs::OpenOptions::new();
+    open_options.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_options.mode(0o600);
+    }
+    let lock_file = open_options.open(dir.join(".lock"))?;
     lock_file.lock()?;
     f()
 }
@@ -150,7 +153,7 @@ fn unique_slug(dir: &Path, base_slug: &str) -> String {
 /// [`with_store_lock`]) are expected to call this from within that lock.
 pub fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
     let dir = tasks_dir(state_dir);
-    std::fs::create_dir_all(&dir)?;
+    crate::paths::create_dir_owner_only(&dir)?;
     let json = serde_json::to_string_pretty(task)?;
     crate::paths::write_owner_only_atomic(&task_path(state_dir, &task.slug), json.as_bytes())?;
     Ok(())
@@ -162,21 +165,51 @@ pub fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
     Ok(serde_json::from_str(&content)?)
 }
 
-/// List all tasks in the store. Corrupt or unreadable files are skipped with
-/// a stderr warning rather than failing the whole listing — a single bad
-/// file must never block `llmenv task ls` or a hook.
+/// List all tasks in the store, tolerating a missing or unreadable store by
+/// treating it as empty (logging the cause via `tracing::warn!`). Callers
+/// that must distinguish "genuinely empty" from "couldn't read the store"
+/// (e.g. denying a `TaskList` redirect with the real error, #1112) should use
+/// [`try_list_tasks`] instead.
 pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
+    match try_list_tasks(state_dir) {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read tasks dir; treating as empty");
+            Vec::new()
+        }
+    }
+}
+
+/// Fallible sibling of [`list_tasks`]: propagates a genuine read error on the
+/// tasks directory itself (e.g. permission denied) instead of collapsing it
+/// to an empty `Vec` indistinguishable from "no tasks tracked yet" (#1112).
+/// A missing directory still resolves to `Ok(vec![])` — that case really is
+/// "no tasks yet". Per-entry `DirEntry` errors and corrupt task files are
+/// logged via `tracing::warn!` and skipped, never silently dropped.
+///
+/// # Errors
+/// Returns an error if the tasks directory exists but can't be read (e.g.
+/// permission denied).
+pub fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
     let dir = tasks_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
-            eprintln!("llmenv: failed to read tasks dir {}: {e}", dir.display());
-            return Vec::new();
+            return Err(
+                anyhow::Error::new(e).context(format!("reading tasks dir {}", dir.display()))
+            );
         }
     };
     let mut tasks = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "skipping unreadable directory entry");
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -186,10 +219,12 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
             .and_then(|content| Ok(serde_json::from_str::<Task>(&content)?))
         {
             Ok(task) => tasks.push(task),
-            Err(e) => eprintln!("llmenv: skipping corrupt task file {}: {e}", path.display()),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "skipping corrupt task file");
+            }
         }
     }
-    tasks
+    Ok(tasks)
 }
 
 /// A task paired with its indentation depth for human `task ls` rendering: a
@@ -497,9 +532,9 @@ pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
         for blocker_slug in &task.blocked_on {
             match load_task(state_dir, blocker_slug) {
                 Ok(blocker) if blocker.state != TaskState::Done => {
-                    eprintln!(
-                        "llmenv: warning: '{slug}' is blocked on '{blocker_slug}' ({:?}, not done) — starting anyway",
-                        blocker.state
+                    tracing::warn!(
+                        slug = %slug, blocker_slug = %blocker_slug, blocker_state = ?blocker.state,
+                        "starting task that is blocked on a not-done task"
                     );
                 }
                 Ok(_) => {}
@@ -508,8 +543,9 @@ pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
                     // file) — warn and treat the edge as absent, matching the
                     // load-time tolerance documented for parent/blocked_on
                     // slugs.
-                    eprintln!(
-                        "llmenv: warning: '{slug}' is blocked on '{blocker_slug}', which could not be loaded ({e}) — starting anyway"
+                    tracing::warn!(
+                        error = %e, slug = %slug, blocker_slug = %blocker_slug,
+                        "starting task whose blocker could not be loaded"
                     );
                 }
             }
@@ -534,9 +570,9 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
     if let Some(session_id) = &task.session
         && let Err(e) = session::touch_last_activity(state_dir, session_id)
     {
-        eprintln!(
-            "llmenv: failed to update last_activity for session '{session_id}' after a \
-             task change (the task change itself is already saved): {e}"
+        tracing::warn!(
+            error = %e, session_id = %session_id,
+            "failed to update last_activity after a task change (task change itself is already saved)"
         );
     }
 }
@@ -929,6 +965,74 @@ mod tests {
     /// nesting) skip the session-resolution dance, which has its own tests.
     fn mk(dir: &Path, title: &str, parent: Option<&str>) -> anyhow::Result<Task> {
         add_task_for_session(dir, title, parent, "test-session")
+    }
+
+    #[test]
+    fn try_list_tasks_missing_store_is_empty_not_error() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(try_list_tasks(dir.path()).unwrap(), Vec::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_store_dirs_and_lock_are_owner_only_from_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        start_session(
+            dir.path(),
+            None,
+            None,
+            &current_project(),
+            StartDecision::Auto,
+        )
+        .expect("test");
+        mk(dir.path(), "seed task", None).expect("test");
+
+        let mode_of = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode_of(&tasks_dir(dir.path())),
+            0o700,
+            "tasks/ must be owner-only from creation"
+        );
+        assert_eq!(
+            mode_of(&tasks_dir(dir.path()).join("sessions")),
+            0o700,
+            "tasks/sessions/ must be owner-only from creation"
+        );
+        assert_eq!(
+            mode_of(&tasks_dir(dir.path()).join(".lock")),
+            0o600,
+            "the store lock file must be owner-only from creation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_list_tasks_unreadable_store_errors_instead_of_empty() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let tasks = tasks_dir(dir.path());
+        std::fs::create_dir_all(&tasks).unwrap();
+        mk(dir.path(), "before making unreadable", None).unwrap();
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let readable_anyway = std::fs::read_dir(&tasks).is_ok();
+        let result = try_list_tasks(dir.path());
+        // The tolerant wrapper must degrade to empty (not panic/propagate) while
+        // the store is still unreadable — check before restoring permissions.
+        let tolerant_result = list_tasks(dir.path());
+
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "an unreadable tasks dir must be a genuine error, not an empty Vec: {result:?}"
+        );
+        assert_eq!(tolerant_result, Vec::new());
     }
 
     /// The real project tag for this test process's cwd (#949 reminder
