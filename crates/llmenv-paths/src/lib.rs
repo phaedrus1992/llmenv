@@ -102,7 +102,11 @@ fn config_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Res
     if let Some(dir) = get_env("LLMENV_CONFIG_DIR").filter(|d| !d.is_empty()) {
         Ok(PathBuf::from(dir))
     } else {
+        // A set-but-empty `HOME` has the identical failure mode as the override
+        // above (a relative `PathBuf::from("")`-derived path) — treat it as
+        // unset too rather than fixing only the override branch.
         let home = get_env("HOME")
+            .filter(|h| !h.is_empty())
             .ok_or_else(|| anyhow::anyhow!("environment variable not found: HOME"))?;
         Ok(PathBuf::from(home).join(".config/llmenv"))
     }
@@ -124,7 +128,10 @@ fn state_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Resu
     if let Some(dir) = get_env("LLMENV_STATE_DIR").filter(|d| !d.is_empty()) {
         Ok(PathBuf::from(dir))
     } else {
+        // Same reasoning as `config_dir_with_env`: a set-but-empty `HOME` must
+        // also be treated as unset, not just the override.
         let home = get_env("HOME")
+            .filter(|h| !h.is_empty())
             .ok_or_else(|| anyhow::anyhow!("environment variable not found: HOME"))?;
         Ok(PathBuf::from(home).join(".local/state/llmenv"))
     }
@@ -366,6 +373,19 @@ mod tests {
     }
 
     #[test]
+    fn state_dir_with_env_empty_home_errors_instead_of_relative_path() {
+        let get_env = |name: &str| match name {
+            "HOME" => Some(String::new()),
+            _ => None,
+        };
+        let result = state_dir_with_env(&get_env);
+        assert!(
+            result.is_err(),
+            "a set-but-empty HOME must error, not resolve to a relative path: {result:?}"
+        );
+    }
+
+    #[test]
     fn config_dir_with_env_empty_override_falls_through_to_home() {
         let get_env = |name: &str| match name {
             "LLMENV_CONFIG_DIR" => Some(String::new()),
@@ -402,6 +422,19 @@ mod tests {
         assert_eq!(
             config_dir_with_env(&get_env).unwrap(),
             PathBuf::from("/custom/config")
+        );
+    }
+
+    #[test]
+    fn config_dir_with_env_empty_home_errors_instead_of_relative_path() {
+        let get_env = |name: &str| match name {
+            "HOME" => Some(String::new()),
+            _ => None,
+        };
+        let result = config_dir_with_env(&get_env);
+        assert!(
+            result.is_err(),
+            "a set-but-empty HOME must error, not resolve to a relative path: {result:?}"
         );
     }
 

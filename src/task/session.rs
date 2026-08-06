@@ -163,6 +163,12 @@ pub fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
             .and_then(|content| Ok(serde_json::from_str::<Session>(&content)?))
         {
             Ok(session) => sessions.push(session),
+            // Distinguish a genuine read failure (e.g. permission denied on
+            // this one file) from corrupt JSON content — same reasoning as
+            // `try_list_tasks` (#1112).
+            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
+                tracing::warn!(error = %e, path = %path.display(), "skipping unreadable session file");
+            }
             Err(e) => {
                 tracing::warn!(error = %e, path = %path.display(), "skipping corrupt session file");
             }
@@ -171,13 +177,19 @@ pub fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
     Ok(sessions)
 }
 
-/// Every currently open session tagged with `project`.
+/// Every currently open session tagged with `project`, tolerating a missing
+/// or unreadable store by treating it as empty. Callers that must distinguish
+/// "genuinely empty" from "couldn't read the store" should use
+/// [`try_open_sessions_for_project`] instead (#1112).
 #[must_use]
 pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session> {
-    list_sessions(state_dir)
-        .into_iter()
-        .filter(|s| s.is_open() && s.project == project)
-        .collect()
+    match try_open_sessions_for_project(state_dir, project) {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read sessions dir; treating as empty");
+            Vec::new()
+        }
+    }
 }
 
 /// Fallible sibling of [`open_sessions_for_project`]: propagates a genuine
