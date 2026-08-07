@@ -506,9 +506,19 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         );
     }
 
-    // Check cache directory is writable
+    // Check cache directory is writable. Hardening only applies when this
+    // check creates the dir; an existing one keeps whatever permissions its
+    // owner set — forcing 0700 here would hard-fail on a cache dir shared
+    // with a different uid, the same regression #1196 walked back for
+    // codebase_memory.index_path (#1198).
     let cache_dir = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
-    std::fs::create_dir_all(&cache_dir).context("cache directory not writable")?;
+    if cache_dir.exists() {
+        let probe = cache_dir.join(".llmenv-doctor-probe");
+        std::fs::write(&probe, b"").context("cache directory not writable")?;
+        let _ = std::fs::remove_file(&probe);
+    } else {
+        crate::paths::create_dir_owner_only(&cache_dir).context("cache directory not writable")?;
+    }
     eprintln!(
         "{pass} Cache directory is writable: {}",
         cache_dir.display()
