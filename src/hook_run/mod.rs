@@ -1838,13 +1838,11 @@ fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
 /// diagnostic is a smaller problem than skipping the work.
 fn redirect_stderr_to_bounded_log(cmd: &mut std::process::Command, log_path: &std::path::Path) {
     cmd.stderr(std::process::Stdio::null());
-    // Always state_dir-rooted (see `detached_child_log_path`), so it's safe —
-    // and necessary, since `open_bounded_log` no longer does this itself
-    // (#1196) — to harden the parent directory here.
-    if let Some(parent) = log_path.parent() {
-        let _ = crate::paths::create_dir_owner_only(parent);
-    }
-    match crate::mcp::proxy::open_bounded_log(log_path, DETACHED_CHILD_LOG_MAX_BYTES) {
+    // Always state_dir-rooted (see `detached_child_log_path`), so `harden_dir:
+    // true` is safe — and `open_bounded_log` does the hardening itself
+    // (#1196), rather than this caller doing it separately and discarding a
+    // failure while the log still opens in an unhardened directory.
+    match crate::mcp::proxy::open_bounded_log(log_path, DETACHED_CHILD_LOG_MAX_BYTES, true) {
         Ok(file) => {
             cmd.stderr(std::process::Stdio::from(file));
         }
@@ -1915,16 +1913,15 @@ fn trigger_codebase_memory_index(
 ) {
     let mut cmd = build_index_repository_command(project_root, cm, state_dir);
     let cache_dir = codebase_memory_cache_dir(cm, state_dir);
+    let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
     // hardened to 0700. A user-configured `index_path` (#1196) can be shared
     // with a codebase-memory-mcp process running under a different uid —
     // forcing it to 0700 would silently break that sharing with an EACCES on
     // the next run.
-    if cm.index_path.is_none() {
-        let _ = crate::paths::create_dir_owner_only(&cache_dir);
-    }
-    let log_path = cache_dir.join("index.log");
-    match crate::mcp::proxy::open_bounded_log(&log_path, CODEBASE_MEMORY_LOG_MAX_BYTES) {
+    let harden_dir = cm.index_path.is_none();
+    match crate::mcp::proxy::open_bounded_log(&log_path, CODEBASE_MEMORY_LOG_MAX_BYTES, harden_dir)
+    {
         Ok(file) => {
             cmd.stderr(std::process::Stdio::from(file));
         }
