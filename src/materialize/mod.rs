@@ -64,6 +64,14 @@ pub fn materialize_with_mode(
     let folder = cache::folder_name(mode, shape, &hash);
     let dest = cache_root.join(&folder);
 
+    // Owner-only (#1198): hardens/self-heals `cache_root` itself before any
+    // mode-specific branch, including the early-return fast paths below —
+    // create_dir_owner_only's self-heal only touches the exact path it's
+    // called on, so calling it later (or only on `dest`, a descendant) would
+    // leave a *pre-existing* cache_root from an older llmenv (created via
+    // bare create_dir_all) world-readable forever.
+    crate::paths::create_dir_owner_only(cache_root)?;
+
     match mode {
         // Loose/normal reuse one folder across content edits: write in place,
         // never swap (the folder is the agent's live home). Stale-file cleanup
@@ -79,8 +87,6 @@ pub fn materialize_with_mode(
         }
         HashingMode::Strict => {}
     }
-
-    crate::paths::create_dir_owner_only(cache_root)?;
 
     // Per-call staging directory: `<folder>.<pid>.<nanos>.tmp`. Each concurrent
     // writer gets its own staging path, so they cannot clobber each other on
@@ -138,10 +144,13 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
     }
     // Owner-only (#1198): the Strict-mode path was hardened in #1196, but
     // Loose/Normal — llmenv's *default* mode — took this separate code path
-    // and was left unprotected. `dest`'s ancestors up to and including
-    // `cache_root` are created 0700; files/subdirs written inside it stay
-    // plain (contained by the hardened top, same convention as the Strict
-    // path's own staging dir).
+    // and was left unprotected. `cache_root` itself is now hardened by the
+    // caller (materialize_with_mode) before reaching here; this call
+    // additionally hardens `dest` and anything between it and `cache_root`.
+    // Files/subdirs written inside `dest` stay plain — contained by the
+    // hardened tree above them, same as materialize_with_mode's own Strict
+    // staging dir (created plain, since it's nested under the now-always-
+    // hardened `cache_root`).
     crate::paths::create_dir_owner_only(dest)?;
     for (rel, abs) in &m.files {
         if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
