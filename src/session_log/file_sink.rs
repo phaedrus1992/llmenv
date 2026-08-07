@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 
-use llmenv_paths::state_dir;
+use llmenv_paths::{create_dir_owner_only, state_dir};
 
 /// Default file-sink path: `<state_dir>/session-log.jsonl`.
 ///
@@ -54,7 +54,7 @@ impl FileSink {
 
     fn try_append(&self, line: &str) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+            create_dir_owner_only(parent)?;
         }
         let mut opts = OpenOptions::new();
         opts.create(true).append(true);
@@ -108,6 +108,22 @@ mod tests {
         FileSink::new(path.clone()).append("{}");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "group/other bits must be unset: {mode:o}");
+    }
+
+    // #1186: append creates its parent directory owner-only, not just the file.
+    #[cfg(unix)]
+    #[test]
+    fn append_creates_parent_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("s.jsonl");
+        FileSink::new(path.clone()).append("{}");
+        let mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "log dir must be owner-only, got {mode:o}");
     }
 
     #[cfg(unix)]
