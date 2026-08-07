@@ -508,7 +508,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     // Check cache directory is writable
     let cache_dir = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
-    std::fs::create_dir_all(&cache_dir).context("cache directory not writable")?;
+    crate::paths::create_dir_owner_only(&cache_dir).context("cache directory not writable")?;
     eprintln!(
         "{pass} Cache directory is writable: {}",
         cache_dir.display()
