@@ -452,6 +452,14 @@ output.
 | `when` | yes | Activation tags; an entry with none is rejected at validate time |
 | `index_path` | no | Override the index storage directory; defaults to `<state_dir>/codebase-memory` |
 
+(added in v3.8.0) The default index storage directory (`<state_dir>/codebase-
+memory`) is created owner-only (`0o700`). An explicit `index_path` override
+is not: llmenv leaves its permissions exactly as its owner set them, so a
+directory intentionally shared with a `codebase-memory-mcp` process running
+under a different uid (a separate service account, or a container with a
+different uid mapping) keeps working. If you rely on this sharing, secure the
+directory yourself — llmenv won't tighten or loosen it for you.
+
 llmenv always computes two environment variables for the launched process,
 never left to the user:
 
