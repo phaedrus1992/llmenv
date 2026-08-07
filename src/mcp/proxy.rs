@@ -514,6 +514,10 @@ fn default_log_path() -> anyhow::Result<PathBuf> {
 /// Opens the proxy's stderr log for appending, rotating it to `mcp-proxy.log.1`
 /// first if it has reached [`PROXY_LOG_MAX_BYTES`].
 fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        crate::paths::create_dir_owner_only(parent)
+            .with_context(|| format!("creating state directory {}", parent.display()))?;
+    }
     open_bounded_log(path, PROXY_LOG_MAX_BYTES)
 }
 
@@ -527,13 +531,20 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
 /// the child talks to, and the mode is set at creation rather than chmod'd
 /// after so there is no window in which the file is world-readable.
 ///
+/// Does *not* harden the parent directory's permissions — some callers point
+/// this at a directory outside llmenv's own state tree (e.g. a user-configured
+/// `codebase_memory.index_path` that may be shared with another uid), and
+/// forcing it to `0o700` would silently break that sharing (#1196). Callers
+/// that own a private state-dir path should harden it themselves before
+/// calling in; this function only ensures the directory exists.
+///
 /// # Errors
 /// Returns an error if the parent directory cannot be created or the log cannot
 /// be opened.
 pub(crate) fn open_bounded_log(path: &Path, max_bytes: u64) -> anyhow::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
-        crate::paths::create_dir_owner_only(parent)
-            .with_context(|| format!("creating state directory {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating log directory {}", parent.display()))?;
     }
 
     // Refuse anything at this path that isn't a plain file. `symlink_metadata`
