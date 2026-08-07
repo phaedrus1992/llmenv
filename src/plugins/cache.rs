@@ -814,9 +814,13 @@ mod tests {
         };
         run(&["init", "-q"]);
         // Without this the fixture inherits a developer's global
-        // `commit.gpgsign = true` and every commit below fails on a signer
-        // that can't prompt. Same guard `tests/sync.rs` already uses.
+        // `commit.gpgsign = true` / `tag.gpgsign = true` and every commit or
+        // annotated tag below hangs/fails on a signer that can't prompt
+        // (e.g. a locked/unreachable 1Password SSH-agent backend). Same
+        // guard `tests/sync.rs` already uses for commit.gpgsign; this test
+        // also creates an annotated tag, so it needs tag.gpgsign too.
         run(&["config", "commit.gpgsign", "false"]);
+        run(&["config", "tag.gpgsign", "false"]);
         std::fs::write(src.path().join("f"), "one").unwrap();
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "one"]);

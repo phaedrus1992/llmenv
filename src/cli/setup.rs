@@ -92,7 +92,10 @@ fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
 
 /// Build the full enumeration JSON value.
 fn build_enumeration(available: &[String], config_dir: &Path) -> serde_json::Value {
-    let home = std::env::var("HOME").map(PathBuf::from).ok();
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
 
     let claude_section = home.as_ref().map(|h| {
@@ -483,7 +486,10 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
     // --- Phase 1: Scan existing configs ---
     eprintln!();
     eprintln!("🔍 Re-scanning for existing tool configurations...");
-    let home_dir = std::env::var("HOME").ok().map(PathBuf::from);
+    let home_dir = std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
     if let Some(ref h) = home_dir {
         let claude_settings = h.join(".claude").join("settings.json");
         if claude_settings.is_file() {
@@ -586,7 +592,10 @@ pub(super) fn run_setup(
     // --- Phase 1: Scan existing configs ---
     eprintln!();
     eprintln!("🔍 Scanning for existing tool configurations...");
-    let home_dir = std::env::var("HOME").ok().map(PathBuf::from);
+    let home_dir = std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
     if let Some(ref h) = home_dir {
         let claude_settings = h.join(".claude").join("settings.json");
         if claude_settings.is_file() {
