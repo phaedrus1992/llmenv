@@ -132,7 +132,7 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
     }
 
     // Wait for output with timeout
-    let output = tokio::time::timeout(LLM_TIMEOUT, child.wait_with_output()).await??;
+    let output = wait_with_timeout_or_kill_group(child, LLM_TIMEOUT).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -148,14 +148,83 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
 /// [`call_claude`]'s [`LLM_TIMEOUT`]) keeps running as an orphan — dropping a
 /// `Child` handle is not termination (#1093, same root cause as the
 /// `mcp-proxy` orphan fixed in #1087).
+///
+/// Also joins the child to its own process group (mirroring
+/// [`crate::mcp::proxy::detach_process_group`]'s pattern) so
+/// [`wait_with_timeout_or_kill_group`] can kill the whole group on timeout —
+/// `kill_on_drop` alone only signals the direct pid, not any descendants the
+/// child spawns (#1165).
 fn spawn_with_kill_on_drop(
     mut cmd: tokio::process::Command,
 ) -> std::io::Result<tokio::process::Child> {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+}
+
+/// Wait for `child` to exit, or kill its whole process group on `timeout`.
+///
+/// `kill_on_drop` (set by [`spawn_with_kill_on_drop`]) only signals `child`'s
+/// own pid when the returned future is dropped — any descendants it spawned
+/// (MCP servers, tool subprocesses) are not in that signal's blast radius and
+/// survive as orphans. `spawn_with_kill_on_drop` makes `child` its own
+/// process-group leader, so on timeout this sends `SIGKILL` to the whole
+/// group (`kill -KILL -<pid>`) rather than relying on `kill_on_drop` alone.
+///
+/// # Errors
+/// Returns an error if `child` doesn't exit within `timeout` or if waiting on
+/// it fails.
+async fn wait_with_timeout_or_kill_group(
+    child: tokio::process::Child,
+    timeout: Duration,
+) -> anyhow::Result<std::process::Output> {
+    let pid = child.id();
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => Ok(result?),
+        Err(_elapsed) => {
+            if let Some(pid) = pid {
+                kill_process_group(pid);
+            }
+            anyhow::bail!("process (pid {pid:?}) timed out after {timeout:?}");
+        }
+    }
+}
+
+/// Send `SIGKILL` to `pid`'s whole process group (`kill -KILL -<pid>`).
+/// `pid` must be a process-group leader (its own pgid), as
+/// [`spawn_with_kill_on_drop`] arranges via `process_group(0)` — killing an
+/// arbitrary pid's group could otherwise take out unrelated siblings.
+///
+/// We avoid pulling in `libc` as a dependency by going through
+/// `std::process`, mirroring [`crate::mcp::proxy::is_alive`]'s rationale —
+/// std doesn't expose a group-targeted `kill(2)` directly. Best-effort: a
+/// failure here just means the timeout error below is the only signal.
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let Ok(pid_i32) = i32::try_from(pid) else {
+            return;
+        };
+        if pid_i32 <= 0 {
+            return;
+        }
+        let _ = std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid_i32}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
 }
 
 /// Make a non-streaming call to the Anthropic Messages API.
@@ -503,6 +572,57 @@ mod tests {
             !still_alive,
             "pid {pid} was still alive 2s after dropping the timed-out child"
         );
+    }
+
+    /// #1165: `kill_on_drop` only signals the direct child pid — `claude -p`'s
+    /// own descendants (MCP servers, tool subprocesses) are not touched by it.
+    /// Uses `sh -c "sleep 30 & wait"` as a stand-in that spawns its own child,
+    /// unlike the bare `sleep 30` above, so it can actually catch this: a fix
+    /// that only kills the direct pid leaves the grandchild running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_the_whole_process_group_not_just_the_direct_child() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 30 & wait");
+        let child = spawn_with_kill_on_drop(cmd).expect("spawn sh");
+        let pid = child.id().expect("child has a pid");
+
+        // Give the grandchild (`sleep 30`) time to actually spawn and join
+        // the group before the timeout fires.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let result = wait_with_timeout_or_kill_group(child, Duration::from_millis(50)).await;
+        assert!(result.is_err(), "sh should not exit within 50ms");
+
+        // No process anywhere should still carry this pgid — proves the
+        // whole group (the direct `sh` child and its `sleep 30` grandchild)
+        // was reaped, not just whatever kill_on_drop already covered.
+        let mut group_alive = true;
+        for _ in 0..100 {
+            if !any_process_has_pgid(pid) {
+                group_alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !group_alive,
+            "process group {pid} still has members 2s after timeout"
+        );
+    }
+
+    #[cfg(unix)]
+    fn any_process_has_pgid(pgid: u32) -> bool {
+        let Ok(out) = std::process::Command::new("ps")
+            .args(["-eo", "pgid="])
+            .output()
+        else {
+            return false;
+        };
+        let pgid = pgid.to_string();
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .any(|p| p == pgid)
     }
 
     proptest! {
