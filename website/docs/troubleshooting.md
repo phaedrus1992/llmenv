@@ -105,8 +105,10 @@ See [MCP & Memory](mcp.md) for the full topology and security model.
 
 Lifecycle hooks run on the agent's hot path, so a slow `hook-run` shows up as
 prompt lag. To see where the time goes, set `LLMENV_TRACE_TIMING` (to any value)
-before the hook fires. Each `hook-run` that completes the memory/session-log
-stage then emits one line to **stderr** (stdout is untouched):
+before the hook fires. Every `hook-run` invocation then emits one line to
+**stderr** (stdout is untouched), whether it completes the full
+memory/session-log stage or takes one of the hook's several early-return
+paths:
 
 ```text
 llmenv-trace {"config_load_us":123,"scope_eval_us":456,"prep_us":78,"mcp_us":9012}
@@ -122,9 +124,14 @@ Each value is an integer microsecond count for that phase:
   and the one-time ~3 ms tokio runtime build on the session's first hook-run.
 - `mcp_us` — the MCP round-trip plus session logging; usually the dominant term.
 
-Events that early-return before the MCP stage (e.g. a `PreToolUse` with no
-active sinks), and runs that error mid-round-trip, emit nothing. The var is off
-by default and adds no measurable overhead when unset.
+(added in v3.8.0) Each field is present only if that phase actually ran, so an
+event that early-returns before scope evaluation (e.g. a `PreToolUse` with no
+active sinks) reports `config_load_us` alone, one that early-returns after
+scope evaluation adds `scope_eval_us`, and so on — earlier versions only
+emitted this marker for events reaching the full memory-dispatch stage (4 of
+11 hook events), so every other event's `config_load`/`scope_eval` cost was
+invisible. Runs that error before the marker point still emit nothing. The var
+is off by default and adds no measurable overhead when unset.
 
 ## Sync conflicts
 
