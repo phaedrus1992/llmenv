@@ -175,7 +175,8 @@ fn spawn_with_kill_on_drop(
 /// (MCP servers, tool subprocesses) are not in that signal's blast radius and
 /// survive as orphans. `spawn_with_kill_on_drop` makes `child` its own
 /// process-group leader, so on timeout this sends `SIGKILL` to the whole
-/// group (`kill -KILL -<pid>`) rather than relying on `kill_on_drop` alone.
+/// group (see [`kill_process_group`]) rather than relying on `kill_on_drop`
+/// alone.
 ///
 /// # Errors
 /// Returns an error if `child` doesn't exit within `timeout` or if waiting on
@@ -196,30 +197,42 @@ async fn wait_with_timeout_or_kill_group(
     }
 }
 
-/// Send `SIGKILL` to `pid`'s whole process group (`kill -KILL -<pid>`).
-/// `pid` must be a process-group leader (its own pgid), as
-/// [`spawn_with_kill_on_drop`] arranges via `process_group(0)` — killing an
-/// arbitrary pid's group could otherwise take out unrelated siblings.
+/// Whether `pid` is safe to negate for a group-kill syscall. Rejects `<= 0`
+/// (not a valid pid, or 0 = the caller's own group) *and* `1`: negated for
+/// `kill(2)`, pid 1 becomes `-1`, which the kernel special-cases as "every
+/// process the caller may signal, except pid 1" rather than "process group
+/// 1" — the exact broadcast disaster a `pid <= 0` guard alone would miss
+/// (#1165, found during pre-pr-review's security-audit pass).
+fn is_safe_kill_target(pid: i32) -> bool {
+    pid > 1
+}
+
+/// Send `SIGKILL` to `pid`'s whole process group. `pid` must be a
+/// process-group leader (its own pgid), as [`spawn_with_kill_on_drop`]
+/// arranges via `process_group(0)` — killing an arbitrary pid's group could
+/// otherwise take out unrelated siblings.
 ///
-/// We avoid pulling in `libc` as a dependency by going through
-/// `std::process`, mirroring [`crate::mcp::proxy::is_alive`]'s rationale —
-/// std doesn't expose a group-targeted `kill(2)` directly. Best-effort: a
-/// failure here just means the timeout error below is the only signal.
+/// Goes through `rustix::process::kill_process_group` (a direct syscall)
+/// rather than fork+exec'ing the `kill` binary: `claude -p` may already have
+/// exited and been reaped by the time this runs (`kill_on_drop`'s own
+/// drop-time kill fires first), so its pid could in principle be recycled
+/// for an unrelated process before we signal it — a syscall closes that
+/// window far tighter than paying `kill`'s fork+exec latency first would.
+/// Best-effort: a failure here just means the timeout error below is the
+/// only signal.
 fn kill_process_group(pid: u32) {
     #[cfg(unix)]
     {
         let Ok(pid_i32) = i32::try_from(pid) else {
             return;
         };
-        if pid_i32 <= 0 {
+        if !is_safe_kill_target(pid_i32) {
             return;
         }
-        let _ = std::process::Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{pid_i32}"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let Some(pid) = rustix::process::Pid::from_raw(pid_i32) else {
+            return;
+        };
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
     }
     #[cfg(not(unix))]
     {
@@ -623,6 +636,29 @@ mod tests {
         String::from_utf8_lossy(&out.stdout)
             .split_whitespace()
             .any(|p| p == pgid)
+    }
+
+    // #1165 (found during pre-pr-review, security-audit): a raw pid of 1
+    // negated for a group-kill syscall becomes `kill(-1, sig)`, which the
+    // kernel special-cases as "signal every process the caller may sign for,
+    // except pid 1" — the same broadcast disaster a naive `pid <= 0` guard
+    // was meant to prevent, just reached via a different value.
+    #[test]
+    fn is_safe_kill_target_rejects_broadcast_self_group_and_init() {
+        assert!(!is_safe_kill_target(-5), "negative pid must be rejected");
+        assert!(
+            !is_safe_kill_target(0),
+            "pid 0 (caller's own group) must be rejected"
+        );
+        assert!(
+            !is_safe_kill_target(1),
+            "pid 1 (would broadcast as -1) must be rejected"
+        );
+        assert!(is_safe_kill_target(2), "an ordinary pid must be accepted");
+        assert!(
+            is_safe_kill_target(12345),
+            "an ordinary pid must be accepted"
+        );
     }
 
     proptest! {
