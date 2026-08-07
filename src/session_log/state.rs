@@ -65,9 +65,6 @@ fn load_at(path: &Path) -> BTreeMap<String, String> {
 }
 
 fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let mut map = load_at(path);
     map.insert(claude_session_id.to_string(), icm_session_id.to_string());
     // ponytail: eviction order is BTreeMap key order (the random session-id

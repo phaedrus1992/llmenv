@@ -213,18 +213,12 @@ pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<(
         // For paths like "foo.json" (no parent dir), use current dir.
         return write_owner_only_atomic_in_dir(Path::new("."), file_name, path, content);
     }
-    std::fs::create_dir_all(parent)?;
-    // Harden parent dir to 0o700 (owner-only). Without this, default umask
-    // 0o022 leaves the state dir at 0o755 (world-listable), leaking the
-    // existence and names of state files on shared systems. Failure is
-    // non-fatal — on platforms that don't support it (Windows), or if the
-    // dir was created by another process and we lack chmod rights, we still
-    // proceed with the file-level 0o600 protection.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
+    // Born owner-only (0o700) at creation, including every missing
+    // ancestor — a create_dir_all + post-hoc set_permissions leaves the
+    // umask default (typically 0o755, world-listable) both as a TOCTOU
+    // window on the immediate parent and permanently on any intermediate
+    // ancestor it doesn't chmod (#1178).
+    create_dir_owner_only(parent)?;
     write_owner_only_atomic_in_dir(parent, file_name, path, content)
 }
 
@@ -668,6 +662,38 @@ mod tests {
         let path = tmp.path().join("a/b/c/file.json");
         write_owner_only_atomic(&path, b"nested").expect("write");
         assert_eq!(std::fs::read(&path).expect("read"), b"nested");
+    }
+
+    // #1178: write_owner_only_atomic must create every missing ancestor
+    // directory owner-only from the moment of creation, not just the
+    // immediate parent. The old create_dir_all + post-hoc set_permissions
+    // approach only chmods the immediate parent, leaving intermediate
+    // ancestors at the umask default (world-readable) forever, and leaves a
+    // TOCTOU window on the immediate parent between creation and chmod.
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_atomic_creates_all_missing_ancestors_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp
+            .path()
+            .join("grandparent")
+            .join("parent")
+            .join("file.json");
+        write_owner_only_atomic(&path, b"nested").expect("write");
+
+        for ancestor in ["grandparent", "grandparent/parent"] {
+            let dir = tmp.path().join(ancestor);
+            let mode = std::fs::metadata(&dir)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "{ancestor} must be born owner-only, got {mode:o}"
+            );
+        }
     }
 
     #[test]
