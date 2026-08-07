@@ -61,3 +61,41 @@ fn doctor_creates_missing_cache_dir_owner_only() {
         & 0o777;
     assert_eq!(mode, 0o700, "cache dir must be owner-only, got {mode:o}");
 }
+
+// #1198 (found during pre-pr-review): doctor's job is to report whether the
+// cache dir is writable, not to mutate an existing one's permissions as a
+// side effect. Forcing 0700 on a pre-existing dir could hard-fail on one
+// owned by a different uid (shared cache location, container volume
+// mapping) — the exact regression #1196 already walked back for
+// codebase_memory.index_path. Hardening only applies when doctor itself
+// creates the dir; an existing one is left exactly as its owner set it.
+#[cfg(unix)]
+#[test]
+fn doctor_does_not_force_permissions_on_a_preexisting_cache_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = setup_test_config("~/cache");
+    let cache_dir = tmp.path().join("cache");
+    fs::create_dir_all(&cache_dir).expect("pre-create cache dir");
+    fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o755)).expect("chmod 755");
+
+    let output = isolated_llmenv_cmd(tmp.path())
+        .arg("doctor")
+        .output()
+        .expect("failed to run llmenv doctor");
+    assert!(
+        output.status.success(),
+        "doctor should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mode = fs::metadata(&cache_dir)
+        .expect("stat cache dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o755,
+        "doctor must not change an existing cache dir's permissions, got {mode:o}"
+    );
+}
