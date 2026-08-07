@@ -123,7 +123,6 @@ pub fn read_state(state_dir: &Path) -> Result<Option<SystemTime>> {
 
 /// Write the current pull timestamp to state_dir/sync.json.
 pub fn write_state(state_dir: &Path, t: SystemTime) -> Result<()> {
-    std::fs::create_dir_all(state_dir)?;
     let secs = t.duration_since(UNIX_EPOCH)?.as_secs();
     crate::paths::write_owner_only_atomic(&state_path(state_dir), secs.to_string().as_bytes())?;
     Ok(())
