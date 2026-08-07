@@ -39,7 +39,7 @@ plugin_collection: []
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("network:home") && stderr.contains("gateway_mac"),
+        stderr.contains("network:home: match has no gateway_mac"),
         "expected a warning naming the network:home scope and gateway_mac, got: {stderr}"
     );
 }
@@ -74,7 +74,11 @@ plugin_collection: []
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("network:office") || !stderr.contains("gateway_mac"),
+        stderr.contains("Doctor check complete"),
+        "doctor must have run to completion, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("network:office: match has no gateway_mac"),
         "must not flag a scope that already has gateway_mac set, got: {stderr}"
     );
 }

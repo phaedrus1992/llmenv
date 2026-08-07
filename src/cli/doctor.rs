@@ -651,9 +651,10 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             }
             if network_scope_cannot_match(&s.r#match) {
                 eprintln!(
-                    "{warn} orphan scope network:{}: match has no gateway_mac -- only \
+                    "{warn} orphan scope network:{}: match has no gateway_mac — only \
                      gateway_mac is evaluated today (ssid/cidr are accepted but ignored), \
-                     so this scope can never activate",
+                     so this scope can never activate; set gateway_mac or use a host scope \
+                     instead",
                     s.id
                 );
                 orphan_count += 1;

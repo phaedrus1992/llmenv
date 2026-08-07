@@ -1,8 +1,10 @@
 # Capability fragment for the `home` bundle.
 #
 # Fires on the `home` tag, which is emitted by the `home` network scope
-# in config.yaml (match: { ssid: "MyWifiSSID" }) when the machine is connected
-# to the home Wi-Fi network.
+# in config.yaml (match: { gateway_mac: "aa:bb:cc:dd:ee:ff" }) when the
+# machine is connected to the home LAN. Only `gateway_mac` is evaluated by the
+# matcher today -- `ssid`/`cidr` are accepted by the schema but silently
+# ignored (#1051), so a scope keyed only on those never fires.
 #
 # WHY NETWORK-SCOPED:
 #   The media-server skill (in skills/media-server/) talks to a local Plex or
@@ -10,12 +12,13 @@
 #   not exposed to the internet and not on a VPN. Loading the skill on a work
 #   laptop at the office would produce a skill that always times out.
 #
-#   The SSID-based scope ensures the skill is only available when the agent
-#   can actually reach the server. If you want it available over VPN too, add
-#   a second network scope in config.yaml with the VPN tunnel interface.
+#   The gateway-MAC-based scope ensures the skill is only available when the
+#   agent can actually reach the server. If you want it available over VPN
+#   too, add a second network scope in config.yaml with the VPN tunnel's
+#   gateway MAC.
 #
 # INTERACTION CHAIN:
-#   SSID == "MyWifiSSID"
+#   gateway MAC == "aa:bb:cc:dd:ee:ff"
 #     → scope `home` fires
 #     → emits tags: [home, trusted-network]
 #     → bundle `home` loads (this file)
@@ -25,7 +28,7 @@
 # IF YOU DON'T HAVE A MEDIA SERVER:
 #   Replace the media-server skill with any other home-only resource:
 #   a local NAS, a home automation hub (Home Assistant), a self-hosted service.
-#   The pattern is the same: SSID scope → home bundle → resource-specific skill.
+#   The pattern is the same: gateway-MAC scope → home bundle → resource-specific skill.
 
 native_permissions:
   claude_code:
