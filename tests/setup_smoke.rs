@@ -56,6 +56,31 @@ fn setup_no_launch_creates_config() {
     assert_setup_files(dir.path());
 }
 
+// #1196 (found during review): `run_init`'s config dir got hardened but its
+// twin in `run_setup` did not — same bare create_dir_all, same TOCTOU window
+// before write_owner_only_atomic's later self-heal happens to close it.
+#[cfg(unix)]
+#[test]
+fn setup_no_launch_creates_config_dir_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let config_dir = dir.path().join("fresh-config");
+    llmenv_cmd(&config_dir)
+        .arg("setup")
+        .arg("--no-launch")
+        .timeout(TIMEOUT)
+        .assert()
+        .success();
+
+    let mode = fs::metadata(&config_dir)
+        .expect("stat config dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "config dir must be owner-only, got {mode:o}");
+}
+
 /// `[PATH]` positional arg overrides the config dir without needing `LLMENV_CONFIG_DIR`.
 #[test]
 fn setup_custom_path() {

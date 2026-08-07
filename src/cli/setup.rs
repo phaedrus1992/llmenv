@@ -586,7 +586,7 @@ pub(super) fn run_setup(
         }
     }
 
-    std::fs::create_dir_all(&config_dir)
+    paths::create_dir_owner_only(&config_dir)
         .with_context(|| format!("creating config dir {}", config_dir.display()))?;
 
     // --- Phase 1: Scan existing configs ---
