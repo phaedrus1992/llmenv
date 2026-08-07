@@ -80,7 +80,7 @@ pub fn materialize_with_mode(
         HashingMode::Strict => {}
     }
 
-    std::fs::create_dir_all(cache_root)?;
+    crate::paths::create_dir_owner_only(cache_root)?;
 
     // Per-call staging directory: `<folder>.<pid>.<nanos>.tmp`. Each concurrent
     // writer gets its own staging path, so they cannot clobber each other on

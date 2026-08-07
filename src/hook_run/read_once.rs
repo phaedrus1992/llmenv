@@ -76,9 +76,6 @@ impl SessionCache {
     /// (fail-soft). Opportunistically prunes stale session files before writing.
     pub fn save(&self, state_dir: &Path) -> anyhow::Result<()> {
         Self::prune_stale_sessions(state_dir, 7);
-        let ro_dir = read_once_state_dir(state_dir);
-        std::fs::create_dir_all(&ro_dir)?;
-
         let path = session_cache_path(state_dir, &self.session_id);
         let json = serde_json::to_string(&self)?;
         crate::paths::write_owner_only_atomic(&path, json.as_bytes())?;
@@ -612,6 +609,25 @@ mod tests {
         let entry = loaded.entries.get("/foo/bar.rs").expect("test");
         assert_eq!(entry.hits, 2);
         assert_eq!(entry.tokens_saved, 500);
+    }
+
+    // #1196: save() must create its state directory owner-only, even though
+    // it no longer calls create_dir_all itself -- write_owner_only_atomic's
+    // own parent-directory creation must be the one and only path.
+    #[cfg(unix)]
+    #[test]
+    fn session_cache_save_creates_state_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let state_dir = TempDir::new().expect("test");
+        let cache = SessionCache::new("test-mode");
+        cache.save(state_dir.path()).expect("test");
+
+        let ro_dir = read_once_state_dir(state_dir.path());
+        let mode = fs::metadata(&ro_dir).expect("test").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "read_once dir must be owner-only, got {mode:o}"
+        );
     }
 
     // #792: ReadEntry and SessionCache derive Serialize/Deserialize and persist
