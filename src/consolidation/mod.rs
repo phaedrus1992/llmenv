@@ -132,7 +132,7 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
     }
 
     // Wait for output with timeout
-    let output = tokio::time::timeout(LLM_TIMEOUT, child.wait_with_output()).await??;
+    let output = wait_with_timeout_or_kill_group(child, LLM_TIMEOUT).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -148,14 +148,96 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
 /// [`call_claude`]'s [`LLM_TIMEOUT`]) keeps running as an orphan — dropping a
 /// `Child` handle is not termination (#1093, same root cause as the
 /// `mcp-proxy` orphan fixed in #1087).
+///
+/// Also joins the child to its own process group (mirroring
+/// [`crate::mcp::proxy::detach_process_group`]'s pattern) so
+/// [`wait_with_timeout_or_kill_group`] can kill the whole group on timeout —
+/// `kill_on_drop` alone only signals the direct pid, not any descendants the
+/// child spawns (#1165).
 fn spawn_with_kill_on_drop(
     mut cmd: tokio::process::Command,
 ) -> std::io::Result<tokio::process::Child> {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+}
+
+/// Wait for `child` to exit, or kill its whole process group on `timeout`.
+///
+/// `kill_on_drop` (set by [`spawn_with_kill_on_drop`]) only signals `child`'s
+/// own pid when the returned future is dropped — any descendants it spawned
+/// (MCP servers, tool subprocesses) are not in that signal's blast radius and
+/// survive as orphans. `spawn_with_kill_on_drop` makes `child` its own
+/// process-group leader, so on timeout this sends `SIGKILL` to the whole
+/// group (see [`kill_process_group`]) rather than relying on `kill_on_drop`
+/// alone.
+///
+/// # Errors
+/// Returns an error if `child` doesn't exit within `timeout` or if waiting on
+/// it fails.
+async fn wait_with_timeout_or_kill_group(
+    child: tokio::process::Child,
+    timeout: Duration,
+) -> anyhow::Result<std::process::Output> {
+    let pid = child.id();
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => Ok(result?),
+        Err(_elapsed) => {
+            if let Some(pid) = pid {
+                kill_process_group(pid);
+            }
+            anyhow::bail!("process (pid {pid:?}) timed out after {timeout:?}");
+        }
+    }
+}
+
+/// Whether `pid` is safe to negate for a group-kill syscall. Rejects `<= 0`
+/// (not a valid pid, or 0 = the caller's own group) *and* `1`: negated for
+/// `kill(2)`, pid 1 becomes `-1`, which the kernel special-cases as "every
+/// process the caller may signal, except pid 1" rather than "process group
+/// 1" — the exact broadcast disaster a `pid <= 0` guard alone would miss
+/// (#1165, found during pre-pr-review's security-audit pass).
+fn is_safe_kill_target(pid: i32) -> bool {
+    pid > 1
+}
+
+/// Send `SIGKILL` to `pid`'s whole process group. `pid` must be a
+/// process-group leader (its own pgid), as [`spawn_with_kill_on_drop`]
+/// arranges via `process_group(0)` — killing an arbitrary pid's group could
+/// otherwise take out unrelated siblings.
+///
+/// Goes through `rustix::process::kill_process_group` (a direct syscall)
+/// rather than fork+exec'ing the `kill` binary: `claude -p` may already have
+/// exited and been reaped by the time this runs (`kill_on_drop`'s own
+/// drop-time kill fires first), so its pid could in principle be recycled
+/// for an unrelated process before we signal it — a syscall closes that
+/// window far tighter than paying `kill`'s fork+exec latency first would.
+/// Best-effort: a failure here just means the timeout error below is the
+/// only signal.
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let Ok(pid_i32) = i32::try_from(pid) else {
+            return;
+        };
+        if !is_safe_kill_target(pid_i32) {
+            return;
+        }
+        let Some(pid) = rustix::process::Pid::from_raw(pid_i32) else {
+            return;
+        };
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
 }
 
 /// Make a non-streaming call to the Anthropic Messages API.
@@ -502,6 +584,80 @@ mod tests {
         assert!(
             !still_alive,
             "pid {pid} was still alive 2s after dropping the timed-out child"
+        );
+    }
+
+    /// #1165: `kill_on_drop` only signals the direct child pid — `claude -p`'s
+    /// own descendants (MCP servers, tool subprocesses) are not touched by it.
+    /// Uses `sh -c "sleep 30 & wait"` as a stand-in that spawns its own child,
+    /// unlike the bare `sleep 30` above, so it can actually catch this: a fix
+    /// that only kills the direct pid leaves the grandchild running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_the_whole_process_group_not_just_the_direct_child() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 30 & wait");
+        let child = spawn_with_kill_on_drop(cmd).expect("spawn sh");
+        let pid = child.id().expect("child has a pid");
+
+        // Give the grandchild (`sleep 30`) time to actually spawn and join
+        // the group before the timeout fires.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let result = wait_with_timeout_or_kill_group(child, Duration::from_millis(50)).await;
+        assert!(result.is_err(), "sh should not exit within 50ms");
+
+        // No process anywhere should still carry this pgid — proves the
+        // whole group (the direct `sh` child and its `sleep 30` grandchild)
+        // was reaped, not just whatever kill_on_drop already covered.
+        let mut group_alive = true;
+        for _ in 0..100 {
+            if !any_process_has_pgid(pid) {
+                group_alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !group_alive,
+            "process group {pid} still has members 2s after timeout"
+        );
+    }
+
+    #[cfg(unix)]
+    fn any_process_has_pgid(pgid: u32) -> bool {
+        let Ok(out) = std::process::Command::new("ps")
+            .args(["-eo", "pgid="])
+            .output()
+        else {
+            return false;
+        };
+        let pgid = pgid.to_string();
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .any(|p| p == pgid)
+    }
+
+    // #1165 (found during pre-pr-review, security-audit): a raw pid of 1
+    // negated for a group-kill syscall becomes `kill(-1, sig)`, which the
+    // kernel special-cases as "signal every process the caller may sign for,
+    // except pid 1" — the same broadcast disaster a naive `pid <= 0` guard
+    // was meant to prevent, just reached via a different value.
+    #[test]
+    fn is_safe_kill_target_rejects_broadcast_self_group_and_init() {
+        assert!(!is_safe_kill_target(-5), "negative pid must be rejected");
+        assert!(
+            !is_safe_kill_target(0),
+            "pid 0 (caller's own group) must be rejected"
+        );
+        assert!(
+            !is_safe_kill_target(1),
+            "pid 1 (would broadcast as -1) must be rejected"
+        );
+        assert!(is_safe_kill_target(2), "an ordinary pid must be accepted");
+        assert!(
+            is_safe_kill_target(12345),
+            "an ordinary pid must be accepted"
         );
     }
 
