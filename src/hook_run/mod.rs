@@ -589,6 +589,70 @@ fn resolve_stop_reminder(
     }
 }
 
+/// Build the `LLMENV_TRACE_TIMING` marker payload from whichever phase
+/// boundaries `run_inner` reached before returning. `t0`/`t_config` are
+/// always available (computed before any early return); `t_scope`/`t_chunk`/
+/// `t_end` are `None` on a path that returned before reaching them. Each
+/// field is included only when its Instant is present, so an early return
+/// still reports the phases it actually ran through instead of nothing
+/// (#1128: previously only events reaching the full memory-dispatch path —
+/// 4 of 11 — emitted this marker at all).
+fn trace_timing_json(
+    t0: std::time::Instant,
+    t_config: std::time::Instant,
+    t_scope: Option<std::time::Instant>,
+    t_chunk: Option<std::time::Instant>,
+    t_end: Option<std::time::Instant>,
+) -> serde_json::Value {
+    // Cap rather than panic on the (unreachable) overflow of an in-process
+    // Instant delta past u64::MAX microseconds (~585,000 years).
+    let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "config_load_us".to_string(),
+        json!(us(t_config.saturating_duration_since(t0))),
+    );
+    if let Some(t_scope) = t_scope {
+        fields.insert(
+            "scope_eval_us".to_string(),
+            json!(us(t_scope.saturating_duration_since(t_config))),
+        );
+        if let Some(t_chunk) = t_chunk {
+            fields.insert(
+                "prep_us".to_string(),
+                json!(us(t_chunk.saturating_duration_since(t_scope))),
+            );
+            if let Some(t_end) = t_end {
+                fields.insert(
+                    "mcp_us".to_string(),
+                    json!(us(t_end.saturating_duration_since(t_chunk))),
+                );
+            }
+        }
+    }
+    serde_json::Value::Object(fields)
+}
+
+/// Emit the per-phase timing marker to stderr when `LLMENV_TRACE_TIMING` is
+/// set (any value): exactly one line, `llmenv-trace <json>`. The clock always
+/// runs (`Instant::now` is ~20ns); only emission is gated, so normal runs are
+/// unaffected and stdout is never touched. See [`trace_timing_json`] for
+/// which fields appear depending on how far the caller got.
+fn emit_trace_timing(
+    t0: std::time::Instant,
+    t_config: std::time::Instant,
+    t_scope: Option<std::time::Instant>,
+    t_chunk: Option<std::time::Instant>,
+    t_end: Option<std::time::Instant>,
+) {
+    if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
+        eprintln!(
+            "llmenv-trace {}",
+            trace_timing_json(t0, t_config, t_scope, t_chunk, t_end)
+        );
+    }
+}
+
 fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
@@ -663,6 +727,7 @@ fn run_inner(
                 let level =
                     event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
                 if !log_cfg.any_sink_wants(level) {
+                    emit_trace_timing(t0, t_config, None, None, None);
                     return Ok(t);
                 }
                 Some(t)
@@ -681,11 +746,9 @@ fn run_inner(
     // (that early-return shape was tried and reverted; see the git history).
     if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
         let state_dir = crate::paths::state_dir()?;
-        return Ok(resolve_stop_reminder(
-            &state_dir,
-            claude_session_id,
-            &config,
-        ));
+        let reminder = resolve_stop_reminder(&state_dir, claude_session_id, &config);
+        emit_trace_timing(t0, t_config, None, None, None);
+        return Ok(reminder);
     }
 
     // #867: the rest of the pipeline (scope evaluation, tag/bundle recall
@@ -713,6 +776,7 @@ fn run_inner(
                 | HookEvent::PostSession
         ) && !log_cfg.any_sink_enabled()
         {
+            emit_trace_timing(t0, t_config, None, None, None);
             return Ok(String::new());
         }
 
@@ -820,6 +884,7 @@ fn run_inner(
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
                 if !log_cfg.any_sink_enabled() {
+                    emit_trace_timing(t0, t_config, Some(t_scope), None, None);
                     return Ok(String::new());
                 }
             }
@@ -922,32 +987,7 @@ fn run_inner(
             Ok::<String, anyhow::Error>(out)
         })?;
         let t_end = std::time::Instant::now();
-
-        // Per-phase timing marker. When `LLMENV_TRACE_TIMING` is set (any value) we
-        // emit exactly ONE line to stderr:
-        //   llmenv-trace {"config_load_us":N,"scope_eval_us":N,"prep_us":N,"mcp_us":N}
-        // `prep_us` spans t_scope→t_chunk: recall-query building, context-chunk
-        // generation, MCP client construction (reqwest/TLS on a cache miss), the
-        // scope-context build, and the one-time ~3ms tokio runtime build — i.e. all
-        // setup before the async MCP round-trips. `mcp_us` is the `block_on` window:
-        // the round-trips plus session logging. The clock always runs (Instant::now
-        // is ~20ns); only emission is gated, so normal runs are unaffected and stdout
-        // is never touched. Events that early-return, and runs that error before this
-        // point (e.g. a failed MCP round-trip), emit nothing.
-        if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
-            // Cap rather than panic on the (unreachable) overflow of an in-process
-            // Instant delta past u64::MAX microseconds (~585,000 years).
-            let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
-            eprintln!(
-                "llmenv-trace {}",
-                json!({
-                    "config_load_us": us(t_config.saturating_duration_since(t0)),
-                    "scope_eval_us": us(t_scope.saturating_duration_since(t_config)),
-                    "prep_us": us(t_chunk.saturating_duration_since(t_scope)),
-                    "mcp_us": us(t_end.saturating_duration_since(t_chunk)),
-                })
-            );
-        }
+        emit_trace_timing(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
         Ok(out)
     })();
 
@@ -1962,6 +2002,54 @@ fn post_session_consolidation() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    // #1128: the marker used to require reaching the full success path (only
+    // 4 of 11 hook events ever got there); every early-return in run_inner
+    // now emits it too, with whichever phases it actually reached. Each
+    // field is present only when the corresponding Instant was reached.
+    #[test]
+    fn trace_timing_json_includes_only_reached_phases() {
+        use std::collections::BTreeSet;
+        let keys_of = |v: &serde_json::Value| -> BTreeSet<String> {
+            v.as_object().unwrap().keys().cloned().collect()
+        };
+
+        let t0 = std::time::Instant::now();
+        let t_config = t0 + std::time::Duration::from_micros(10);
+
+        let only_config = trace_timing_json(t0, t_config, None, None, None);
+        assert_eq!(
+            keys_of(&only_config),
+            BTreeSet::from(["config_load_us".to_string()]),
+            "an early return before scope eval must report only config_load_us"
+        );
+
+        let t_scope = t_config + std::time::Duration::from_micros(20);
+        let through_scope = trace_timing_json(t0, t_config, Some(t_scope), None, None);
+        assert_eq!(
+            keys_of(&through_scope),
+            BTreeSet::from(["config_load_us".to_string(), "scope_eval_us".to_string()]),
+            "an early return after scope eval must add scope_eval_us"
+        );
+
+        let t_chunk = t_scope + std::time::Duration::from_micros(30);
+        let t_end = t_chunk + std::time::Duration::from_micros(40);
+        let full = trace_timing_json(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
+        assert_eq!(
+            keys_of(&full),
+            BTreeSet::from([
+                "config_load_us".to_string(),
+                "scope_eval_us".to_string(),
+                "prep_us".to_string(),
+                "mcp_us".to_string(),
+            ]),
+            "the full success path must report all four phases"
+        );
+        assert_eq!(full["config_load_us"], 10);
+        assert_eq!(full["scope_eval_us"], 20);
+        assert_eq!(full["prep_us"], 30);
+        assert_eq!(full["mcp_us"], 40);
+    }
 
     // #920: `memory_url` must use the disk-persisted merge cache when its key
     // matches, instead of redoing the live merge. Proven behaviorally (not by
