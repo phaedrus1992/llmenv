@@ -124,6 +124,16 @@ pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
         .collect()
 }
 
+/// True if a network scope's `match` can never activate: the matcher
+/// (`src/scope/matcher.rs`) only evaluates `gateway_mac` today — `ssid`/`cidr`
+/// are accepted by the config schema and documented as fields, but silently
+/// ignored (#1051). A scope with no `gateway_mac` set can never match,
+/// regardless of what `ssid`/`cidr` say.
+#[must_use]
+pub(super) fn network_scope_cannot_match(m: &crate::config::NetworkMatch) -> bool {
+    m.gateway_mac.is_none()
+}
+
 /// Returns the `when` tag sets of `codebase_memory` entries (top-level +
 /// bundle-contributed) that no emitted tag covers — these can never activate.
 /// Unlike `memory`, there's no `host:` table reference to check (codebase-
@@ -639,6 +649,16 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                 );
                 orphan_count += 1;
             }
+            if network_scope_cannot_match(&s.r#match) {
+                eprintln!(
+                    "{warn} orphan scope network:{}: match has no gateway_mac — only \
+                     gateway_mac is evaluated today (ssid/cidr are accepted but ignored), \
+                     so this scope can never activate; set gateway_mac or use a host scope \
+                     instead",
+                    s.id
+                );
+                orphan_count += 1;
+            }
         }
         for s in &config.scope.host {
             if !s.tags.iter().any(|t| consumed.contains(t)) {
@@ -1000,6 +1020,46 @@ mod tests {
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+
+    // -- network_scope_cannot_match --
+
+    // #1051: the matcher only evaluates gateway_mac; ssid/cidr are accepted
+    // by the schema but never checked, so their presence alone can't save a
+    // scope from being flagged.
+    #[test]
+    fn network_scope_cannot_match_without_gateway_mac() {
+        use crate::config::NetworkMatch;
+        for m in [
+            NetworkMatch {
+                gateway_mac: None,
+                ssid: Some("MyWifi".into()),
+                cidr: None,
+            },
+            NetworkMatch {
+                gateway_mac: None,
+                ssid: None,
+                cidr: Some("10.0.0.0/24".into()),
+            },
+            NetworkMatch {
+                gateway_mac: None,
+                ssid: None,
+                cidr: None,
+            },
+        ] {
+            assert!(network_scope_cannot_match(&m), "{m:?} must be flagged");
+        }
+    }
+
+    #[test]
+    fn network_scope_can_match_with_gateway_mac() {
+        use crate::config::NetworkMatch;
+        let m = NetworkMatch {
+            gateway_mac: Some("aa:bb:cc:dd:ee:ff".into()),
+            ssid: None,
+            cidr: None,
+        };
+        assert!(!network_scope_cannot_match(&m));
+    }
 
     // -- memory_orphaned_by_disable_bundles --
 

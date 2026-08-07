@@ -329,12 +329,15 @@ scope:
       tags: [user-phaedrus]
 
   # --- Network scopes --------------------------------------------------------
-  # Home network is identified by SSID. The `home` tag enables the `home` bundle
+  # Home network is identified by the router's gateway MAC address (the only
+  # field the matcher actually evaluates today -- `ssid`/`cidr` are accepted
+  # by the schema but silently ignored, #1051; `llmenv doctor --all` flags a
+  # scope that only sets those). The `home` tag enables the `home` bundle
   # (plex skill), and `trusted-network` can be used to relax settings that
   # should only run on a known LAN.
   network:
     - id: home
-      match: { ssid: "MyWifiSSID" }
+      match: { gateway_mac: "aa:bb:cc:dd:ee:ff" }
       tags: [home, trusted-network]
 
 ################################################################################
@@ -372,8 +375,9 @@ bundle:
   - name: work
     when: [work]
 
-  # Home network bundle: fires on the `home` tag (SSID "MyWifiSSID"). Carries
-  # the plex skill because the local media server is only reachable at home.
+  # Home network bundle: fires on the `home` tag (gateway MAC
+  # "aa:bb:cc:dd:ee:ff"). Carries the plex skill because the local media
+  # server is only reachable at home.
   - name: home
     when: [home]
 
