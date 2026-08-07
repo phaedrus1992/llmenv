@@ -536,7 +536,9 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - cache directory writability
 - git connectivity
 - orphans — scopes/tags/bundles/MCP/plugins that can never activate, a memory
-  `server_host` missing from `host:`, and unknown fields in project markers
+  `server_host` missing from `host:`, unknown fields in project markers, and a
+  network scope whose `match` has no `gateway_mac` (added in v3.8.0) — only
+  `gateway_mac` is evaluated today, so `ssid`/`cidr` alone can never match
 - dead `native_<feature>.<engine>` keys (added in v3.8.0) — warns when a key in
   `native_permissions`, `native_hooks`, `native_plugins`, `native_mcp`,
   `native_model_providers`, or `native` names no registered engine (a typo), or

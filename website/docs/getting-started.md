@@ -169,7 +169,9 @@ Full per-command reference: [commands.md](commands.md).
   addresses, MACs, SSIDs, and URLs. See
   [Configuration → YAML gotchas](configuration.md#yaml-gotchas).
 - **Network scope never matches** — only `gateway_mac` is evaluated today;
-  `ssid`/`cidr` are ignored. Use a host scope as a reliable fallback.
+  `ssid`/`cidr` are ignored. `llmenv doctor --all` flags a network scope whose
+  `match` has no `gateway_mac` as an orphan that can never activate (added in
+  v3.8.0). Use a host scope as a reliable fallback.
 
 ## Recommended external tools
 
