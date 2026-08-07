@@ -48,8 +48,9 @@ pub fn state_env_vars(cfg: &StateConfig, state_dir: &Path) -> Vec<(String, Strin
 
 /// Create the durable state directory and every configured tool's subdirectory.
 ///
-/// Idempotent (`create_dir_all`). Tools expect their relocated dir to exist
-/// before they start, so materialization creates them up front.
+/// Idempotent (`create_dir_owner_only`); directories are created owner-only
+/// (0o700 on Unix). Tools expect their relocated dir to exist before they
+/// start, so materialization creates them up front.
 ///
 /// # Errors
 /// Returns an error if any directory cannot be created.

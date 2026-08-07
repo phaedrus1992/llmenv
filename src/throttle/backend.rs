@@ -122,9 +122,8 @@ fn write_cache(
     cache_file: &std::path::Path,
     snap: &UsageSnapshot,
 ) -> anyhow::Result<()> {
-    if let Err(e) = crate::paths::create_dir_owner_only(cache_dir) {
-        anyhow::bail!("create_dir_owner_only failed: {e}");
-    }
+    crate::paths::create_dir_owner_only(cache_dir)
+        .with_context(|| format!("creating throttle cache directory {}", cache_dir.display()))?;
     let bytes = serde_json::to_vec(snap)?;
     crate::paths::write_owner_only(cache_file, &bytes).context("writing cache file")?;
     Ok(())
