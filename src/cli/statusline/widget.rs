@@ -1168,8 +1168,16 @@ fn format_delta(delta: f64) -> String {
 /// (`$CLAUDE_CONFIG_DIR/statusline-state`). `None` when the engine didn't
 /// export `CLAUDE_CONFIG_DIR`, which disables delta tracking.
 fn usage_state_dir() -> Option<PathBuf> {
-    std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
+    usage_state_dir_with_env(&|name| std::env::var(name).ok())
+}
+
+/// [`usage_state_dir`] with an injectable env-var provider so tests can
+/// exercise the set-but-empty case without mutating real process env vars.
+fn usage_state_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    // A set-but-empty `CLAUDE_CONFIG_DIR=` must disable delta tracking like an
+    // unset one, not resolve to the relative path `statusline-state` (#1111).
+    get_env("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
         .map(|d| PathBuf::from(d).join("statusline-state"))
 }
 
@@ -1182,6 +1190,33 @@ const SEVEN_DAY_SECS: i64 = 7 * 86_400;
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn usage_state_dir_with_env_unset_disables_tracking() {
+        let get_env = |_: &str| None;
+        assert_eq!(usage_state_dir_with_env(&get_env), None);
+    }
+
+    #[test]
+    fn usage_state_dir_with_env_empty_disables_tracking_like_unset() {
+        let get_env = |name: &str| match name {
+            "CLAUDE_CONFIG_DIR" => Some(String::new()),
+            _ => None,
+        };
+        assert_eq!(usage_state_dir_with_env(&get_env), None);
+    }
+
+    #[test]
+    fn usage_state_dir_with_env_non_empty_used_verbatim() {
+        let get_env = |name: &str| match name {
+            "CLAUDE_CONFIG_DIR" => Some("/custom/config".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            usage_state_dir_with_env(&get_env),
+            Some(PathBuf::from("/custom/config/statusline-state"))
+        );
+    }
 
     /// Test-only convenience wrapper: the `pr` widget's full render
     /// (resolve + text + dynamic style), matching what `render_engine_widget`
