@@ -4,8 +4,6 @@
 
 use crate::scope::ActiveScopes;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::fs;
 use std::path::{Path, PathBuf};
 use tracing;
 
@@ -119,7 +117,7 @@ fn write_memory(path: &Path, memory: &IcmMemory) -> anyhow::Result<()> {
 /// property tests to verify on-disk roundtrip.
 #[cfg(test)]
 fn read_memory(path: &Path) -> anyhow::Result<IcmMemory> {
-    let body = fs::read_to_string(path)?;
+    let body = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&body)?)
 }
 
@@ -303,7 +301,7 @@ mod tests {
             let path = temp.path().join("icm.json");
             let memory = IcmMemory { tags, bundles: vec![] };
             write_memory(&path, &memory).expect("write");
-            let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+            let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
             // Only owner bits should be set in the low 9 bits.
             prop_assert_eq!(mode & 0o077, 0, "group/other bits set: {:o}", mode);
         }
