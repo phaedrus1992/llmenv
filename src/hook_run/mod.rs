@@ -1008,6 +1008,13 @@ fn run_inner(
                     "hook-run: pipeline failed after a PreToolUse decision was \
                      already computed; returning it instead of silently dropping it"
                 );
+                // #1128: this is also a return point, though in practice the
+                // memory-client/network failures this branch was written for
+                // (#867) are caught fail-soft inside the pipeline itself and
+                // never reach here — this covers the rarer errors that do
+                // (e.g. a tag/bundle validation failure). t_scope/t_chunk/
+                // t_end are lost along with the closure that computed them.
+                emit_trace_timing(t0, t_config, None, None, None);
                 Ok(text)
             } else {
                 Err(e)
@@ -2049,6 +2056,33 @@ mod tests {
         assert_eq!(full["scope_eval_us"], 20);
         assert_eq!(full["prep_us"], 30);
         assert_eq!(full["mcp_us"], 40);
+    }
+
+    proptest! {
+        // #1128: trace_timing_json must never panic for any gap between
+        // phases, including a zero gap (Instants captured in the same tick)
+        // and a gap large enough to push the microsecond count past u64::MAX
+        // (~585,000 years — saturating_duration_since + the try_from/
+        // unwrap_or(u64::MAX) fallback must absorb it rather than panic).
+        #[test]
+        fn trace_timing_json_never_panics_for_arbitrary_gaps(
+            config_gap_secs in 0u64..1_000_000_000_000,
+            scope_gap_secs in 0u64..1_000_000_000_000,
+            chunk_gap_secs in 0u64..1_000_000_000_000,
+            end_gap_secs in 0u64..1_000_000_000_000,
+        ) {
+            let t0 = std::time::Instant::now();
+            let t_config = t0 + std::time::Duration::from_secs(config_gap_secs);
+            let t_scope = t_config + std::time::Duration::from_secs(scope_gap_secs);
+            let t_chunk = t_scope + std::time::Duration::from_secs(chunk_gap_secs);
+            let t_end = t_chunk + std::time::Duration::from_secs(end_gap_secs);
+
+            let v = trace_timing_json(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
+            prop_assert!(v.get("config_load_us").is_some());
+            prop_assert!(v.get("scope_eval_us").is_some());
+            prop_assert!(v.get("prep_us").is_some());
+            prop_assert!(v.get("mcp_us").is_some());
+        }
     }
 
     // #920: `memory_url` must use the disk-persisted merge cache when its key
