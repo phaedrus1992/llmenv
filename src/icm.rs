@@ -4,7 +4,6 @@
 
 use crate::scope::ActiveScopes;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 use tracing;
 
@@ -92,7 +91,6 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
 /// Returns an error if memory storage fails.
 pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
-    fs::create_dir_all(&state_dir)?;
     let memory = IcmMemory {
         tags: active.tags.iter().cloned().collect::<Vec<_>>(),
         bundles: bundles.to_vec(),
@@ -119,7 +117,7 @@ fn write_memory(path: &Path, memory: &IcmMemory) -> anyhow::Result<()> {
 /// property tests to verify on-disk roundtrip.
 #[cfg(test)]
 fn read_memory(path: &Path) -> anyhow::Result<IcmMemory> {
-    let body = fs::read_to_string(path)?;
+    let body = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&body)?)
 }
 
@@ -303,7 +301,7 @@ mod tests {
             let path = temp.path().join("icm.json");
             let memory = IcmMemory { tags, bundles: vec![] };
             write_memory(&path, &memory).expect("write");
-            let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+            let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
             // Only owner bits should be set in the low 9 bits.
             prop_assert_eq!(mode & 0o077, 0, "group/other bits set: {:o}", mode);
         }
