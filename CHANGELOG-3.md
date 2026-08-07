@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - `hook-run` reuses the bundle-merge result from the last `regenerate`/`export` instead of redoing it on every invocation. The prior in-process merge cache (#813) never actually hit in real usage — each `hook-run` is a fresh subprocess — so the disk I/O and YAML parsing behind memory-backend resolution ran on every `SessionStart`/`TurnStart`/`SessionEnd`. It's now persisted to a small cache file keyed on bundle/config content, with a live merge as the fallback whenever that key doesn't match. See [Materialize](https://phaedrus1992.github.io/llmenv/docs/concepts#materialize) (#920)
+- `LLMENV_TRACE_TIMING`'s per-phase marker now fires on every `hook-run` event, not just the ones that reach the full memory-dispatch stage (previously 4 of 11). Each field is present only for phases the event actually reached, so an early return still reports whatever `config_load`/`scope_eval` cost it incurred instead of nothing. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-hook-run-latency) (#1128)
 
 ### Fixed
 
