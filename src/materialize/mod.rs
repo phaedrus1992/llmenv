@@ -136,7 +136,13 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
     if m.files.is_empty() {
         return Ok(());
     }
-    std::fs::create_dir_all(dest)?;
+    // Owner-only (#1198): the Strict-mode path was hardened in #1196, but
+    // Loose/Normal — llmenv's *default* mode — took this separate code path
+    // and was left unprotected. `dest`'s ancestors up to and including
+    // `cache_root` are created 0700; files/subdirs written inside it stay
+    // plain (contained by the hardened top, same convention as the Strict
+    // path's own staging dir).
+    crate::paths::create_dir_owner_only(dest)?;
     for (rel, abs) in &m.files {
         if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
             anyhow::bail!("path traversal in bundle file: {}", rel.display());

@@ -228,6 +228,35 @@ fn cache_root_created_owner_only() {
     assert_eq!(mode, 0o700, "cache root must be owner-only, got {mode:o}");
 }
 
+// #1198: the #1196 fix only reached the Strict-mode path (materialize_with_mode's
+// early-return for Loose/Normal never calls create_dir_owner_only). Loose/Normal
+// is llmenv's *default* mode, so the common case was left unprotected.
+#[cfg(unix)]
+#[test]
+fn default_mode_cache_root_created_owner_only() {
+    use llmenv::materialize::materialize;
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempdir().expect("tempdir");
+    let cache_root = tmp.path().join("cache");
+    let m = merge(
+        &llmenv::config::Capabilities::default(),
+        &empty_native(),
+        &[fixture_bundle("base")],
+    )
+    .expect("merge");
+    materialize(&m, &cache_root).expect("materialize default mode");
+
+    let mode = std::fs::metadata(&cache_root)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o700,
+        "default-mode cache root must be owner-only, got {mode:o}"
+    );
+}
+
 #[test]
 fn gc_on_missing_root_is_noop() {
     let tmp = tempdir().expect("tempdir");
