@@ -418,7 +418,7 @@ pub fn sync_external_plugin_with(
         let parent = dest.parent().ok_or_else(|| {
             SyncError::Other(anyhow::anyhow!("plugin payload path has no parent"))
         })?;
-        std::fs::create_dir_all(parent)
+        crate::paths::create_dir_owner_only(parent)
             .map_err(|e| SyncError::Other(anyhow::anyhow!("creating plugin payload dir: {e}")))?;
         git.clone(source, &dest)
             .map_err(|e| SyncError::CloneFailed {
@@ -951,6 +951,50 @@ mod tests {
         assert_eq!(
             mode, 0o700,
             "marketplace cache root must be owner-only, got {mode:o}"
+        );
+    }
+
+    // #1198: plugin-payloads/ is a sibling tree to marketplaces/, not nested
+    // under it — #1196's marketplace_cache_root fix doesn't cover it.
+    #[cfg(unix)]
+    #[test]
+    fn sync_external_plugin_creates_payload_parent_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RecordingGit;
+        impl GitBackend for RecordingGit {
+            fn clone(&self, _source: &str, dest: &Path) -> Result<()> {
+                std::fs::create_dir_all(dest.join(".git")).unwrap();
+                Ok(())
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                Some("abc123".to_string())
+            }
+        }
+
+        let cache = tempfile::tempdir().unwrap();
+        sync_external_plugin_with(
+            cache.path(),
+            "market",
+            "plugin",
+            "https://github.com/example/plugin.git",
+            true,
+            &RecordingGit,
+        )
+        .unwrap();
+
+        let dest = plugin_payload_path(cache.path(), "market", "plugin");
+        let mode = std::fs::metadata(dest.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "plugin payload parent dir must be owner-only, got {mode:o}"
         );
     }
 

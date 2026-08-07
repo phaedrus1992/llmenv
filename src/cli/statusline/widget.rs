@@ -743,7 +743,7 @@ fn read_pr_cache(path: &Path, now: i64) -> Option<Option<PrInfo>> {
 /// re-queries `gh`, not a broken widget.
 fn write_pr_cache(path: &Path, pr: &Option<PrInfo>, now: i64) {
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
+        && let Err(e) = crate::paths::create_dir_owner_only(parent)
     {
         tracing::debug!("pr cache dir unavailable (non-fatal): {e}");
         return;
@@ -1142,7 +1142,7 @@ fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
 
 fn write_usage_state(path: &Path, pct: f64, now: i64) {
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
+        && let Err(e) = crate::paths::create_dir_owner_only(parent)
     {
         tracing::debug!("usage delta state dir unavailable (non-fatal): {e}");
         return;
@@ -2004,6 +2004,46 @@ mod tests {
         );
         let calls = std::fs::read_to_string(repo_dir.path().join("gh-calls.log")).unwrap();
         assert_eq!(calls.lines().count(), 1, "gh should be called after expiry");
+    }
+
+    // #1198: distinct from the throttle usage-cache directory #1186 already
+    // hardened — this is the statusline widget's own PR-lookup cache.
+    #[cfg(unix)]
+    #[test]
+    fn write_pr_cache_creates_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let cache_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
+        write_pr_cache(&cache_path, &None, 1_000);
+
+        let mode = std::fs::metadata(cache_path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "pr cache dir must be owner-only, got {mode:o}");
+    }
+
+    // #1198: distinct from the throttle usage-cache directory #1186 already
+    // hardened — this is the statusline widget's own usage-delta cache.
+    #[cfg(unix)]
+    #[test]
+    fn write_usage_state_creates_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let state_dir = tempfile::tempdir().unwrap();
+        let path = state_dir.path().join("nested").join("usage-delta");
+        write_usage_state(&path, 42.0, 1_000);
+
+        let mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "usage delta state dir must be owner-only, got {mode:o}"
+        );
     }
 
     #[test]
