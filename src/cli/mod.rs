@@ -2659,7 +2659,7 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
         }
         None => paths::config_dir()?,
     };
-    std::fs::create_dir_all(&config_dir)
+    paths::create_dir_owner_only(&config_dir)
         .with_context(|| format!("creating config dir {}", config_dir.display()))?;
 
     if let Some(_repo_url) = repo {

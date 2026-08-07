@@ -231,7 +231,7 @@ fn sync_git(
         });
     } else {
         // refresh=true and .git doesn't exist: attempt to clone.
-        std::fs::create_dir_all(marketplace_cache_root(cache_dir)).map_err(|e| {
+        crate::paths::create_dir_owner_only(&marketplace_cache_root(cache_dir)).map_err(|e| {
             SyncError::Other(anyhow::anyhow!("creating marketplace cache root: {e}"))
         })?;
         git.clone(&m.source, &dest)
@@ -912,6 +912,46 @@ mod tests {
             "pinned source must re-clone on refresh"
         );
         assert_eq!(pull_calls.get(), 0, "pinned source must never pull");
+    }
+
+    // #1196: the marketplace cache root must be owner-only, not just the
+    // clone dest git creates inside it.
+    #[cfg(unix)]
+    #[test]
+    fn sync_git_creates_cache_root_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RecordingGit;
+        impl GitBackend for RecordingGit {
+            fn clone(&self, _source: &str, dest: &Path) -> Result<()> {
+                std::fs::create_dir_all(dest.join(".git")).unwrap();
+                Ok(())
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                Some("abc123".to_string())
+            }
+        }
+
+        let m = Marketplace {
+            name: "fresh".into(),
+            source: "https://github.com/example/repo.git".into(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+
+        sync_marketplace_with(cache.path(), &m, true, &RecordingGit).unwrap();
+
+        let mode = std::fs::metadata(marketplace_cache_root(cache.path()))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "marketplace cache root must be owner-only, got {mode:o}"
+        );
     }
 
     #[test]
