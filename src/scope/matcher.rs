@@ -139,7 +139,9 @@ impl Env {
                 tracing::warn!("current_dir() unavailable; project-scope matching disabled");
                 String::new()
             });
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let home = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(std::path::PathBuf::from);
         Self {
             // Hostname comparison is case-insensitive — `hostname(1)` and
             // /etc/hostname may differ in case across hosts.
