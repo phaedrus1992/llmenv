@@ -1838,7 +1838,11 @@ fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
 /// diagnostic is a smaller problem than skipping the work.
 fn redirect_stderr_to_bounded_log(cmd: &mut std::process::Command, log_path: &std::path::Path) {
     cmd.stderr(std::process::Stdio::null());
-    match crate::mcp::proxy::open_bounded_log(log_path, DETACHED_CHILD_LOG_MAX_BYTES) {
+    // Always state_dir-rooted (see `detached_child_log_path`), so `harden_dir:
+    // true` is safe — and `open_bounded_log` does the hardening itself
+    // (#1196), rather than this caller doing it separately and discarding a
+    // failure while the log still opens in an unhardened directory.
+    match crate::mcp::proxy::open_bounded_log(log_path, DETACHED_CHILD_LOG_MAX_BYTES, true) {
         Ok(file) => {
             cmd.stderr(std::process::Stdio::from(file));
         }
@@ -1908,8 +1912,16 @@ fn trigger_codebase_memory_index(
     state_dir: &std::path::Path,
 ) {
     let mut cmd = build_index_repository_command(project_root, cm, state_dir);
-    let log_path = codebase_memory_cache_dir(cm, state_dir).join("index.log");
-    match crate::mcp::proxy::open_bounded_log(&log_path, CODEBASE_MEMORY_LOG_MAX_BYTES) {
+    let cache_dir = codebase_memory_cache_dir(cm, state_dir);
+    let log_path = cache_dir.join("index.log");
+    // Only the default cache dir (under llmenv's own state tree) gets
+    // hardened to 0700. A user-configured `index_path` (#1196) can be shared
+    // with a codebase-memory-mcp process running under a different uid —
+    // forcing it to 0700 would silently break that sharing with an EACCES on
+    // the next run.
+    let harden_dir = cm.index_path.is_none();
+    match crate::mcp::proxy::open_bounded_log(&log_path, CODEBASE_MEMORY_LOG_MAX_BYTES, harden_dir)
+    {
         Ok(file) => {
             cmd.stderr(std::process::Stdio::from(file));
         }
@@ -2772,6 +2784,38 @@ mod tests {
         let meta = std::fs::metadata(&log_path)
             .unwrap_or_else(|e| panic!("expected {} to exist: {e}", log_path.display()));
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    // #1196: a user-configured `index_path` can be shared with a
+    // codebase-memory-mcp process running under a different uid (separate
+    // service account, container with different uid mapping). Forcing it to
+    // 0700 — appropriate for llmenv's own state tree — breaks that sharing
+    // with an EACCES surfaced only via `tracing::debug!`. Only the *default*
+    // (state_dir-rooted) cache dir gets hardened; an explicit override keeps
+    // whatever permissions its owner already gave it.
+    #[cfg(unix)]
+    #[test]
+    fn trigger_codebase_memory_index_leaves_user_index_path_permissions_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let state_dir = tempfile::tempdir().unwrap();
+        let index_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(index_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cm = crate::config::CodebaseMemory {
+            when: vec!["proj".to_string()],
+            index_path: Some(index_dir.path().to_str().unwrap().to_string()),
+        };
+
+        trigger_codebase_memory_index(std::path::Path::new("/repos/proj"), &cm, state_dir.path());
+
+        let mode = std::fs::metadata(index_dir.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "a user-configured index_path must keep its prior permissions, got {mode:o}"
+        );
     }
 
     // PRELOADED_CONFIG is a process-global cache; these two tests populate and

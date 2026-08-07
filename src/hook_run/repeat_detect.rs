@@ -89,7 +89,6 @@ impl SessionState {
         // needs a longer memory than that (the counter resets on any
         // different call, or expires with the session itself).
         super::session_state::prune_stale_json_files(&rd_dir, 7);
-        std::fs::create_dir_all(&rd_dir)?;
         let path = session_state_path(state_dir, &self.session_id);
         let json = serde_json::to_string(&self)?;
         crate::paths::write_owner_only_atomic(&path, json.as_bytes())?;
@@ -425,6 +424,28 @@ mod tests {
         // A different session's first call must not inherit s1's streak.
         let out = handle_pre_tool_use(&payload, Some("s2"), &config(2), dir.path());
         assert!(out.is_empty(), "sessions must not share state");
+    }
+
+    // #1196: save() must create its state directory owner-only, even though
+    // it no longer calls create_dir_all itself -- write_owner_only_atomic's
+    // own parent-directory creation must be the one and only path.
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_state_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("test");
+        handle_pre_tool_use(&bash_payload("ls"), Some("s1"), &config(2), dir.path());
+
+        let rd_dir = repeat_detect_state_dir(dir.path());
+        let mode = std::fs::metadata(&rd_dir)
+            .expect("test")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "repeat_detect dir must be owner-only, got {mode:o}"
+        );
     }
 
     #[test]

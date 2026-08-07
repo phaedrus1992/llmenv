@@ -75,3 +75,34 @@ fn test_init_skips_existing_agents_md() {
         "existing AGENTS.md should not be overwritten"
     );
 }
+
+// #1196: init must create a fresh config dir owner-only, not world-readable.
+#[cfg(unix)]
+#[test]
+fn test_init_creates_config_dir_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("create temp dir");
+    // init must create the leaf dir itself (not just populate an existing one).
+    let config_dir = temp.path().join("fresh-config");
+    let config_dir_str = config_dir.to_str().expect("path to string");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_llmenv"))
+        .arg("init")
+        .arg(config_dir_str)
+        .output()
+        .expect("run init command");
+
+    assert!(
+        output.status.success(),
+        "init should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mode = fs::metadata(&config_dir)
+        .expect("stat config dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "config dir must be owner-only, got {mode:o}");
+}

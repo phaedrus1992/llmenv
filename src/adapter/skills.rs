@@ -15,22 +15,12 @@ const IGNORE_INLINE: &str = "# llmenv-ignore: hardcoded-path";
 const IGNORE_FILE: &str = "# llmenv-ignore-file: hardcoded-path";
 
 /// Create a directory with owner-only permissions (0o700 on Unix, default on non-Unix).
-/// Recursive — creates parent directories as needed.
+/// Recursive — creates parent directories as needed. Thin wrapper over the
+/// canonical [`crate::paths::create_dir_owner_only`] so both share the
+/// self-heal behavior for pre-existing looser-mode directories (#1196).
 pub(crate) fn create_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
-    }
+    crate::paths::create_dir_owner_only(dir)
+        .map_err(|e| anyhow::anyhow!("failed to create dir {}: {e}", dir.display()))
 }
 
 /// Reject materialized content carrying a hardcoded `~/.claude` / `$HOME/.claude`
@@ -428,6 +418,28 @@ mod tests {
         // Missing skills dir → nothing to validate.
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_skills(tmp.path()).is_ok());
+    }
+
+    // #1196: this module used to carry its own create_dir_owner_only, which
+    // lacked the self-heal added to the canonical crates/llmenv-paths version
+    // for #1178 — a pre-existing looser-mode dir stayed world-readable. Now a
+    // thin wrapper over the canonical helper, so it must self-heal too.
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_owner_only_self_heals_existing_looser_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("preexisting");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        create_dir_owner_only(&dir).expect("create_dir_owner_only");
+
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "pre-existing dir must be self-healed, got {mode:o}"
+        );
     }
 
     proptest! {
