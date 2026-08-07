@@ -3,10 +3,19 @@
 use std::path::{Path, PathBuf};
 
 /// Expand a leading `~` or `~/` to `$HOME`. Other input is returned unchanged.
-/// Returns the input unchanged when `HOME` is unset.
+/// Returns the input unchanged when `HOME` is unset or empty.
 #[must_use]
 pub fn expand_tilde(p: &str) -> String {
-    let Ok(home) = std::env::var("HOME") else {
+    expand_tilde_with_env(p, &|name| std::env::var(name).ok())
+}
+
+/// [`expand_tilde`] with an injectable env-var provider so tests can exercise
+/// the set-but-empty `HOME` case without mutating real process env vars.
+fn expand_tilde_with_env(p: &str, get_env: &impl Fn(&str) -> Option<String>) -> String {
+    // A set-but-empty HOME has the same failure mode as HOME being unset — an
+    // empty home would silently anchor "~/rest" at the filesystem root
+    // ("/rest") instead of leaving the input unchanged (#1179).
+    let Some(home) = get_env("HOME").filter(|h| !h.is_empty()) else {
         return p.to_string();
     };
     if let Some(rest) = p.strip_prefix("~/") {
@@ -138,22 +147,34 @@ fn state_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Resu
 }
 
 /// Create a directory (and any missing parent components) with owner-only
-/// permissions (mode 0o700 on Unix) from the moment of creation. On Windows
-/// falls back to `create_dir_all`'s default permissions.
+/// permissions (mode 0o700 on Unix) from the moment of creation, and harden
+/// it to 0o700 if it already existed at a looser mode. On Windows falls back
+/// to `create_dir_all`'s default permissions.
 ///
 /// Use instead of `create_dir_all` followed by a separate `set_permissions`
-/// call for any directory that must never be world-readable even briefly —
-/// the two-call version leaves the directory at the umask default (typically
-/// 0o755) between creation and the chmod, a TOCTOU window (#1113). A no-op
-/// (`Ok(())`) if the directory already exists, matching `create_dir_all`.
+/// call for any directory that must never be world-readable — the two-call
+/// version leaves the directory at the umask default (typically 0o755)
+/// between creation and the chmod, a TOCTOU window (#1113), and a caller who
+/// skips the follow-up chmod (or an older llmenv version, before this
+/// hardening existed) leaves it world-readable indefinitely (#1178).
+///
+/// # Errors
+/// Propagates directory-creation failure, and failure to chmod an
+/// already-existing directory (e.g. owned by another user).
 pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(dir)
+            .create(dir)?;
+        // DirBuilder's mode only governs directories it creates. If `dir`
+        // already existed (an older llmenv version, a caller that used a
+        // bare create_dir_all, a permissive umask), its mode is left
+        // untouched -- self-heal it so every caller gets an owner-only
+        // directory regardless of whether it was just created.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
     }
     #[cfg(not(unix))]
     {
@@ -213,18 +234,17 @@ pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<(
         // For paths like "foo.json" (no parent dir), use current dir.
         return write_owner_only_atomic_in_dir(Path::new("."), file_name, path, content);
     }
-    std::fs::create_dir_all(parent)?;
-    // Harden parent dir to 0o700 (owner-only). Without this, default umask
-    // 0o022 leaves the state dir at 0o755 (world-listable), leaking the
-    // existence and names of state files on shared systems. Failure is
-    // non-fatal — on platforms that don't support it (Windows), or if the
-    // dir was created by another process and we lack chmod rights, we still
-    // proceed with the file-level 0o600 protection.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
+    // Born owner-only (0o700) at creation, including every missing
+    // ancestor — a create_dir_all + post-hoc set_permissions leaves the
+    // umask default (typically 0o755, world-listable) both as a TOCTOU
+    // window on the immediate parent and permanently on any intermediate
+    // ancestor it doesn't chmod (#1178).
+    create_dir_owner_only(parent).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("creating/hardening directory {}: {e}", parent.display()),
+        )
+    })?;
     write_owner_only_atomic_in_dir(parent, file_name, path, content)
 }
 
@@ -330,6 +350,28 @@ mod tests {
         create_dir_owner_only(&dir).unwrap();
         create_dir_owner_only(&dir).unwrap();
         assert!(dir.is_dir());
+    }
+
+    // A directory created before this hardening shipped (older llmenv
+    // version, a caller using bare create_dir_all, a permissive umask) must
+    // still end up owner-only the next time something calls
+    // create_dir_owner_only on it -- not just directories it creates fresh.
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_owner_only_hardens_a_preexisting_looser_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        create_dir_owner_only(&dir).unwrap();
+
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "pre-existing looser dir must be hardened, got {mode:o}"
+        );
     }
 
     #[test]
@@ -670,6 +712,38 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("read"), b"nested");
     }
 
+    // #1178: write_owner_only_atomic must create every missing ancestor
+    // directory owner-only from the moment of creation, not just the
+    // immediate parent. The old create_dir_all + post-hoc set_permissions
+    // approach only chmods the immediate parent, leaving intermediate
+    // ancestors at the umask default (world-readable) forever, and leaves a
+    // TOCTOU window on the immediate parent between creation and chmod.
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_atomic_creates_all_missing_ancestors_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp
+            .path()
+            .join("grandparent")
+            .join("parent")
+            .join("file.json");
+        write_owner_only_atomic(&path, b"nested").expect("write");
+
+        for ancestor in ["grandparent", "grandparent/parent"] {
+            let dir = tmp.path().join(ancestor);
+            let mode = std::fs::metadata(&dir)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "{ancestor} must be born owner-only, got {mode:o}"
+            );
+        }
+    }
+
     #[test]
     fn write_owner_only_atomic_concurrent_writers_no_torn_reads() {
         // Spawn N threads writing distinct fixed-size payloads to the same
@@ -722,6 +796,20 @@ mod tests {
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
         assert_eq!(expand_tilde("rel/path"), "rel/path");
         assert_eq!(expand_tilde(""), "");
+    }
+
+    #[test]
+    fn expand_tilde_with_env_empty_home_behaves_like_unset() {
+        let unset = |_: &str| None;
+        let empty = |name: &str| match name {
+            "HOME" => Some(String::new()),
+            _ => None,
+        };
+        assert_eq!(
+            expand_tilde_with_env("~/foo", &unset),
+            expand_tilde_with_env("~/foo", &empty)
+        );
+        assert_eq!(expand_tilde_with_env("~/foo", &empty), "~/foo");
     }
 
     #[test]
