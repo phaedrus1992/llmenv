@@ -122,9 +122,8 @@ fn write_cache(
     cache_file: &std::path::Path,
     snap: &UsageSnapshot,
 ) -> anyhow::Result<()> {
-    if let Err(e) = std::fs::create_dir_all(cache_dir) {
-        anyhow::bail!("create_dir_all failed: {e}");
-    }
+    crate::paths::create_dir_owner_only(cache_dir)
+        .with_context(|| format!("creating throttle cache directory {}", cache_dir.display()))?;
     let bytes = serde_json::to_vec(snap)?;
     crate::paths::write_owner_only(cache_file, &bytes).context("writing cache file")?;
     Ok(())
@@ -416,6 +415,26 @@ mod tests {
         // Fail-safe: a garbage timestamp must not be treated as a future penalty.
         assert!(!is_future_timestamp("not-a-timestamp"));
         assert!(!is_future_timestamp(""));
+    }
+
+    // #1186: write_cache's cache directory must be owner-only, not just the
+    // cache file it writes inside it.
+    #[cfg(unix)]
+    #[test]
+    fn write_cache_creates_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("throttle");
+        let cache_file = cache_dir.join("umans-usage.json");
+        let snap = UsageSnapshot {
+            remaining: Some(1),
+            limit: Some(2),
+            resets_at: None,
+            penalized: false,
+        };
+        write_cache(&cache_dir, &cache_file, &snap).unwrap();
+        let mode = std::fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "cache dir must be owner-only, got {mode:o}");
     }
 
     #[test]

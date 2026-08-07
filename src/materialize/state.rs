@@ -48,15 +48,16 @@ pub fn state_env_vars(cfg: &StateConfig, state_dir: &Path) -> Vec<(String, Strin
 
 /// Create the durable state directory and every configured tool's subdirectory.
 ///
-/// Idempotent (`create_dir_all`). Tools expect their relocated dir to exist
-/// before they start, so materialization creates them up front.
+/// Idempotent (`create_dir_owner_only`); directories are created owner-only
+/// (0o700 on Unix). Tools expect their relocated dir to exist before they
+/// start, so materialization creates them up front.
 ///
 /// # Errors
 /// Returns an error if any directory cannot be created.
 pub fn ensure_state_dirs(cfg: &StateConfig, state_dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(state_dir)?;
+    crate::paths::create_dir_owner_only(state_dir)?;
     for tool in &cfg.tools {
-        std::fs::create_dir_all(state_dir.join(&tool.subdir))?;
+        crate::paths::create_dir_owner_only(&state_dir.join(&tool.subdir))?;
     }
     Ok(())
 }
@@ -144,6 +145,27 @@ mod tests {
         assert!(dir.is_dir());
         assert!(dir.join("a").is_dir());
         assert!(dir.join("b").is_dir());
+    }
+
+    // #1186: the durable state dir and every tool subdir must be owner-only,
+    // matching every other state-dir creation site in the codebase.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_creates_base_and_subdirs_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+        ensure_state_dirs(&cfg(&[("A_DIR", "a")]), &dir).unwrap();
+
+        for created in [dir.clone(), dir.join("a")] {
+            let mode = std::fs::metadata(&created).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "{} must be owner-only, got {mode:o}",
+                created.display()
+            );
+        }
     }
 
     #[test]

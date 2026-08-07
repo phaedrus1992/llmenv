@@ -129,7 +129,7 @@ where
     }
 
     if let Some(parent) = pid_path.parent() {
-        std::fs::create_dir_all(parent)
+        crate::paths::create_dir_owner_only(parent)
             .with_context(|| format!("creating state directory {}", parent.display()))?;
     }
 
@@ -532,7 +532,7 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
 /// be opened.
 pub(crate) fn open_bounded_log(path: &Path, max_bytes: u64) -> anyhow::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        crate::paths::create_dir_owner_only(parent)
             .with_context(|| format!("creating state directory {}", parent.display()))?;
     }
 
@@ -1301,6 +1301,36 @@ mod tests {
         );
     }
 
+    // #1186: the pidfile's parent directory must be owner-only from creation,
+    // matching every other state-dir creation site in the codebase.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_running_creates_pidfile_parent_dir_owner_only() {
+        use super::ensure_running_within;
+        use std::os::unix::fs::PermissionsExt;
+
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr").port()
+        };
+        let bind = format!("127.0.0.1:{port}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("nested").join("mcp-proxy.pid");
+
+        let _ = ensure_running_within(&bind, &pid_path, |_| Err(anyhow::anyhow!("no spawn")), 50);
+
+        let parent = pid_path.parent().expect("parent");
+        let mode = std::fs::metadata(parent)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "pidfile parent dir must be owner-only, got {mode:o}"
+        );
+    }
+
     /// A pidfile naming a live process is left alone; the running pid is the best
     /// available answer to "who do I signal" (#1085).
     #[test]
@@ -1433,6 +1463,26 @@ mod tests {
         let log = dir.path().join("nested").join("mcp-proxy.log");
         drop(open_proxy_log(&log).expect("open"));
         assert!(log.exists());
+    }
+
+    // #1186: the log's created parent directory must be owner-only too, not
+    // just the log file itself.
+    #[cfg(unix)]
+    #[test]
+    fn open_proxy_log_creates_parent_dir_owner_only() {
+        use super::open_proxy_log;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("nested").join("mcp-proxy.log");
+        drop(open_proxy_log(&log).expect("open"));
+
+        let mode = std::fs::metadata(log.parent().expect("parent"))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "log dir must be owner-only, got {mode:o}");
     }
 
     /// A symlink at the log path must be refused, not followed: opening it would
