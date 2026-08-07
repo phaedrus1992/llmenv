@@ -6,7 +6,16 @@ use std::path::{Path, PathBuf};
 /// Returns the input unchanged when `HOME` is unset.
 #[must_use]
 pub fn expand_tilde(p: &str) -> String {
-    let Ok(home) = std::env::var("HOME") else {
+    expand_tilde_with_env(p, &|name| std::env::var(name).ok())
+}
+
+/// [`expand_tilde`] with an injectable env-var provider so tests can exercise
+/// the set-but-empty `HOME` case without mutating real process env vars.
+fn expand_tilde_with_env(p: &str, get_env: &impl Fn(&str) -> Option<String>) -> String {
+    // A set-but-empty HOME has the same failure mode as HOME being unset — an
+    // empty home would silently anchor "~/rest" at the filesystem root
+    // ("/rest") instead of leaving the input unchanged (#1179).
+    let Some(home) = get_env("HOME").filter(|h| !h.is_empty()) else {
         return p.to_string();
     };
     if let Some(rest) = p.strip_prefix("~/") {
@@ -748,6 +757,20 @@ mod tests {
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
         assert_eq!(expand_tilde("rel/path"), "rel/path");
         assert_eq!(expand_tilde(""), "");
+    }
+
+    #[test]
+    fn expand_tilde_with_env_empty_home_behaves_like_unset() {
+        let unset = |_: &str| None;
+        let empty = |name: &str| match name {
+            "HOME" => Some(String::new()),
+            _ => None,
+        };
+        assert_eq!(
+            expand_tilde_with_env("~/foo", &unset),
+            expand_tilde_with_env("~/foo", &empty)
+        );
+        assert_eq!(expand_tilde_with_env("~/foo", &empty), "~/foo");
     }
 
     #[test]
