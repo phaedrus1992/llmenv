@@ -4,6 +4,7 @@
 
 use crate::scope::ActiveScopes;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing;
@@ -92,7 +93,6 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
 /// Returns an error if memory storage fails.
 pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
-    fs::create_dir_all(&state_dir)?;
     let memory = IcmMemory {
         tags: active.tags.iter().cloned().collect::<Vec<_>>(),
         bundles: bundles.to_vec(),
