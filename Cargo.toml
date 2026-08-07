@@ -77,9 +77,12 @@ schemars = "=1.2.2"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
 url = "=2.5.8"
 # Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
-# every hook-run. rustix is already in the tree transitively; "system" enables
-# uname. No unsafe.
-rustix = { version = "=1.1.4", features = ["system"] }
+# every hook-run ("system" enables uname). "process" enables kill_process_group
+# for #1165's consolidation-timeout group-kill: a direct syscall instead of
+# fork+exec'ing `kill`, which narrows the already-small window in which a
+# reaped pid could be recycled before the group-kill fires. rustix is already
+# in the tree transitively. No unsafe.
+rustix = { version = "=1.1.4", features = ["process", "system"] }
 tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
 dialoguer = "=0.12.0"
