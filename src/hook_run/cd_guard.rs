@@ -172,4 +172,79 @@ mod tests {
             let _ = command_uses_cd(&command);
         }
     }
+
+    // #1208: strengthen coverage beyond panic-safety with real correctness
+    // invariants over generated compound-command shapes.
+    mod correctness_proptests {
+        use super::*;
+
+        /// A token that never equals `cd` exactly, safe to use as a
+        /// non-cd leading word or argument (no internal whitespace).
+        fn arb_non_cd_token() -> impl Strategy<Value = String> {
+            "[a-zA-Z][a-zA-Z0-9_]{0,8}".prop_filter("must not be exactly 'cd'", |s| s != "cd")
+        }
+
+        fn arb_separator() -> impl Strategy<Value = &'static str> {
+            proptest::sample::select(vec!["&&", "||", ";", "\n", "|"])
+        }
+
+        /// Builds a compound command from `leads.len()` segments (each
+        /// `<leading> <arg>`, joined by generated separators) where each
+        /// segment's leading word is `cd` iff the corresponding `leads[i]` is
+        /// true — plus the expected `command_uses_cd` result for it.
+        fn arb_command_and_expected() -> impl Strategy<Value = (String, bool)> {
+            proptest::collection::vec(proptest::bool::ANY, 1..6)
+                .prop_flat_map(|leads| {
+                    let n = leads.len();
+                    (
+                        Just(leads),
+                        proptest::collection::vec(arb_separator(), n.saturating_sub(1).max(1)),
+                        proptest::collection::vec(arb_non_cd_token(), n * 2),
+                    )
+                })
+                .prop_map(|(leads, seps, args)| {
+                    let n = leads.len();
+                    let mut command = String::new();
+                    for i in 0..n {
+                        if i > 0 {
+                            command.push_str(&format!(" {} ", seps[(i - 1) % seps.len()]));
+                        }
+                        let leading = if leads[i] {
+                            "cd".to_string()
+                        } else {
+                            args[i].clone()
+                        };
+                        command.push_str(&leading);
+                        command.push(' ');
+                        command.push_str(&args[n + i]);
+                    }
+                    let expected = leads.iter().any(|&b| b);
+                    (command, expected)
+                })
+        }
+
+        /// A token containing `cd` as a substring but never equal to it
+        /// exactly — e.g. `abcd`, `cdx` — used to prove substring/argument
+        /// occurrences of `cd` don't trigger a false positive.
+        fn arb_cd_like_but_not_exact_token() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9_]{0,4}cd[a-zA-Z0-9_]{0,4}"
+                .prop_filter("must not be exactly 'cd'", |s| s != "cd")
+        }
+
+        proptest! {
+            #[test]
+            fn command_uses_cd_matches_leading_cd_segments((command, expected) in arb_command_and_expected()) {
+                prop_assert_eq!(command_uses_cd(&command), expected, "command: {:?}", command);
+            }
+
+            #[test]
+            fn command_uses_cd_ignores_non_leading_cd_occurrences(
+                leading in arb_cd_like_but_not_exact_token(),
+                trailing in proptest::sample::select(vec!["cd", "cd/", "xcd", "cdx"]),
+            ) {
+                let command = format!("{leading} {trailing}");
+                prop_assert!(!command_uses_cd(&command), "command: {:?}", command);
+            }
+        }
+    }
 }
