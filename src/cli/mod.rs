@@ -2113,6 +2113,7 @@ fn fold_root_features(
         repeat_detect,
         slippage,
         task_tracker,
+        cd_guard,
     } = root.clone();
     let mut out = merged.unwrap_or_default();
 
@@ -2127,6 +2128,7 @@ fn fold_root_features(
     out.repeat_detect = repeat_detect.or(out.repeat_detect);
     out.slippage = slippage.or(out.slippage);
     out.task_tracker = task_tracker.or(out.task_tracker);
+    out.cd_guard = cd_guard.or(out.cd_guard);
 
     Some(out)
 }
@@ -5571,6 +5573,7 @@ mod tests {
                 slippage: None,
                 task_tracker: None,
                 codebase_memory: vec![],
+                cd_guard: None,
             }),
             host,
             ..Config::default()

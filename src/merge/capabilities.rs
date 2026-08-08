@@ -137,6 +137,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let repeat_detect = highest_precedence(contributors, |c| {
         c.features.as_ref()?.repeat_detect.as_ref()
     });
+    let cd_guard = highest_precedence(contributors, |c| c.features.as_ref()?.cd_guard.as_ref());
 
     let features = Some(Features {
         memory,
@@ -148,6 +149,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         slippage,
         task_tracker,
         codebase_memory,
+        cd_guard,
     })
     .filter(|f| !f.is_empty());
 
@@ -1611,6 +1613,7 @@ mod tests {
                     slippage: None,
                     task_tracker: None,
                     codebase_memory: vec![],
+                    cd_guard: None,
                 }),
                 ..Default::default()
             }
@@ -1651,6 +1654,7 @@ mod tests {
                     slippage: None,
                     task_tracker: None,
                     codebase_memory: vec![],
+                    cd_guard: None,
                 }),
                 ..Default::default()
             }

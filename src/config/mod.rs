@@ -2,8 +2,8 @@ pub use llmenv_config::ValidateError;
 pub use llmenv_config::{
     Bundle, CONTEXT_MODE_DATA_ENV, CONTEXT_MODE_MARKETPLACE, CONTEXT_MODE_MCP_PREFIX,
     CONTEXT_MODE_PLUGIN, CONTEXT_MODE_SOURCE, CONTEXT_MODE_STATE_SUBDIR, Cache, Capabilities,
-    CodebaseMemory, Config, ConsolidationBackend, ContentMatch, ContentScope, ContextMode, EnvVar,
-    Features, FileSinkConfig, HashingMode, Hook, HookHandler, HookHandlerKind, HostEntry,
+    CdGuard, CodebaseMemory, Config, ConsolidationBackend, ContentMatch, ContentScope, ContextMode,
+    EnvVar, Features, FileSinkConfig, HashingMode, Hook, HookHandler, HookHandlerKind, HostEntry,
     HostMatch, HostScope, InitConfig, LogLevel, LspServer, Marketplace, MarketplaceSource,
     McpPermissionAction, McpPermissions, McpServer, McpTransport, Memory, ModelCost, ModelProvider,
     ModelRef, ModelSource, NativePermissionRules, NetworkMatch, NetworkScope,

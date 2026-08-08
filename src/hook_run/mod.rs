@@ -7,6 +7,7 @@
 //! path and must never block it.
 
 pub(crate) mod action;
+pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
@@ -552,12 +553,22 @@ fn resolve_pre_tool_text(
     });
     let repeat_detect_text = repeat_detect_text.filter(|t| !t.is_empty());
 
-    match (primary, repeat_detect_text) {
-        (Some(p), Some(r)) => Some(format!("{p}\n\n{r}")),
-        (Some(p), None) => Some(p),
-        (None, Some(r)) => Some(r),
-        (None, None) => None,
-    }
+    // On by default (#976): absent `features.cd_guard` resolves the same as
+    // an explicit, empty block — see `CdGuard::default()`.
+    let cd_guard_cfg = config
+        .features
+        .as_ref()
+        .and_then(|f| f.cd_guard.clone())
+        .unwrap_or_default();
+    let cd_guard_text =
+        crate::hook_run::cd_guard::handle_pre_tool_use(stdin_payload, &cd_guard_cfg);
+    let cd_guard_text = (!cd_guard_text.is_empty()).then_some(cd_guard_text);
+
+    let parts: Vec<String> = [primary, repeat_detect_text, cd_guard_text]
+        .into_iter()
+        .flatten()
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 /// The task-tracker's `Stop` reminder, with repeat-detection applied: once
@@ -2728,6 +2739,70 @@ mod tests {
         assert!(
             text.is_some_and(|t| !t.is_empty()),
             "repeat_detect must still fire for a non-Read tool when read_once is also enabled"
+        );
+    }
+
+    // #976: cd_guard is on by default and composes with repeat_detect, same
+    // as read_once does — both texts must survive, joined.
+    #[test]
+    fn cd_guard_fires_by_default_for_a_cd_command() {
+        let state_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config::default();
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cd /tmp && ls" },
+        });
+        let text = resolve_pre_tool_text(&payload, Some("s1"), &config, false, state_dir.path());
+        assert!(
+            text.is_some_and(|t| t.contains("cd")),
+            "cd_guard must be on by default"
+        );
+    }
+
+    #[test]
+    fn cd_guard_disabled_via_config_stays_silent() {
+        let state_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                cd_guard: Some(crate::config::CdGuard { enabled: false }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cd /tmp && ls" },
+        });
+        let text = resolve_pre_tool_text(&payload, Some("s1"), &config, false, state_dir.path());
+        assert!(
+            text.is_none(),
+            "cd_guard disabled and nothing else configured must produce no advisory"
+        );
+    }
+
+    #[test]
+    fn cd_guard_composes_with_repeat_detect_text() {
+        let state_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: true,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cd /tmp && ls" },
+        });
+        let text = resolve_pre_tool_text(&payload, Some("s2"), &config, false, state_dir.path())
+            .expect("test");
+        assert!(text.contains("cd"), "cd_guard text must be present: {text}");
+        assert!(
+            text.contains("identical input"),
+            "repeat_detect text must also be present: {text}"
         );
     }
 

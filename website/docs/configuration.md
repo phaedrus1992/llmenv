@@ -22,7 +22,7 @@ The config directory is resolved in this order:
 | `bundle:` | list | Environment-variable + file bundles |
 | `mcp:` | list | MCP server declarations |
 | `lsp:` | list | LSP server declarations (Crush + Claude Code; no-op on engines without an LSP surface) |
-| `features:` | map | Feature flags; holds `memory:` (ICM backend topology), `codebase_memory:` (codebase-memory-mcp integration), `throttle:` (usage throttling), `upgrade:` (upgrade release track), `read_once:` (re-read deduplication), `task_tracker:` (in-engine task tracker), `slippage:` (behavior-drift guardrails), `repeat_detect:` (loop detection), and `context_mode:` (context-mode built-in) |
+| `features:` | map | Feature flags; holds `memory:` (ICM backend topology), `codebase_memory:` (codebase-memory-mcp integration), `throttle:` (usage throttling), `upgrade:` (upgrade release track), `read_once:` (re-read deduplication), `task_tracker:` (in-engine task tracker), `slippage:` (behavior-drift guardrails), `repeat_detect:` (loop detection), `cd_guard:` (Bash `cd` advisory), and `context_mode:` (context-mode built-in) |
 | `session_log:` | map | Session-activity logging: local JSONL file and/or ICM transcript |
 | `statusline:` | map | Widget layout, formatting, and colour config for `llmenv statusline` |
 | `state:` | map | Durable per-tool state relocation (survives cache folder churn) |
@@ -378,8 +378,9 @@ Feature flags. Holds `memory:` (llmenv's ICM memory backend), `codebase_memory:`
 (codebase-memory-mcp integration), `throttle:` (usage throttling), `upgrade:`
 (upgrade release track), `read_once:` (re-read deduplication), `task_tracker:`
 (in-engine task tracker), `slippage:` (behavior-drift guardrails),
-`repeat_detect:` (loop detection), and `context_mode:` (context-mode
-built-in). Additional feature flags may be nested here in future versions.
+`repeat_detect:` (loop detection), `cd_guard:` (Bash `cd` advisory), and
+`context_mode:` (context-mode built-in). Additional feature flags may be
+nested here in future versions.
 
 ### `features.memory:`
 
@@ -575,6 +576,34 @@ features:
 |-------------|----------|--------------------------------------------------------------------|
 | `enabled`   | no       | Default `true`.                                                    |
 | `threshold` | no       | Consecutive identical calls/reminders before warning; default `3`. |
+
+### `features.cd_guard:`
+
+(added in v3.8.0)
+
+Warn-only `PreToolUse` advisory for Bash commands that `cd`, **on by
+default** (opt-*out*, not opt-in — omitting `features.cd_guard` entirely
+resolves the same as `enabled: true`). Claude Code resets the working
+directory after every Bash call, so a `cd` — whether standalone or the
+leading step of a compound command (`cd X && …`) — silently breaks any
+*following* command that assumed the new directory. Prose guidance alone
+("prefer absolute paths") doesn't reliably stop this; the advisory
+mechanizes the reminder instead.
+
+A lightweight heuristic, not a shell parser: it flags any top-level segment
+(split on `&&`, `||`, `;`, `|`, or newline) whose first word is literally
+`cd`. Never blocks — a deliberate `cd` still runs; the model just gets a
+one-line nudge toward absolute paths.
+
+```yaml
+features:
+  cd_guard:
+    enabled: false  # opt out entirely; omit the block (or `enabled: true`) to keep it on
+```
+
+| Field     | Required | Notes           |
+|-----------|----------|-----------------|
+| `enabled` | no       | Default `true`. |
 
 ### `features.context_mode:`
 

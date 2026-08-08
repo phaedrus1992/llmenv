@@ -44,7 +44,7 @@ pub struct Features {
     /// ReadOnce: avoid re-reading unchanged files within a TTL window.
     #[serde(default)]
     pub read_once: Option<ReadOnce>,
-    /// RepeatDetect (#1006): break identical-tool-call loops, off by default.
+    /// RepeatDetect (#1006): break identical-tool-call loops. On by default.
     #[serde(default)]
     pub repeat_detect: Option<RepeatDetect>,
     /// Slippage control: guardrails against model behavior drift.
@@ -59,6 +59,10 @@ pub struct Features {
     /// like `memory` — multiple local per-project servers can coexist).
     #[serde(default)]
     pub codebase_memory: Vec<CodebaseMemory>,
+    /// CdGuard (#976): warn-only PreToolUse advisory on a Bash `cd`. On by
+    /// default, like `repeat_detect`.
+    #[serde(default)]
+    pub cd_guard: Option<CdGuard>,
 }
 
 /// Self-upgrade configuration, nested under `features.upgrade`.
@@ -624,6 +628,7 @@ impl Features {
             && self.context_mode.is_none()
             && self.upgrade.is_none()
             && self.task_tracker.is_none()
+            && self.cd_guard.is_none()
     }
 }
 
@@ -1038,6 +1043,30 @@ const fn default_repeat_detect_enabled() -> bool {
 
 const fn default_repeat_detect_threshold() -> u32 {
     3
+}
+
+/// CdGuard: a warn-only `PreToolUse` advisory on a Bash `cd` (#976).
+/// Engine-neutral (lives in `hook_run`). **On by default**: prose guidance
+/// alone ("prefer absolute paths over `cd`") wasn't stopping the recurring
+/// "Shell cwd was reset" misfire — mechanizing the reminder is the fix.
+/// Absent `features.cd_guard` entirely resolves the same as `enabled: true`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CdGuard {
+    #[serde(default = "default_cd_guard_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for CdGuard {
+    fn default() -> Self {
+        Self {
+            enabled: default_cd_guard_enabled(),
+        }
+    }
+}
+
+const fn default_cd_guard_enabled() -> bool {
+    true
 }
 
 /// SlippageControl: guardrails against model behavior drift.
@@ -2288,6 +2317,47 @@ index_path: /custom/index/path
             let original = RepeatDetect { enabled, threshold };
             let json = serde_json::to_string(&original).unwrap();
             let back: RepeatDetect = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(original, back);
+        }
+    }
+
+    // #976: CdGuard, on by default like RepeatDetect.
+    #[test]
+    fn cd_guard_default_is_enabled() {
+        assert!(CdGuard::default().enabled);
+    }
+
+    #[test]
+    fn features_roundtrip_cd_guard() {
+        let original = Features {
+            cd_guard: Some(CdGuard { enabled: false }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Features = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    // #1025: is_empty() must account for every field, or a features block
+    // holding *only* the new field silently merges away as if unset — this
+    // bug class has already recurred three times (throttle, task_tracker,
+    // codebase_memory). Guard cd_guard explicitly rather than trusting the
+    // next person to remember.
+    #[test]
+    fn features_with_only_cd_guard_set_is_not_empty() {
+        let features = Features {
+            cd_guard: Some(CdGuard { enabled: false }),
+            ..Default::default()
+        };
+        assert!(!features.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn prop_cd_guard_json_roundtrip(enabled in proptest::bool::ANY) {
+            let original = CdGuard { enabled };
+            let json = serde_json::to_string(&original).unwrap();
+            let back: CdGuard = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(original, back);
         }
     }
