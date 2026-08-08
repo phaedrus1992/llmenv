@@ -1537,6 +1537,7 @@ mod tests {
             timeout: Some(10_000),
             disabled_tools: vec![],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
@@ -1567,6 +1568,7 @@ mod tests {
             timeout: Some(5000),
             disabled_tools: vec![],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
@@ -1594,6 +1596,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
@@ -2467,6 +2470,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         });
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
         let raw = std::fs::read_to_string(out.path().join(OPENCODE_JSON_FILE)).unwrap();
@@ -3560,6 +3564,7 @@ mod tests {
                     timeout,
                     disabled_tools: vec![],
                     mcp_permissions: None,
+                    wakeup_max_tokens: None,
                 })
                 .collect()
         })

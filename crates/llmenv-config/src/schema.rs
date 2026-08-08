@@ -1306,6 +1306,16 @@ pub struct Memory {
     /// -> allow, destructive -> ask) when unset.
     #[serde(default)]
     pub mcp_permissions: Option<McpPermissions>,
+    /// Token budget for the `icm_wake_up` `SessionStart` call (#1216). When
+    /// set, passed explicitly as the tool call's `max_tokens` argument
+    /// instead of omitting it — icm's own MCP handler defaults to 200 tokens
+    /// when the argument is absent, not the 500 a user might expect from
+    /// icm's own `config.toml` (that file is never consulted on this path).
+    /// Validated to `20..=4000`, the same range icm's handler clamps to, so
+    /// an out-of-range value fails fast at `llmenv doctor`/materialize time
+    /// instead of being silently truncated by icm.
+    #[serde(default)]
+    pub wakeup_max_tokens: Option<u32>,
 }
 
 /// A local, tag-activated `codebase-memory-mcp` server. Unlike `Memory`

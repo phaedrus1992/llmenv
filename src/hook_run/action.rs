@@ -67,8 +67,12 @@ pub fn parse_importance_marker(chunk: &str) -> Option<&str> {
 /// One memory action against the ICM MCP backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Inject the session wake-up pack (`icm_wake_up`).
-    WakeUp,
+    /// Inject the session wake-up pack (`icm_wake_up`). The carried value is
+    /// the configured `features.memory[].wakeup_max_tokens` (#1216) for the
+    /// active memory entry, passed through as the tool call's `max_tokens`
+    /// argument. `None` omits the argument entirely, letting icm's own MCP
+    /// handler fall back to its hardcoded 200-token default.
+    WakeUp(Option<u32>),
     /// Inject recalled context for the active tags/project (`icm_memory_recall`).
     /// Project-scoped (cwd default) natural-language recall.
     Recall,
@@ -92,7 +96,7 @@ impl Action {
     /// The ICM MCP tool this action calls.
     pub fn tool_name(&self) -> &'static str {
         match self {
-            Action::WakeUp => "icm_wake_up",
+            Action::WakeUp(_) => "icm_wake_up",
             Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_) => "icm_memory_recall",
             Action::Store => "icm_memory_store",
         }
@@ -108,7 +112,10 @@ impl Action {
     /// `keyword: llmenv-bundle:<bundle>` to scope the recall.
     pub fn arguments(&self, query: &str, chunk: &str) -> Value {
         match self {
-            Action::WakeUp => json!({}),
+            Action::WakeUp(max_tokens) => match max_tokens {
+                Some(n) => json!({ "max_tokens": n }),
+                None => json!({}),
+            },
             Action::Recall => json!({ "query": query }),
             Action::RecallTag(q) => json!({
                 "query": q.tag,
@@ -188,16 +195,22 @@ mod tests {
 
     #[test]
     fn action_tool_name_mapping() {
-        assert_eq!(Action::WakeUp.tool_name(), "icm_wake_up");
+        assert_eq!(Action::WakeUp(None).tool_name(), "icm_wake_up");
         assert_eq!(Action::Recall.tool_name(), "icm_memory_recall");
         assert_eq!(Action::Store.tool_name(), "icm_memory_store");
         assert_eq!(recall_bundle("base").tool_name(), "icm_memory_recall");
     }
 
     #[test]
-    fn wakeup_arguments_are_empty_object() {
-        let args = Action::WakeUp.arguments("query text", "chunk text");
+    fn wakeup_arguments_are_empty_object_when_unconfigured() {
+        let args = Action::WakeUp(None).arguments("query text", "chunk text");
         assert_eq!(args, serde_json::json!({}));
+    }
+
+    #[test]
+    fn wakeup_arguments_carry_configured_max_tokens() {
+        let args = Action::WakeUp(Some(750)).arguments("query text", "chunk text");
+        assert_eq!(args, serde_json::json!({ "max_tokens": 750 }));
     }
 
     #[test]

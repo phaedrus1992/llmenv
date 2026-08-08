@@ -2652,6 +2652,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
+                wakeup_max_tokens: None,
             });
         let remote =
             ("[a-z][a-z0-9_-]{0,10}", "https://[a-z]{1,8}\\.test").prop_map(|(name, url)| {
@@ -2665,6 +2666,7 @@ mod tests {
                     timeout: None,
                     disabled_tools: vec![],
                     mcp_permissions: None,
+                    wakeup_max_tokens: None,
                 }
             });
         prop_oneof![stdio, remote]
@@ -2762,6 +2764,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
+                wakeup_max_tokens: None,
             }],
             ..Default::default()
         };
@@ -2914,6 +2917,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
+                wakeup_max_tokens: None,
             }],
             ..Default::default()
         };
@@ -3006,6 +3010,7 @@ mod tests {
                 mutation: None,
                 destructive: Some(crate::config::McpPermissionAction::Deny),
             }),
+            wakeup_max_tokens: None,
         };
         let active_tags = std::collections::BTreeSet::from(["home".to_string()]);
         let resolved = crate::mcp::resolve::resolve_mcps(&[], &[memory], &host, &active_tags)
@@ -4036,6 +4041,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         }
     }
 
@@ -4050,6 +4056,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         }
     }
 

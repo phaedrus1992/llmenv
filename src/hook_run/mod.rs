@@ -214,7 +214,9 @@ impl std::fmt::Display for HookEvent {
 
 /// The ordered actions to run for an event, given the active tags' and bundles'
 /// recall queries (built by [`tag_recall_queries`] and [`bundle_recall_queries`],
-/// the single sources of tag→recall and bundle→recall expansion).
+/// the single sources of tag→recall and bundle→recall expansion), plus the
+/// active memory entry's configured wake-up token budget (#1216, `None` if
+/// unset), threaded straight into `Action::WakeUp` on `SessionStart`.
 ///
 /// `TurnStart` runs the project-scoped natural-language `Recall` first, then one
 /// project-unfiltered `RecallTag` per active tag (#197), then one
@@ -224,9 +226,10 @@ fn dispatch(
     event: HookEvent,
     tag_queries: &[TagRecallQuery],
     bundle_queries: &[BundleRecallQuery],
+    wakeup_max_tokens: Option<u32>,
 ) -> Vec<Action> {
     match event {
-        HookEvent::SessionStart => vec![Action::WakeUp],
+        HookEvent::SessionStart => vec![Action::WakeUp(wakeup_max_tokens)],
         HookEvent::TurnStart => {
             let mut actions = vec![Action::Recall];
             actions.extend(tag_queries.iter().cloned().map(Action::RecallTag));
@@ -860,7 +863,12 @@ fn run_inner(
         // cheap — reqwest::Client is internally Arc, and the MCP session_id is
         // shared via Arc so re-initialization is also avoided.
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-        let client = resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
+        let resolved_client =
+            resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
+        // #1216: the wake-up token budget travels alongside the client since
+        // both come from the same resolved `features.memory` entry.
+        let wakeup_max_tokens = resolved_client.as_ref().and_then(|(_, w)| *w);
+        let client = resolved_client.map(|(c, _)| c);
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
             &active,
@@ -938,7 +946,7 @@ fn run_inner(
             if let Some(client) = &client
                 && !session_end_unchanged
             {
-                let actions = dispatch(event, &tag_queries, &bundle_queries);
+                let actions = dispatch(event, &tag_queries, &bundle_queries, wakeup_max_tokens);
                 out = run_memory_actions(client, actions, &query, &chunk).await?;
 
                 // PostSession: run reflective consolidation (R5) in a detached
@@ -1387,8 +1395,13 @@ fn recall_bundle_names(active: &crate::scope::ActiveScopes) -> Vec<String> {
 /// be configured and merely unparseable: that is a failure, not an absence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemoryEndpoint {
-    /// The memory backend resolved to this HTTP URL.
-    Active(String),
+    /// The memory backend resolved to this HTTP URL, carrying the active
+    /// `features.memory` entry's configured `wakeup_max_tokens` (#1216,
+    /// `None` if unset).
+    Active {
+        url: String,
+        wakeup_max_tokens: Option<u32>,
+    },
     /// No bundle fired for the active scopes and no top-level `features.memory`
     /// entry matched — nothing could have supplied a backend.
     NoBundlesFired,
@@ -1411,7 +1424,7 @@ impl MemoryEndpoint {
     pub(crate) fn into_url(self) -> anyhow::Result<String> {
         const PREFIX: &str = "no memory backend active for this scope";
         match self {
-            Self::Active(url) => Ok(url),
+            Self::Active { url, .. } => Ok(url),
             Self::NoBundlesFired => Err(anyhow::anyhow!(
                 "{PREFIX}: no bundles fired and config.yaml declares no features.memory"
             )),
@@ -1433,6 +1446,18 @@ impl MemoryEndpoint {
             )),
         }
     }
+
+    /// The active entry's configured wake-up token budget (#1216). `None`
+    /// for every non-[`MemoryEndpoint::Active`] variant, and for `Active`
+    /// itself when `features.memory[].wakeup_max_tokens` is unset.
+    pub(crate) fn wakeup_max_tokens(&self) -> Option<u32> {
+        match self {
+            Self::Active {
+                wakeup_max_tokens, ..
+            } => *wakeup_max_tokens,
+            _ => None,
+        }
+    }
 }
 
 /// Resolve (or reuse from `cache`) the MCP client for the active memory
@@ -1450,8 +1475,17 @@ fn resolve_memory_client(
     active: &crate::scope::ActiveScopes,
     event: impl std::fmt::Display,
     cache: &'static OnceLock<Mutex<HashMap<String, McpHttpClient>>>,
-) -> Option<McpHttpClient> {
-    let url = match memory_url(config, config_dir, active).and_then(MemoryEndpoint::into_url) {
+) -> Option<(McpHttpClient, Option<u32>)> {
+    let endpoint = match memory_url(config, config_dir, active) {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            eprintln!("llmenv: memory {event} skipped: {e}");
+            return None;
+        }
+    };
+    // #1216: read before `into_url` consumes `endpoint` below.
+    let wakeup_max_tokens = endpoint.wakeup_max_tokens();
+    let url = match endpoint.into_url() {
         Ok(url) => url,
         Err(e) => {
             eprintln!("llmenv: memory {event} skipped: {e}");
@@ -1460,18 +1494,19 @@ fn resolve_memory_client(
     };
     let clients = cache.get_or_init(|| Mutex::new(HashMap::new()));
     let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
-    match clients.entry(url) {
-        std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
+    let client = match clients.entry(url) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
         std::collections::hash_map::Entry::Vacant(entry) => {
             match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
-                Ok(client) => Some(entry.insert(client).clone()),
+                Ok(client) => entry.insert(client).clone(),
                 Err(e) => {
                     eprintln!("llmenv: memory {event} skipped: invalid memory backend URL: {e}");
-                    None
+                    return None;
                 }
             }
         }
-    }
+    };
+    Some((client, wakeup_max_tokens))
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, or the
@@ -1529,12 +1564,17 @@ pub(crate) fn memory_url(
     // build_manifest's host_tags; that would break recall in project scopes.
     let resolved = resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
         .map_err(|e| annotate_resolve_error(e, config, config_dir, active))?;
-    let url = resolved.into_iter().find_map(|m| match m.kind {
-        ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some(url),
+    let matched = resolved.into_iter().find_map(|m| match m.kind {
+        ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => {
+            Some((url, m.wakeup_max_tokens))
+        }
         _ => None,
     });
-    Ok(match url {
-        Some(url) => MemoryEndpoint::Active(url),
+    Ok(match matched {
+        Some((url, wakeup_max_tokens)) => MemoryEndpoint::Active {
+            url,
+            wakeup_max_tokens,
+        },
         None => classify_missing_memory(config, config_dir, active, &firing, &bundle_refs),
     })
 }
@@ -2157,6 +2197,7 @@ mod tests {
             auto_prune: false,
             consolidation: None,
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         }];
         let mut persisted_host = std::collections::BTreeMap::new();
         persisted_host.insert(
@@ -2176,7 +2217,10 @@ mod tests {
         let url = memory_url(&config, config_root.path(), &active).expect("test");
         assert_eq!(
             url,
-            MemoryEndpoint::Active("http://still.local:7878/mcp".into()),
+            MemoryEndpoint::Active {
+                url: "http://still.local:7878/mcp".into(),
+                wakeup_max_tokens: None,
+            },
             "memory_url must read the persisted merge cache instead of falling \
              back to a live merge of a bundle that declares no memory/host"
         );
@@ -2243,7 +2287,10 @@ mod tests {
         let url = memory_url(&config, config_root.path(), &active).expect("test");
         assert_eq!(
             url,
-            MemoryEndpoint::Active("http://still.local:7878/mcp".into()),
+            MemoryEndpoint::Active {
+                url: "http://still.local:7878/mcp".into(),
+                wakeup_max_tokens: None,
+            },
             "a key mismatch must fall back to a correct live merge, never the stale cache"
         );
     }
@@ -2468,6 +2515,51 @@ mod tests {
         );
     }
 
+    // #1216: a top-level `features.memory` entry's configured
+    // `wakeup_max_tokens` must survive resolution and be readable off the
+    // active endpoint, so hook_run's dispatch pipeline can pass it to
+    // icm_wake_up.
+    #[test]
+    fn memory_url_surfaces_configured_wakeup_max_tokens() {
+        let config_root = tempfile::tempdir().expect("test");
+        let mut host = std::collections::BTreeMap::new();
+        host.insert(
+            "still".to_string(),
+            crate::config::HostEntry {
+                addr: "still.local".into(),
+            },
+        );
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                memory: vec![crate::config::Memory {
+                    server_host: "still".into(),
+                    port: 7878,
+                    listen_host: "127.0.0.1".into(),
+                    when: vec!["network-home".into()],
+                    default_topics: vec![],
+                    default_type: None,
+                    default_importance: None,
+                    type_importance: std::collections::BTreeMap::new(),
+                    retention: None,
+                    auto_prune: false,
+                    consolidation: None,
+                    mcp_permissions: None,
+                    wakeup_max_tokens: Some(750),
+                }],
+                ..Default::default()
+            }),
+            host,
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            tags: std::collections::BTreeSet::from(["network-home".to_string()]),
+            ..Default::default()
+        };
+
+        let endpoint = memory_url(&config, config_root.path(), &active).expect("test");
+        assert_eq!(endpoint.wakeup_max_tokens(), Some(750));
+    }
+
     // #1131: bundles fired, they just declare no memory — the benign case, and
     // the only one the old `Ok(None)` reading was ever right about.
     #[test]
@@ -2619,6 +2711,7 @@ mod tests {
                     auto_prune: false,
                     consolidation: None,
                     mcp_permissions: None,
+                    wakeup_max_tokens: None,
                 }],
                 ..Default::default()
             }),
@@ -2700,7 +2793,7 @@ mod tests {
 
         let url = memory_url(&config, config_root.path(), &active).expect("test");
         assert!(
-            !matches!(url, MemoryEndpoint::Active(_)),
+            !matches!(url, MemoryEndpoint::Active { .. }),
             "a bundle disabled via `disable_bundles` must not contribute its \
              memory/host entries to memory_url resolution, got {url:?}"
         );
@@ -3252,7 +3345,7 @@ mod tests {
             HookEvent::SubagentStop,
             HookEvent::PreCompact,
         ] {
-            assert_eq!(dispatch(ev, &[], &[]), Vec::<Action>::new());
+            assert_eq!(dispatch(ev, &[], &[], None), Vec::<Action>::new());
         }
     }
 
@@ -3321,21 +3414,34 @@ mod tests {
     #[test]
     fn dispatch_maps_events_to_actions() {
         assert_eq!(
-            dispatch(HookEvent::SessionStart, &[], &[]),
-            vec![Action::WakeUp]
+            dispatch(HookEvent::SessionStart, &[], &[], None),
+            vec![Action::WakeUp(None)]
         );
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[]),
+            dispatch(HookEvent::TurnStart, &[], &[], None),
             vec![Action::Recall]
         );
         assert_eq!(
-            dispatch(HookEvent::SessionEnd, &[], &[]),
+            dispatch(HookEvent::SessionEnd, &[], &[], None),
             vec![Action::Store]
         );
         assert_eq!(
-            dispatch(HookEvent::PostSession, &[], &[]),
+            dispatch(HookEvent::PostSession, &[], &[], None),
             vec![],
             "PostSession defers to consolidation module, no dispatch actions"
+        );
+    }
+
+    #[test]
+    fn dispatch_threads_wakeup_max_tokens_into_session_start_only() {
+        assert_eq!(
+            dispatch(HookEvent::SessionStart, &[], &[], Some(750)),
+            vec![Action::WakeUp(Some(750))]
+        );
+        // Not carried by any other event's actions — WakeUp only fires on SessionStart.
+        assert_eq!(
+            dispatch(HookEvent::TurnStart, &[], &[], Some(750)),
+            vec![Action::Recall]
         );
     }
 
@@ -3343,7 +3449,7 @@ mod tests {
     fn turn_start_expands_one_recall_tag_per_active_tag() {
         let tags = vec!["rust".to_string(), "work-vpn".to_string()];
         let queries = tag_recall_queries(&tags).expect("valid tags");
-        let actions = dispatch(HookEvent::TurnStart, &queries, &[]);
+        let actions = dispatch(HookEvent::TurnStart, &queries, &[], None);
         assert_eq!(
             actions,
             vec![
@@ -3365,7 +3471,7 @@ mod tests {
     fn turn_start_expands_one_recall_bundle_per_active_bundle() {
         let bundles = vec!["base".to_string(), "rust-defaults".to_string()];
         let queries = bundle_recall_queries(&bundles).expect("valid bundles");
-        let actions = dispatch(HookEvent::TurnStart, &[], &queries);
+        let actions = dispatch(HookEvent::TurnStart, &[], &queries, None);
         assert_eq!(
             actions,
             vec![
@@ -3387,7 +3493,7 @@ mod tests {
     fn turn_start_interleaves_tag_and_bundle_recalls() {
         let tag_qs = tag_recall_queries(&["rust".to_string()]).expect("valid");
         let bundle_qs = bundle_recall_queries(&["base".to_string()]).expect("valid");
-        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs);
+        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, None);
         // Order: project recall, then tag recalls, then bundle recalls.
         assert_eq!(actions[0], Action::Recall);
         assert!(matches!(actions[1], Action::RecallTag(_)));
@@ -3435,7 +3541,7 @@ mod tests {
         // recalls keyed on different prefixes — no cross-contamination.
         let tag_qs = tag_recall_queries(&["foo".to_string()]).expect("valid");
         let bundle_qs = bundle_recall_queries(&["foo".to_string()]).expect("valid");
-        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs);
+        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, None);
         assert_eq!(actions.len(), 3);
         match &actions[1] {
             Action::RecallTag(q) => assert_eq!(q.keyword, "llmenv-tag:foo"),
@@ -3550,7 +3656,7 @@ mod tests {
         ) {
             let tag_qs = tag_recall_queries(&tags).expect("valid tags");
             let bundle_qs = bundle_recall_queries(&bundles).expect("valid bundles");
-            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs);
+            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, None);
 
             prop_assert_eq!(actions.len(), 1 + tags.len() + bundles.len());
             prop_assert!(matches!(actions[0], Action::Recall));
@@ -3584,6 +3690,7 @@ mod tests {
                 auto_prune: false,
                 consolidation: None,
                 mcp_permissions: None,
+                wakeup_max_tokens: None,
             }],
             ..Default::default()
         });

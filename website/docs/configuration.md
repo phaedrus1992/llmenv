@@ -446,6 +446,15 @@ features:
 | `when` | no | Activation tags |
 | `default_topics` | no | Documentation only; preserved across round-trips |
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
+| `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
+
+`wakeup_max_tokens` (added in v3.8.0) controls the size of the wake-up pack
+injected at session start. When unset, llmenv omits the argument entirely and
+icm's own MCP handler falls back to its hardcoded 200-token default — **not**
+the 500 tokens icm's own `config.toml` may configure, since that file is never
+consulted on this path. Set it explicitly to request a different budget; out-
+of-range values fail `llmenv doctor`/materialize validation instead of being
+silently clamped.
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
