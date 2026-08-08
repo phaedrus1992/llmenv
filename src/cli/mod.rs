@@ -844,14 +844,21 @@ pub(super) fn warn_dead_native_keys(
 }
 
 /// Report every config setting that will be silently dropped at render time:
-/// dead `native_*.<engine>` keys (#1032), permission patterns that opencode
-/// can never match (#838), and legacy shell tools allowed without their
-/// rules-recommended replacement (#975).
+/// dead `native_*.<engine>` keys (#1032) and permission patterns that opencode
+/// can never match (#838).
 ///
 /// Reads the merged manifest when one was built, so bundle-contributed settings
 /// are covered, and falls back to the raw config when no bundle fired. Shared by
 /// `export`, `regenerate`, and `doctor` so a new materialize path can't quietly
 /// opt out of the diagnostics.
+///
+/// Deliberately does **not** include the #975 legacy-tool lint
+/// (`legacy_tools_missing_replacement`): unlike the two checks here, an
+/// `allow`d legacy tool with no replacement is working config, not a dead
+/// setting — and `export`/`regenerate` are sourced from the shell prompt on
+/// every invocation, so a check that isn't "something silently doesn't work"
+/// has no business printing there. It's a `doctor`-only nudge instead, called
+/// directly from `run_doctor`.
 pub(super) fn warn_dead_config(
     config: &Config,
     manifest: Option<&crate::merge::MergedManifest>,
@@ -864,9 +871,6 @@ pub(super) fn warn_dead_config(
     warn_dead_native_keys(capabilities, native, prefix);
     let opencode_active = engine_is_active(config, "opencode");
     for hit in doctor::claude_only_colon_permission_patterns(capabilities, opencode_active) {
-        eprintln!("{prefix} {}", hit.message());
-    }
-    for hit in doctor::legacy_tools_missing_replacement(capabilities) {
         eprintln!("{prefix} {}", hit.message());
     }
 }

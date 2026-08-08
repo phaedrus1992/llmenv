@@ -135,6 +135,15 @@ fn safe_readonly_preset_parses_from_yaml_and_expands_at_merge_time() {
             .iter()
             .any(|r| r.tool == "Bash" && r.pattern.as_deref() == Some("fd *"))
     );
+    // #975 pre-pr-review: fd's --exec/-x can run arbitrary commands, so the
+    // preset's blanket "fd *" allow must ship with a deny for it.
+    assert!(
+        m.capabilities
+            .permissions
+            .deny
+            .iter()
+            .any(|r| r.tool == "Bash" && r.pattern.as_deref() == Some("fd *--exec*"))
+    );
 }
 
 #[test]

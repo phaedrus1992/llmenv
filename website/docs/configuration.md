@@ -204,8 +204,16 @@ capabilities:
   (`rg`, `fd`, `ast-grep`, `shellcheck`, `shfmt`) plus safe read-only `git`
   subcommands (`status`, `diff`, `log`, `show`, `blame`) and `ls`, so agents
   stop hitting a permission prompt for tools the rules themselves told them
-  to prefer. A rule the preset already covers doesn't duplicate one an
-  explicit `allow` entry also declares. Run `llmenv doctor` to get flagged
+  to prefer. `git status`/`diff`/`log`/`show`/`blame` and `ls` each get both a
+  bare form and a `*`-suffixed one, since the bare form is their dominant
+  invocation. `rg`/`fd`/`ast-grep`/`shfmt` (not `shellcheck`) each ship a
+  `deny` companion for the flags that turn them from read-only into
+  arbitrary command execution or an in-place write (`rg --pre`/
+  `--hostname-bin`, `fd -x`/`-X`, `ast-grep -U`, `shfmt -w`) — Claude Code
+  checks `deny` before `allow`, so those specific invocations still prompt.
+  A rule the preset already covers
+  doesn't duplicate one an explicit `allow`/`deny` entry also declares. Run
+  `llmenv doctor` to get flagged
   when a config allows a legacy tool (`grep`, `find`) without also allowing
   its recommended replacement (`rg`, `fd`) — a nudge toward the preset even
   without adopting it.

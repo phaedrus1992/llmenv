@@ -81,7 +81,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     // covers doesn't duplicate one an explicit `allow` entry also declares.
     let preset = highest_precedence(contributors, |c| c.permissions.preset.as_ref());
     if let Some(preset) = preset {
-        allow.extend(safe_readonly_rules_for(preset));
+        allow.extend(safe_readonly_allow_rules_for(preset));
+        deny.extend(safe_readonly_deny_rules_for(preset));
     }
 
     let env = resolve_env(contributors)?;
@@ -192,37 +193,72 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     })
 }
 
+fn bash_rule(pattern: &str) -> PermissionRule {
+    PermissionRule {
+        tool: "Bash".to_string(),
+        pattern: Some(pattern.to_string()),
+        paths: Vec::new(),
+    }
+}
+
 /// The curated `allow` rules a [`PermissionPreset`] expands to (#975).
 ///
 /// A tool ends up here only if this project's own bundled rules
 /// (`examples/config-llmenv-dir/bundles/base/AGENTS.md`'s "CLI Tools" table)
 /// name it as the recommended read-only replacement for a common shell
 /// command, or #975 named it directly as a safe read-only `git`/`ls`
-/// invocation. Every pattern uses `"<cmd> *"` (space before the glob),
-/// matching this codebase's own established convention for Bash permission
-/// patterns — an invocation with zero arguments (a bare `ls`) is not
-/// covered, consistent with existing rules like `"cargo *"`.
-fn safe_readonly_rules_for(preset: PermissionPreset) -> Vec<PermissionRule> {
-    fn bash(pattern: &str) -> PermissionRule {
-        PermissionRule {
-            tool: "Bash".to_string(),
-            pattern: Some(pattern.to_string()),
-            paths: Vec::new(),
-        }
-    }
+/// invocation. `git status`/`diff`/`log`/`show`/`blame` and `ls` get both a
+/// bare form and a `"<cmd> *"` glob — the bare form is their dominant
+/// invocation, unlike e.g. `cargo`, which is never run with zero arguments.
+///
+/// `rg`, `fd`, `ast-grep`, and `shfmt` each have a flag that turns a
+/// "read-only" invocation into arbitrary command execution or an in-place
+/// file write (`fd -x`/`-X`, `rg --pre`/`--hostname-bin`, `ast-grep -U`,
+/// `shfmt -w`) — verified against each tool's own `--help`. A blanket
+/// `"<tool> *"` allow can't exclude just those flags, so
+/// [`safe_readonly_deny_rules_for`] denies them specifically; deny wins over
+/// allow for every adapter this preset targets. This is a denylist of the
+/// flags found during #975's review, not a proof that no other escape
+/// exists — a future flag on any of these tools could reopen the same gap.
+fn safe_readonly_allow_rules_for(preset: PermissionPreset) -> Vec<PermissionRule> {
     match preset {
         PermissionPreset::SafeReadonly => vec![
-            bash("rg *"),
-            bash("fd *"),
-            bash("ast-grep *"),
-            bash("shellcheck *"),
-            bash("shfmt *"),
-            bash("git status *"),
-            bash("git diff *"),
-            bash("git log *"),
-            bash("git show *"),
-            bash("git blame *"),
-            bash("ls *"),
+            bash_rule("rg *"),
+            bash_rule("fd *"),
+            bash_rule("ast-grep *"),
+            bash_rule("shellcheck *"),
+            bash_rule("shfmt *"),
+            bash_rule("git status"),
+            bash_rule("git status *"),
+            bash_rule("git diff"),
+            bash_rule("git diff *"),
+            bash_rule("git log"),
+            bash_rule("git log *"),
+            bash_rule("git show"),
+            bash_rule("git show *"),
+            bash_rule("git blame"),
+            bash_rule("git blame *"),
+            bash_rule("ls"),
+            bash_rule("ls *"),
+        ],
+    }
+}
+
+/// The `deny` rules that close the escapes documented on
+/// [`safe_readonly_allow_rules_for`] — always expanded alongside it, never
+/// independently, since a deny with no matching allow is a no-op.
+fn safe_readonly_deny_rules_for(preset: PermissionPreset) -> Vec<PermissionRule> {
+    match preset {
+        PermissionPreset::SafeReadonly => vec![
+            bash_rule("fd *-x*"),
+            bash_rule("fd *-X*"),
+            bash_rule("fd *--exec*"),
+            bash_rule("rg *--pre*"),
+            bash_rule("rg *--hostname-bin*"),
+            bash_rule("ast-grep *-U*"),
+            bash_rule("ast-grep *--update-all*"),
+            bash_rule("shfmt *-w*"),
+            bash_rule("shfmt *--write*"),
         ],
     }
 }
@@ -532,19 +568,45 @@ mod tests {
         }
     }
 
-    fn expected_safe_readonly_rules() -> Vec<PermissionRule> {
+    fn expected_safe_readonly_allow_rules() -> Vec<PermissionRule> {
         vec![
             rule("Bash", "rg *"),
             rule("Bash", "fd *"),
             rule("Bash", "ast-grep *"),
             rule("Bash", "shellcheck *"),
             rule("Bash", "shfmt *"),
+            rule("Bash", "git status"),
             rule("Bash", "git status *"),
+            rule("Bash", "git diff"),
             rule("Bash", "git diff *"),
+            rule("Bash", "git log"),
             rule("Bash", "git log *"),
+            rule("Bash", "git show"),
             rule("Bash", "git show *"),
+            rule("Bash", "git blame"),
             rule("Bash", "git blame *"),
+            rule("Bash", "ls"),
             rule("Bash", "ls *"),
+        ]
+    }
+
+    /// #975 pre-pr-review finding: `fd -x`/`-X`, `rg --pre`/`--hostname-bin`,
+    /// `ast-grep -U`/`--update-all`, and `shfmt -w`/`--write` let a tool this
+    /// preset calls "safe-readonly" execute arbitrary commands or write
+    /// files — a blanket `"<tool> *"` allow can't exclude just those flags,
+    /// so a `deny` companion (which Claude Code checks first) closes the gap
+    /// for each verified escape.
+    fn expected_safe_readonly_deny_rules() -> Vec<PermissionRule> {
+        vec![
+            rule("Bash", "fd *-x*"),
+            rule("Bash", "fd *-X*"),
+            rule("Bash", "fd *--exec*"),
+            rule("Bash", "rg *--pre*"),
+            rule("Bash", "rg *--hostname-bin*"),
+            rule("Bash", "ast-grep *-U*"),
+            rule("Bash", "ast-grep *--update-all*"),
+            rule("Bash", "shfmt *-w*"),
+            rule("Bash", "shfmt *--write*"),
         ]
     }
 
@@ -552,7 +614,8 @@ mod tests {
     fn safe_readonly_preset_expands_into_allow_rules() {
         let a = contributor("a", 0, with_preset(PermissionPreset::SafeReadonly));
         let out = merge_capabilities(&[a]).unwrap();
-        assert_eq!(out.permissions.allow, expected_safe_readonly_rules());
+        assert_eq!(out.permissions.allow, expected_safe_readonly_allow_rules());
+        assert_eq!(out.permissions.deny, expected_safe_readonly_deny_rules());
         assert_eq!(out.permissions.preset, Some(PermissionPreset::SafeReadonly));
     }
 
@@ -562,7 +625,16 @@ mod tests {
         caps.permissions.allow.push(rule("Bash", "rg *"));
         let a = contributor("a", 0, caps);
         let out = merge_capabilities(&[a]).unwrap();
-        assert_eq!(out.permissions.allow, expected_safe_readonly_rules());
+        assert_eq!(out.permissions.allow, expected_safe_readonly_allow_rules());
+    }
+
+    #[test]
+    fn safe_readonly_preset_deny_rules_dedup_with_explicit_deny() {
+        let mut caps = with_preset(PermissionPreset::SafeReadonly);
+        caps.permissions.deny.push(rule("Bash", "fd *-x*"));
+        let a = contributor("a", 0, caps);
+        let out = merge_capabilities(&[a]).unwrap();
+        assert_eq!(out.permissions.deny, expected_safe_readonly_deny_rules());
     }
 
     #[test]
@@ -570,6 +642,7 @@ mod tests {
         let a = contributor("a", 0, Capabilities::default());
         let out = merge_capabilities(&[a]).unwrap();
         assert!(out.permissions.allow.is_empty());
+        assert!(out.permissions.deny.is_empty());
         assert_eq!(out.permissions.preset, None);
     }
 
@@ -579,7 +652,8 @@ mod tests {
         let high = contributor("high", 1, with_preset(PermissionPreset::SafeReadonly));
         let out = merge_capabilities(&[low, high]).unwrap();
         assert_eq!(out.permissions.preset, Some(PermissionPreset::SafeReadonly));
-        assert_eq!(out.permissions.allow, expected_safe_readonly_rules());
+        assert_eq!(out.permissions.allow, expected_safe_readonly_allow_rules());
+        assert_eq!(out.permissions.deny, expected_safe_readonly_deny_rules());
     }
 
     #[test]

@@ -453,22 +453,38 @@ fn pattern_command(pattern: &str) -> &str {
     first.split(':').next().unwrap_or("")
 }
 
-/// Returns every legacy/replacement pair (#975) where the merged `allow` list
+/// The command a raw `native_permissions.<engine>.allow` string (Claude's
+/// own `"Bash(<pattern>)"` grammar) grants, or `None` for a non-`Bash` entry
+/// (`"WebFetch(domain:example.com)"`) or a malformed one.
+fn native_bash_command(raw: &str) -> Option<&str> {
+    let inner = raw.strip_prefix("Bash(")?.strip_suffix(')')?;
+    Some(pattern_command(inner))
+}
+
+/// Returns every legacy/replacement pair (#975) where the merged config
 /// grants the legacy tool but not its recommended replacement.
 ///
 /// Scoped to `Bash` rules and the `allow` tier only: `ask`/`deny` don't grant
 /// access, so they're not the "still gets a permission prompt" case this lint
 /// targets. Takes merged `capabilities` so a bundle-contributed `allow` rule
-/// for the replacement correctly silences the warning.
+/// for the replacement correctly silences the warning. Also checks every
+/// engine's `native_permissions.<engine>.allow` — a replacement granted only
+/// there (a documented, exercised pattern) must silence the warning too,
+/// not just a neutral `permissions.allow` entry.
 pub(super) fn legacy_tools_missing_replacement(capabilities: &Capabilities) -> Vec<LegacyToolRule> {
-    let commands: std::collections::HashSet<&str> = capabilities
+    let neutral = capabilities
         .permissions
         .allow
         .iter()
         .filter(|r| r.tool == "Bash")
         .filter_map(|r| r.pattern.as_deref())
-        .map(pattern_command)
-        .collect();
+        .map(pattern_command);
+    let native = capabilities
+        .native_permissions
+        .values()
+        .flat_map(|rules| rules.allow.iter())
+        .filter_map(|raw| native_bash_command(raw));
+    let commands: std::collections::HashSet<&str> = neutral.chain(native).collect();
 
     LEGACY_TOOL_REPLACEMENTS
         .iter()
@@ -826,6 +842,10 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                     .capabilities
             }
         };
+
+        for hit in legacy_tools_missing_replacement(&doctor_bundle_caps) {
+            eprintln!("{warn} {}", hit.message());
+        }
 
         let mut merged_host_for_doctor = doctor_bundle_caps.host.clone();
         for (k, v) in &config.host {
@@ -1640,6 +1660,23 @@ mod tests {
     #[test]
     fn non_bash_tool_rules_are_ignored() {
         let caps = caps_with_allow("Read", "grep");
+        assert!(legacy_tools_missing_replacement(&caps).is_empty());
+    }
+
+    /// #975 pre-pr-review finding: a replacement granted only through
+    /// `native_permissions.<engine>.allow` (a documented, exercised pattern
+    /// — `examples/config-llmenv-dir/config.yaml`) must still silence the
+    /// warning, not just a neutral `permissions.allow` entry.
+    #[test]
+    fn silent_when_replacement_allowed_via_native_permissions() {
+        let mut caps = caps_with_allow("Bash", "grep -r *");
+        caps.native_permissions.insert(
+            "claude_code".into(),
+            NativePermissionRules {
+                allow: vec!["Bash(rg *)".into()],
+                ..Default::default()
+            },
+        );
         assert!(legacy_tools_missing_replacement(&caps).is_empty());
     }
 
