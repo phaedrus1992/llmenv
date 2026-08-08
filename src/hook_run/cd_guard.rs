@@ -34,7 +34,10 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
         // Claude Code's Bash tool schema guarantees `command` is present as a
         // string — this should never fire in practice. Log it rather than
         // silently no-op, in case the harness's payload shape ever drifts.
-        tracing::debug!("tool_input.command missing or not a string for Bash PreToolUse payload");
+        // `error!`, not `warn!`/`debug!`: the default `EnvFilter` (`RUST_LOG`
+        // unset) is ERROR-only and drops anything weaker before it reaches a
+        // default-configured user's log (#1133 precedent).
+        tracing::error!("tool_input.command missing or not a string for Bash PreToolUse payload");
         return String::new();
     };
     if command_uses_cd(command) {
@@ -153,15 +156,19 @@ mod tests {
     // payload shape ever drifts, cd_guard would otherwise stop firing with no
     // trace in the logs.
     #[test]
-    fn handle_pre_tool_use_logs_debug_when_bash_command_missing() {
+    fn handle_pre_tool_use_logs_error_when_bash_command_missing() {
         let payload = serde_json::json!({ "tool_name": "Bash", "tool_input": {} });
-        let logs = crate::test_log_capture::capture_debug_logs(|| {
+        let logs = crate::test_log_capture::capture_logs(|| {
             let text = handle_pre_tool_use(&payload, &CdGuard { enabled: true });
             assert!(text.is_empty());
         });
         assert!(
             logs.contains("tool_input.command missing"),
-            "expected a debug log when tool_input.command is absent"
+            "expected an error log when tool_input.command is absent, got: {logs}"
+        );
+        assert!(
+            logs.contains("ERROR"),
+            "must log at error level so it survives the default (RUST_LOG-unset) filter, got: {logs}"
         );
     }
 
@@ -185,42 +192,35 @@ mod tests {
         }
 
         fn arb_separator() -> impl Strategy<Value = &'static str> {
-            proptest::sample::select(vec!["&&", "||", ";", "\n", "|"])
+            proptest::sample::select(&["&&", "||", ";", "\n", "|"][..])
         }
 
-        /// Builds a compound command from `leads.len()` segments (each
-        /// `<leading> <arg>`, joined by generated separators) where each
-        /// segment's leading word is `cd` iff the corresponding `leads[i]` is
-        /// true — plus the expected `command_uses_cd` result for it.
+        /// Builds a compound command from 1-5 segments, each
+        /// `<preceding separator> <leading> <arg>` (the first segment's
+        /// separator is generated but unused) — plus the expected
+        /// `command_uses_cd` result for it.
         fn arb_command_and_expected() -> impl Strategy<Value = (String, bool)> {
-            proptest::collection::vec(proptest::bool::ANY, 1..6)
-                .prop_flat_map(|leads| {
-                    let n = leads.len();
-                    (
-                        Just(leads),
-                        proptest::collection::vec(arb_separator(), n.saturating_sub(1).max(1)),
-                        proptest::collection::vec(arb_non_cd_token(), n * 2),
-                    )
-                })
-                .prop_map(|(leads, seps, args)| {
-                    let n = leads.len();
-                    let mut command = String::new();
-                    for i in 0..n {
-                        if i > 0 {
-                            command.push_str(&format!(" {} ", seps[(i - 1) % seps.len()]));
-                        }
-                        let leading = if leads[i] {
-                            "cd".to_string()
-                        } else {
-                            args[i].clone()
-                        };
-                        command.push_str(&leading);
+            let segment = (
+                proptest::bool::ANY,
+                arb_non_cd_token(),
+                arb_non_cd_token(),
+                arb_separator(),
+            );
+            proptest::collection::vec(segment, 1..6).prop_map(|segments| {
+                let expected = segments.iter().any(|&(leads_with_cd, ..)| leads_with_cd);
+                let mut command = String::new();
+                for (i, (leads_with_cd, token, arg, sep)) in segments.iter().enumerate() {
+                    if i > 0 {
                         command.push(' ');
-                        command.push_str(&args[n + i]);
+                        command.push_str(sep);
+                        command.push(' ');
                     }
-                    let expected = leads.iter().any(|&b| b);
-                    (command, expected)
-                })
+                    command.push_str(if *leads_with_cd { "cd" } else { token });
+                    command.push(' ');
+                    command.push_str(arg);
+                }
+                (command, expected)
+            })
         }
 
         /// A token containing `cd` as a substring but never equal to it

@@ -133,6 +133,13 @@ pub(crate) fn handle_pre_tool_use(
         return String::new();
     }
     let Some(tool_name) = stdin_payload.get("tool_name").and_then(|v| v.as_str()) else {
+        // tool_name is required on every PreToolUse payload -- this should
+        // never fire in practice. `error!`, not `warn!`/`debug!`: the default
+        // `EnvFilter` (`RUST_LOG` unset) is ERROR-only and drops anything
+        // weaker before it reaches a default-configured user's log (#1133
+        // precedent). Found during #1209's pre-pr-review as the same
+        // "required field missing" category cd_guard/read_once already fix.
+        tracing::error!("tool_name missing or not a string for PreToolUse payload");
         return String::new();
     };
     let tool_input = stdin_payload
@@ -355,6 +362,30 @@ mod tests {
             dir.path(),
         );
         assert!(result.is_empty());
+    }
+
+    // Found during #1209's pre-pr-review: the same "required field missing,
+    // should never happen" category cd_guard/read_once already log for.
+    #[test]
+    fn no_tool_name_logs_error() {
+        let dir = TempDir::new().expect("test");
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let result = handle_pre_tool_use(
+                &json!({ "tool_input": {} }),
+                Some("s1"),
+                &config(3),
+                dir.path(),
+            );
+            assert!(result.is_empty());
+        });
+        assert!(
+            logs.contains("tool_name missing"),
+            "expected an error log when tool_name is absent, got: {logs}"
+        );
+        assert!(
+            logs.contains("ERROR"),
+            "must log at error level, got: {logs}"
+        );
     }
 
     #[test]

@@ -1,62 +1,41 @@
 //! Test-only tracing log capture helper (#1207).
 //!
-//! Lets a unit test assert that a specific `tracing::debug!` event fired,
-//! without pulling in the `tracing-test` crate for two call sites —
-//! `tracing-subscriber` is already a full (non-dev) workspace dependency, so
-//! this reuses its `fmt` layer with a buffer-backed writer instead.
+//! Lets a unit test assert that a specific `tracing` event fired, without
+//! pulling in the `tracing-test` crate for a handful of call sites —
+//! `tracing-subscriber` is already a full (non-dev) workspace dependency and
+//! already ships a `Mutex<W>` `MakeWriter` impl, so this just reuses it.
 
 #![expect(clippy::expect_used, reason = "test-only helper")]
 
-use std::io;
 use std::sync::{Arc, Mutex};
 
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::fmt::writer::MutexGuardWriter;
 
-/// Logs captured by [`capture_debug_logs`], queryable by substring.
 #[derive(Clone, Default)]
-pub(crate) struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-impl CapturedLogs {
-    pub(crate) fn contains(&self, needle: &str) -> bool {
-        let buf = self.0.lock().expect("test log buffer mutex poisoned");
-        String::from_utf8_lossy(&buf).contains(needle)
-    }
-}
-
-pub(crate) struct Writer(Arc<Mutex<Vec<u8>>>);
-
-impl io::Write for Writer {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("test log buffer mutex poisoned")
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
 
 impl<'a> MakeWriter<'a> for CapturedLogs {
-    type Writer = Writer;
+    type Writer = MutexGuardWriter<'a, Vec<u8>>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Writer(self.0.clone())
+        self.0.make_writer()
     }
 }
 
-/// Run `f` with a debug-level `tracing` subscriber installed for the
-/// duration of the call (current-thread scoped, doesn't affect other
-/// tests), then return whatever it logged.
-pub(crate) fn capture_debug_logs(f: impl FnOnce()) -> CapturedLogs {
+/// Run `f` with a `tracing` subscriber installed for the duration of the
+/// call (current-thread scoped, doesn't affect other tests), returning
+/// whatever it logged. Captures every level a test might assert on — the
+/// subscriber's max level is a test-harness knob, unrelated to production's
+/// `RUST_LOG`-driven filter.
+pub(crate) fn capture_logs(f: impl FnOnce()) -> String {
     let captured = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(captured.clone())
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::TRACE)
         .without_time()
         .finish();
     tracing::subscriber::with_default(subscriber, f);
-    captured
+    let buf = captured.0.lock().expect("test log buffer mutex poisoned");
+    String::from_utf8_lossy(&buf).into_owned()
 }

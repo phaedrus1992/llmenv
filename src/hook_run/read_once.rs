@@ -154,7 +154,14 @@ pub(crate) fn handle_pre_tool_use(
     // Parse tool_input for file path and offset/limit
     let tool_input = match stdin_payload["tool_input"].as_object() {
         Some(obj) => obj,
-        None => return String::new(),
+        None => {
+            // tool_input is required and always an object per Claude Code's
+            // Read tool schema — this should never fire in practice. `error!`,
+            // not `warn!`: the default `EnvFilter` (`RUST_LOG` unset) is
+            // ERROR-only and drops anything weaker (#1133 precedent).
+            tracing::error!("tool_input missing or not an object for Read PreToolUse payload");
+            return String::new();
+        }
     };
     // Extract file path — the real key is snake_case per Claude Code hook payload
     // convention, but accept PascalCase fallback for synthetic test payloads.
@@ -170,9 +177,11 @@ pub(crate) fn handle_pre_tool_use(
         .and_then(|v| v.as_str())
     else {
         // file_path is required per Claude Code's Read tool schema — this
-        // should never fire in practice. Log it rather than silently no-op,
-        // in case the harness's payload shape ever drifts.
-        tracing::debug!("tool_input.file_path missing or not a string for Read PreToolUse payload");
+        // should never fire in practice. `error!`, not `warn!`/`debug!`: the
+        // default `EnvFilter` (`RUST_LOG` unset) is ERROR-only and drops
+        // anything weaker before it reaches a default-configured user's log
+        // (#1133 precedent).
+        tracing::error!("tool_input.file_path missing or not a string for Read PreToolUse payload");
         return String::new();
     };
     // Partial read bypass: if offset or limit are present, never cache
@@ -206,6 +215,10 @@ pub(crate) fn handle_pre_tool_use(
     // absolute value would otherwise escape `state_dir` entirely (the
     // latter because `Path::join` discards the base on an absolute RHS).
     if !crate::paths::is_valid_short_name(session_id) {
+        // A rejected session_id means the hook's own harness sent an unsafe
+        // value — worth surfacing even though the rejection itself is safe.
+        // `error!`, not `warn!`: see the #1133 precedent above.
+        tracing::error!("session_id failed path-safety validation for read_once, rejecting");
         return String::new();
     }
     let canonical = std::fs::canonicalize(path)
@@ -398,10 +411,10 @@ mod tests {
     // schema, so this should never fire in practice — but if it ever does,
     // read_once would otherwise stop deduplicating with no trace in the logs.
     #[test]
-    fn logs_debug_when_file_path_missing() {
+    fn logs_error_when_file_path_missing() {
         let dir = TempDir::new().expect("test");
         let payload = serde_json::json!({ "tool_name": "Read", "tool_input": {} });
-        let logs = crate::test_log_capture::capture_debug_logs(|| {
+        let logs = crate::test_log_capture::capture_logs(|| {
             let result = handle_pre_tool_use(
                 &payload,
                 Some("test-session"),
@@ -412,7 +425,62 @@ mod tests {
         });
         assert!(
             logs.contains("tool_input.file_path missing"),
-            "expected a debug log when tool_input.file_path is absent"
+            "expected an error log when tool_input.file_path is absent, got: {logs}"
+        );
+        assert!(
+            logs.contains("ERROR"),
+            "must log at error level so it survives the default (RUST_LOG-unset) filter, got: {logs}"
+        );
+    }
+
+    // Found during #1209's pre-pr-review: the identical "required field
+    // missing, should never happen" category as file_path above, just one
+    // level up (tool_input itself missing/not-an-object) — was left unlogged.
+    #[test]
+    fn logs_error_when_tool_input_not_an_object() {
+        let dir = TempDir::new().expect("test");
+        let payload = serde_json::json!({ "tool_name": "Read", "tool_input": "not-an-object" });
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let result = handle_pre_tool_use(
+                &payload,
+                Some("test-session"),
+                &test_config_warn(),
+                dir.path(),
+            );
+            assert!(result.is_empty());
+        });
+        assert!(
+            logs.contains("tool_input missing or not an object"),
+            "expected an error log when tool_input isn't an object, got: {logs}"
+        );
+        assert!(
+            logs.contains("ERROR"),
+            "must log at error level, got: {logs}"
+        );
+    }
+
+    // Found during #1209's pre-pr-review: a rejected session_id means the
+    // harness sent an unsafe value -- a security-relevant rejection that was
+    // previously silent.
+    #[test]
+    fn logs_error_when_session_id_fails_path_safety_check() {
+        let dir = TempDir::new().expect("test");
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, b"content").expect("test");
+        let payload = read_payload(file_path.to_str().expect("test"));
+
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let result =
+                handle_pre_tool_use(&payload, Some("../escape"), &test_config_warn(), dir.path());
+            assert!(result.is_empty());
+        });
+        assert!(
+            logs.contains("session_id failed path-safety validation"),
+            "expected an error log when session_id is rejected, got: {logs}"
+        );
+        assert!(
+            logs.contains("ERROR"),
+            "must log at error level, got: {logs}"
         );
     }
 
