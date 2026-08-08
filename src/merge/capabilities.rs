@@ -79,7 +79,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     // convention as the other feature scalars below) and expand it into
     // `allow` rules before the dedup pass, so a rule the preset already
     // covers doesn't duplicate one an explicit `allow` entry also declares.
-    let preset = highest_precedence(contributors, |c| c.permissions.preset.as_ref());
+    let preset = highest_precedence(contributors, "preset", |c| c.permissions.preset.as_ref())?;
     if let Some(preset) = preset {
         allow.extend(safe_readonly_allow_rules_for(preset));
         deny.extend(safe_readonly_deny_rules_for(preset));
