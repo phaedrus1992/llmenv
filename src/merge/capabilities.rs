@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{
     Capabilities, CodebaseMemory, Features, HostEntry, Memory, NativePermissionRules,
-    PermissionMode, Permissions, Throttle,
+    PermissionMode, PermissionPreset, PermissionRule, Permissions, Throttle,
 };
 use crate::util::{dedup, merge_yaml, normalize_yaml};
 
@@ -73,6 +73,16 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             slot.ask.extend(rules.ask.iter().cloned());
             slot.deny.extend(rules.deny.iter().cloned());
         }
+    }
+
+    // #975: resolve the `permissions.preset` scalar (same highest-precedence
+    // convention as the other feature scalars below) and expand it into
+    // `allow` rules before the dedup pass, so a rule the preset already
+    // covers doesn't duplicate one an explicit `allow` entry also declares.
+    let preset = highest_precedence(contributors, |c| c.permissions.preset.as_ref());
+    if let Some(preset) = preset {
+        allow.extend(safe_readonly_allow_rules_for(preset));
+        deny.extend(safe_readonly_deny_rules_for(preset));
     }
 
     let env = resolve_env(contributors)?;
@@ -170,6 +180,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     Ok(Capabilities {
         permissions: Permissions {
             default_mode,
+            preset,
             allow,
             ask,
             deny,
@@ -194,6 +205,89 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         model_providers,
         default_models,
     })
+}
+
+fn bash_rule(pattern: &str) -> PermissionRule {
+    PermissionRule {
+        tool: "Bash".to_string(),
+        pattern: Some(pattern.to_string()),
+        paths: Vec::new(),
+    }
+}
+
+/// The curated `allow` rules a [`PermissionPreset`] expands to (#975).
+///
+/// A tool ends up here only if this project's own bundled rules
+/// (`examples/config-llmenv-dir/bundles/base/AGENTS.md`'s "CLI Tools" table)
+/// name it as the recommended read-only replacement for a common shell
+/// command, or #975 named it directly as a safe read-only `git`/`ls`
+/// invocation. `git status`/`diff`/`log`/`show`/`blame` and `ls` get both a
+/// bare form and a `"<cmd> *"` glob — the bare form is their dominant
+/// invocation, unlike e.g. `cargo`, which is never run with zero arguments.
+///
+/// `rg`, `ast-grep`, and `shfmt` each have a flag that turns a "read-only"
+/// invocation into arbitrary command execution or an in-place file write
+/// (`rg --pre`/`--hostname-bin`, `ast-grep -U`, `shfmt -w`) — verified
+/// against each tool's own `--help`. A blanket `"<tool> *"` allow can't
+/// exclude just those flags, so [`safe_readonly_deny_rules_for`] denies them
+/// specifically; deny wins over allow for every adapter this preset
+/// targets. Verified this is actually sufficient for each of these three
+/// (no clustering path exists to hide the flag from the deny glob): `rg`'s
+/// dangerous flags have no short forms at all; `ast-grep`'s only other
+/// boolean short flag (`-i`) is mutually exclusive with `-U`; `shfmt`'s Go
+/// `flag` package doesn't support short-flag clustering at all
+/// (`shfmt -sw file` is rejected outright).
+///
+/// `fd` is deliberately **not** in this list despite being named directly by
+/// #975 and the CLI-tools table: `fd -x`/`-X`/`--exec` has the same class of
+/// escape, but `fd` (like most clap-based Rust CLIs) supports GNU-style
+/// short-flag clustering, and has ~11 other boolean short flags any of
+/// which can precede `-x`/`-X` in a cluster (`fd -Lx cmd .` runs `cmd`
+/// despite denying `*-x*` — verified locally, `-x` never appears as its own
+/// substring). Enumerating every clustering prefix as a `deny` glob is
+/// combinatorially infeasible and still fragile against a future flag. See
+/// #1219 for revisiting this once there's a genuinely robust fix.
+///
+/// This is a denylist of the flags found during #975's review, not a proof
+/// that no other escape exists on the tools that *are* listed — a future
+/// flag on any of them could reopen the same class of gap.
+fn safe_readonly_allow_rules_for(preset: PermissionPreset) -> Vec<PermissionRule> {
+    match preset {
+        PermissionPreset::SafeReadonly => vec![
+            bash_rule("rg *"),
+            bash_rule("ast-grep *"),
+            bash_rule("shellcheck *"),
+            bash_rule("shfmt *"),
+            bash_rule("git status"),
+            bash_rule("git status *"),
+            bash_rule("git diff"),
+            bash_rule("git diff *"),
+            bash_rule("git log"),
+            bash_rule("git log *"),
+            bash_rule("git show"),
+            bash_rule("git show *"),
+            bash_rule("git blame"),
+            bash_rule("git blame *"),
+            bash_rule("ls"),
+            bash_rule("ls *"),
+        ],
+    }
+}
+
+/// The `deny` rules that close the escapes documented on
+/// [`safe_readonly_allow_rules_for`] — always expanded alongside it, never
+/// independently, since a deny with no matching allow is a no-op.
+fn safe_readonly_deny_rules_for(preset: PermissionPreset) -> Vec<PermissionRule> {
+    match preset {
+        PermissionPreset::SafeReadonly => vec![
+            bash_rule("rg *--pre*"),
+            bash_rule("rg *--hostname-bin*"),
+            bash_rule("ast-grep *-U*"),
+            bash_rule("ast-grep *--update-all*"),
+            bash_rule("shfmt *-w*"),
+            bash_rule("shfmt *--write*"),
+        ],
+    }
 }
 
 /// Merge one of the per-engine opaque `native_*` maps across all contributors.
@@ -440,7 +534,7 @@ fn resolve_default_mode(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::{Hook, HookHandler, HookHandlerKind, PermissionRule};
+    use crate::config::{Hook, HookHandler, HookHandlerKind, PermissionPreset, PermissionRule};
 
     fn rule(tool: &str, pattern: &str) -> PermissionRule {
         PermissionRule {
@@ -517,6 +611,122 @@ mod tests {
         );
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.permissions.allow, vec![rule("A", "1"), rule("B", "2")]);
+    }
+
+    fn with_preset(preset: PermissionPreset) -> Capabilities {
+        Capabilities {
+            permissions: Permissions {
+                preset: Some(preset),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn expected_safe_readonly_allow_rules() -> Vec<PermissionRule> {
+        vec![
+            rule("Bash", "rg *"),
+            rule("Bash", "ast-grep *"),
+            rule("Bash", "shellcheck *"),
+            rule("Bash", "shfmt *"),
+            rule("Bash", "git status"),
+            rule("Bash", "git status *"),
+            rule("Bash", "git diff"),
+            rule("Bash", "git diff *"),
+            rule("Bash", "git log"),
+            rule("Bash", "git log *"),
+            rule("Bash", "git show"),
+            rule("Bash", "git show *"),
+            rule("Bash", "git blame"),
+            rule("Bash", "git blame *"),
+            rule("Bash", "ls"),
+            rule("Bash", "ls *"),
+        ]
+    }
+
+    /// #975 pre-pr-review finding: `rg --pre`/`--hostname-bin`,
+    /// `ast-grep -U`/`--update-all`, and `shfmt -w`/`--write` let a tool this
+    /// preset calls "safe-readonly" execute arbitrary commands or write
+    /// files — a blanket `"<tool> *"` allow can't exclude just those flags,
+    /// so a `deny` companion (which Claude Code checks first) closes the gap
+    /// for each verified escape. `fd` has the same class of escape
+    /// (`-x`/`-X`/`--exec`) but isn't included here — see
+    /// [`safe_readonly_allow_rules_for`]'s doc comment for why a deny can't
+    /// actually close it for `fd`.
+    fn expected_safe_readonly_deny_rules() -> Vec<PermissionRule> {
+        vec![
+            rule("Bash", "rg *--pre*"),
+            rule("Bash", "rg *--hostname-bin*"),
+            rule("Bash", "ast-grep *-U*"),
+            rule("Bash", "ast-grep *--update-all*"),
+            rule("Bash", "shfmt *-w*"),
+            rule("Bash", "shfmt *--write*"),
+        ]
+    }
+
+    #[test]
+    fn safe_readonly_preset_expands_into_allow_rules() {
+        let a = contributor("a", 0, with_preset(PermissionPreset::SafeReadonly));
+        let out = merge_capabilities(&[a]).unwrap();
+        assert_eq!(out.permissions.allow, expected_safe_readonly_allow_rules());
+        assert_eq!(out.permissions.deny, expected_safe_readonly_deny_rules());
+        assert_eq!(out.permissions.preset, Some(PermissionPreset::SafeReadonly));
+    }
+
+    /// #975 pre-pr-review, verified locally: `fd -Lx touch MARKER .` runs
+    /// `touch` despite denying `*-x*` — clap clusters `-x`/`-X` behind any of
+    /// fd's ~11 other boolean short flags, so the literal substring `-x`
+    /// never appears in the command string and a deny glob can't catch it.
+    /// `fd` must not be in the preset at all until #1219 finds a fix.
+    #[test]
+    fn safe_readonly_preset_excludes_fd() {
+        let a = contributor("a", 0, with_preset(PermissionPreset::SafeReadonly));
+        let out = merge_capabilities(&[a]).unwrap();
+        assert!(
+            !out.permissions
+                .allow
+                .iter()
+                .any(|r| r.pattern.as_deref() == Some("fd *")),
+            "fd must not be allowed by the preset: {:?}",
+            out.permissions.allow
+        );
+    }
+
+    #[test]
+    fn safe_readonly_preset_rules_dedup_with_explicit_allow() {
+        let mut caps = with_preset(PermissionPreset::SafeReadonly);
+        caps.permissions.allow.push(rule("Bash", "rg *"));
+        let a = contributor("a", 0, caps);
+        let out = merge_capabilities(&[a]).unwrap();
+        assert_eq!(out.permissions.allow, expected_safe_readonly_allow_rules());
+    }
+
+    #[test]
+    fn safe_readonly_preset_deny_rules_dedup_with_explicit_deny() {
+        let mut caps = with_preset(PermissionPreset::SafeReadonly);
+        caps.permissions.deny.push(rule("Bash", "rg *--pre*"));
+        let a = contributor("a", 0, caps);
+        let out = merge_capabilities(&[a]).unwrap();
+        assert_eq!(out.permissions.deny, expected_safe_readonly_deny_rules());
+    }
+
+    #[test]
+    fn no_preset_yields_no_expansion() {
+        let a = contributor("a", 0, Capabilities::default());
+        let out = merge_capabilities(&[a]).unwrap();
+        assert!(out.permissions.allow.is_empty());
+        assert!(out.permissions.deny.is_empty());
+        assert_eq!(out.permissions.preset, None);
+    }
+
+    #[test]
+    fn preset_resolves_by_highest_precedence() {
+        let low = contributor("low", 0, Capabilities::default());
+        let high = contributor("high", 1, with_preset(PermissionPreset::SafeReadonly));
+        let out = merge_capabilities(&[low, high]).unwrap();
+        assert_eq!(out.permissions.preset, Some(PermissionPreset::SafeReadonly));
+        assert_eq!(out.permissions.allow, expected_safe_readonly_allow_rules());
+        assert_eq!(out.permissions.deny, expected_safe_readonly_deny_rules());
     }
 
     #[test]

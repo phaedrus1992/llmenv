@@ -3955,6 +3955,7 @@ mod tests {
                     capabilities: crate::config::Capabilities {
                         permissions: crate::config::Permissions {
                             default_mode: None,
+                            preset: None,
                             allow,
                             ask: Vec::new(),
                             deny,

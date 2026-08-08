@@ -117,6 +117,42 @@ fn top_level_capabilities_merge_with_bundle_fragments() {
 }
 
 #[test]
+fn safe_readonly_preset_parses_from_yaml_and_expands_at_merge_time() {
+    let top: Capabilities =
+        serde_yaml::from_str("permissions:\n  preset: safe-readonly\n").expect("parse");
+    let m = merge(&top, &empty_native(), &[]).expect("merge");
+    assert!(
+        m.capabilities
+            .permissions
+            .allow
+            .iter()
+            .any(|r| r.tool == "Bash" && r.pattern.as_deref() == Some("rg *"))
+    );
+    // #975 pre-pr-review: rg's --pre/--hostname-bin can run arbitrary
+    // commands, so the preset's blanket "rg *" allow ships with a deny for
+    // them. fd has the same class of escape (-x/-X) but clap's short-flag
+    // clustering makes it un-denyable with a plain glob (verified locally:
+    // `fd -Lx cmd .` runs `cmd` without the literal substring "-x" ever
+    // appearing), so fd is excluded from the preset entirely rather than
+    // shipped with a deny that doesn't actually close the gap. See #1219.
+    assert!(
+        m.capabilities
+            .permissions
+            .deny
+            .iter()
+            .any(|r| r.tool == "Bash" && r.pattern.as_deref() == Some("rg *--pre*"))
+    );
+    assert!(
+        !m.capabilities
+            .permissions
+            .allow
+            .iter()
+            .any(|r| r.pattern.as_deref() == Some("fd *")),
+        "fd must not be allowed by the preset"
+    );
+}
+
+#[test]
 fn agents_md_order_follows_bundle_order() {
     let a = merge(
         &Capabilities::default(),
