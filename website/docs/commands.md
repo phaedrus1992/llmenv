@@ -594,6 +594,15 @@ active context (active bundles, active MCP servers, etc.). Checks:
   engines honour, or move the Claude-only form to
   `native_permissions.claude_code`. `llmenv export` and `llmenv regenerate`
   report this too.
+- legacy shell tools without their recommended replacement (added in v3.8.0) —
+  warns when `capabilities.permissions.allow` grants `grep`/`find` without also
+  granting `rg`/`fd`, the replacements this project's own bundled rules
+  recommend — a nudge toward `capabilities.permissions.preset: safe-readonly`
+  even without adopting it. `doctor`-only: unlike the two checks above, an
+  `allow`d legacy tool with no replacement is working config, not something
+  silently dropped, so `export`/`regenerate` (sourced on every shell prompt)
+  don't report it. See
+  [Configuration](configuration.md#capabilities).
 - glob-shaped hook matchers — warns when a `hook.matcher` looks like a
   file-extension glob (e.g. `*.rs`, `.py`) instead of a tool-name pattern;
   Claude Code matches `hook.matcher` against tool name only, never file path,

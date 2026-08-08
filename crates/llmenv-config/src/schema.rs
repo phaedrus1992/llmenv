@@ -482,7 +482,8 @@ pub enum HashingMode {
 
 /// Engine-agnostic capability vocabulary. Identical shape whether declared at the
 /// top level of `config.yaml` or in a bundle's `bundle.yaml`. Merged across all
-/// contributors by value shape (see [`crate::merge`]).
+/// contributors by value shape (see the main crate's `merge` module,
+/// `src/merge/`).
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 pub struct Capabilities {
     #[serde(default)]
@@ -641,6 +642,12 @@ impl Features {
 pub struct Permissions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<PermissionMode>,
+    /// Named bundle of `allow` rules to expand at merge time (#975). A scalar
+    /// — resolves by scope precedence like `default_mode`. Expansion happens
+    /// in `merge_capabilities`, before the `allow` list is deduped, so a
+    /// preset rule already present explicitly doesn't produce a duplicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<PermissionPreset>,
     #[serde(default)]
     pub allow: Vec<PermissionRule>,
     #[serde(default)]
@@ -652,10 +659,24 @@ pub struct Permissions {
 impl Permissions {
     pub fn is_empty(&self) -> bool {
         self.default_mode.is_none()
+            && self.preset.is_none()
             && self.allow.is_empty()
             && self.ask.is_empty()
             && self.deny.is_empty()
     }
+}
+
+/// A curated, core-shipped bundle of `allow` rules, expanded at merge time.
+///
+/// `SafeReadonly` covers the read-only CLI tools this project's own bundled
+/// rules (`AGENTS.md`'s "CLI Tools" table) tell the agent to prefer —
+/// `rg`, `fd`, `ast-grep`, `shellcheck`, `shfmt` — plus the read-only `git`
+/// subcommands and `ls` named directly in #975. See `safe_readonly_rules` in
+/// the main crate's `src/merge/capabilities.rs` for the exact list.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionPreset {
+    SafeReadonly,
 }
 
 /// Per-engine raw permission rule strings, in the engine's own grammar (e.g.
@@ -1526,7 +1547,7 @@ pub struct ModelRef {
 }
 
 /// An agent plugin marketplace: a name plus a source the marketplace is fetched
-/// from. The `source` is interpreted by [`MarketplaceSource::classify`] as
+/// from. The `source` is interpreted by [`Marketplace::classify_source`] as
 /// either a git URL (cloned into the shared cache) or a local path (used in
 /// place). Marketplaces are referenced from [`PluginCollection`] entries as the
 /// left half of a `marketplace:plugin` identifier.

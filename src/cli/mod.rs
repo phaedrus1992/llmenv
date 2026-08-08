@@ -851,6 +851,14 @@ pub(super) fn warn_dead_native_keys(
 /// are covered, and falls back to the raw config when no bundle fired. Shared by
 /// `export`, `regenerate`, and `doctor` so a new materialize path can't quietly
 /// opt out of the diagnostics.
+///
+/// Deliberately does **not** include the #975 legacy-tool lint
+/// (`legacy_tools_missing_replacement`): unlike the two checks here, an
+/// `allow`d legacy tool with no replacement is working config, not a dead
+/// setting — and `export`/`regenerate` are sourced from the shell prompt on
+/// every invocation, so a check that isn't "something silently doesn't work"
+/// has no business printing there. It's a `doctor`-only nudge instead, called
+/// directly from `run_doctor`.
 pub(super) fn warn_dead_config(
     config: &Config,
     manifest: Option<&crate::merge::MergedManifest>,
