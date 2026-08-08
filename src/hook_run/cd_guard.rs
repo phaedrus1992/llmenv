@@ -31,6 +31,10 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str())
     else {
+        // Claude Code's Bash tool schema guarantees `command` is present as a
+        // string — this should never fire in practice. Log it rather than
+        // silently no-op, in case the harness's payload shape ever drifts.
+        tracing::debug!("tool_input.command missing or not a string for Bash PreToolUse payload");
         return String::new();
     };
     if command_uses_cd(command) {
@@ -142,6 +146,23 @@ mod tests {
     fn handle_pre_tool_use_empty_when_no_cd() {
         let text = handle_pre_tool_use(&bash_payload("ls -la"), &CdGuard { enabled: true });
         assert!(text.is_empty());
+    }
+
+    // #1207: a Bash payload missing tool_input.command should never happen in
+    // practice (Claude Code's schema guarantees it), but if the harness's
+    // payload shape ever drifts, cd_guard would otherwise stop firing with no
+    // trace in the logs.
+    #[test]
+    fn handle_pre_tool_use_logs_debug_when_bash_command_missing() {
+        let payload = serde_json::json!({ "tool_name": "Bash", "tool_input": {} });
+        let logs = crate::test_log_capture::capture_debug_logs(|| {
+            let text = handle_pre_tool_use(&payload, &CdGuard { enabled: true });
+            assert!(text.is_empty());
+        });
+        assert!(
+            logs.contains("tool_input.command missing"),
+            "expected a debug log when tool_input.command is absent"
+        );
     }
 
     proptest! {

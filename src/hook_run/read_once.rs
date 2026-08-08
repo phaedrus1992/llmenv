@@ -169,6 +169,10 @@ pub(crate) fn handle_pre_tool_use(
         })
         .and_then(|v| v.as_str())
     else {
+        // file_path is required per Claude Code's Read tool schema — this
+        // should never fire in practice. Log it rather than silently no-op,
+        // in case the harness's payload shape ever drifts.
+        tracing::debug!("tool_input.file_path missing or not a string for Read PreToolUse payload");
         return String::new();
     };
     // Partial read bypass: if offset or limit are present, never cache
@@ -388,6 +392,28 @@ mod tests {
             );
         }
         assert!(!std::path::Path::new("/tmp/llmenv-abs-escape").exists());
+    }
+
+    // #1207: file_path is a required field per Claude Code's Read tool
+    // schema, so this should never fire in practice — but if it ever does,
+    // read_once would otherwise stop deduplicating with no trace in the logs.
+    #[test]
+    fn logs_debug_when_file_path_missing() {
+        let dir = TempDir::new().expect("test");
+        let payload = serde_json::json!({ "tool_name": "Read", "tool_input": {} });
+        let logs = crate::test_log_capture::capture_debug_logs(|| {
+            let result = handle_pre_tool_use(
+                &payload,
+                Some("test-session"),
+                &test_config_warn(),
+                dir.path(),
+            );
+            assert!(result.is_empty());
+        });
+        assert!(
+            logs.contains("tool_input.file_path missing"),
+            "expected a debug log when tool_input.file_path is absent"
+        );
     }
 
     #[test]
