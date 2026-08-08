@@ -103,9 +103,13 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
 
     // Scalar resolution: highest precedence wins (not positional order), via
     // the shared `highest_precedence` helper (#1023/#1025).
-    let auto_memory_enabled = highest_precedence(contributors, |c| c.auto_memory_enabled.as_ref());
-    let effort_level = highest_precedence(contributors, |c| c.effort_level.as_ref());
-    let advisor_size = highest_precedence(contributors, |c| c.advisor_size.as_ref());
+    let auto_memory_enabled = highest_precedence(contributors, "auto_memory_enabled", |c| {
+        c.auto_memory_enabled.as_ref()
+    })?;
+    let effort_level =
+        highest_precedence(contributors, "effort_level", |c| c.effort_level.as_ref())?;
+    let advisor_size =
+        highest_precedence(contributors, "advisor_size", |c| c.advisor_size.as_ref())?;
 
     // Collect memory, throttle, and codebase_memory entries from all
     // contributors: concat + dedup (same list model as hooks, plugins, mcp).
@@ -127,17 +131,27 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     // #317: resolve feature scalars (slippage, context_mode, upgrade, read_once,
     // task_tracker, repeat_detect) by highest-precedence-wins, via the shared
     // `highest_precedence` helper (#1023 — these were 6 near-identical blocks).
-    let slippage = highest_precedence(contributors, |c| c.features.as_ref()?.slippage.as_ref());
-    let context_mode =
-        highest_precedence(contributors, |c| c.features.as_ref()?.context_mode.as_ref());
-    let upgrade = highest_precedence(contributors, |c| c.features.as_ref()?.upgrade.as_ref());
-    let read_once = highest_precedence(contributors, |c| c.features.as_ref()?.read_once.as_ref());
-    let task_tracker =
-        highest_precedence(contributors, |c| c.features.as_ref()?.task_tracker.as_ref());
-    let repeat_detect = highest_precedence(contributors, |c| {
+    let slippage = highest_precedence(contributors, "slippage", |c| {
+        c.features.as_ref()?.slippage.as_ref()
+    })?;
+    let context_mode = highest_precedence(contributors, "context_mode", |c| {
+        c.features.as_ref()?.context_mode.as_ref()
+    })?;
+    let upgrade = highest_precedence(contributors, "upgrade", |c| {
+        c.features.as_ref()?.upgrade.as_ref()
+    })?;
+    let read_once = highest_precedence(contributors, "read_once", |c| {
+        c.features.as_ref()?.read_once.as_ref()
+    })?;
+    let task_tracker = highest_precedence(contributors, "task_tracker", |c| {
+        c.features.as_ref()?.task_tracker.as_ref()
+    })?;
+    let repeat_detect = highest_precedence(contributors, "repeat_detect", |c| {
         c.features.as_ref()?.repeat_detect.as_ref()
-    });
-    let cd_guard = highest_precedence(contributors, |c| c.features.as_ref()?.cd_guard.as_ref());
+    })?;
+    let cd_guard = highest_precedence(contributors, "cd_guard", |c| {
+        c.features.as_ref()?.cd_guard.as_ref()
+    })?;
 
     let features = Some(Features {
         memory,
@@ -218,15 +232,43 @@ fn merge_native_feature(
 /// the value from the contributor with the highest `precedence` that set it
 /// (#1023/#1025 — shared by the scalar fields that all followed this same
 /// filter_map/max_by_key pattern, at both the `Capabilities` and `Features` level).
-fn highest_precedence<T: Clone>(
+///
+/// Same-precedence disagreement is a hard error naming both contributors,
+/// matching [`resolve_default_mode`]'s policy and the module doc comment's
+/// promise for every scalar (#1215 — this helper used to pick the last-seen
+/// value silently instead, an undocumented, iteration-order-dependent
+/// divergence from that promise).
+fn highest_precedence<T: Clone + PartialEq + std::fmt::Debug>(
     contributors: &[CapabilityContributor],
+    field_name: &str,
     pick: impl Fn(&Capabilities) -> Option<&T>,
-) -> Option<T> {
-    contributors
-        .iter()
-        .filter_map(|c| pick(&c.capabilities).map(|v| (c.precedence, v.clone())))
-        .max_by_key(|(p, _)| *p)
-        .map(|(_, v)| v)
+) -> anyhow::Result<Option<T>> {
+    let mut winner: Option<(&CapabilityContributor, T)> = None;
+    for c in contributors {
+        let Some(v) = pick(&c.capabilities) else {
+            continue;
+        };
+        let v = v.clone();
+        match winner {
+            None => winner = Some((c, v)),
+            Some((prev_c, prev_v)) => {
+                if c.precedence > prev_c.precedence {
+                    winner = Some((c, v));
+                } else if c.precedence == prev_c.precedence && v != prev_v {
+                    anyhow::bail!(
+                        "conflicting {field_name} at the same precedence: \
+                         '{}' sets {prev_v:?} but '{}' sets {v:?} — no scope can break \
+                         the tie; resolve by giving one a higher-precedence scope",
+                        prev_c.name,
+                        c.name,
+                    );
+                } else {
+                    winner = Some((prev_c, prev_v));
+                }
+            }
+        }
+    }
+    Ok(winner.map(|(_, v)| v))
 }
 
 /// Merge the flat `native:` map across all contributors.
@@ -1537,6 +1579,80 @@ mod tests {
         let a = contributor("a", 1, Capabilities::default());
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.effort_level, None);
+    }
+
+    /// #1215: `highest_precedence` (backing `effort_level` and every other
+    /// `Features`/`Capabilities` scalar it resolves) must hard-error on a
+    /// same-precedence value conflict, matching `resolve_default_mode`'s
+    /// policy — the module doc comment promises this for every scalar, but
+    /// the shared helper silently picked the last-seen value instead.
+    #[test]
+    fn highest_precedence_same_precedence_different_value_hard_errors() {
+        let a = contributor(
+            "a",
+            1,
+            Capabilities {
+                effort_level: Some("low".into()),
+                ..Default::default()
+            },
+        );
+        let b = contributor(
+            "b",
+            1,
+            Capabilities {
+                effort_level: Some("high".into()),
+                ..Default::default()
+            },
+        );
+        let err = merge_capabilities(&[a, b]).unwrap_err().to_string();
+        assert!(err.contains("conflicting effort_level"), "got: {err}");
+        assert!(err.contains('a') && err.contains('b'), "got: {err}");
+    }
+
+    #[test]
+    fn highest_precedence_same_precedence_same_value_is_not_a_conflict() {
+        let a = contributor(
+            "a",
+            1,
+            Capabilities {
+                effort_level: Some("low".into()),
+                ..Default::default()
+            },
+        );
+        let b = contributor(
+            "b",
+            1,
+            Capabilities {
+                effort_level: Some("low".into()),
+                ..Default::default()
+            },
+        );
+        let out = merge_capabilities(&[a, b]).unwrap();
+        assert_eq!(out.effort_level.as_deref(), Some("low"));
+    }
+
+    /// The hard-error must fire regardless of which conflicting contributor
+    /// is encountered first — mirrors `higher_precedence_wins_regardless_of_input_order`.
+    #[test]
+    fn highest_precedence_conflict_detected_regardless_of_order() {
+        let a = contributor(
+            "a",
+            1,
+            Capabilities {
+                effort_level: Some("low".into()),
+                ..Default::default()
+            },
+        );
+        let b = contributor(
+            "b",
+            1,
+            Capabilities {
+                effort_level: Some("high".into()),
+                ..Default::default()
+            },
+        );
+        assert!(merge_capabilities(&[a.clone(), b.clone()]).is_err());
+        assert!(merge_capabilities(&[b, a]).is_err());
     }
 
     /// `advisor_size` was hardcoded to `None` in `merge_capabilities` — checked
