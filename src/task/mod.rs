@@ -14,7 +14,7 @@
 pub mod project;
 pub mod session;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,21 @@ pub enum TaskState {
     /// non-`Done` state as its starting point).
     Waiting,
     Done,
+}
+
+impl TaskState {
+    /// Lowercase label (`open`/`wip`/`waiting`/`done`), the canonical
+    /// rendering shared by `cli::style::task_state_label` and any
+    /// user-facing message composed here in `task/mod.rs`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Wip => "wip",
+            Self::Waiting => "waiting",
+            Self::Done => "done",
+        }
+    }
 }
 
 /// A timestamped progress note attached to a task.
@@ -282,7 +297,7 @@ pub fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<Displa
     let mut keys: Vec<Option<String>> = tasks
         .iter()
         .map(|t| t.session.clone())
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect();
     // Cache the key (it allocates for the "other sessions" bucket) so it's
@@ -302,7 +317,6 @@ pub fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<Displa
 /// `visited` guard makes malformed parent cycles terminate instead of
 /// recursing forever.
 fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
-    use std::collections::{HashMap, HashSet};
     let present: HashSet<&str> = group.iter().map(|t| t.slug.as_str()).collect();
     let mut children: HashMap<&str, Vec<&Task>> = HashMap::new();
     let mut roots: Vec<&Task> = Vec::new();
@@ -348,7 +362,7 @@ fn visit<'a>(
     task: &'a Task,
     depth: usize,
     children: &std::collections::HashMap<&'a str, Vec<&'a Task>>,
-    visited: &mut std::collections::HashSet<&'a str>,
+    visited: &mut HashSet<&'a str>,
     rows: &mut Vec<DisplayRow>,
 ) {
     if !visited.insert(task.slug.as_str()) {
@@ -557,7 +571,7 @@ pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<
         if task.state == TaskState::Done {
             anyhow::bail!("task '{slug}' is already done; cannot start it again");
         }
-        if !force {
+        if !force && !task.blocked_on.is_empty() {
             let all_tasks = list_tasks(state_dir);
             let by_slug: HashMap<&str, &Task> =
                 all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
@@ -582,6 +596,30 @@ pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<
     })?;
     touch_task_session(state_dir, &task);
     Ok(task)
+}
+
+/// Soft-block advisory for [`start_task`] (#1164): `None` when `task` has no
+/// `parent`, the parent can't be loaded (dangling reference — nothing
+/// meaningful to warn about once the parent itself is gone), or the parent
+/// is already `done`. Otherwise a message naming the parent and its current
+/// state, for a caller to surface however it prefers (println, appended to
+/// a hook's response text, …) — starting the task is never blocked by this,
+/// unlike an unmet `blocked_on` reference.
+#[must_use]
+pub fn parent_soft_block_warning(state_dir: &Path, task: &Task) -> Option<String> {
+    let parent_slug = task.parent.as_ref()?;
+    let parent = load_task(state_dir, parent_slug).ok()?;
+    if parent.state == TaskState::Done {
+        return None;
+    }
+    Some(format!(
+        "Note: parent task '{parent_slug}' isn't done yet ({}) — starting '{}' anyway. \
+         Use `llmenv task block {} --on {parent_slug}` instead if this really can't start \
+         until the parent finishes.",
+        parent.state.as_str(),
+        task.slug,
+        task.slug
+    ))
 }
 
 /// Bump the `last_activity` of the session a task is tagged to, if any — so a
@@ -864,7 +902,7 @@ fn is_done_including_descendants(slug: &str, by_slug: &HashMap<&str, &Task>) -> 
     fn go<'a>(
         slug: &'a str,
         by_slug: &HashMap<&'a str, &'a Task>,
-        visited: &mut std::collections::HashSet<&'a str>,
+        visited: &mut HashSet<&'a str>,
     ) -> bool {
         if !visited.insert(slug) {
             return true;
@@ -878,7 +916,7 @@ fn is_done_including_descendants(slug: &str, by_slug: &HashMap<&str, &Task>) -> 
                 .filter(|t| t.parent.as_deref() == Some(slug))
                 .all(|child| go(&child.slug, by_slug, visited))
     }
-    go(slug, by_slug, &mut std::collections::HashSet::new())
+    go(slug, by_slug, &mut HashSet::new())
 }
 
 /// Parent-before-children execution order for a single session's tasks —
@@ -1507,9 +1545,12 @@ mod tests {
             err.to_string().contains(&parent.slug),
             "error should name the unmet blocker: {err}"
         );
-        // Just documenting the setup: child is the reason the parent isn't
-        // considered fully done yet.
-        assert_ne!(child.state, TaskState::Done);
+        // Confirm the setup actually holds: child is the reason the parent
+        // isn't considered fully done yet.
+        assert_ne!(
+            load_task(dir.path(), &child.slug).expect("test").state,
+            TaskState::Done
+        );
     }
 
     #[test]

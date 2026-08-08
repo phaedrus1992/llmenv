@@ -201,7 +201,8 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
         Err(e) => {
             tracing::error!(error = %e, id = %id, "task redirect: couldn't resolve task id");
             return deny(&format!(
-                "couldn't resolve task '{id}' ({e}); run `llmenv task ls --all` for the current ids."
+                "couldn't resolve task '{id}' ({e}); \
+                 run `llmenv task ls --all` for the current ids."
             ));
         }
     };
@@ -211,7 +212,15 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
             // force=false: the redirect must enforce the same hard-block on
             // an unmet `blocked_on` (#1164) that `llmenv task start` does --
             // an agent shouldn't bypass it just by using the native tool.
-            task::start_task(state_dir, &slug, false).map(|_| format!("started '{slug}'"))
+            task::start_task(state_dir, &slug, false).map(|started| {
+                // The parent soft-block warning (#1164) belongs here too --
+                // this redirect is exactly where an agent is likely to be
+                // starting a subtask under a not-yet-done parent.
+                match task::parent_soft_block_warning(state_dir, &started) {
+                    Some(warning) => format!("started '{slug}' ({warning})"),
+                    None => format!("started '{slug}'"),
+                }
+            })
         }
         Some("completed") => {
             task::done_task(state_dir, &slug).map(|_| format!("completed '{slug}'"))

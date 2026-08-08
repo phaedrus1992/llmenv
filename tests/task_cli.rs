@@ -842,6 +842,111 @@ fn start_resumes_a_waiting_task() {
     assert_eq!(task["state"], "wip");
 }
 
+// #1164: CLI-level coverage for --force and the parent soft-block warning
+// (the underlying behavior is covered at the module level in src/task/mod.rs
+// -- this exercises that the CLI flag actually reaches start_task, and that
+// the warning text actually reaches the user).
+
+#[test]
+fn start_on_blocked_task_fails_without_force() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Blocker"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Blocked"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "block", "blocked", "--on", "blocker"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "start", "blocked"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("blocker"))
+        .stderr(predicates::str::contains("--force"));
+}
+
+#[test]
+fn start_on_blocked_task_with_force_succeeds() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Blocker"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Blocked"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "block", "blocked", "--on", "blocker"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "start", "blocked", "--force"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Started"));
+}
+
+#[test]
+fn start_on_child_with_undone_parent_warns_but_starts() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Parent step"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Child step", "--parent", "parent-step"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "start", "child-step"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Note: parent task 'parent-step' isn't done yet",
+        ))
+        .stdout(predicates::str::contains("Started"));
+}
+
+#[test]
+fn start_on_child_with_done_parent_has_no_warning() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Parent step"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Child step", "--parent", "parent-step"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "parent-step"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "done", "parent-step"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "start", "child-step"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("isn't done yet").not());
+}
+
 #[test]
 fn ls_filters_by_session() {
     let dir = TempDir::new().unwrap();

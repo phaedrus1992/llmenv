@@ -3104,18 +3104,8 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             // (hard-blocked inside start_task itself), an undone parent
             // only warns here, mirroring Add's own wip-in-progress warning
             // above -- the agent may have a legitimate reason to proceed.
-            if let Some(parent_slug) = &task.parent {
-                let siblings = crate::task::list_tasks(&state_dir);
-                if let Some(parent) = siblings.iter().find(|t| &t.slug == parent_slug)
-                    && parent.state != crate::task::TaskState::Done
-                {
-                    println!(
-                        "Note: parent task '{parent_slug}' isn't done yet ({:?}) — starting \
-                         '{}' anyway. Use `llmenv task block {} --on {parent_slug}` instead if \
-                         this really can't start until the parent finishes.",
-                        parent.state, task.slug, task.slug
-                    );
-                }
+            if let Some(warning) = crate::task::parent_soft_block_warning(&state_dir, &task) {
+                println!("{warning}");
             }
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
