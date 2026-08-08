@@ -201,21 +201,25 @@ capabilities:
 - `permissions.preset` (added in v3.8.0) expands, at merge time, into a
   curated set of `allow` rules — `safe-readonly` is the only preset today. It
   covers the read-only CLI tools this project's own bundled rules recommend
-  (`rg`, `fd`, `ast-grep`, `shellcheck`, `shfmt`) plus safe read-only `git`
+  (`rg`, `ast-grep`, `shellcheck`, `shfmt`) plus safe read-only `git`
   subcommands (`status`, `diff`, `log`, `show`, `blame`) and `ls`, so agents
   stop hitting a permission prompt for tools the rules themselves told them
   to prefer. `git status`/`diff`/`log`/`show`/`blame` and `ls` each get both a
   bare form and a `*`-suffixed one, since the bare form is their dominant
-  invocation. `rg`/`fd`/`ast-grep`/`shfmt` (not `shellcheck`) each ship a
-  `deny` companion for the flags that turn them from read-only into
-  arbitrary command execution or an in-place write (`rg --pre`/
-  `--hostname-bin`, `fd -x`/`-X`, `ast-grep -U`, `shfmt -w`) — Claude Code
-  checks `deny` before `allow`, so those specific invocations still prompt.
-  A rule the preset already covers
-  doesn't duplicate one an explicit `allow`/`deny` entry also declares. Run
-  `llmenv doctor` to get flagged
-  when a config allows a legacy tool (`grep`, `find`) without also allowing
-  its recommended replacement (`rg`, `fd`) — a nudge toward the preset even
+  invocation. `rg`/`ast-grep`/`shfmt` (not `shellcheck`) each ship a `deny`
+  companion for the flags that turn them from read-only into arbitrary
+  command execution or an in-place write (`rg --pre`/`--hostname-bin`,
+  `ast-grep -U`, `shfmt -w`) — Claude Code checks `deny` before `allow`, so
+  those specific invocations still prompt. `fd` is deliberately not in the
+  preset despite `rg`'s sibling recommendation in the CLI-tools table: its
+  own escape (`fd -x`/`-X`) can hide behind any of its ~11 other boolean
+  short flags in a single clustered token (e.g. `fd -Lx cmd .`), so a plain
+  glob `deny` can't actually close it — see
+  [#1219](https://github.com/phaedrus1992/llmenv/issues/1219). A rule the
+  preset already covers doesn't duplicate one an explicit `allow`/`deny`
+  entry also declares. Run `llmenv doctor` to get flagged when a config
+  allows a legacy tool (`grep`, `find`) without also allowing its
+  recommended replacement (`rg`, `fd`) — a nudge toward the preset even
   without adopting it.
 - A **hook** has an `event`, optional `matcher`, and a `handler` of type
   `command` (with `command:`) or `mcp_tool` (with `tool:`). Hook command paths

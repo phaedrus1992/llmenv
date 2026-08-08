@@ -211,20 +211,36 @@ fn bash_rule(pattern: &str) -> PermissionRule {
 /// bare form and a `"<cmd> *"` glob — the bare form is their dominant
 /// invocation, unlike e.g. `cargo`, which is never run with zero arguments.
 ///
-/// `rg`, `fd`, `ast-grep`, and `shfmt` each have a flag that turns a
-/// "read-only" invocation into arbitrary command execution or an in-place
-/// file write (`fd -x`/`-X`, `rg --pre`/`--hostname-bin`, `ast-grep -U`,
-/// `shfmt -w`) — verified against each tool's own `--help`. A blanket
-/// `"<tool> *"` allow can't exclude just those flags, so
-/// [`safe_readonly_deny_rules_for`] denies them specifically; deny wins over
-/// allow for every adapter this preset targets. This is a denylist of the
-/// flags found during #975's review, not a proof that no other escape
-/// exists — a future flag on any of these tools could reopen the same gap.
+/// `rg`, `ast-grep`, and `shfmt` each have a flag that turns a "read-only"
+/// invocation into arbitrary command execution or an in-place file write
+/// (`rg --pre`/`--hostname-bin`, `ast-grep -U`, `shfmt -w`) — verified
+/// against each tool's own `--help`. A blanket `"<tool> *"` allow can't
+/// exclude just those flags, so [`safe_readonly_deny_rules_for`] denies them
+/// specifically; deny wins over allow for every adapter this preset
+/// targets. Verified this is actually sufficient for each of these three
+/// (no clustering path exists to hide the flag from the deny glob): `rg`'s
+/// dangerous flags have no short forms at all; `ast-grep`'s only other
+/// boolean short flag (`-i`) is mutually exclusive with `-U`; `shfmt`'s Go
+/// `flag` package doesn't support short-flag clustering at all
+/// (`shfmt -sw file` is rejected outright).
+///
+/// `fd` is deliberately **not** in this list despite being named directly by
+/// #975 and the CLI-tools table: `fd -x`/`-X`/`--exec` has the same class of
+/// escape, but `fd` (like most clap-based Rust CLIs) supports GNU-style
+/// short-flag clustering, and has ~11 other boolean short flags any of
+/// which can precede `-x`/`-X` in a cluster (`fd -Lx cmd .` runs `cmd`
+/// despite denying `*-x*` — verified locally, `-x` never appears as its own
+/// substring). Enumerating every clustering prefix as a `deny` glob is
+/// combinatorially infeasible and still fragile against a future flag. See
+/// #1219 for revisiting this once there's a genuinely robust fix.
+///
+/// This is a denylist of the flags found during #975's review, not a proof
+/// that no other escape exists on the tools that *are* listed — a future
+/// flag on any of them could reopen the same class of gap.
 fn safe_readonly_allow_rules_for(preset: PermissionPreset) -> Vec<PermissionRule> {
     match preset {
         PermissionPreset::SafeReadonly => vec![
             bash_rule("rg *"),
-            bash_rule("fd *"),
             bash_rule("ast-grep *"),
             bash_rule("shellcheck *"),
             bash_rule("shfmt *"),
@@ -250,9 +266,6 @@ fn safe_readonly_allow_rules_for(preset: PermissionPreset) -> Vec<PermissionRule
 fn safe_readonly_deny_rules_for(preset: PermissionPreset) -> Vec<PermissionRule> {
     match preset {
         PermissionPreset::SafeReadonly => vec![
-            bash_rule("fd *-x*"),
-            bash_rule("fd *-X*"),
-            bash_rule("fd *--exec*"),
             bash_rule("rg *--pre*"),
             bash_rule("rg *--hostname-bin*"),
             bash_rule("ast-grep *-U*"),
@@ -571,7 +584,6 @@ mod tests {
     fn expected_safe_readonly_allow_rules() -> Vec<PermissionRule> {
         vec![
             rule("Bash", "rg *"),
-            rule("Bash", "fd *"),
             rule("Bash", "ast-grep *"),
             rule("Bash", "shellcheck *"),
             rule("Bash", "shfmt *"),
@@ -590,17 +602,17 @@ mod tests {
         ]
     }
 
-    /// #975 pre-pr-review finding: `fd -x`/`-X`, `rg --pre`/`--hostname-bin`,
+    /// #975 pre-pr-review finding: `rg --pre`/`--hostname-bin`,
     /// `ast-grep -U`/`--update-all`, and `shfmt -w`/`--write` let a tool this
     /// preset calls "safe-readonly" execute arbitrary commands or write
     /// files — a blanket `"<tool> *"` allow can't exclude just those flags,
     /// so a `deny` companion (which Claude Code checks first) closes the gap
-    /// for each verified escape.
+    /// for each verified escape. `fd` has the same class of escape
+    /// (`-x`/`-X`/`--exec`) but isn't included here — see
+    /// [`safe_readonly_allow_rules_for`]'s doc comment for why a deny can't
+    /// actually close it for `fd`.
     fn expected_safe_readonly_deny_rules() -> Vec<PermissionRule> {
         vec![
-            rule("Bash", "fd *-x*"),
-            rule("Bash", "fd *-X*"),
-            rule("Bash", "fd *--exec*"),
             rule("Bash", "rg *--pre*"),
             rule("Bash", "rg *--hostname-bin*"),
             rule("Bash", "ast-grep *-U*"),
@@ -619,6 +631,25 @@ mod tests {
         assert_eq!(out.permissions.preset, Some(PermissionPreset::SafeReadonly));
     }
 
+    /// #975 pre-pr-review, verified locally: `fd -Lx touch MARKER .` runs
+    /// `touch` despite denying `*-x*` — clap clusters `-x`/`-X` behind any of
+    /// fd's ~11 other boolean short flags, so the literal substring `-x`
+    /// never appears in the command string and a deny glob can't catch it.
+    /// `fd` must not be in the preset at all until #1219 finds a fix.
+    #[test]
+    fn safe_readonly_preset_excludes_fd() {
+        let a = contributor("a", 0, with_preset(PermissionPreset::SafeReadonly));
+        let out = merge_capabilities(&[a]).unwrap();
+        assert!(
+            !out.permissions
+                .allow
+                .iter()
+                .any(|r| r.pattern.as_deref() == Some("fd *")),
+            "fd must not be allowed by the preset: {:?}",
+            out.permissions.allow
+        );
+    }
+
     #[test]
     fn safe_readonly_preset_rules_dedup_with_explicit_allow() {
         let mut caps = with_preset(PermissionPreset::SafeReadonly);
@@ -631,7 +662,7 @@ mod tests {
     #[test]
     fn safe_readonly_preset_deny_rules_dedup_with_explicit_deny() {
         let mut caps = with_preset(PermissionPreset::SafeReadonly);
-        caps.permissions.deny.push(rule("Bash", "fd *-x*"));
+        caps.permissions.deny.push(rule("Bash", "rg *--pre*"));
         let a = contributor("a", 0, caps);
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.permissions.deny, expected_safe_readonly_deny_rules());
