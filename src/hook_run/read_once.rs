@@ -397,13 +397,23 @@ mod tests {
         fs::write(&file_path, b"content").expect("test");
         let payload = read_payload(file_path.to_str().expect("test"));
 
-        for evil in ["../../victim/pwn", "/tmp/llmenv-abs-escape", "..", "a/b"] {
-            let out = handle_pre_tool_use(&payload, Some(evil), &test_config_warn(), dir.path());
-            assert!(
-                out.is_empty(),
-                "unsafe session_id {evil:?} must pass through: {out}"
-            );
-        }
+        // Wrapped in capture_logs (output discarded) even though this test
+        // doesn't assert on logs: this hits the same tracing::error! callsite
+        // as logs_error_when_session_id_fails_path_safety_check below, and a
+        // sibling test reaching that callsite outside any subscriber makes
+        // tracing's per-callsite interest caching order-dependent across
+        // parallel test threads (the exact hazard #1133's precedent flags) --
+        // always running under *some* subscriber keeps the callsite live.
+        crate::test_log_capture::capture_logs(|| {
+            for evil in ["../../victim/pwn", "/tmp/llmenv-abs-escape", "..", "a/b"] {
+                let out =
+                    handle_pre_tool_use(&payload, Some(evil), &test_config_warn(), dir.path());
+                assert!(
+                    out.is_empty(),
+                    "unsafe session_id {evil:?} must pass through: {out}"
+                );
+            }
+        });
         assert!(!std::path::Path::new("/tmp/llmenv-abs-escape").exists());
     }
 

@@ -130,6 +130,11 @@ pub(crate) fn handle_pre_tool_use(
     // or absolute value would otherwise escape `state_dir` entirely (the
     // latter because `Path::join` discards the base on an absolute RHS).
     if !crate::paths::is_valid_short_name(session_id) {
+        // A rejected session_id means the hook's own harness sent an unsafe
+        // value -- worth surfacing even though the rejection itself is safe.
+        // `error!`, not `warn!`: see the #1133 precedent below. Found during
+        // #1209's pre-pr-review: read_once.rs's identical check already logs.
+        tracing::error!("session_id failed path-safety validation for repeat_detect, rejecting");
         return String::new();
     }
     let Some(tool_name) = stdin_payload.get("tool_name").and_then(|v| v.as_str()) else {
@@ -341,27 +346,67 @@ mod tests {
     #[test]
     fn unsafe_session_id_passes_through_without_escaping_state_dir() {
         let dir = TempDir::new().expect("test");
-        for evil in ["../../victim/pwn", "/tmp/llmenv-abs-escape", "..", "a/b"] {
-            let out = handle_pre_tool_use(&bash_payload("ls"), Some(evil), &config(1), dir.path());
-            assert!(
-                out.is_empty(),
-                "unsafe session_id {evil:?} must pass through: {out}"
-            );
-        }
+        // Wrapped in capture_logs (output discarded) even though this test
+        // doesn't assert on logs: this hits the same tracing::error! callsite
+        // as unsafe_session_id_logs_error below, and a sibling test reaching
+        // that callsite outside any subscriber makes tracing's per-callsite
+        // interest caching order-dependent across parallel test threads
+        // (the exact hazard #1133's precedent flags) -- always running under
+        // *some* subscriber keeps the callsite's interest live.
+        crate::test_log_capture::capture_logs(|| {
+            for evil in ["../../victim/pwn", "/tmp/llmenv-abs-escape", "..", "a/b"] {
+                let out =
+                    handle_pre_tool_use(&bash_payload("ls"), Some(evil), &config(1), dir.path());
+                assert!(
+                    out.is_empty(),
+                    "unsafe session_id {evil:?} must pass through: {out}"
+                );
+            }
+        });
         // Nothing should have been written outside the state dir's repeat_detect/ subdir.
         assert!(!std::path::Path::new("/tmp/llmenv-abs-escape").exists());
+    }
+
+    // Found during #1209's pre-pr-review (security-audit): read_once.rs's
+    // identical check already logs this rejection; repeat_detect's own copy
+    // of the same check didn't.
+    #[test]
+    fn unsafe_session_id_logs_error() {
+        let dir = TempDir::new().expect("test");
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let out = handle_pre_tool_use(
+                &bash_payload("ls"),
+                Some("../escape"),
+                &config(1),
+                dir.path(),
+            );
+            assert!(out.is_empty());
+        });
+        assert!(
+            logs.contains("session_id failed path-safety validation"),
+            "expected an error log when session_id is rejected, got: {logs}"
+        );
+        assert!(
+            logs.contains("ERROR"),
+            "must log at error level, got: {logs}"
+        );
     }
 
     #[test]
     fn no_tool_name_passes_through() {
         let dir = TempDir::new().expect("test");
-        let result = handle_pre_tool_use(
-            &json!({ "tool_input": {} }),
-            Some("s1"),
-            &config(3),
-            dir.path(),
-        );
-        assert!(result.is_empty());
+        // Wrapped in capture_logs (output discarded) for the same reason as
+        // unsafe_session_id_passes_through_without_escaping_state_dir above --
+        // avoids racing no_tool_name_logs_error below over the same callsite.
+        crate::test_log_capture::capture_logs(|| {
+            let result = handle_pre_tool_use(
+                &json!({ "tool_input": {} }),
+                Some("s1"),
+                &config(3),
+                dir.path(),
+            );
+            assert!(result.is_empty());
+        });
     }
 
     // Found during #1209's pre-pr-review: the same "required field missing,
