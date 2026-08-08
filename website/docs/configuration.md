@@ -152,7 +152,11 @@ Each scope has an `id` (used in diagnostics and `LLMENV_ACTIVE_SCOPES`), a
 
 When scopes of different kinds set conflicting scalar capability values, the
 order least-to-most specific is **network → host → user → project**. List-shaped
-values concatenate and de-duplicate instead of overriding.
+values concatenate and de-duplicate instead of overriding. Two contributors at
+the **same** precedence disagreeing on a scalar's value is a hard error naming
+both — there's no rank to break the tie, so llmenv fails loudly rather than
+silently picking one (added in v3.8.0 for every scalar; `default_mode` always
+had this).
 
 ## `capabilities:`
 
