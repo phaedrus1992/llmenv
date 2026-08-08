@@ -217,7 +217,7 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
                 // this redirect is exactly where an agent is likely to be
                 // starting a subtask under a not-yet-done parent.
                 match task::parent_soft_block_warning(state_dir, &started) {
-                    Some(warning) => format!("started '{slug}' ({warning})"),
+                    Some(warning) => format!("started '{slug}'. {warning}"),
                     None => format!("started '{slug}'"),
                 }
             })
