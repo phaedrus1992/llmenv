@@ -127,8 +127,10 @@ fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
                 "Tracked in the llmenv task tracker as '{slug}' — do NOT stop tracking and do \
                  NOT retry TaskCreate (it will keep being redirected). Update with `llmenv task \
                  start|note|done|wait {slug}`, block on another with `llmenv task block {slug} \
-                 --on <other>`, and list with `llmenv task ls`.",
-                slug = t.slug
+                 --on <other>`, and list with `llmenv task ls --session {session}` (#1124: \
+                 `ls` requires --session or --all, never lists every session by default).",
+                slug = t.slug,
+                session = t.session.as_deref().unwrap_or("<session-id>")
             );
             // Keep the task even if the note write fails, but surface the loss —
             // reporting unqualified success while the description silently
@@ -188,7 +190,7 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
     else {
         return deny(
             "TaskUpdate carried no `taskId`; update via `llmenv task start|note|done|wait <id>` \
-             or `llmenv task block <id> --on <other>` (see `llmenv task ls` for ids).",
+             or `llmenv task block <id> --on <other>` (see `llmenv task ls --all` for ids).",
         );
     };
     let slug = match task::resolve_identifier(state_dir, id) {
@@ -199,14 +201,17 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
         Err(e) => {
             tracing::error!(error = %e, id = %id, "task redirect: couldn't resolve task id");
             return deny(&format!(
-                "couldn't resolve task '{id}' ({e}); run `llmenv task ls` for the current ids."
+                "couldn't resolve task '{id}' ({e}); run `llmenv task ls --all` for the current ids."
             ));
         }
     };
     let status = str_field(input, "status");
     let outcome = match status {
         Some("in_progress") => {
-            task::start_task(state_dir, &slug).map(|_| format!("started '{slug}'"))
+            // force=false: the redirect must enforce the same hard-block on
+            // an unmet `blocked_on` (#1164) that `llmenv task start` does --
+            // an agent shouldn't bypass it just by using the native tool.
+            task::start_task(state_dir, &slug, false).map(|_| format!("started '{slug}'"))
         }
         Some("completed") => {
             task::done_task(state_dir, &slug).map(|_| format!("completed '{slug}'"))

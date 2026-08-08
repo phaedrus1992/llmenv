@@ -306,10 +306,10 @@ re-ingestion on the next turn.
 
 ```text
 llmenv task add <title> [--parent SLUG] [--session <id>]
-llmenv task start <id>
+llmenv task start <id> [--force]
 llmenv task done <id>
 llmenv task wait <id> [reason]
-llmenv task ls [--format json] [--session <id>] [--current-project]
+llmenv task ls [--format json] (--session <id> | --all) [--current-project]
 llmenv task show <id> | --current | --next
 llmenv task note <id> [text]
 llmenv task block <id> --on <other>
@@ -330,9 +330,17 @@ unambiguous prefix of one.
   (see below): with exactly one session open for the current project it
   auto-resolves; pass `--session <id>` when two or more are open; errors
   with actionable guidance when none is open.
-- `task start <id>` — claim a task, moving it to `wip`. Also the resume
-  action for a `waiting` task — it accepts any non-`done` state as its
-  starting point.
+- `task start <id> [--force]` — claim a task, moving it to `wip`. Also the
+  resume action for a `waiting` task — it accepts any non-`done` state as its
+  starting point. `parent` and `blocked_on` (added in v3.8.0) are enforced
+  differently: an undone **parent** only warns — organizational grouping,
+  not an ordering guarantee, so starting a child while the parent is still
+  open is often fine. An undone **`blocked_on`** reference (`task block`,
+  below) hard-blocks — refuses to start — since that's an explicit
+  dependency the user configured on purpose; pass `--force` to override. A
+  `blocked_on` reference resolves as done only once the target task *and
+  every one of its descendants* are done, so blocking on a parent task alone
+  covers its whole child set (see `task block`, below).
 - `task done <id>` — mark a task complete.
 - `task wait <id> [reason]` — mark a task `waiting` on something outside the
   agent's control (a human review, a decision, external system access)
@@ -344,18 +352,21 @@ unambiguous prefix of one.
   behavior is to wait for the reason to clear, not keep retrying (and
   re-injecting the FYI every turn would just nag about a state meant to be
   quiet).
-- `task ls [--format json] [--session <id>] [--state <s>]... [--hide-done]
-  [--current-project]` — list tasks. The default human output groups tasks by
-  session (current-project sessions first), indents subtasks under their
-  parent, prefixes each row with a state glyph + label
+- `task ls [--format json] (--session <id> | --all) [--state <s>]...
+  [--hide-done] [--current-project]` — list tasks. **Requires `--session <id>`
+  or `--all`** (added in v3.8.0) — no silent default to every session's
+  tasks; pass `--all` to deliberately see everything. The human output groups
+  tasks by session (current-project sessions first), indents subtasks under
+  their parent, prefixes each row with a state glyph + label
   (`open`/`wip`/`waiting`/`done`), and annotates blocked tasks with their
   `blocked_on` refs; color follows TTY / `NO_COLOR` / `CLICOLOR_FORCE`.
-  `--format json` is the stable machine format. `--session <id>` narrows to
-  one session; `--state <open|wip|waiting|done>` (repeatable) keeps only
-  those states; `--hide-done` (alias `--active`) drops completed tasks;
-  `--current-project` (added in v3.8.0) narrows to tasks whose session is
-  tagged to the current project — any session ever tagged to it, open or
-  closed, so a finished session's tasks still show. Tasks with no session are
+  `--format json` is the stable machine format. `--state
+  <open|wip|waiting|done>` (repeatable) keeps only those states; `--hide-done`
+  (alias `--active`) drops completed tasks; `--current-project` (added in
+  v3.8.0) further narrows to tasks whose session is tagged to the current
+  project — any session ever tagged to it, open or closed, so a finished
+  session's tasks still show — but doesn't substitute for `--session`/`--all`,
+  since it narrows by project, not by session. Tasks with no session are
   excluded under `--current-project`. Filters compose with each other, and
   apply to the JSON output too when passed.
 - `task show <id>` — full detail for one task (notes, parent, blockers).
@@ -371,7 +382,14 @@ unambiguous prefix of one.
   if no session is open for the current project.
 - `task note <id> [text]` — append a progress note; reads from stdin if
   `text` is omitted.
-- `task block <id> --on <other>` — record that `id` is blocked on `other`.
+- `task block <id> --on <other>` — record that `id` is blocked on `other`: a
+  hard ordering dependency (see `task start`, above) — prefer this over
+  relying on `--parent` nesting to imply an order it doesn't actually
+  enforce. For a downstream step that must wait on a whole set of sibling
+  tasks (e.g. several parallel analyzer tasks under one parent step), block
+  on the **parent** rather than hand-wiring a `block` edge to each sibling —
+  a `blocked_on` reference isn't satisfied until the target task *and every
+  one of its descendants* are done.
 - `task clear <id>...` / `task clear --session <id>` — delete task(s)
   outright, for a batch that's being deliberately abandoned rather than just
   detached from a session (that's what `session start --replace` does,
@@ -382,7 +400,7 @@ unambiguous prefix of one.
 **Sessions are mandatory**: every task belongs to one, and a session is
 tagged with the project it was started in (resolved from the git root, else
 a `.llmenv.yaml` marker, else the cwd). The task/session store stays global
-per engine — `task ls` shows everything — but `task add`'s auto-resolve and
+per engine — `task ls --all` can show everything — but `task add`'s auto-resolve and
 `session start`'s checkpoint scope to the current project's open sessions, so
 two windows in the same project can't silently collide. Any number of
 sessions may be open at once. The SessionStart/Stop `wip`/`waiting` lifecycle

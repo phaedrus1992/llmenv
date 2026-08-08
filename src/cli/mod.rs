@@ -390,18 +390,28 @@ enum TaskCommand {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Claim a task, transitioning it to `wip`.
-    Start { id: String },
+    /// Claim a task, transitioning it to `wip`. An undone `parent` only
+    /// warns (soft-block, starts anyway); an undone `blocked_on` reference
+    /// refuses to start (hard-block) unless `--force` is passed.
+    Start {
+        id: String,
+        #[arg(long)]
+        force: bool,
+    },
     /// Mark a task done.
     Done { id: String },
-    /// List all tasks. Unfiltered by default; `--session` narrows to one
-    /// session's tasks, `--state`/`--hide-done` filter by lifecycle state,
-    /// `--current-project` narrows to the current project's tasks.
+    /// List tasks. Requires `--session <id>` or `--all` (#1124) — no silent
+    /// default to every session's tasks. `--state`/`--hide-done` filter by
+    /// lifecycle state; `--current-project` further narrows to the current
+    /// project's tasks (composable with either `--session` or `--all`).
     Ls {
         #[arg(long, value_enum)]
         format: Option<TaskListFormat>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         session: Option<String>,
+        /// Deliberately list every session's tasks, not just one.
+        #[arg(long, conflicts_with = "session")]
+        all: bool,
         /// Only show tasks in these state(s). Repeatable:
         /// `--state wip --state waiting`. Omit for all states.
         #[arg(long = "state", value_enum)]
@@ -411,7 +421,8 @@ enum TaskCommand {
         hide_done: bool,
         /// Only show tasks whose session is tagged to the current project
         /// (open or closed sessions). Tasks with no session are excluded.
-        /// Composes with `--session` and `--state`.
+        /// Composes with `--session`/`--all` and `--state`, but doesn't
+        /// substitute for either — it narrows by project, not by session.
         #[arg(long)]
         current_project: bool,
     },
@@ -3087,8 +3098,25 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             )?;
             println!("Added task '{}' ({})", task.slug, task.title);
         }
-        TaskCommand::Start { id } => {
-            let task = crate::task::start_task(&state_dir, &id)?;
+        TaskCommand::Start { id, force } => {
+            let task = crate::task::start_task(&state_dir, &id, force)?;
+            // Parent is a soft-block (#1164): unlike an unmet blocked_on
+            // (hard-blocked inside start_task itself), an undone parent
+            // only warns here, mirroring Add's own wip-in-progress warning
+            // above -- the agent may have a legitimate reason to proceed.
+            if let Some(parent_slug) = &task.parent {
+                let siblings = crate::task::list_tasks(&state_dir);
+                if let Some(parent) = siblings.iter().find(|t| &t.slug == parent_slug)
+                    && parent.state != crate::task::TaskState::Done
+                {
+                    println!(
+                        "Note: parent task '{parent_slug}' isn't done yet ({:?}) — starting \
+                         '{}' anyway. Use `llmenv task block {} --on {parent_slug}` instead if \
+                         this really can't start until the parent finishes.",
+                        parent.state, task.slug, task.slug
+                    );
+                }
+            }
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
         TaskCommand::Done { id } => {
@@ -3098,10 +3126,20 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
         TaskCommand::Ls {
             format,
             session,
+            all,
             state,
             hide_done,
             current_project,
         } => {
+            // #1124: force a deliberate choice instead of silently listing
+            // every session's tasks. --current-project alone doesn't count
+            // — it narrows by project, not by session.
+            if session.is_none() && !all {
+                anyhow::bail!(
+                    "llmenv task ls requires either --session <id> or --all \
+                     — pass --all to deliberately list every session's tasks"
+                );
+            }
             let mut tasks = crate::task::list_tasks(&state_dir);
             if current_project {
                 let project = current_project_tag()?;

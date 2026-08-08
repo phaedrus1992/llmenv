@@ -43,7 +43,7 @@ fn full_lifecycle_add_start_note_done() {
         .stdout(predicates::str::contains("Added task"));
 
     let ls_json = llmenv(dir.path())
-        .args(["task", "ls", "--format", "json"])
+        .args(["task", "ls", "--format", "json", "--all"])
         .output()
         .unwrap();
     assert!(ls_json.status.success());
@@ -79,7 +79,7 @@ fn full_lifecycle_add_start_note_done() {
         .stdout(predicates::str::contains("Completed"));
 
     let final_ls = llmenv(dir.path())
-        .args(["task", "ls", "--format", "json"])
+        .args(["task", "ls", "--format", "json", "--all"])
         .output()
         .unwrap();
     let tasks: serde_json::Value = serde_json::from_slice(&final_ls.stdout).unwrap();
@@ -232,7 +232,7 @@ fn three_level_nesting_chain_via_cli() {
         .success();
 
     let ls = llmenv(dir.path())
-        .args(["task", "ls", "--format", "json"])
+        .args(["task", "ls", "--format", "json", "--all"])
         .output()
         .unwrap();
     let tasks: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
@@ -268,7 +268,7 @@ fn multiple_children_under_one_parent_via_cli() {
     }
 
     let ls = llmenv(dir.path())
-        .args(["task", "ls", "--format", "json"])
+        .args(["task", "ls", "--format", "json", "--all"])
         .output()
         .unwrap();
     let tasks: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
@@ -384,7 +384,7 @@ fn session_start_then_task_add_auto_resolves() {
         .assert()
         .success();
     let ls = llmenv(dir.path())
-        .args(["task", "ls", "--format", "json"])
+        .args(["task", "ls", "--format", "json", "--all"])
         .output()
         .unwrap();
     let tasks: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
@@ -677,6 +677,61 @@ fn clear_with_both_ids_and_session_is_rejected_by_clap() {
         .failure();
 }
 
+// #1124: `ls` must not silently default to every session's tasks -- force a
+// deliberate choice between --session <id> and --all.
+#[test]
+fn ls_with_neither_session_nor_all_fails() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "ls"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--session"))
+        .stderr(predicates::str::contains("--all"));
+}
+
+#[test]
+fn ls_with_all_flag_succeeds() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "ls", "--all", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Ship the release"));
+}
+
+#[test]
+fn ls_with_all_and_session_is_rejected_by_clap() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "ls", "--all", "--session", "some-session"])
+        .assert()
+        .failure();
+}
+
+// --current-project alone doesn't satisfy the requirement -- it narrows by
+// project, not by session, so it's still "everything in this project" rather
+// than the single deliberate choice #1124 wants to force.
+#[test]
+fn ls_with_only_current_project_still_requires_session_or_all() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "ls", "--current-project"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--session"));
+}
+
 #[test]
 fn wait_marks_task_waiting_and_notes_reason() {
     let dir = TempDir::new().unwrap();
@@ -822,7 +877,7 @@ fn ls_filters_by_session() {
 }
 
 #[test]
-fn ls_unfiltered_shows_tasks_across_sessions() {
+fn ls_all_shows_tasks_across_sessions() {
     let dir = TempDir::new().unwrap();
     start_session(dir.path(), "sprint 1");
     llmenv(dir.path())
@@ -839,7 +894,7 @@ fn ls_unfiltered_shows_tasks_across_sessions() {
         .success();
 
     let ls_json = llmenv(dir.path())
-        .args(["task", "ls", "--format", "json"])
+        .args(["task", "ls", "--format", "json", "--all"])
         .output()
         .unwrap();
     let tasks: serde_json::Value = serde_json::from_slice(&ls_json.stdout).unwrap();
@@ -849,8 +904,12 @@ fn ls_unfiltered_shows_tasks_across_sessions() {
 // --- task ls: human output, grouping, glyphs, filtering (#926) ---
 
 /// Run `task ls` (+ extra args) with color forced off; return stdout as a String.
+/// Adds `--all` unless `extra` already passes `--session` (they conflict).
 fn ls(dir: &std::path::Path, extra: &[&str]) -> String {
     let mut args = vec!["task", "ls"];
+    if !extra.contains(&"--session") {
+        args.push("--all");
+    }
     args.extend_from_slice(extra);
     let out = llmenv(dir)
         .env("NO_COLOR", "1")
@@ -1068,7 +1127,7 @@ fn ls_json_applies_filters_only_when_passed() {
 
     // No filter: both tasks in the stable machine format.
     let all = llmenv(dir.path())
-        .args(["task", "ls", "--format", "json"])
+        .args(["task", "ls", "--format", "json", "--all"])
         .output()
         .unwrap();
     let all: serde_json::Value = serde_json::from_slice(&all.stdout).unwrap();
@@ -1076,7 +1135,7 @@ fn ls_json_applies_filters_only_when_passed() {
 
     // Filter passed: applies to JSON too.
     let filtered = llmenv(dir.path())
-        .args(["task", "ls", "--format", "json", "--state", "wip"])
+        .args(["task", "ls", "--format", "json", "--state", "wip", "--all"])
         .output()
         .unwrap();
     let filtered: serde_json::Value = serde_json::from_slice(&filtered.stdout).unwrap();
@@ -1096,7 +1155,7 @@ fn ls_respects_color_flag_over_tty_detection() {
 
     // --color always forces ANSI even though stdout is piped (not a TTY).
     let always = llmenv(dir.path())
-        .args(["--color", "always", "task", "ls"])
+        .args(["--color", "always", "task", "ls", "--all"])
         .output()
         .unwrap();
     let always = String::from_utf8(always.stdout).unwrap();
@@ -1107,7 +1166,7 @@ fn ls_respects_color_flag_over_tty_detection() {
 
     // --color never suppresses ANSI regardless of environment.
     let never = llmenv(dir.path())
-        .args(["--color", "never", "task", "ls"])
+        .args(["--color", "never", "task", "ls", "--all"])
         .output()
         .unwrap();
     let never = String::from_utf8(never.stdout).unwrap();
@@ -1121,6 +1180,9 @@ fn ls_respects_color_flag_over_tty_detection() {
 
 fn ls_json(dir: &std::path::Path, extra: &[&str]) -> Vec<serde_json::Value> {
     let mut args = vec!["task", "ls", "--format", "json"];
+    if !extra.contains(&"--session") {
+        args.push("--all");
+    }
     args.extend_from_slice(extra);
     let out = llmenv(dir).args(&args).output().unwrap();
     assert!(out.status.success());
