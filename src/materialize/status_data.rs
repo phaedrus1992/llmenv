@@ -1028,7 +1028,7 @@ mod tests {
         );
         let task = crate::task::add_task_for_session(dir.path(), "In progress", None, &session.id)
             .unwrap();
-        crate::task::start_task(dir.path(), &task.slug).unwrap();
+        crate::task::start_task(dir.path(), &task.slug, false).unwrap();
 
         let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
         assert_eq!(data.current.as_deref(), Some("In progress"));

@@ -129,13 +129,7 @@ pub fn task_state_glyph(state: crate::task::TaskState, use_color: bool) -> Strin
 /// Lowercase label for a task lifecycle state (`open`/`wip`/`waiting`/`done`).
 #[must_use]
 pub fn task_state_label(state: crate::task::TaskState) -> &'static str {
-    use crate::task::TaskState;
-    match state {
-        TaskState::Open => "open",
-        TaskState::Wip => "wip",
-        TaskState::Waiting => "waiting",
-        TaskState::Done => "done",
-    }
+    state.as_str()
 }
 
 /// Strip control characters (ANSI/CSI/OSC escapes, NUL, embedded newlines,

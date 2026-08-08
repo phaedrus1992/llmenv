@@ -14,7 +14,7 @@
 pub mod project;
 pub mod session;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,21 @@ pub enum TaskState {
     /// non-`Done` state as its starting point).
     Waiting,
     Done,
+}
+
+impl TaskState {
+    /// Lowercase label (`open`/`wip`/`waiting`/`done`), the canonical
+    /// rendering shared by `cli::style::task_state_label` and any
+    /// user-facing message composed here in `task/mod.rs`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Wip => "wip",
+            Self::Waiting => "waiting",
+            Self::Done => "done",
+        }
+    }
 }
 
 /// A timestamped progress note attached to a task.
@@ -282,7 +297,7 @@ pub fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<Displa
     let mut keys: Vec<Option<String>> = tasks
         .iter()
         .map(|t| t.session.clone())
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect();
     // Cache the key (it allocates for the "other sessions" bucket) so it's
@@ -302,7 +317,6 @@ pub fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<Displa
 /// `visited` guard makes malformed parent cycles terminate instead of
 /// recursing forever.
 fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
-    use std::collections::{HashMap, HashSet};
     let present: HashSet<&str> = group.iter().map(|t| t.slug.as_str()).collect();
     let mut children: HashMap<&str, Vec<&Task>> = HashMap::new();
     let mut roots: Vec<&Task> = Vec::new();
@@ -348,7 +362,7 @@ fn visit<'a>(
     task: &'a Task,
     depth: usize,
     children: &std::collections::HashMap<&'a str, Vec<&'a Task>>,
-    visited: &mut std::collections::HashSet<&'a str>,
+    visited: &mut HashSet<&'a str>,
     rows: &mut Vec<DisplayRow>,
 ) {
     if !visited.insert(task.slug.as_str()) {
@@ -535,36 +549,44 @@ pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<Strin
 
 /// Claim a task, transitioning it to `wip`.
 ///
+/// `blocked_on` is a hard-block (#1164): an explicit dependency the user
+/// configured on purpose, unlike the soft-block `parent` relationship (see
+/// `cli/mod.rs`'s `Start` handler, which warns-but-allows on an undone
+/// parent instead). A `blocked_on` reference resolves as done only once the
+/// target task *and every one of its descendants* are done — so blocking on
+/// a parent task alone covers its whole child set (the parallel fan-out
+/// case) without hand-wiring a block edge per sibling.
+///
 /// # Errors
-/// Errors if the task is already `done`. Warns (but still allows) starting a
-/// task whose `blocked_on` list contains a non-`done` task — the agent may
-/// know better than the ordering hint.
-pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+/// Errors if the task is already `done`, or if any `blocked_on` reference
+/// isn't (recursively) done and `force` is `false`. A dangling `blocked_on`
+/// reference (deleted/corrupt blocker file) fails closed — treated as
+/// unmet, same rationale as [`is_actionable`]'s dangling-blocker handling.
+/// `force` overrides both cases — the agent may know better than the
+/// ordering hint.
+pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!("task '{slug}' is already done; cannot start it again");
         }
-        for blocker_slug in &task.blocked_on {
-            match load_task(state_dir, blocker_slug) {
-                Ok(blocker) if blocker.state != TaskState::Done => {
-                    tracing::warn!(
-                        slug = %slug, blocker_slug = %blocker_slug, blocker_state = ?blocker.state,
-                        "starting task that is blocked on a not-done task"
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    // Dangling blocked_on reference (deleted/corrupt blocker
-                    // file) — warn and treat the edge as absent, matching the
-                    // load-time tolerance documented for parent/blocked_on
-                    // slugs.
-                    tracing::warn!(
-                        error = %e, slug = %slug, blocker_slug = %blocker_slug,
-                        "starting task whose blocker could not be loaded"
-                    );
-                }
+        if !force && !task.blocked_on.is_empty() {
+            let all_tasks = list_tasks(state_dir);
+            let by_slug: HashMap<&str, &Task> =
+                all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+            let unmet: Vec<&str> = task
+                .blocked_on
+                .iter()
+                .map(String::as_str)
+                .filter(|blocker_slug| !is_done_including_descendants(blocker_slug, &by_slug))
+                .collect();
+            if !unmet.is_empty() {
+                anyhow::bail!(
+                    "task '{slug}' is blocked on not-done task(s): {} \
+                     (pass --force to start anyway)",
+                    unmet.join(", ")
+                );
             }
         }
         task.state = TaskState::Wip;
@@ -574,6 +596,30 @@ pub fn start_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     })?;
     touch_task_session(state_dir, &task);
     Ok(task)
+}
+
+/// Soft-block advisory for [`start_task`] (#1164): `None` when `task` has no
+/// `parent`, the parent can't be loaded (dangling reference — nothing
+/// meaningful to warn about once the parent itself is gone), or the parent
+/// is already `done`. Otherwise a message naming the parent and its current
+/// state, for a caller to surface however it prefers (println, appended to
+/// a hook's response text, …) — starting the task is never blocked by this,
+/// unlike an unmet `blocked_on` reference.
+#[must_use]
+pub fn parent_soft_block_warning(state_dir: &Path, task: &Task) -> Option<String> {
+    let parent_slug = task.parent.as_ref()?;
+    let parent = load_task(state_dir, parent_slug).ok()?;
+    if parent.state == TaskState::Done {
+        return None;
+    }
+    Some(format!(
+        "Note: parent task '{parent_slug}' isn't done yet ({}) — starting '{}' anyway. \
+         Use `llmenv task block {} --on {parent_slug}` instead if this really can't start \
+         until the parent finishes.",
+        parent.state.as_str(),
+        task.slug,
+        task.slug
+    ))
 }
 
 /// Bump the `last_activity` of the session a task is tagged to, if any — so a
@@ -830,16 +876,47 @@ pub fn resolve_next_task(
 }
 
 /// True when `task` is neither `done` nor `waiting`, and every one of its
-/// `blocked_on` refs resolves (via `by_slug`) to a `done` task. A dangling or
-/// not-yet-done blocker keeps the task non-actionable — fail closed rather
-/// than treat an unresolvable reference as satisfied.
+/// `blocked_on` refs is (recursively) done per [`is_done_including_descendants`].
+/// A dangling or not-yet-done blocker keeps the task non-actionable — fail
+/// closed rather than treat an unresolvable reference as satisfied.
 fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
     !matches!(task.state, TaskState::Done | TaskState::Waiting)
-        && task.blocked_on.iter().all(|b| {
-            by_slug
-                .get(b.as_str())
-                .is_some_and(|blocker| blocker.state == TaskState::Done)
-        })
+        && task
+            .blocked_on
+            .iter()
+            .all(|b| is_done_including_descendants(b, by_slug))
+}
+
+/// True when the task named `slug` is `done` and every task transitively
+/// parented under it (its children, their children, …) is also `done` —
+/// the resolution `blocked_on` uses (#1164), so blocking on a parent task
+/// alone covers its whole child set without a block edge per sibling.
+///
+/// A dangling `slug` (no task in `by_slug`) resolves to `false` — fail
+/// closed, same rationale as the old non-recursive check this replaces. A
+/// malformed parent cycle terminates via the `visited` guard (mirroring
+/// [`append_forest`]'s guard) instead of recursing forever; a cycle is
+/// invalid data, not a case this needs to resolve "correctly" for, only
+/// safely.
+fn is_done_including_descendants(slug: &str, by_slug: &HashMap<&str, &Task>) -> bool {
+    fn go<'a>(
+        slug: &'a str,
+        by_slug: &HashMap<&'a str, &'a Task>,
+        visited: &mut HashSet<&'a str>,
+    ) -> bool {
+        if !visited.insert(slug) {
+            return true;
+        }
+        let Some(&task) = by_slug.get(slug) else {
+            return false;
+        };
+        task.state == TaskState::Done
+            && by_slug
+                .values()
+                .filter(|t| t.parent.as_deref() == Some(slug))
+                .all(|child| go(&child.slug, by_slug, visited))
+    }
+    go(slug, by_slug, &mut HashSet::new())
 }
 
 /// Parent-before-children execution order for a single session's tasks —
@@ -1106,14 +1183,14 @@ mod tests {
     fn wip_task_in_project(dir: &Path, title: &str, project: &str) -> Task {
         let session_id = session_for_project(dir, project);
         let task = add_task_for_session(dir, title, None, &session_id).expect("test");
-        start_task(dir, &task.slug).expect("test")
+        start_task(dir, &task.slug, false).expect("test")
     }
 
     /// Create a `waiting` task tagged to a real session in `project`.
     fn waiting_task_in_project(dir: &Path, title: &str, project: &str, reason: &str) -> Task {
         let session_id = session_for_project(dir, project);
         let task = add_task_for_session(dir, title, None, &session_id).expect("test");
-        start_task(dir, &task.slug).expect("test");
+        start_task(dir, &task.slug, false).expect("test");
         wait_task(dir, &task.slug, reason).expect("test")
     }
 
@@ -1219,7 +1296,7 @@ mod tests {
             .map(|_| {
                 let dir_path = dir_path.clone();
                 let slug = slug.clone();
-                std::thread::spawn(move || start_task(&dir_path, &slug))
+                std::thread::spawn(move || start_task(&dir_path, &slug, false))
             })
             .collect();
         let results: Vec<_> = threads
@@ -1306,7 +1383,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let parent = mk(dir.path(), "Parent", None).expect("test");
         let child = mk(dir.path(), "Child", Some(&parent.slug)).expect("test");
-        start_task(dir.path(), &child.slug).expect("test");
+        start_task(dir.path(), &child.slug, false).expect("test");
         done_task(dir.path(), &child.slug).expect("test");
 
         let reloaded_parent = load_task(dir.path(), &parent.slug).expect("test");
@@ -1394,7 +1471,7 @@ mod tests {
     fn start_task_transitions_open_to_wip() {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Do thing", None).expect("test");
-        let started = start_task(dir.path(), &task.slug).expect("test");
+        let started = start_task(dir.path(), &task.slug, false).expect("test");
         assert_eq!(started.state, TaskState::Wip);
     }
 
@@ -1403,7 +1480,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Do thing", None).expect("test");
         done_task(dir.path(), &task.slug).expect("test");
-        assert!(start_task(dir.path(), &task.slug).is_err());
+        assert!(start_task(dir.path(), &task.slug, false).is_err());
     }
 
     #[test]
@@ -1414,14 +1491,78 @@ mod tests {
         assert_eq!(done.state, TaskState::Done);
     }
 
+    // #1164: blocked_on is a hard-block (an explicit dependency the user
+    // configured on purpose), unlike parent (soft-block, see cli/mod.rs's
+    // Start handler). Starting a task blocked on a not-done task must error.
     #[test]
-    fn start_task_warns_but_allows_when_blocked_on_open_task() {
+    fn start_task_errors_when_blocked_on_open_task() {
         let dir = TempDir::new().expect("test");
         let blocker = mk(dir.path(), "Blocker task", None).expect("test");
         let task = mk(dir.path(), "Blocked task", None).expect("test");
         block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
-        // Not an error — warning only, transition still allowed.
-        let started = start_task(dir.path(), &task.slug).expect("test");
+        let err = start_task(dir.path(), &task.slug, false).unwrap_err();
+        assert!(
+            err.to_string().contains(&blocker.slug),
+            "error should name the unmet blocker: {err}"
+        );
+    }
+
+    #[test]
+    fn start_task_force_overrides_unmet_blocker() {
+        let dir = TempDir::new().expect("test");
+        let blocker = mk(dir.path(), "Blocker task", None).expect("test");
+        let task = mk(dir.path(), "Blocked task", None).expect("test");
+        block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
+        let started = start_task(dir.path(), &task.slug, true).expect("test");
+        assert_eq!(started.state, TaskState::Wip);
+    }
+
+    #[test]
+    fn start_task_allows_when_blocker_is_done() {
+        let dir = TempDir::new().expect("test");
+        let blocker = mk(dir.path(), "Blocker task", None).expect("test");
+        let task = mk(dir.path(), "Blocked task", None).expect("test");
+        block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
+        done_task(dir.path(), &blocker.slug).expect("test");
+        let started = start_task(dir.path(), &task.slug, false).expect("test");
+        assert_eq!(started.state, TaskState::Wip);
+    }
+
+    // #1164 fan-out design: blocking on a parent task with children means
+    // "blocked until the parent AND all its children are done" -- so a
+    // downstream task can hard-block on the whole set via one edge to the
+    // parent, without hand-wiring a block edge per sibling.
+    #[test]
+    fn start_task_errors_when_blocker_has_undone_child() {
+        let dir = TempDir::new().expect("test");
+        let parent = mk(dir.path(), "Parent step", None).expect("test");
+        let child = mk(dir.path(), "Sibling task", Some(&parent.slug)).expect("test");
+        done_task(dir.path(), &parent.slug).expect("test");
+        let downstream = mk(dir.path(), "Downstream", None).expect("test");
+        block_task(dir.path(), &downstream.slug, &parent.slug).expect("test");
+        let err = start_task(dir.path(), &downstream.slug, false).unwrap_err();
+        assert!(
+            err.to_string().contains(&parent.slug),
+            "error should name the unmet blocker: {err}"
+        );
+        // Confirm the setup actually holds: child is the reason the parent
+        // isn't considered fully done yet.
+        assert_ne!(
+            load_task(dir.path(), &child.slug).expect("test").state,
+            TaskState::Done
+        );
+    }
+
+    #[test]
+    fn start_task_allows_when_blocker_and_all_children_done() {
+        let dir = TempDir::new().expect("test");
+        let parent = mk(dir.path(), "Parent step", None).expect("test");
+        let child = mk(dir.path(), "Sibling task", Some(&parent.slug)).expect("test");
+        done_task(dir.path(), &child.slug).expect("test");
+        done_task(dir.path(), &parent.slug).expect("test");
+        let downstream = mk(dir.path(), "Downstream", None).expect("test");
+        block_task(dir.path(), &downstream.slug, &parent.slug).expect("test");
+        let started = start_task(dir.path(), &downstream.slug, false).expect("test");
         assert_eq!(started.state, TaskState::Wip);
     }
 
@@ -1438,7 +1579,7 @@ mod tests {
     fn wait_task_transitions_to_waiting_and_notes_reason() {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Do thing", None).expect("test");
-        start_task(dir.path(), &task.slug).expect("test");
+        start_task(dir.path(), &task.slug, false).expect("test");
         let waiting = wait_task(dir.path(), &task.slug, "need spec review").expect("test");
         assert_eq!(waiting.state, TaskState::Waiting);
         assert_eq!(waiting.notes.len(), 1);
@@ -1458,7 +1599,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Do thing", None).expect("test");
         wait_task(dir.path(), &task.slug, "blocked").expect("test");
-        let resumed = start_task(dir.path(), &task.slug).expect("test");
+        let resumed = start_task(dir.path(), &task.slug, false).expect("test");
         assert_eq!(resumed.state, TaskState::Wip);
     }
 
@@ -1495,8 +1636,11 @@ mod tests {
         assert_eq!(loaded, task);
     }
 
+    // A dangling blocked_on reference (deleted/corrupt blocker file) fails
+    // closed -- same rationale as is_actionable's dangling-blocker handling
+    // for `task show --next` -- rather than silently treating it as resolved.
     #[test]
-    fn start_task_blocked_on_deleted_task_warns_but_allows() {
+    fn start_task_errors_when_blocked_on_deleted_task() {
         let dir = TempDir::new().expect("test");
         let blocker = mk(dir.path(), "Blocker", None).expect("test");
         let task = mk(dir.path(), "Blocked", None).expect("test");
@@ -1507,7 +1651,23 @@ mod tests {
                 .join(format!("{}.json", blocker.slug)),
         )
         .expect("test");
-        let started = start_task(dir.path(), &task.slug).expect("test");
+        let err = start_task(dir.path(), &task.slug, false).unwrap_err();
+        assert!(err.to_string().contains(&blocker.slug));
+    }
+
+    #[test]
+    fn start_task_force_overrides_dangling_blocker() {
+        let dir = TempDir::new().expect("test");
+        let blocker = mk(dir.path(), "Blocker", None).expect("test");
+        let task = mk(dir.path(), "Blocked", None).expect("test");
+        block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
+        std::fs::remove_file(
+            dir.path()
+                .join("tasks")
+                .join(format!("{}.json", blocker.slug)),
+        )
+        .expect("test");
+        let started = start_task(dir.path(), &task.slug, true).expect("test");
         assert_eq!(started.state, TaskState::Wip);
     }
 
@@ -2082,7 +2242,7 @@ mod tests {
         let task =
             add_task(dir.path(), "Do thing", None, Some(&session.id), PROJECT).expect("test");
         std::thread::sleep(std::time::Duration::from_secs(1));
-        start_task(dir.path(), &task.slug).expect("test");
+        start_task(dir.path(), &task.slug, false).expect("test");
         let reloaded = open_sessions_for_project(dir.path(), PROJECT)
             .into_iter()
             .find(|s| s.id == session.id)
