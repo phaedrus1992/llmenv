@@ -360,8 +360,8 @@ unambiguous prefix of one.
   their parent, prefixes each row with a state glyph + label
   (`open`/`wip`/`waiting`/`done`), and annotates blocked tasks with their
   `blocked_on` refs; color follows TTY / `NO_COLOR` / `CLICOLOR_FORCE`.
-  `--format json` is the stable machine format. `--state
-  <open|wip|waiting|done>` (repeatable) keeps only those states; `--hide-done`
+  `--format json` is the stable machine format.
+  `--state <open|wip|waiting|done>` (repeatable) keeps only those states; `--hide-done`
   (alias `--active`) drops completed tasks; `--current-project` (added in
   v3.8.0) further narrows to tasks whose session is tagged to the current
   project — any session ever tagged to it, open or closed, so a finished
