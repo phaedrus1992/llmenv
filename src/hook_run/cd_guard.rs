@@ -31,6 +31,13 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str())
     else {
+        // Claude Code's Bash tool schema guarantees `command` is present as a
+        // string — this should never fire in practice. Log it rather than
+        // silently no-op, in case the harness's payload shape ever drifts.
+        // `error!`, not `warn!`/`debug!`: the default `EnvFilter` (`RUST_LOG`
+        // unset) is ERROR-only and drops anything weaker before it reaches a
+        // default-configured user's log (#1133 precedent).
+        tracing::error!("tool_input.command missing or not a string for Bash PreToolUse payload");
         return String::new();
     };
     if command_uses_cd(command) {
@@ -144,11 +151,100 @@ mod tests {
         assert!(text.is_empty());
     }
 
+    // #1207: a Bash payload missing tool_input.command should never happen in
+    // practice (Claude Code's schema guarantees it), but if the harness's
+    // payload shape ever drifts, cd_guard would otherwise stop firing with no
+    // trace in the logs.
+    #[test]
+    fn handle_pre_tool_use_logs_error_when_bash_command_missing() {
+        let payload = serde_json::json!({ "tool_name": "Bash", "tool_input": {} });
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let text = handle_pre_tool_use(&payload, &CdGuard { enabled: true });
+            assert!(text.is_empty());
+        });
+        assert!(
+            logs.contains("tool_input.command missing"),
+            "expected an error log when tool_input.command is absent, got: {logs}"
+        );
+        assert!(
+            logs.contains("ERROR"),
+            "must log at error level so it survives the default (RUST_LOG-unset) filter, got: {logs}"
+        );
+    }
+
     proptest! {
         // Arbitrary text never panics, regardless of shell-metacharacter content.
         #[test]
         fn command_uses_cd_never_panics(command in ".{0,200}") {
             let _ = command_uses_cd(&command);
+        }
+    }
+
+    // #1208: strengthen coverage beyond panic-safety with real correctness
+    // invariants over generated compound-command shapes.
+    mod correctness_proptests {
+        use super::*;
+
+        /// A token that never equals `cd` exactly, safe to use as a
+        /// non-cd leading word or argument (no internal whitespace).
+        fn arb_non_cd_token() -> impl Strategy<Value = String> {
+            "[a-zA-Z][a-zA-Z0-9_]{0,8}".prop_filter("must not be exactly 'cd'", |s| s != "cd")
+        }
+
+        fn arb_separator() -> impl Strategy<Value = &'static str> {
+            proptest::sample::select(&["&&", "||", ";", "\n", "|"][..])
+        }
+
+        /// Builds a compound command from 1-5 segments, each
+        /// `<preceding separator> <leading> <arg>` (the first segment's
+        /// separator is generated but unused) — plus the expected
+        /// `command_uses_cd` result for it.
+        fn arb_command_and_expected() -> impl Strategy<Value = (String, bool)> {
+            let segment = (
+                proptest::bool::ANY,
+                arb_non_cd_token(),
+                arb_non_cd_token(),
+                arb_separator(),
+            );
+            proptest::collection::vec(segment, 1..6).prop_map(|segments| {
+                let expected = segments.iter().any(|&(leads_with_cd, ..)| leads_with_cd);
+                let mut command = String::new();
+                for (i, (leads_with_cd, token, arg, sep)) in segments.iter().enumerate() {
+                    if i > 0 {
+                        command.push(' ');
+                        command.push_str(sep);
+                        command.push(' ');
+                    }
+                    command.push_str(if *leads_with_cd { "cd" } else { token });
+                    command.push(' ');
+                    command.push_str(arg);
+                }
+                (command, expected)
+            })
+        }
+
+        /// A token containing `cd` as a substring but never equal to it
+        /// exactly — e.g. `abcd`, `cdx` — used to prove substring/argument
+        /// occurrences of `cd` don't trigger a false positive.
+        fn arb_cd_like_but_not_exact_token() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9_]{0,4}cd[a-zA-Z0-9_]{0,4}"
+                .prop_filter("must not be exactly 'cd'", |s| s != "cd")
+        }
+
+        proptest! {
+            #[test]
+            fn command_uses_cd_matches_leading_cd_segments((command, expected) in arb_command_and_expected()) {
+                prop_assert_eq!(command_uses_cd(&command), expected, "command: {:?}", command);
+            }
+
+            #[test]
+            fn command_uses_cd_ignores_non_leading_cd_occurrences(
+                leading in arb_cd_like_but_not_exact_token(),
+                trailing in proptest::sample::select(vec!["cd", "cd/", "xcd", "cdx"]),
+            ) {
+                let command = format!("{leading} {trailing}");
+                prop_assert!(!command_uses_cd(&command), "command: {:?}", command);
+            }
         }
     }
 }

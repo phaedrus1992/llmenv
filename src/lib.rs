@@ -19,5 +19,7 @@ pub mod sync;
 pub mod task;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
+#[cfg(test)]
+pub(crate) mod test_log_capture;
 pub mod throttle;
 pub mod util;
