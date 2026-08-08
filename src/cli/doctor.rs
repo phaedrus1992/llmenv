@@ -1707,6 +1707,33 @@ mod tests {
         assert!(msg.contains("rg"), "{msg}");
     }
 
+    proptest! {
+        /// Never panics on arbitrary pattern text — patterns are user-authored
+        /// config strings, including non-ASCII, empty, and colon-only input.
+        #[test]
+        fn pattern_command_never_panics(pattern in ".*") {
+            let _ = pattern_command(&pattern);
+        }
+
+        /// Never panics on arbitrary native-permission strings, including
+        /// malformed ones missing the `Bash(...)` wrapper entirely.
+        #[test]
+        fn native_bash_command_never_panics(raw in ".*") {
+            let _ = native_bash_command(&raw);
+        }
+
+        /// A well-formed `Bash(<pattern>)` string round-trips to the same
+        /// command `pattern_command` would extract from `<pattern>` directly
+        /// — the native-permission parser must agree with the neutral one.
+        #[test]
+        fn native_bash_command_matches_pattern_command_for_wrapped_input(
+            pattern in "[a-zA-Z][a-zA-Z0-9_-]{0,10}( [^()]{0,20})?"
+        ) {
+            let raw = format!("Bash({pattern})");
+            prop_assert_eq!(native_bash_command(&raw), Some(pattern_command(&pattern)));
+        }
+    }
+
     // -- hooks_with_glob_like_matchers --
 
     fn hook_with_matcher(event: &str, matcher: &str) -> Hook {
