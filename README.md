@@ -115,7 +115,7 @@ and plugins activate automatically.
 | `llmenv context [--bundle NAME] [--why]` | Show the resolved environment and active scopes in detail |
 | `llmenv validate` | Check config for structural issues |
 | `llmenv edit [BUNDLE-NAME]` | Open config (or a bundle file) in `$EDITOR` |
-| `llmenv completions <bash\|zsh\|fish>` | Generate shell completion scripts |
+| `llmenv completions <bash\|zsh\|fish> [--install]` | Generate (or install) shell completion scripts |
 | `llmenv plugin-sync` | Clone/fast-forward plugin marketplaces into the cache |
 | `llmenv login [--global]` | Capture and cache Claude Code auth credentials |
 | `llmenv upgrade [--check] [--track beta\|release]` | Self-upgrade from the latest GitHub release |

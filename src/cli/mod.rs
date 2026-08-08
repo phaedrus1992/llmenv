@@ -237,10 +237,20 @@ enum Command {
         /// Bundle name to edit (defaults to main config.yaml)
         bundle: Option<String>,
     },
-    /// Generate shell completion scripts
+    /// Generate shell completion scripts, or install them (--install)
     Completions {
-        /// Shell to generate completions for
-        shell: clap_complete::Shell,
+        /// Shell to generate for. Omit with `--install` to auto-detect from `$SHELL`.
+        shell: Option<clap_complete::Shell>,
+        /// Write the script to the shell's standard completion directory
+        /// instead of printing to stdout
+        #[arg(long)]
+        install: bool,
+        /// Custom install directory (implies `--install`)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Overwrite an existing completion file
+        #[arg(long)]
+        force: bool,
     },
     /// Emit source config paths into agent context via SessionStart (#289).
     ///
@@ -693,8 +703,20 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Edit { bundle }) => {
             run_edit(bundle)?;
         }
-        Some(Command::Completions { shell }) => {
-            run_completions(shell)?;
+        Some(Command::Completions {
+            shell,
+            install,
+            dir,
+            force,
+        }) => {
+            if install || dir.is_some() {
+                run_completions_install(shell, dir, force)?;
+            } else {
+                let shell = shell.ok_or_else(|| {
+                    anyhow::anyhow!("SHELL is required unless --install is passed")
+                })?;
+                run_completions(shell)?;
+            }
         }
         None => {
             eprintln!("Usage: llmenv [COMMAND]");
@@ -4131,6 +4153,152 @@ fn run_completions(shell: clap_complete::Shell) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Map `$SHELL`'s basename to a [`clap_complete::Shell`]. `shell_env` is the
+/// raw `$SHELL` value (injected so this is unit-testable without mutating
+/// process env) — typically a path like `/bin/zsh`.
+fn detect_shell(shell_env: Option<&str>) -> anyhow::Result<clap_complete::Shell> {
+    let shell_path = shell_env.ok_or_else(|| {
+        anyhow::anyhow!("--shell not given and $SHELL is not set; pass --shell explicitly")
+    })?;
+    let name = Path::new(shell_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("could not determine shell name from $SHELL={shell_path}")
+        })?;
+    match name {
+        "bash" => Ok(clap_complete::Shell::Bash),
+        "zsh" => Ok(clap_complete::Shell::Zsh),
+        "fish" => Ok(clap_complete::Shell::Fish),
+        other => anyhow::bail!(
+            "unrecognized shell '{other}' from $SHELL={shell_path}; pass --shell explicitly \
+             (bash, zsh, or fish)"
+        ),
+    }
+}
+
+/// The file name a completion script is conventionally installed under.
+/// zsh's autoload-based completion system requires the leading underscore.
+fn completion_filename(shell: clap_complete::Shell) -> &'static str {
+    match shell {
+        clap_complete::Shell::Zsh => "_llmenv",
+        clap_complete::Shell::Fish => "llmenv.fish",
+        _ => "llmenv",
+    }
+}
+
+/// The shell's standard per-user completion directory. `bash_completion_user_dir`
+/// and `zsh_custom` are `$BASH_COMPLETION_USER_DIR`/`$ZSH_CUSTOM` (injected for
+/// testability); when unset, falls back to the vanilla per-shell convention.
+///
+/// # Errors
+/// Returns an error for any shell other than bash/zsh/fish — `clap_complete`
+/// supports more (elvish, PowerShell), but this repo has no install
+/// convention to target for them yet.
+fn completion_target_dir(
+    shell: clap_complete::Shell,
+    home: &Path,
+    bash_completion_user_dir: Option<&str>,
+    zsh_custom: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    match shell {
+        clap_complete::Shell::Bash => Ok(match bash_completion_user_dir {
+            Some(dir) => PathBuf::from(dir).join("completions"),
+            None => home.join(".local/share/bash-completion/completions"),
+        }),
+        clap_complete::Shell::Zsh => Ok(match zsh_custom {
+            Some(dir) => PathBuf::from(dir).join("completions"),
+            None => home.join(".zsh/completions"),
+        }),
+        clap_complete::Shell::Fish => Ok(home.join(".config/fish/completions")),
+        other => {
+            anyhow::bail!("completions --install only supports bash, zsh, and fish (got {other})")
+        }
+    }
+}
+
+/// Print how to activate the just-installed completion script — each shell's
+/// completion system needs a different one-time setup before a *new* shell
+/// picks it up (bash/fish autoload from the standard dir already; zsh needs
+/// `fpath` to include it before `compinit` runs).
+fn print_activation_instructions(shell: clap_complete::Shell, target_dir: &Path) {
+    match shell {
+        clap_complete::Shell::Zsh => {
+            eprintln!(
+                "Add this to ~/.zshrc, before the `compinit` line, then restart your shell:\n  \
+                 fpath+=({})",
+                target_dir.display()
+            );
+        }
+        _ => {
+            eprintln!("Restart your shell (or run `exec $SHELL`) to load the new completions.");
+        }
+    }
+}
+
+/// `llmenv completions [SHELL] --install [--dir DIR] [--force]`: write the
+/// completion script to disk instead of stdout. `shell` is auto-detected
+/// from `$SHELL` when omitted; `dir` overrides the shell's standard
+/// completion directory.
+///
+/// # Errors
+/// Returns an error if the shell can't be determined/isn't supported, the
+/// target file already exists without `--force`, or the write fails.
+fn run_completions_install(
+    shell: Option<clap_complete::Shell>,
+    dir: Option<PathBuf>,
+    force: bool,
+) -> anyhow::Result<()> {
+    let shell = match shell {
+        Some(s) => s,
+        None => detect_shell(std::env::var("SHELL").ok().as_deref())?,
+    };
+    let target_dir = match dir {
+        Some(d) => {
+            let d = d
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("--dir is not valid UTF-8"))?;
+            PathBuf::from(paths::expand_tilde(d))
+        }
+        None => {
+            let home_str = paths::expand_tilde("~");
+            if home_str == "~" {
+                anyhow::bail!("cannot determine home directory: $HOME is unset or empty");
+            }
+            let bash_completion_user_dir = std::env::var("BASH_COMPLETION_USER_DIR")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let zsh_custom = std::env::var("ZSH_CUSTOM").ok().filter(|s| !s.is_empty());
+            completion_target_dir(
+                shell,
+                Path::new(&home_str),
+                bash_completion_user_dir.as_deref(),
+                zsh_custom.as_deref(),
+            )?
+        }
+    };
+
+    std::fs::create_dir_all(&target_dir)
+        .with_context(|| format!("creating completion directory {}", target_dir.display()))?;
+    let path = target_dir.join(completion_filename(shell));
+    if path.exists() && !force {
+        anyhow::bail!(
+            "{} already exists; pass --force to overwrite",
+            path.display()
+        );
+    }
+
+    use clap::CommandFactory;
+    let mut buf: Vec<u8> = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "llmenv", &mut buf);
+    std::fs::write(&path, &buf)
+        .with_context(|| format!("writing completion script to {}", path.display()))?;
+
+    eprintln!("Installed {shell} completions to {}", path.display());
+    print_activation_instructions(shell, &target_dir);
+    Ok(())
+}
+
 fn run_prune(
     all: bool,
     older_than: Option<String>,
@@ -4280,6 +4448,99 @@ mod tests {
         let input = "line1  \nline2   \nline3";
         let expected = "line1\nline2\nline3";
         assert_eq!(compress_agents_md(input), expected);
+    }
+
+    // #756: shell autocomplete install support.
+
+    #[test]
+    fn detect_shell_maps_shell_env_basename() {
+        assert_eq!(
+            detect_shell(Some("/bin/bash")).expect("test"),
+            clap_complete::Shell::Bash
+        );
+        assert_eq!(
+            detect_shell(Some("/usr/bin/zsh")).expect("test"),
+            clap_complete::Shell::Zsh
+        );
+        assert_eq!(
+            detect_shell(Some("/usr/local/bin/fish")).expect("test"),
+            clap_complete::Shell::Fish
+        );
+    }
+
+    #[test]
+    fn detect_shell_errors_when_shell_env_unset() {
+        let err = detect_shell(None).expect_err("test");
+        assert!(err.to_string().contains("SHELL"));
+    }
+
+    #[test]
+    fn detect_shell_errors_on_unrecognized_shell() {
+        let err = detect_shell(Some("/bin/csh")).expect_err("test");
+        assert!(err.to_string().contains("csh"));
+    }
+
+    #[test]
+    fn completion_filename_prefixes_zsh_with_underscore() {
+        assert_eq!(completion_filename(clap_complete::Shell::Zsh), "_llmenv");
+        assert_eq!(completion_filename(clap_complete::Shell::Bash), "llmenv");
+        assert_eq!(
+            completion_filename(clap_complete::Shell::Fish),
+            "llmenv.fish"
+        );
+    }
+
+    #[test]
+    fn completion_target_dir_bash_honors_bash_completion_user_dir() {
+        let home = std::path::Path::new("/home/u");
+        let dir = completion_target_dir(clap_complete::Shell::Bash, home, Some("/custom"), None)
+            .expect("test");
+        assert_eq!(dir, std::path::PathBuf::from("/custom/completions"));
+    }
+
+    #[test]
+    fn completion_target_dir_bash_falls_back_to_xdg_data_home() {
+        let home = std::path::Path::new("/home/u");
+        let dir =
+            completion_target_dir(clap_complete::Shell::Bash, home, None, None).expect("test");
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/home/u/.local/share/bash-completion/completions")
+        );
+    }
+
+    #[test]
+    fn completion_target_dir_zsh_honors_zsh_custom() {
+        let home = std::path::Path::new("/home/u");
+        let dir = completion_target_dir(clap_complete::Shell::Zsh, home, None, Some("/oh-my-zsh"))
+            .expect("test");
+        assert_eq!(dir, std::path::PathBuf::from("/oh-my-zsh/completions"));
+    }
+
+    #[test]
+    fn completion_target_dir_zsh_falls_back_to_vanilla_dir() {
+        let home = std::path::Path::new("/home/u");
+        let dir = completion_target_dir(clap_complete::Shell::Zsh, home, None, None).expect("test");
+        assert_eq!(dir, std::path::PathBuf::from("/home/u/.zsh/completions"));
+    }
+
+    #[test]
+    fn completion_target_dir_fish_is_the_standard_config_dir() {
+        let home = std::path::Path::new("/home/u");
+        let dir =
+            completion_target_dir(clap_complete::Shell::Fish, home, None, None).expect("test");
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/home/u/.config/fish/completions")
+        );
+    }
+
+    #[test]
+    fn completion_target_dir_rejects_unsupported_shells() {
+        let home = std::path::Path::new("/home/u");
+        let err = completion_target_dir(clap_complete::Shell::Elvish, home, None, None)
+            .expect_err("test");
+        assert!(err.to_string().contains("elvish"));
     }
 
     // #987: root `config.features` must reach `manifest.capabilities.features`.

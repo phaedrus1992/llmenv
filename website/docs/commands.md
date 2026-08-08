@@ -153,11 +153,11 @@ Open `config.yaml` (or, if `BUNDLE-NAME` is given, the matching
 ## `completions`
 
 ```text
-llmenv completions <bash|zsh|fish>
+llmenv completions [SHELL] [--install] [--dir DIR] [--force]
 ```
 
-Generate shell completion scripts. Pipe the output to a file your shell loads at
-startup:
+Generate shell completion scripts for `bash`, `zsh`, or `fish`. With no flags,
+prints the script to stdout — pipe it to a file your shell loads at startup:
 
 ```sh
 # zsh — add to your .zshrc or drop into $fpath
@@ -169,6 +169,23 @@ llmenv completions bash > ~/.local/share/bash-completion/completions/llmenv
 # fish
 llmenv completions fish > ~/.config/fish/completions/llmenv.fish
 ```
+
+(added in v3.8.0) `--install` writes the script to the shell's standard
+completion directory instead, so you don't need to know the path yourself:
+
+```sh
+llmenv completions --install              # detect $SHELL, install to the standard location
+llmenv completions zsh --install          # install for a specific shell
+llmenv completions --install --dir DIR    # install to a custom directory
+llmenv completions --install --force      # overwrite an existing completion file
+```
+
+Standard locations: `$BASH_COMPLETION_USER_DIR/completions/` (falling back to
+`~/.local/share/bash-completion/completions/`) for bash, `$ZSH_CUSTOM/completions/`
+(falling back to `~/.zsh/completions/`) for zsh, and `~/.config/fish/completions/`
+for fish. Refuses to overwrite an existing file unless `--force` is passed.
+Restart your shell (or `exec $SHELL`) afterward — for zsh, add the printed
+`fpath+=(...)` line to `~/.zshrc` first, before `compinit`.
 
 ## `plugin-sync`
 
