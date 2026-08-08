@@ -163,6 +163,7 @@ bundle's `bundle.yaml` (bundle-scoped); contributors are merged by value shape.
 capabilities:
   permissions:
     default_mode: acceptEdits           # acceptEdits | plan | default | bypassPermissions
+    preset: safe-readonly               # added in v3.8.0 — see below
     allow:
       - { tool: Bash, pattern: "git *" }
       - { tool: Read, paths: ["~/code"] }
@@ -193,10 +194,21 @@ capabilities:
     opencode: { ... }                    # deep-merged onto the provider block
 ```
 
-- `permissions.default_mode` is a scalar (resolved by precedence);
-  `allow`/`ask`/`deny` are lists (concatenated + deduped).
+- `permissions.default_mode` and `permissions.preset` are scalars (resolved
+  by precedence); `allow`/`ask`/`deny` are lists (concatenated + deduped).
 - A **permission rule** has a `tool` plus either a glob `pattern` or a list of
   `paths`.
+- `permissions.preset` (added in v3.8.0) expands, at merge time, into a
+  curated set of `allow` rules — `safe-readonly` is the only preset today. It
+  covers the read-only CLI tools this project's own bundled rules recommend
+  (`rg`, `fd`, `ast-grep`, `shellcheck`, `shfmt`) plus safe read-only `git`
+  subcommands (`status`, `diff`, `log`, `show`, `blame`) and `ls`, so agents
+  stop hitting a permission prompt for tools the rules themselves told them
+  to prefer. A rule the preset already covers doesn't duplicate one an
+  explicit `allow` entry also declares. Run `llmenv doctor` to get flagged
+  when a config allows a legacy tool (`grep`, `find`) without also allowing
+  its recommended replacement (`rg`, `fd`) — a nudge toward the preset even
+  without adopting it.
 - A **hook** has an `event`, optional `matcher`, and a `handler` of type
   `command` (with `command:`) or `mcp_tool` (with `tool:`). Hook command paths
   declared in a bundle are bundle-relative and resolved at materialize time.

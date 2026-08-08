@@ -7,8 +7,8 @@ use super::{
     Bundle, Cache, Capabilities, ContentMatch, ContentScope, ContextMode, Features, Hook,
     HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, Marketplace,
     McpPermissionAction, McpPermissions, McpServer, McpTransport, Memory, NativePermissionRules,
-    NetworkMatch, NetworkScope, PermissionMode, Permissions, PluginCollection, Scopes, Throttle,
-    UserMatch, UserScope,
+    NetworkMatch, NetworkScope, PermissionMode, PermissionPreset, Permissions, PluginCollection,
+    Scopes, Throttle, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -893,12 +893,14 @@ mod tests {
     fn arb_permissions() -> impl Strategy<Value = Permissions> {
         (
             prop::option::of(arb_permission_mode()),
+            prop::option::of(Just(PermissionPreset::SafeReadonly)),
             prop::collection::vec(arb_permission_rule(), 0..3),
             prop::collection::vec(arb_permission_rule(), 0..3),
             prop::collection::vec(arb_permission_rule(), 0..3),
         )
-            .prop_map(|(default_mode, allow, ask, deny)| Permissions {
+            .prop_map(|(default_mode, preset, allow, ask, deny)| Permissions {
                 default_mode,
+                preset,
                 allow,
                 ask,
                 deny,

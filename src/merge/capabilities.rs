@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{
     Capabilities, CodebaseMemory, Features, HostEntry, Memory, NativePermissionRules,
-    PermissionMode, Permissions, Throttle,
+    PermissionMode, PermissionPreset, PermissionRule, Permissions, Throttle,
 };
 use crate::util::{dedup, merge_yaml, normalize_yaml};
 
@@ -73,6 +73,15 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
             slot.ask.extend(rules.ask.iter().cloned());
             slot.deny.extend(rules.deny.iter().cloned());
         }
+    }
+
+    // #975: resolve the `permissions.preset` scalar (same highest-precedence
+    // convention as the other feature scalars below) and expand it into
+    // `allow` rules before the dedup pass, so a rule the preset already
+    // covers doesn't duplicate one an explicit `allow` entry also declares.
+    let preset = highest_precedence(contributors, |c| c.permissions.preset.as_ref());
+    if let Some(preset) = preset {
+        allow.extend(safe_readonly_rules_for(preset));
     }
 
     let env = resolve_env(contributors)?;
@@ -156,6 +165,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     Ok(Capabilities {
         permissions: Permissions {
             default_mode,
+            preset,
             allow,
             ask,
             deny,
@@ -180,6 +190,41 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         model_providers,
         default_models,
     })
+}
+
+/// The curated `allow` rules a [`PermissionPreset`] expands to (#975).
+///
+/// A tool ends up here only if this project's own bundled rules
+/// (`examples/config-llmenv-dir/bundles/base/AGENTS.md`'s "CLI Tools" table)
+/// name it as the recommended read-only replacement for a common shell
+/// command, or #975 named it directly as a safe read-only `git`/`ls`
+/// invocation. Every pattern uses `"<cmd> *"` (space before the glob),
+/// matching this codebase's own established convention for Bash permission
+/// patterns — an invocation with zero arguments (a bare `ls`) is not
+/// covered, consistent with existing rules like `"cargo *"`.
+fn safe_readonly_rules_for(preset: PermissionPreset) -> Vec<PermissionRule> {
+    fn bash(pattern: &str) -> PermissionRule {
+        PermissionRule {
+            tool: "Bash".to_string(),
+            pattern: Some(pattern.to_string()),
+            paths: Vec::new(),
+        }
+    }
+    match preset {
+        PermissionPreset::SafeReadonly => vec![
+            bash("rg *"),
+            bash("fd *"),
+            bash("ast-grep *"),
+            bash("shellcheck *"),
+            bash("shfmt *"),
+            bash("git status *"),
+            bash("git diff *"),
+            bash("git log *"),
+            bash("git show *"),
+            bash("git blame *"),
+            bash("ls *"),
+        ],
+    }
 }
 
 /// Merge one of the per-engine opaque `native_*` maps across all contributors.
@@ -398,7 +443,7 @@ fn resolve_default_mode(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::{Hook, HookHandler, HookHandlerKind, PermissionRule};
+    use crate::config::{Hook, HookHandler, HookHandlerKind, PermissionPreset, PermissionRule};
 
     fn rule(tool: &str, pattern: &str) -> PermissionRule {
         PermissionRule {
@@ -475,6 +520,66 @@ mod tests {
         );
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.permissions.allow, vec![rule("A", "1"), rule("B", "2")]);
+    }
+
+    fn with_preset(preset: PermissionPreset) -> Capabilities {
+        Capabilities {
+            permissions: Permissions {
+                preset: Some(preset),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn expected_safe_readonly_rules() -> Vec<PermissionRule> {
+        vec![
+            rule("Bash", "rg *"),
+            rule("Bash", "fd *"),
+            rule("Bash", "ast-grep *"),
+            rule("Bash", "shellcheck *"),
+            rule("Bash", "shfmt *"),
+            rule("Bash", "git status *"),
+            rule("Bash", "git diff *"),
+            rule("Bash", "git log *"),
+            rule("Bash", "git show *"),
+            rule("Bash", "git blame *"),
+            rule("Bash", "ls *"),
+        ]
+    }
+
+    #[test]
+    fn safe_readonly_preset_expands_into_allow_rules() {
+        let a = contributor("a", 0, with_preset(PermissionPreset::SafeReadonly));
+        let out = merge_capabilities(&[a]).unwrap();
+        assert_eq!(out.permissions.allow, expected_safe_readonly_rules());
+        assert_eq!(out.permissions.preset, Some(PermissionPreset::SafeReadonly));
+    }
+
+    #[test]
+    fn safe_readonly_preset_rules_dedup_with_explicit_allow() {
+        let mut caps = with_preset(PermissionPreset::SafeReadonly);
+        caps.permissions.allow.push(rule("Bash", "rg *"));
+        let a = contributor("a", 0, caps);
+        let out = merge_capabilities(&[a]).unwrap();
+        assert_eq!(out.permissions.allow, expected_safe_readonly_rules());
+    }
+
+    #[test]
+    fn no_preset_yields_no_expansion() {
+        let a = contributor("a", 0, Capabilities::default());
+        let out = merge_capabilities(&[a]).unwrap();
+        assert!(out.permissions.allow.is_empty());
+        assert_eq!(out.permissions.preset, None);
+    }
+
+    #[test]
+    fn preset_resolves_by_highest_precedence() {
+        let low = contributor("low", 0, Capabilities::default());
+        let high = contributor("high", 1, with_preset(PermissionPreset::SafeReadonly));
+        let out = merge_capabilities(&[low, high]).unwrap();
+        assert_eq!(out.permissions.preset, Some(PermissionPreset::SafeReadonly));
+        assert_eq!(out.permissions.allow, expected_safe_readonly_rules());
     }
 
     #[test]

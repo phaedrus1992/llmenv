@@ -414,6 +414,74 @@ pub(super) fn hooks_with_glob_like_matchers(config: &Config) -> Vec<String> {
         .collect()
 }
 
+/// Legacy shell tool -> recommended replacement, per this project's own
+/// bundled rules (`examples/config-llmenv-dir/bundles/base/AGENTS.md`'s "CLI
+/// Tools" table). Only pairs that table names an explicit replacement for are
+/// in scope — a tool like `cat` has no named replacement there and is
+/// deliberately not checked (#975).
+const LEGACY_TOOL_REPLACEMENTS: &[(&str, &str)] = &[("grep", "rg"), ("find", "fd")];
+
+/// A config `allow` rule for a legacy tool with no matching allow rule for
+/// its recommended replacement (#975).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LegacyToolRule {
+    pub legacy: &'static str,
+    pub replacement: &'static str,
+}
+
+impl LegacyToolRule {
+    pub fn message(&self) -> String {
+        let Self {
+            legacy,
+            replacement,
+        } = self;
+        format!(
+            "config allows `{legacy}` but not its recommended replacement `{replacement}` — \
+             this project's own bundled rules tell the agent to prefer `{replacement}`, so every \
+             `{replacement}` invocation still hits a permission prompt. Add an allow rule for \
+             `{replacement}` (e.g. `Bash({replacement} *)`), or set \
+             `capabilities.permissions.preset: safe-readonly` to cover it"
+        )
+    }
+}
+
+/// The leading whitespace-delimited token of a Bash permission pattern, with
+/// any Claude-style colon-subcommand suffix stripped — the command name a
+/// glob like `"grep -r *"` or `"grep:*"` actually gates.
+fn pattern_command(pattern: &str) -> &str {
+    let first = pattern.split_whitespace().next().unwrap_or("");
+    first.split(':').next().unwrap_or("")
+}
+
+/// Returns every legacy/replacement pair (#975) where the merged `allow` list
+/// grants the legacy tool but not its recommended replacement.
+///
+/// Scoped to `Bash` rules and the `allow` tier only: `ask`/`deny` don't grant
+/// access, so they're not the "still gets a permission prompt" case this lint
+/// targets. Takes merged `capabilities` so a bundle-contributed `allow` rule
+/// for the replacement correctly silences the warning.
+pub(super) fn legacy_tools_missing_replacement(capabilities: &Capabilities) -> Vec<LegacyToolRule> {
+    let commands: std::collections::HashSet<&str> = capabilities
+        .permissions
+        .allow
+        .iter()
+        .filter(|r| r.tool == "Bash")
+        .filter_map(|r| r.pattern.as_deref())
+        .map(pattern_command)
+        .collect();
+
+    LEGACY_TOOL_REPLACEMENTS
+        .iter()
+        .filter(|(legacy, replacement)| {
+            commands.contains(legacy) && !commands.contains(replacement)
+        })
+        .map(|&(legacy, replacement)| LegacyToolRule {
+            legacy,
+            replacement,
+        })
+        .collect()
+}
+
 /// Drop the platform credential entry belonging to each cache folder GC just
 /// deleted, and report how many went (#1057).
 ///
@@ -1511,6 +1579,95 @@ mod tests {
             let pattern = format!("{cmd} {sub} *");
             prop_assert!(!uses_colon_prefix_syntax(&pattern));
         }
+    }
+
+    // -- legacy_tools_missing_replacement --
+
+    #[test]
+    fn flags_grep_without_rg() {
+        let caps = caps_with_allow("Bash", "grep -r *");
+        let found = legacy_tools_missing_replacement(&caps);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].legacy, "grep");
+        assert_eq!(found[0].replacement, "rg");
+    }
+
+    #[test]
+    fn flags_find_without_fd() {
+        let caps = caps_with_allow("Bash", "find *");
+        let found = legacy_tools_missing_replacement(&caps);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].legacy, "find");
+        assert_eq!(found[0].replacement, "fd");
+    }
+
+    #[test]
+    fn silent_when_replacement_already_allowed() {
+        let caps = Capabilities {
+            permissions: Permissions {
+                allow: vec![
+                    rule("Bash", Some("grep -r *"), vec![]),
+                    rule("Bash", Some("rg *"), vec![]),
+                ],
+                ..Default::default()
+            },
+            ..Capabilities::default()
+        };
+        assert!(legacy_tools_missing_replacement(&caps).is_empty());
+    }
+
+    #[test]
+    fn silent_when_neither_legacy_nor_replacement_allowed() {
+        assert!(legacy_tools_missing_replacement(&Capabilities::default()).is_empty());
+    }
+
+    #[test]
+    fn cat_is_not_flagged_no_named_replacement() {
+        // cat has no explicit replacement in this project's own bundled rules
+        // — only pairs the AGENTS.md table names outright (grep->rg, find->fd)
+        // are in scope for this lint.
+        let caps = caps_with_allow("Bash", "cat *");
+        assert!(legacy_tools_missing_replacement(&caps).is_empty());
+    }
+
+    #[test]
+    fn does_not_match_substring_of_a_longer_command() {
+        // "grepper *" is not "grep" — the leading token must match exactly.
+        let caps = caps_with_allow("Bash", "grepper *");
+        assert!(legacy_tools_missing_replacement(&caps).is_empty());
+    }
+
+    #[test]
+    fn non_bash_tool_rules_are_ignored() {
+        let caps = caps_with_allow("Read", "grep");
+        assert!(legacy_tools_missing_replacement(&caps).is_empty());
+    }
+
+    #[test]
+    fn both_legacy_tools_flagged_independently() {
+        let caps = Capabilities {
+            permissions: Permissions {
+                allow: vec![
+                    rule("Bash", Some("grep -r *"), vec![]),
+                    rule("Bash", Some("find *"), vec![]),
+                ],
+                ..Default::default()
+            },
+            ..Capabilities::default()
+        };
+        let found = legacy_tools_missing_replacement(&caps);
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn message_names_both_tools() {
+        let rule = LegacyToolRule {
+            legacy: "grep",
+            replacement: "rg",
+        };
+        let msg = rule.message();
+        assert!(msg.contains("grep"), "{msg}");
+        assert!(msg.contains("rg"), "{msg}");
     }
 
     // -- hooks_with_glob_like_matchers --

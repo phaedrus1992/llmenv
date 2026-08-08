@@ -117,6 +117,27 @@ fn top_level_capabilities_merge_with_bundle_fragments() {
 }
 
 #[test]
+fn safe_readonly_preset_parses_from_yaml_and_expands_at_merge_time() {
+    let top: Capabilities =
+        serde_yaml::from_str("permissions:\n  preset: safe-readonly\n").expect("parse");
+    let m = merge(&top, &empty_native(), &[]).expect("merge");
+    assert!(
+        m.capabilities
+            .permissions
+            .allow
+            .iter()
+            .any(|r| r.tool == "Bash" && r.pattern.as_deref() == Some("rg *"))
+    );
+    assert!(
+        m.capabilities
+            .permissions
+            .allow
+            .iter()
+            .any(|r| r.tool == "Bash" && r.pattern.as_deref() == Some("fd *"))
+    );
+}
+
+#[test]
 fn agents_md_order_follows_bundle_order() {
     let a = merge(
         &Capabilities::default(),
