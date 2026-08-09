@@ -657,6 +657,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         }
     }
 
@@ -1238,6 +1239,7 @@ mod tests {
             timeout: Some(30),
             disabled_tools: vec!["dangerous_tool".into()],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         });
         manifest.mcps.push(ResolvedMcp {
             name: "sse-server".into(),
@@ -1249,6 +1251,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         });
 
         CrushAdapter.materialize(&manifest, tmp.path()).unwrap();

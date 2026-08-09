@@ -41,6 +41,11 @@ pub struct ResolvedMcp {
     /// (plain `mcp` entries and `codebase_memory` have no tier constants to
     /// override). Consumed by `ClaudeCodeAdapter` only today.
     pub mcp_permissions: Option<McpPermissions>,
+    /// Token budget for the `icm_wake_up` call (#1216), carried through from
+    /// the source `features.memory` entry for the ICM MCP. `None` for every
+    /// other server. Consumed by `hook_run`'s live dispatch pipeline, not by
+    /// static materialization.
+    pub wakeup_max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +203,7 @@ fn resolve_static(m: &McpServer) -> Result<ResolvedMcp, ResolveError> {
         timeout: m.timeout,
         disabled_tools: m.disabled_tools.clone(),
         mcp_permissions: None,
+        wakeup_max_tokens: None,
     })
 }
 
@@ -225,6 +231,9 @@ fn resolve_memory(
         // #946: threads the per-tier override through so the adapter can
         // apply it when rendering ICM's tool-tier permissions.
         mcp_permissions: mem.mcp_permissions.clone(),
+        // #1216: threads the configured wake-up token budget through so
+        // hook_run's dispatch pipeline can pass it explicitly to icm_wake_up.
+        wakeup_max_tokens: mem.wakeup_max_tokens,
     })
 }
 
@@ -274,6 +283,7 @@ pub fn resolve_codebase_memory(
         timeout: None,
         disabled_tools: vec![],
         mcp_permissions: None,
+        wakeup_max_tokens: None,
     }
 }
 
@@ -390,6 +400,7 @@ mod tests {
             auto_prune: false,
             consolidation: None,
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         }
     }
 
@@ -480,6 +491,21 @@ mod tests {
     }
 
     #[test]
+    fn memory_carries_wakeup_max_tokens() {
+        let mut mem = memory();
+        mem.wakeup_max_tokens = Some(750);
+        let resolved = resolve_mcps(&[], &[mem], &base_host(), &tags(&["network-home"])).unwrap();
+        assert_eq!(resolved[0].wakeup_max_tokens, Some(750));
+    }
+
+    #[test]
+    fn memory_wakeup_max_tokens_defaults_to_none() {
+        let resolved =
+            resolve_mcps(&[], &[memory()], &base_host(), &tags(&["network-home"])).unwrap();
+        assert_eq!(resolved[0].wakeup_max_tokens, None);
+    }
+
+    #[test]
     fn memory_ambiguous_errors() {
         let home = Memory {
             server_host: "still".into(),
@@ -494,6 +520,7 @@ mod tests {
             auto_prune: false,
             consolidation: None,
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
@@ -508,6 +535,7 @@ mod tests {
             auto_prune: false,
             consolidation: None,
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         };
         let mut host = base_host();
         host.insert(
@@ -539,6 +567,7 @@ mod tests {
             auto_prune: false,
             consolidation: None,
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
@@ -553,6 +582,7 @@ mod tests {
             auto_prune: false,
             consolidation: None,
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         };
         let mut host = base_host();
         host.insert(
