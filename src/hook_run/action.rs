@@ -112,10 +112,8 @@ impl Action {
     /// `keyword: llmenv-bundle:<bundle>` to scope the recall.
     pub fn arguments(&self, query: &str, chunk: &str) -> Value {
         match self {
-            Action::WakeUp(max_tokens) => match max_tokens {
-                Some(n) => json!({ "max_tokens": n }),
-                None => json!({}),
-            },
+            Action::WakeUp(Some(n)) => json!({ "max_tokens": n }),
+            Action::WakeUp(None) => json!({}),
             Action::Recall => json!({ "query": query }),
             Action::RecallTag(q) => json!({
                 "query": q.tag,

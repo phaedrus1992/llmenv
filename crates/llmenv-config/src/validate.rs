@@ -643,7 +643,7 @@ impl Config {
                     ));
                 }
                 if let Some(n) = mem.wakeup_max_tokens
-                    && !(20..=4000).contains(&n)
+                    && !crate::WAKEUP_MAX_TOKENS_RANGE.contains(&n)
                 {
                     return Err(ValidateError::MemoryWakeupMaxTokensInvalid(n));
                 }
@@ -1101,7 +1101,7 @@ mod tests {
             prop::collection::vec(arb_string(), 0..3),
             prop::collection::vec(arb_string(), 0..3),
             prop::option::of(arb_mcp_permissions()),
-            prop::option::of(20u32..=4000),
+            prop::option::of(crate::WAKEUP_MAX_TOKENS_RANGE),
         )
             .prop_map(
                 |(
@@ -1779,68 +1779,51 @@ mod tests {
         mem
     }
 
-    #[test]
-    fn memory_wakeup_max_tokens_below_range_is_rejected() {
-        let mut host = std::collections::BTreeMap::new();
-        host.insert(
+    fn validate_with_wakeup_max_tokens(n: Option<u32>) -> Result<(), ValidateError> {
+        let host = std::collections::BTreeMap::from([(
             "h".to_string(),
             crate::HostEntry {
                 addr: "127.0.0.1".to_string(),
             },
-        );
-        let config =
-            config_with_memory_and_host(vec![memory_entry_with_wakeup_max_tokens(Some(19))], host);
+        )]);
+        config_with_memory_and_host(vec![memory_entry_with_wakeup_max_tokens(n)], host).validate()
+    }
+
+    #[test]
+    fn memory_wakeup_max_tokens_below_range_is_rejected() {
         assert!(matches!(
-            config.validate(),
+            validate_with_wakeup_max_tokens(Some(19)),
             Err(ValidateError::MemoryWakeupMaxTokensInvalid(19))
         ));
     }
 
     #[test]
     fn memory_wakeup_max_tokens_above_range_is_rejected() {
-        let mut host = std::collections::BTreeMap::new();
-        host.insert(
-            "h".to_string(),
-            crate::HostEntry {
-                addr: "127.0.0.1".to_string(),
-            },
-        );
-        let config = config_with_memory_and_host(
-            vec![memory_entry_with_wakeup_max_tokens(Some(4001))],
-            host,
-        );
         assert!(matches!(
-            config.validate(),
+            validate_with_wakeup_max_tokens(Some(4001)),
             Err(ValidateError::MemoryWakeupMaxTokensInvalid(4001))
         ));
     }
 
     #[test]
     fn memory_wakeup_max_tokens_in_range_is_accepted() {
-        let mut host = std::collections::BTreeMap::new();
-        host.insert(
-            "h".to_string(),
-            crate::HostEntry {
-                addr: "127.0.0.1".to_string(),
-            },
-        );
-        let config =
-            config_with_memory_and_host(vec![memory_entry_with_wakeup_max_tokens(Some(750))], host);
-        assert!(config.validate().is_ok());
+        assert!(validate_with_wakeup_max_tokens(Some(750)).is_ok());
     }
 
     #[test]
     fn memory_wakeup_max_tokens_unset_is_accepted() {
-        let mut host = std::collections::BTreeMap::new();
-        host.insert(
-            "h".to_string(),
-            crate::HostEntry {
-                addr: "127.0.0.1".to_string(),
-            },
-        );
-        let config =
-            config_with_memory_and_host(vec![memory_entry_with_wakeup_max_tokens(None)], host);
-        assert!(config.validate().is_ok());
+        assert!(validate_with_wakeup_max_tokens(None).is_ok());
+    }
+
+    proptest! {
+        // #1216: validate() accepts a wakeup_max_tokens value iff it's within
+        // WAKEUP_MAX_TOKENS_RANGE — strengthens the four boundary-value unit
+        // tests above with the full-range property.
+        #[test]
+        fn memory_wakeup_max_tokens_validate_matches_range(n in any::<u32>()) {
+            let in_range = crate::WAKEUP_MAX_TOKENS_RANGE.contains(&n);
+            prop_assert_eq!(validate_with_wakeup_max_tokens(Some(n)).is_ok(), in_range);
+        }
     }
 
     fn config_with_codebase_memory(codebase_memory: Vec<crate::CodebaseMemory>) -> Config {

@@ -326,6 +326,18 @@ pub(crate) fn read_bundle_yaml(
                     mem.listen_host
                 );
             }
+            if let Some(n) = mem.wakeup_max_tokens
+                && !crate::config::WAKEUP_MAX_TOKENS_RANGE.contains(&n)
+            {
+                anyhow::bail!(
+                    "{context}: features.memory entry for '{}': wakeup_max_tokens ({n}) must be \
+                     between {} and {} (icm's own MCP handler clamps to this range; llmenv \
+                     fails fast instead of silently truncating)",
+                    mem.server_host,
+                    crate::config::WAKEUP_MAX_TOKENS_RANGE.start(),
+                    crate::config::WAKEUP_MAX_TOKENS_RANGE.end()
+                );
+            }
         }
         for th in &features.throttle {
             if th.when.is_empty() {
@@ -539,6 +551,42 @@ mod tests {
             .expect("features must be present");
         assert_eq!(features.memory.len(), 1);
         assert_eq!(features.memory[0].server_host, "still");
+    }
+
+    // #1216: a bundle-contributed memory entry's `wakeup_max_tokens` must be
+    // rejected at bundle-read time when out of range, mirroring the
+    // `Config::validate()` check for top-level `features.memory` entries —
+    // otherwise a bundle can smuggle a value the top-level validator would
+    // reject straight past every llmenv check.
+    #[test]
+    fn bundle_memory_wakeup_max_tokens_out_of_range_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("mem-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 9092\n",
+                "      when: [home]\n",
+                "      wakeup_max_tokens: 4001\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "mem-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        assert!(
+            err.to_string().contains("wakeup_max_tokens"),
+            "expected a wakeup_max_tokens range error, got: {err}"
+        );
     }
 
     // #365: a bundle.yaml with a features.codebase_memory block contributes

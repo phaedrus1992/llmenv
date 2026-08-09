@@ -34,8 +34,8 @@ pub use schema::{
     PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, RepeatDetect, Scopes,
     SessionLog, SkillSource, SlippageControl, StateConfig, StateTool, StatuslineConfig,
     StatuslineStyle, TaskTracker, Throttle, TranscriptSinkConfig, UpgradeConfig, UpgradeTrack,
-    UserMatch, UserScope, WidgetConfig, classify_source, github_owner_repo,
-    is_reserved_official_marketplace, split_plugin_ref,
+    UserMatch, UserScope, WAKEUP_MAX_TOKENS_RANGE, WidgetConfig, classify_source,
+    github_owner_repo, is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
 pub use validate::{

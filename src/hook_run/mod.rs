@@ -865,10 +865,8 @@ fn run_inner(
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
-        // #1216: the wake-up token budget travels alongside the client since
-        // both come from the same resolved `features.memory` entry.
-        let wakeup_max_tokens = resolved_client.as_ref().and_then(|(_, w)| *w);
-        let client = resolved_client.map(|(c, _)| c);
+        let wakeup_max_tokens = resolved_client.as_ref().and_then(|r| r.wakeup_max_tokens);
+        let client = resolved_client.map(|r| r.client);
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
             &active,
@@ -1458,6 +1456,22 @@ impl MemoryEndpoint {
             _ => None,
         }
     }
+
+    /// Consume into `(url, wakeup_max_tokens)`, erroring exactly as
+    /// [`Self::into_url`] — `into_url` itself keeps its existing signature
+    /// since it has several other callers that don't need the token budget.
+    pub(crate) fn into_url_and_wakeup_max_tokens(self) -> anyhow::Result<(String, Option<u32>)> {
+        let wakeup_max_tokens = self.wakeup_max_tokens();
+        Ok((self.into_url()?, wakeup_max_tokens))
+    }
+}
+
+/// A resolved memory-backend client plus the active `features.memory`
+/// entry's configured wake-up token budget (#1216) — the two travel
+/// together since both come from the same resolved endpoint.
+struct ResolvedMemoryClient {
+    client: McpHttpClient,
+    wakeup_max_tokens: Option<u32>,
 }
 
 /// Resolve (or reuse from `cache`) the MCP client for the active memory
@@ -1475,18 +1489,11 @@ fn resolve_memory_client(
     active: &crate::scope::ActiveScopes,
     event: impl std::fmt::Display,
     cache: &'static OnceLock<Mutex<HashMap<String, McpHttpClient>>>,
-) -> Option<(McpHttpClient, Option<u32>)> {
-    let endpoint = match memory_url(config, config_dir, active) {
-        Ok(endpoint) => endpoint,
-        Err(e) => {
-            eprintln!("llmenv: memory {event} skipped: {e}");
-            return None;
-        }
-    };
-    // #1216: read before `into_url` consumes `endpoint` below.
-    let wakeup_max_tokens = endpoint.wakeup_max_tokens();
-    let url = match endpoint.into_url() {
-        Ok(url) => url,
+) -> Option<ResolvedMemoryClient> {
+    let (url, wakeup_max_tokens) = match memory_url(config, config_dir, active)
+        .and_then(MemoryEndpoint::into_url_and_wakeup_max_tokens)
+    {
+        Ok(pair) => pair,
         Err(e) => {
             eprintln!("llmenv: memory {event} skipped: {e}");
             return None;
@@ -1506,7 +1513,10 @@ fn resolve_memory_client(
             }
         }
     };
-    Some((client, wakeup_max_tokens))
+    Some(ResolvedMemoryClient {
+        client,
+        wakeup_max_tokens,
+    })
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, or the

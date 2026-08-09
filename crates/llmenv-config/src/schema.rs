@@ -1318,6 +1318,13 @@ pub struct Memory {
     pub wakeup_max_tokens: Option<u32>,
 }
 
+/// Valid range for [`Memory::wakeup_max_tokens`] — the range icm's own MCP
+/// handler clamps to. Shared by every place that validates the field (top-
+/// level `Config::validate()`, the bundle-contributed mirror in
+/// `crate::merge`, and the proptest generator) so the bound can't drift
+/// between them.
+pub const WAKEUP_MAX_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 20..=4000;
+
 /// A local, tag-activated `codebase-memory-mcp` server. Unlike `Memory`
 /// (ICM), this resolves to a **local stdio** MCP entry, not a network
 /// client — codebase-memory-mcp has no remote-serve mode. `CBM_CACHE_DIR`
