@@ -115,6 +115,26 @@ pub fn merge(
 
     let mut merged_caps = merge_capabilities(&contributors)?;
 
+    // #1224: a memory entry's `server_host` may be declared in a *different*
+    // contributor's `host:` block than the one that declares the memory
+    // entry itself (e.g. a bundle's `server_host` pointing at a host the
+    // top-level config.yaml declares) — the merged host table is the only
+    // point where every contributor's `host:` entries are visible together,
+    // so this check cannot run any earlier (not in `read_bundle_yaml`, which
+    // only sees one bundle in isolation, and not in `Config::validate()`,
+    // which never sees bundles at all).
+    if let Some(features) = &merged_caps.features {
+        for mem in &features.memory {
+            if !merged_caps.host.contains_key(&mem.server_host) {
+                anyhow::bail!(
+                    "features.memory entry references server_host '{}' which has no entry in \
+                     the merged `host:` table (checked across config.yaml and every bundle)",
+                    mem.server_host
+                );
+            }
+        }
+    }
+
     // #317: if slippage enabled with effort_level and no higher-precedence
     // effort_level was set, propagate from slippage config.
     if merged_caps.effort_level.is_none()
@@ -543,7 +563,15 @@ mod tests {
             precedence: 1,
         };
 
-        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+        let mut top_level = Capabilities::default();
+        top_level.host.insert(
+            "still".to_string(),
+            crate::config::HostEntry {
+                addr: "still.local".to_string(),
+            },
+        );
+
+        let manifest = merge(&top_level, &BTreeMap::new(), &[bundle]).unwrap();
         let features = manifest
             .capabilities
             .features
@@ -586,6 +614,90 @@ mod tests {
         assert!(
             err.to_string().contains("wakeup_max_tokens"),
             "expected a wakeup_max_tokens range error, got: {err}"
+        );
+    }
+
+    // #1224: a bundle-contributed memory entry whose `server_host` has no
+    // entry in the fully-merged `host:` table (top-level + every bundle) must
+    // be rejected. This check can only run post-merge — a bundle's own
+    // `bundle.yaml` legitimately has no `host:` block of its own when its
+    // `server_host` is declared at the top level (see the acceptance test
+    // right below), so per-bundle validation (`read_bundle_yaml`) can't see
+    // enough context to make this call.
+    #[test]
+    fn bundle_memory_unknown_server_host_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("mem-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: does-not-exist\n",
+                "      port: 9092\n",
+                "      when: [home]\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "mem-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        assert!(
+            err.to_string().contains("does-not-exist"),
+            "expected an unknown-server_host error naming the host, got: {err}"
+        );
+    }
+
+    // #1224: a bundle's `server_host` may legitimately reference a `host:`
+    // entry declared at the *top level* rather than in the bundle's own
+    // `bundle.yaml` — the merged host table is the union of both, so this
+    // must be accepted, not rejected as "unknown".
+    #[test]
+    fn bundle_memory_server_host_declared_at_top_level_is_accepted() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("mem-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 9092\n",
+                "      when: [home]\n",
+            ),
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "mem-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let mut top_level = Capabilities::default();
+        top_level.host.insert(
+            "still".to_string(),
+            crate::config::HostEntry {
+                addr: "still.local".to_string(),
+            },
+        );
+
+        let manifest = merge(&top_level, &BTreeMap::new(), &[bundle]).unwrap();
+        assert_eq!(
+            manifest
+                .capabilities
+                .features
+                .expect("features must be present")
+                .memory
+                .len(),
+            1
         );
     }
 
