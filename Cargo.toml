@@ -54,8 +54,8 @@ llmenv-paths = { path = "crates/llmenv-paths", version = "3.7.0" }
 llmenv-git = { path = "crates/llmenv-git", version = "3.7.0" }
 llmenv-config = { path = "crates/llmenv-config", version = "3.7.0" }
 llmenv-util = { path = "crates/llmenv-util", version = "3.7.0" }
-clap = { version = "=4.6.5", features = ["derive"] }
-clap_complete = "=4.6.8"
+clap = { version = "=4.6.6", features = ["derive"] }
+clap_complete = "=4.6.9"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
