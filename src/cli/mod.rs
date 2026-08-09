@@ -5600,6 +5600,7 @@ mod tests {
                     auto_prune: false,
                     consolidation: None,
                     mcp_permissions: None,
+                    wakeup_max_tokens: None,
                 }],
                 throttle: vec![],
                 context_mode: None,

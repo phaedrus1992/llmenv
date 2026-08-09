@@ -42,6 +42,7 @@ fn stdio(name: &str, command: &str, args: &[&str]) -> ResolvedMcp {
         timeout: None,
         disabled_tools: vec![],
         mcp_permissions: None,
+        wakeup_max_tokens: None,
     }
 }
 
@@ -56,6 +57,7 @@ fn remote(name: &str, url: &str) -> ResolvedMcp {
         timeout: None,
         disabled_tools: vec![],
         mcp_permissions: None,
+        wakeup_max_tokens: None,
     }
 }
 

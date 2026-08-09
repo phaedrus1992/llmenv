@@ -53,6 +53,11 @@ pub enum ValidateError {
         "memory: listen_host '{0}' is not a valid IP address literal (hostnames not supported)"
     )]
     MemoryInvalidListenHost(String),
+    #[error(
+        "memory: wakeup_max_tokens ({0}) must be between 20 and 4000 (icm's own MCP handler \
+         clamps to this range; llmenv fails fast instead of silently truncating)"
+    )]
+    MemoryWakeupMaxTokensInvalid(u32),
     #[error("features.codebase_memory entry has no `when` tags")]
     CodebaseMemoryNoTags,
     #[error("throttle entry for '{0}' has no when: tags")]
@@ -637,6 +642,11 @@ impl Config {
                         mem.listen_host.clone(),
                     ));
                 }
+                if let Some(n) = mem.wakeup_max_tokens
+                    && !crate::WAKEUP_MAX_TOKENS_RANGE.contains(&n)
+                {
+                    return Err(ValidateError::MemoryWakeupMaxTokensInvalid(n));
+                }
             }
             for th in &features.throttle {
                 if th.when.is_empty() {
@@ -1091,21 +1101,33 @@ mod tests {
             prop::collection::vec(arb_string(), 0..3),
             prop::collection::vec(arb_string(), 0..3),
             prop::option::of(arb_mcp_permissions()),
+            prop::option::of(crate::WAKEUP_MAX_TOKENS_RANGE),
         )
             .prop_map(
-                |(server_host, port, listen_host, when, default_topics, mcp_permissions)| Memory {
+                |(
                     server_host,
                     port,
                     listen_host,
                     when,
                     default_topics,
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: std::collections::BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
                     mcp_permissions,
+                    wakeup_max_tokens,
+                )| {
+                    Memory {
+                        server_host,
+                        port,
+                        listen_host,
+                        when,
+                        default_topics,
+                        default_type: None,
+                        default_importance: None,
+                        type_importance: std::collections::BTreeMap::new(),
+                        retention: None,
+                        auto_prune: false,
+                        consolidation: None,
+                        mcp_permissions,
+                        wakeup_max_tokens,
+                    }
                 },
             )
     }
@@ -1716,6 +1738,7 @@ mod tests {
             retention: None,
             auto_prune: false,
             mcp_permissions: None,
+            wakeup_max_tokens: None,
         }
     }
 
@@ -1748,6 +1771,59 @@ mod tests {
             config.validate(),
             Err(ValidateError::MemoryUnknownServerHost(h)) if h == "does-not-exist"
         ));
+    }
+
+    fn memory_entry_with_wakeup_max_tokens(wakeup_max_tokens: Option<u32>) -> crate::Memory {
+        let mut mem = arb_memory_entry("h", vec!["t".to_string()]);
+        mem.wakeup_max_tokens = wakeup_max_tokens;
+        mem
+    }
+
+    fn validate_with_wakeup_max_tokens(n: Option<u32>) -> Result<(), ValidateError> {
+        let host = std::collections::BTreeMap::from([(
+            "h".to_string(),
+            crate::HostEntry {
+                addr: "127.0.0.1".to_string(),
+            },
+        )]);
+        config_with_memory_and_host(vec![memory_entry_with_wakeup_max_tokens(n)], host).validate()
+    }
+
+    #[test]
+    fn memory_wakeup_max_tokens_below_range_is_rejected() {
+        assert!(matches!(
+            validate_with_wakeup_max_tokens(Some(19)),
+            Err(ValidateError::MemoryWakeupMaxTokensInvalid(19))
+        ));
+    }
+
+    #[test]
+    fn memory_wakeup_max_tokens_above_range_is_rejected() {
+        assert!(matches!(
+            validate_with_wakeup_max_tokens(Some(4001)),
+            Err(ValidateError::MemoryWakeupMaxTokensInvalid(4001))
+        ));
+    }
+
+    #[test]
+    fn memory_wakeup_max_tokens_in_range_is_accepted() {
+        assert!(validate_with_wakeup_max_tokens(Some(750)).is_ok());
+    }
+
+    #[test]
+    fn memory_wakeup_max_tokens_unset_is_accepted() {
+        assert!(validate_with_wakeup_max_tokens(None).is_ok());
+    }
+
+    proptest! {
+        // #1216: validate() accepts a wakeup_max_tokens value iff it's within
+        // WAKEUP_MAX_TOKENS_RANGE — strengthens the four boundary-value unit
+        // tests above with the full-range property.
+        #[test]
+        fn memory_wakeup_max_tokens_validate_matches_range(n in any::<u32>()) {
+            let in_range = crate::WAKEUP_MAX_TOKENS_RANGE.contains(&n);
+            prop_assert_eq!(validate_with_wakeup_max_tokens(Some(n)).is_ok(), in_range);
+        }
     }
 
     fn config_with_codebase_memory(codebase_memory: Vec<crate::CodebaseMemory>) -> Config {
