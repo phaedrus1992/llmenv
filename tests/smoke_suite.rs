@@ -25,12 +25,34 @@ fn current_user() -> String {
         .unwrap_or_else(|_| "runner".to_string())
 }
 
+/// Placeholder every config scaffold below writes for `cache.cache_dir`, which
+/// [`setup_config`] rewrites to a path inside the test's own temp dir.
+const CACHE_DIR_PLACEHOLDER: &str = "__CACHE_DIR__";
+
 /// Write `config.yaml` into a fresh temp dir and return the dir (kept alive for
 /// the test) plus its path. The dir doubles as `LLMENV_CONFIG_DIR`.
+///
+/// Rewrites [`CACHE_DIR_PLACEHOLDER`] to a per-test cache directory. Without
+/// that, `cache.cache_dir` defaults to the real `~/.cache/llmenv` and the
+/// materialized folder is `<adapter>/<version>/<selection-shape>` — so every
+/// test here that declares the same tags and bundles resolves to the *same*
+/// folder, and concurrent tests overwrite each other's output (#1254). It also
+/// kept the suite writing into the developer's and CI runner's actual llmenv
+/// cache.
 fn setup_config(content: &str) -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
     let config_path = dir.path().join("config.yaml");
-    fs::write(&config_path, content).unwrap();
+    assert!(
+        content.contains(CACHE_DIR_PLACEHOLDER),
+        "config scaffold must declare cache.cache_dir as {CACHE_DIR_PLACEHOLDER}, \
+         or the test shares the real ~/.cache/llmenv with every other test"
+    );
+    let cache_dir = dir.path().join("cache");
+    fs::write(
+        &config_path,
+        content.replace(CACHE_DIR_PLACEHOLDER, &cache_dir.display().to_string()),
+    )
+    .unwrap();
     (dir, config_path)
 }
 
@@ -51,6 +73,7 @@ tag:
   test: ""
 
 cache:
+  cache_dir: "__CACHE_DIR__"
   sync_interval_minutes: 60
 
 adapter:
@@ -89,6 +112,7 @@ features:
       when: [test]
 
 cache:
+  cache_dir: "__CACHE_DIR__"
   sync_interval_minutes: 60
 
 adapter:
@@ -125,6 +149,7 @@ bundle:
     when: [test]
 
 cache:
+  cache_dir: "__CACHE_DIR__"
   sync_interval_minutes: 60
 
 adapter:
@@ -164,6 +189,7 @@ features:
     - when: [test]
 
 cache:
+  cache_dir: "__CACHE_DIR__"
   sync_interval_minutes: 60
 
 adapter:
