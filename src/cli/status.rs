@@ -482,14 +482,33 @@ fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `read_dir(dir)`, or a status label distinguishing "doesn't exist" from any
+/// other failure (#1180) — a permission error must not display identically
+/// to "genuinely empty," since only one of those is fixable by the operator.
+/// Logs the real-error case; `NotFound` is the ordinary "nothing cached yet"
+/// state and not worth a log line.
+fn read_dir_or_status_label(dir: &std::path::Path) -> Result<std::fs::ReadDir, &'static str> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("(none)"),
+        Err(e) => {
+            tracing::warn!(error = %e, dir = %dir.display(), "failed to read directory");
+            Err("(unreadable)")
+        }
+    }
+}
+
 fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     let state_dir = paths::state_dir()?;
     let ro_dir = read_once_state_dir(&state_dir);
 
-    if !ro_dir.exists() {
-        println!("  ReadOnce: (none)");
-        return Ok(());
-    }
+    let dir_entries = match read_dir_or_status_label(&ro_dir) {
+        Ok(entries) => entries,
+        Err(label) => {
+            println!("  ReadOnce: {label}");
+            return Ok(());
+        }
+    };
 
     let mut total_entries: u64 = 0;
     let mut total_hits: u64 = 0;
@@ -497,15 +516,6 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     let mut session_count: u64 = 0;
     let mut skipped: u64 = 0;
     let mut path_hits: HashMap<String, u64> = HashMap::new();
-
-    let dir_entries = match std::fs::read_dir(&ro_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("  warning: failed to read ReadOnce cache directory: {e}");
-            println!("  ReadOnce: (none)");
-            return Ok(());
-        }
-    };
 
     for entry in dir_entries.flatten() {
         let path = entry.path();
@@ -574,4 +584,43 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_dir_or_status_label_ok_for_existing_readable_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_dir_or_status_label(dir.path()).is_ok());
+    }
+
+    // #1180: a missing directory (the ordinary "nothing cached yet" state)
+    // must report "(none)", not be confused with a real read failure.
+    #[test]
+    fn read_dir_or_status_label_none_for_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert_eq!(read_dir_or_status_label(&missing).err(), Some("(none)"));
+    }
+
+    // #1180: a permission error must not display identically to "genuinely
+    // empty" — the fix this issue exists for.
+    #[cfg(unix)]
+    #[test]
+    fn read_dir_or_status_label_unreadable_for_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable_anyway = std::fs::read_dir(dir.path()).is_ok();
+        let result = read_dir_or_status_label(dir.path());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert_eq!(result.err(), Some("(unreadable)"));
+    }
 }
