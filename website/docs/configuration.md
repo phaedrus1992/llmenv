@@ -594,7 +594,13 @@ trackers share this one setting:
   identically `threshold` times in a row, this appends a pointer to
   `llmenv task wait <slug> "<reason>"` — the actual way to silence the
   reminder while genuinely blocked — instead of just repeating the same
-  "keep working" imperative forever.
+  "keep working" imperative forever. Past `threshold * 3` repeats (added in
+  v3.9.0), the reminder stops firing entirely rather than escalating
+  further — the listed tasks are often none of the current session's own
+  (a different, concurrently active session's), so the `task wait` pointer
+  is moot advice and the reminder itself had become the loop. A changed
+  task set (a different reminder) resets the streak and re-arms this
+  normally.
 
 Both are warnings, never blocks — llmenv never denies the repeated call or
 the reminder, so a deliberately re-run command (e.g. re-running `cargo test`

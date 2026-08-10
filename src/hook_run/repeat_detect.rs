@@ -17,7 +17,11 @@
 //!   mid-task" wording then forces action on every turn with no escape
 //!   hatch, which is its own stuck loop. When the identical reminder repeats
 //!   N times in a row, this appends a pointer to `llmenv task wait` instead
-//!   of just repeating the same imperative forever.
+//!   of just repeating the same imperative forever — and past
+//!   [`SILENCE_AFTER_THRESHOLD_MULTIPLE`] times that, stops repeating it at
+//!   all (#1247): the listed tasks are often none of the current session's
+//!   own (a different, still-active session's), so the `task wait` pointer
+//!   is moot advice and the reminder had become the loop, not the fix.
 //!
 //! This lives in `hook_run` (not per-adapter) so it fires for any
 //! adapter/model, mirroring how `task_tools.rs`'s redirect is shared by
@@ -37,6 +41,17 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::RepeatDetect as RepeatDetectConfig;
+
+/// Once the identical Stop reminder has repeated this many multiples of
+/// `config.threshold`, stop repeating it entirely instead of escalating the
+/// wording again (#1247). Below this, the `llmenv task wait` pointer added
+/// at `threshold` is real, actionable advice; past it, the agent has had
+/// every opportunity to act on it, and further identical repeats add no new
+/// information — becoming the exact "stuck loop with no escape hatch"
+/// pattern this whole module exists to break, just self-inflicted by the
+/// reminder itself instead of a tool call. A different reminder (the task
+/// set changed) resets the streak and re-arms this normally.
+const SILENCE_AFTER_THRESHOLD_MULTIPLE: u32 = 3;
 
 /// Per-session state: the two trackers (`PreToolUse` and `Stop`) are
 /// independent — a tool call between two Stop events must not reset the
@@ -221,7 +236,15 @@ pub fn handle_stop(
         eprintln!("llmenv: failed to save repeat-detect state for session {session_id}: {e}");
     }
 
-    if consecutive >= config.threshold.max(1) {
+    let threshold = config.threshold.max(1);
+    if consecutive >= threshold.saturating_mul(SILENCE_AFTER_THRESHOLD_MULTIPLE) {
+        // Past the point where the escalated message below already gave the
+        // agent every chance to act — repeating it further is the loop this
+        // module exists to break, not a fix for one. Silent until the
+        // underlying task set changes (a different reminder resets the
+        // streak) or the session ends.
+        String::new()
+    } else if consecutive >= threshold {
         format!(
             "{reminder}\n\nThis exact reminder has repeated {consecutive} times in a row with no \
              progress. If one of the listed tasks is your own and you're genuinely blocked on \
@@ -325,6 +348,47 @@ mod tests {
         let other = "You still have task(s) in progress:\n- bar\nkeep working";
         let out = handle_stop(other, Some("s1"), &config(2), dir.path());
         assert_eq!(out, other, "a different reminder must reset the streak");
+    }
+
+    // #1247: the escalated message (task_wait pointer) is only useful advice
+    // up to a point — past SILENCE_AFTER_THRESHOLD_MULTIPLE repeats of the
+    // *same* threshold, the reminder must stop firing entirely rather than
+    // looping the same "keep working" imperative forever.
+    #[test]
+    fn goes_silent_after_threshold_multiple_repeats() {
+        let dir = TempDir::new().expect("test");
+        let threshold = 2;
+        let silence_at = threshold * SILENCE_AFTER_THRESHOLD_MULTIPLE;
+        for _ in 0..silence_at - 1 {
+            let out = handle_stop(WIP_REMINDER, Some("s1"), &config(threshold), dir.path());
+            assert!(!out.is_empty(), "must still remind below the silence point");
+        }
+        let out = handle_stop(WIP_REMINDER, Some("s1"), &config(threshold), dir.path());
+        assert!(
+            out.is_empty(),
+            "must go silent at the silence point, got: {out:?}"
+        );
+        // Confirm it stays silent, not a one-turn blip.
+        let out = handle_stop(WIP_REMINDER, Some("s1"), &config(threshold), dir.path());
+        assert!(out.is_empty(), "must stay silent past the silence point");
+    }
+
+    // #1247: silence must not be permanent — a changed task set (a
+    // different reminder string) re-arms the normal escalation from scratch.
+    #[test]
+    fn a_new_reminder_after_silence_is_shown_again() {
+        let dir = TempDir::new().expect("test");
+        let threshold = 2;
+        let silence_at = threshold * SILENCE_AFTER_THRESHOLD_MULTIPLE;
+        for _ in 0..silence_at {
+            handle_stop(WIP_REMINDER, Some("s1"), &config(threshold), dir.path());
+        }
+        let other = "You still have task(s) in progress:\n- bar\nkeep working";
+        let out = handle_stop(other, Some("s1"), &config(threshold), dir.path());
+        assert_eq!(
+            out, other,
+            "a changed task set must be shown again, not silenced"
+        );
     }
 
     #[test]
