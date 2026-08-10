@@ -2626,6 +2626,135 @@ mod tests {
         ]
     }
 
+    /// The three structural shapes `merge_json` dispatches on. Two values of
+    /// different kinds are a value-type conflict, which must replace wholesale
+    /// rather than structurally merge (#852).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ValueKind {
+        Scalar,
+        Sequence,
+        Mapping,
+    }
+
+    const VALUE_KINDS: [ValueKind; 3] =
+        [ValueKind::Scalar, ValueKind::Sequence, ValueKind::Mapping];
+
+    fn json_kind(value: &serde_json::Value) -> ValueKind {
+        match value {
+            serde_json::Value::Array(_) => ValueKind::Sequence,
+            serde_json::Value::Object(_) => ValueKind::Mapping,
+            _ => ValueKind::Scalar,
+        }
+    }
+
+    /// Arbitrary YAML of exactly `kind`. Containers are non-empty so a
+    /// value-type conflict can't be satisfied vacuously, and no leaf is null:
+    /// null has its own documented merge semantics (stripped on insert,
+    /// replaces on collision) covered by the idempotence property instead.
+    fn arb_yaml_of_kind(kind: ValueKind) -> BoxedStrategy<serde_yaml::Value> {
+        let scalar = prop_oneof![
+            any::<bool>().prop_map(serde_yaml::Value::Bool),
+            any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
+            "[a-z]{1,6}".prop_map(serde_yaml::Value::String),
+        ];
+        match kind {
+            ValueKind::Scalar => scalar.boxed(),
+            ValueKind::Sequence => proptest::collection::vec(scalar, 1..4)
+                .prop_map(serde_yaml::Value::Sequence)
+                .boxed(),
+            ValueKind::Mapping => proptest::collection::vec(("[a-z]{1,6}", scalar), 1..4)
+                .prop_map(|pairs| {
+                    let mut map = serde_yaml::Mapping::new();
+                    for (k, v) in pairs {
+                        map.insert(serde_yaml::Value::String(k), v);
+                    }
+                    serde_yaml::Value::Mapping(map)
+                })
+                .boxed(),
+        }
+    }
+
+    /// A colliding key plus two values of *different* kinds for it: the value
+    /// already in the destination, and the one the native fragment carries.
+    fn arb_value_type_conflict()
+    -> impl Strategy<Value = (String, serde_yaml::Value, serde_yaml::Value)> {
+        (0usize..VALUE_KINDS.len(), 0usize..VALUE_KINDS.len())
+            .prop_filter("kinds must differ to be a value-type conflict", |(a, b)| {
+                a != b
+            })
+            .prop_flat_map(|(dst_idx, frag_idx)| {
+                (
+                    "[a-z]{1,8}".prop_map(String::from),
+                    arb_yaml_of_kind(VALUE_KINDS[dst_idx]),
+                    arb_yaml_of_kind(VALUE_KINDS[frag_idx]),
+                )
+            })
+    }
+
+    proptest! {
+        // #852 overlay_native value-type conflict: when the destination holds one
+        // structural kind at a key and the fragment holds a different kind, the
+        // fragment's value must replace it wholesale. No partial blend, no
+        // leaked destination content, no panic. `merge_json` only recurses when
+        // both sides are objects or both are arrays; every other pairing hits
+        // the overwrite arm, and this pins that down as a property rather than
+        // trusting the match arms to stay ordered correctly.
+        #[test]
+        fn overlay_native_replaces_on_value_type_conflict(
+            (key, dst_val, frag_val) in arb_value_type_conflict(),
+        ) {
+            let dst_json: serde_json::Value = serde_json::to_value(&dst_val).unwrap();
+            let mut dst = serde_json::json!({ key.clone(): dst_json.clone() });
+
+            let mut map = serde_yaml::Mapping::new();
+            map.insert(serde_yaml::Value::String(key.clone()), frag_val.clone());
+            overlay_native(&mut dst, Some(&serde_yaml::Value::Mapping(map))).unwrap();
+
+            let frag_json: serde_json::Value = serde_json::to_value(&frag_val).unwrap();
+            let got = dst.get(&key).unwrap();
+
+            // The result takes the fragment's shape, not the destination's.
+            prop_assert_eq!(
+                json_kind(got),
+                json_kind(&frag_json),
+                "conflict at {:?} kept the destination's shape: {} vs fragment {}",
+                key, got, frag_json
+            );
+
+            match &frag_json {
+                // A scalar fragment replaces any container exactly.
+                serde_json::Value::Object(want) => {
+                    let got_obj = got.as_object().unwrap();
+                    // Exactly the fragment's keys — no destination key smuggled in.
+                    prop_assert!(
+                        got_obj.keys().eq(want.keys()),
+                        "object conflict must yield exactly the fragment's keys: {got} vs {frag_json}"
+                    );
+                    for (k, v) in want {
+                        prop_assert_eq!(got_obj.get(k), Some(v), "fragment value for {:?} altered", k);
+                    }
+                }
+                serde_json::Value::Array(want) => {
+                    let got_arr = got.as_array().unwrap();
+                    // Dedup can shrink the array but never introduce an element.
+                    for item in got_arr {
+                        prop_assert!(
+                            want.contains(item),
+                            "array conflict leaked a non-fragment element {item}: {got}"
+                        );
+                    }
+                    for item in want {
+                        prop_assert!(
+                            got_arr.contains(item),
+                            "array conflict dropped fragment element {item}: {got}"
+                        );
+                    }
+                }
+                scalar => prop_assert_eq!(got, scalar, "scalar fragment must replace exactly"),
+            }
+        }
+    }
+
     // ---- generate_settings_json: permission render ----
 
     fn render_settings_for_test(manifest: &crate::merge::MergedManifest) -> serde_json::Value {
