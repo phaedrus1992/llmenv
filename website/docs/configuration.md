@@ -1141,6 +1141,7 @@ materialized folder automatically; there is nothing to configure.
 | Prompt history (`↑` recall) | `history.jsonl` | Copied in from `$LLMENV_STATE_DIR` when the folder has none |
 | MCP "needs auth" record | `mcp-needs-auth-cache.json` | Copied in when the folder has none, so Claude Code doesn't re-probe every OAuth MCP server |
 | OAuth credential | macOS keychain, service name keyed by the config-dir path; `.credentials.json` elsewhere | Cached in `$LLMENV_STATE_DIR/auth/credentials.json` (owner-only, `0600`) and written into a folder that has none |
+| Claude Code's internal session logs (added in v3.9.0) | `session-logs/` (one file per calendar day) | The folder's `session-logs/` is a symlink to `$LLMENV_STATE_DIR/session-logs`, same one-store-shared-by-every-folder treatment as `/resume` transcripts |
 
 Transcripts are linked rather than copied, so a session started under one config
 hash stays visible to `/resume` after a config edit or version bump — and there

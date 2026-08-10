@@ -1761,7 +1761,8 @@ fn build_and_materialize(
 /// Non-fatal: if the cache is empty or the inject fails the folder simply has
 /// no pre-seeded auth. Errors are traced at debug so `run_export` stays clean.
 /// Inherit the Claude Code state that has no env var to relocate it: `/resume`
-/// transcripts and prompt history (#1059).
+/// transcripts and prompt history (#1059), and Claude Code's own internal
+/// session logs (#1064).
 ///
 /// Best-effort — a folder that can't inherit its transcripts is a degraded
 /// session, not a failed `export`, so every failure warns instead of propagating.
@@ -1769,6 +1770,9 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
     migrate_stranded_transcripts_once(adapter_root, state_dir);
     if let Err(e) = crate::materialize::inherit::link_projects_dir(state_dir, cache_path) {
         tracing::warn!("could not inherit /resume transcripts (non-fatal): {e:#}");
+    }
+    if let Err(e) = crate::materialize::inherit::link_session_logs_dir(state_dir, cache_path) {
+        tracing::warn!("could not inherit session logs (non-fatal): {e:#}");
     }
     // Capture before inherit: Claude Code only ever writes these into the config
     // dir, so without this the durable store would never gain a copy to hand to
