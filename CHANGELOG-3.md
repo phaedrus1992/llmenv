@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- `no memory backend active for this scope` no longer misreports a declared `features.memory` entry as "nothing declared" when the entry is simply gated on a `when` tag that isn't active right now — hook-run now reports that case distinctly, naming the affected `server_host`(s). `llmenv doctor --all`'s `disable_bundles` orphan check had the same "does it exist" instead of "is it tag-active" bug, including mis-attributing a disabled bundle as the cause when its only memory entry was itself tag-inactive — both are fixed the same way. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#project-markers) (#1140)
+- The "bundle(s) X fired but have no content directory" hook-run message no longer claims that as the sole cause when a firing bundle was actually skipped for a rejected/unsafe name instead — the wording now covers both. (#1142)
+
 ## [3.8.0] - 2026-08-10
 
 Mostly a hardening release. A long directory-permission series locks down
