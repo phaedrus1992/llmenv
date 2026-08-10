@@ -1344,6 +1344,7 @@ fn render_opencode_default_models(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
     use crate::merge::rules::RuleFile;
 
@@ -3483,14 +3484,9 @@ mod tests {
     // Follow-up from pre-pr-review of #1010 (opencode schema sidecar wiring,
     // #1001): closes gaps flagged by property-test-gap-finder (#1011, #1012).
 
-    /// Strategy for a small string→string map, used for `environment`/`headers`.
-    fn arb_string_map() -> impl Strategy<Value = BTreeMap<String, String>> {
-        proptest::collection::btree_map("[a-zA-Z0-9_]{1,8}", "[a-zA-Z0-9_ ]{0,12}", 0..3)
-    }
-
     fn arb_mcp_entry() -> impl Strategy<Value = McpEntry> {
         let local = (
-            proptest::collection::vec("[a-zA-Z0-9_./-]{1,10}", 1..4),
+            proptest::collection::vec("[a-z][a-z0-9_./-]{0,9}", 1..4),
             arb_string_map(),
             arb_string_map(),
             proptest::option::of(0u32..10_000),
@@ -3526,50 +3522,6 @@ mod tests {
         }
     }
 
-    /// Strategy for one `ResolvedMcp`'s kind/headers/timeout, keyed separately
-    /// by name so callers can build a name-unique list (see `arb_mcp_list`).
-    fn arb_mcp_body() -> impl Strategy<Value = (ResolvedKind, BTreeMap<String, String>, Option<u32>)>
-    {
-        let stdio = (
-            "[a-z]{1,8}",
-            proptest::collection::vec("[a-z]{1,6}", 0..3),
-            arb_string_map(),
-        )
-            .prop_map(|(command, args, env)| ResolvedKind::Stdio { command, args, env });
-        let remote = (
-            "https?://[a-z0-9.]{3,20}",
-            prop_oneof![
-                Just(crate::config::McpTransport::Http),
-                Just(crate::config::McpTransport::Sse),
-            ],
-        )
-            .prop_map(|(url, transport)| ResolvedKind::Remote { url, transport });
-        (
-            prop_oneof![stdio, remote],
-            arb_string_map(),
-            proptest::option::of(0u32..10_000),
-        )
-    }
-
-    /// A list of `ResolvedMcp` with distinct names — `materialize` keys the
-    /// `mcp` object by name, so duplicate names aren't a scenario the
-    /// MCP-assembly loop needs to handle.
-    fn arb_mcp_list() -> impl Strategy<Value = Vec<ResolvedMcp>> {
-        proptest::collection::btree_map("[a-z]{1,6}", arb_mcp_body(), 0..5).prop_map(|map| {
-            map.into_iter()
-                .map(|(name, (kind, headers, timeout))| ResolvedMcp {
-                    name,
-                    kind,
-                    headers,
-                    timeout,
-                    disabled_tools: vec![],
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                })
-                .collect()
-        })
-    }
-
     proptest! {
         /// #1012 task 2: for any arbitrary combination of stdio/remote MCP
         /// servers, `materialize`'s MCP-assembly loop emits exactly one
@@ -3577,7 +3529,7 @@ mod tests {
         /// `ResolvedKind` — and never panics regardless of headers/timeout.
         #[test]
         fn mcp_assembly_produces_one_entry_per_server_with_correct_type(
-            mcps in arb_mcp_list()
+            mcps in arb_distinct_resolved_mcps()
         ) {
             let tmp = tempfile::tempdir().unwrap();
             let manifest = MergedManifest {
@@ -3616,7 +3568,7 @@ mod tests {
         /// follow-up can extend the strategy if those drift too.
         #[test]
         fn materialized_top_level_keys_are_declared_in_schema(
-            mcps in arb_mcp_list(),
+            mcps in arb_distinct_resolved_mcps(),
             allow in proptest::collection::vec(arb_permission_rule(), 0..3),
             large_model in proptest::option::of(("[a-z]{2,6}", "[a-z]{2,6}")),
             small_model in proptest::option::of(("[a-z]{2,6}", "[a-z]{2,6}")),
