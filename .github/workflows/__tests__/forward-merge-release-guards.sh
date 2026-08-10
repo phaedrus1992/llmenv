@@ -3,6 +3,10 @@
 # Exercises the shell logic extracted from the workflow; stubs git and gh.
 # Run: bash .github/workflows/__tests__/forward-merge-release-guards.sh
 # Expected: FAIL until Issue #476 and #475 fixes are applied.
+# cascade_block/fallback_block run under `set -euo pipefail`, matching the
+# real workflow (see Issue #1250) — without it, a failing push/fetch/ls-remote
+# captured via `VAR=$(cmd); RC=$?` kills the script before RC is ever read,
+# and these tests wouldn't catch it.
 set -uo pipefail
 
 PASS=0
@@ -24,10 +28,13 @@ run_test() {
 # Callers export: CURRENT TARGET and provide git stubs on PATH.
 cascade_block() {
   cat <<'SHELL'
-set -uo pipefail
+set -euo pipefail
 
-FETCH_STDERR=$(git fetch origin "$CURRENT" "$TARGET" 2>&1 >/dev/null)
-FETCH_RC=$?
+if FETCH_STDERR=$(git fetch origin "$CURRENT" "$TARGET" 2>&1 >/dev/null); then
+  FETCH_RC=0
+else
+  FETCH_RC=$?
+fi
 if [[ $FETCH_RC -ne 0 ]]; then
   if [[ -n "$FETCH_STDERR" ]]; then
     echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR"
@@ -45,11 +52,14 @@ SHELL
 # Callers export: CURRENT TARGET MERGE_BRANCH and provide git/gh stubs on PATH.
 fallback_block() {
   cat <<'SHELL'
-set -uo pipefail
+set -euo pipefail
 HALTED=""
 
-PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null)
-PUSH_RC=$?
+if PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
+  PUSH_RC=0
+else
+  PUSH_RC=$?
+fi
 if [[ $PUSH_RC -eq 0 ]]; then
   echo "Pushed directly to $TARGET"
 else
