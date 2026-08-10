@@ -170,6 +170,10 @@ pub(crate) fn dead_native_engine_keys(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use proptest::prelude::*;
+
     use super::*;
     use crate::config::{McpServer, McpTransport, NativePermissionRules};
 
@@ -399,5 +403,158 @@ mod tests {
         }
         .message();
         assert!(!msg.contains("capabilities."), "{msg}");
+    }
+
+    // ---- #1077: properties derived from the adapter registry ----
+    //
+    // `dead_native_engine_keys` is permutation-heavy — 7 map positions × every
+    // registered adapter × 2 reasons. The example-based tests above pin down
+    // specific pairings; these derive the expected answer from `native_maps()`
+    // itself, so a newly registered adapter or a new `native_*` map is covered
+    // without anyone writing a new test.
+
+    /// The seven (label, map) positions the function walks, in its own
+    /// declaration order. Labels are unique, so a reported label identifies its
+    /// position — which is what the ordering property checks against.
+    const SLOTS: [(&str, &str); 7] = [
+        (NATIVE_PERMISSIONS, NATIVE_PERMISSIONS),
+        (NATIVE_HOOKS, NATIVE_HOOKS),
+        (NATIVE_PLUGINS, NATIVE_PLUGINS),
+        (NATIVE_MCP, NATIVE_MCP),
+        (NATIVE_MODEL_PROVIDERS, NATIVE_MODEL_PROVIDERS),
+        ("top-level native", NATIVE),
+        ("capabilities.native", NATIVE),
+    ];
+
+    /// Whether the adapter registered under `engine` declares that it reads
+    /// `map`. Unknown engine ids declare nothing.
+    fn engine_reads_map(engine: &str, map: &str) -> bool {
+        registered_adapters()
+            .iter()
+            .find(|a| engine_id(a.as_ref()) == engine)
+            .is_some_and(|a| a.native_maps().contains(&map))
+    }
+
+    /// Populate the seven map positions with `keys[i]`, returning the
+    /// capabilities and the separate top-level `native` block.
+    fn caps_with_keys(
+        keys: &[BTreeSet<String>; 7],
+    ) -> (Capabilities, BTreeMap<String, serde_yaml::Value>) {
+        let yaml_map = |ks: &BTreeSet<String>| -> BTreeMap<String, serde_yaml::Value> {
+            ks.iter()
+                .map(|k| {
+                    (
+                        k.clone(),
+                        serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                    )
+                })
+                .collect()
+        };
+        let caps = Capabilities {
+            native_permissions: keys[0]
+                .iter()
+                .map(|k| (k.clone(), NativePermissionRules::default()))
+                .collect(),
+            native_hooks: yaml_map(&keys[1]),
+            native_plugins: yaml_map(&keys[2]),
+            native_mcp: yaml_map(&keys[3]),
+            native_model_providers: yaml_map(&keys[4]),
+            native: yaml_map(&keys[6]),
+            ..Capabilities::default()
+        };
+        (caps, yaml_map(&keys[5]))
+    }
+
+    /// A `native_*` key: usually a real engine id (so the live and `MapNotRead`
+    /// paths dominate), sometimes arbitrary (the `UnknownEngine` path).
+    fn arb_native_key() -> impl Strategy<Value = String> {
+        prop_oneof![
+            3 => proptest::sample::select(crate::adapter::known_engine_ids()),
+            1 => "[a-z_]{1,10}".prop_map(String::from),
+        ]
+    }
+
+    proptest! {
+        /// For any registered engine id in any map position, `native_maps()`
+        /// decides the verdict: if the adapter declares the map the key is
+        /// live, otherwise it is dead with exactly one `MapNotRead`. Both
+        /// directions are asserted from the registry, never restated.
+        #[test]
+        fn registered_engine_verdict_follows_native_maps(
+            engine in proptest::sample::select(crate::adapter::known_engine_ids()),
+            slot in 0usize..SLOTS.len(),
+        ) {
+            let (_, map) = SLOTS[slot];
+            let mut keys: [BTreeSet<String>; 7] = Default::default();
+            keys[slot].insert(engine.clone());
+            let (caps, top) = caps_with_keys(&keys);
+            let found = dead_native_engine_keys(&caps, &top);
+
+            if engine_reads_map(&engine, map) {
+                prop_assert!(
+                    found.is_empty(),
+                    "{engine} declares {map} in native_maps() but was flagged: {found:?}"
+                );
+            } else {
+                prop_assert_eq!(
+                    found.len(), 1,
+                    "{} omits {} from native_maps(), expected one finding: {:?}",
+                    engine, map, found
+                );
+                prop_assert_eq!(&found[0].reason, &DeadKeyReason::MapNotRead);
+                prop_assert_eq!(found[0].map, map);
+                prop_assert_eq!(&found[0].key, &engine);
+            }
+        }
+
+        /// Across arbitrary keys in every position: the function reports at most
+        /// one finding per key, is deterministic, and emits findings in map
+        /// declaration order with each map's keys sorted.
+        #[test]
+        fn output_is_bounded_deterministic_and_ordered(
+            keys in proptest::array::uniform7(
+                proptest::collection::btree_set(arb_native_key(), 0..4),
+            ),
+        ) {
+            let total: usize = keys.iter().map(BTreeSet::len).sum();
+            let (caps, top) = caps_with_keys(&keys);
+            let found = dead_native_engine_keys(&caps, &top);
+
+            prop_assert!(
+                found.len() <= total,
+                "reported {} findings for {total} keys",
+                found.len()
+            );
+            prop_assert_eq!(
+                &found,
+                &dead_native_engine_keys(&caps, &top),
+                "repeated calls must agree"
+            );
+
+            let slots: Vec<Option<usize>> = found
+                .iter()
+                .map(|d| SLOTS.iter().position(|(label, _)| *label == d.label))
+                .collect();
+            prop_assert!(
+                slots.iter().all(Option::is_some),
+                "every finding's label must be one of the seven positions: {found:?}"
+            );
+
+            // Ordering is (map position, key) ascending: maps in declaration
+            // order, keys in BTreeMap order within a map.
+            let ordering: Vec<(usize, &String)> = slots
+                .iter()
+                .flatten()
+                .copied()
+                .zip(found.iter().map(|d| &d.key))
+                .collect();
+            for pair in ordering.windows(2) {
+                prop_assert!(
+                    pair[0] < pair[1],
+                    "findings must ascend by (map position, key): {:?} then {:?}",
+                    pair[0], pair[1]
+                );
+            }
+        }
     }
 }
