@@ -669,7 +669,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                     }
                 }
             } else {
-                tracing::warn!(
+                tracing::error!(
                     "failed to read adapter cache directory {:?} for version skew check",
                     adapter_cache,
                 );
