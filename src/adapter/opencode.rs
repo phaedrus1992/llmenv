@@ -40,6 +40,8 @@ enum McpEntry {
         timeout: Option<u32>,
     },
     Remote {
+        /// Deliberately unvalidated passthrough — see the doc comment on
+        /// `ResolvedKind::Remote::url` (#1017) for why.
         url: String,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
@@ -52,6 +54,7 @@ enum McpEntry {
 /// Constructed from the merged manifest, serialized to Value, then native
 /// overlay keys are deep-merged at the Value level.
 #[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 struct OpencodeConfig {
     /// Native opencode JS plugins (e.g. context-mode).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +96,7 @@ struct OpencodeConfig {
 /// A `provider.<id>` entry in `opencode.json`, matching opencode's
 /// `ProviderConfig` schema (`packages/core/src/v1/config/provider.ts`).
 #[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 struct OpencodeProviderEntry {
     /// AI SDK package, e.g. `@ai-sdk/openai-compatible`, `@ai-sdk/anthropic`.
     npm: String,
@@ -107,6 +111,7 @@ struct OpencodeProviderEntry {
 /// schema recognizes; opencode itself tolerates arbitrary extra keys here,
 /// but this struct only renders what llmenv actually sets.
 #[derive(serde::Serialize, Default, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 struct OpencodeProviderOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "baseURL")]
@@ -120,6 +125,7 @@ struct OpencodeProviderOptions {
 /// A `provider.<id>.models.<model_id>` entry, matching opencode's `Model`
 /// config schema. Only the subset llmenv's `ModelSource` can populate.
 #[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 struct OpencodeModelEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -136,12 +142,14 @@ struct OpencodeModelEntry {
 }
 
 #[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 struct OpencodeModelLimit {
     context: u32,
     output: u32,
 }
 
 #[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 struct OpencodeModelCost {
     input: f64,
     output: f64,
@@ -152,12 +160,14 @@ struct OpencodeModelCost {
 }
 
 #[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 struct OpencodeModalities {
     input: Vec<String>,
 }
 
 /// An LSP server entry in opencode.json.
 #[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 struct LspServerEntry {
     /// Command with arguments.
     command: Vec<String>,
@@ -176,6 +186,7 @@ struct LspServerEntry {
 /// a wildcard pattern covering all inputs) or a pattern→action map (when the
 /// tool has specific input patterns with distinct actions).
 #[derive(serde::Serialize, JsonSchema)]
+#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
 #[serde(untagged)]
 enum PermissionValue {
     /// Single action covering all patterns (e.g. `"allow"`).
@@ -1344,6 +1355,7 @@ fn render_opencode_default_models(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
     use crate::merge::rules::RuleFile;
 
@@ -3405,6 +3417,18 @@ mod tests {
             std::fs::write(&hooks_path, &content).unwrap();
             let _ = parse_plugin_hooks(&hooks_path, tmp.path(), "test-plugin");
         }
+
+        /// #1017: `parse_plugin_mcp_entries` deserializes a plugin-provided
+        /// `LLM_PROVIDER_MCP_JSON` file — genuinely untrusted input, unlike
+        /// the adapter's own `McpEntry` construction path — and must never
+        /// panic regardless of content.
+        #[test]
+        fn parse_plugin_mcp_entries_never_panics_on_arbitrary_content(content in ".{0,200}") {
+            let tmp = tempfile::tempdir().unwrap();
+            let mcp_path = tmp.path().join("LLM_PROVIDER_MCP_JSON");
+            std::fs::write(&mcp_path, &content).unwrap();
+            let _ = parse_plugin_mcp_entries(&mcp_path, "test-plugin");
+        }
     }
 
     #[test]
@@ -3483,14 +3507,9 @@ mod tests {
     // Follow-up from pre-pr-review of #1010 (opencode schema sidecar wiring,
     // #1001): closes gaps flagged by property-test-gap-finder (#1011, #1012).
 
-    /// Strategy for a small string→string map, used for `environment`/`headers`.
-    fn arb_string_map() -> impl Strategy<Value = BTreeMap<String, String>> {
-        proptest::collection::btree_map("[a-zA-Z0-9_]{1,8}", "[a-zA-Z0-9_ ]{0,12}", 0..3)
-    }
-
     fn arb_mcp_entry() -> impl Strategy<Value = McpEntry> {
         let local = (
-            proptest::collection::vec("[a-zA-Z0-9_./-]{1,10}", 1..4),
+            proptest::collection::vec("[a-z][a-z0-9_./-]{0,9}", 1..4),
             arb_string_map(),
             arb_string_map(),
             proptest::option::of(0u32..10_000),
@@ -3514,60 +3533,225 @@ mod tests {
         prop_oneof![local, remote]
     }
 
+    // -- property-based tests: remaining typed opencode.json structs roundtrip --
+    //
+    // Follow-up from pre-pr-review of #1013 (#1016): #1013 only covered
+    // `McpEntry`. The same Serialize-only-but-should-roundtrip pattern exists
+    // on the rest of the typed `opencode.json` output structs.
+
+    /// Shared JSON-roundtrip assertion for the `#[cfg_attr(test, derive(...))]`
+    /// structs below — six identical three-line bodies collapsed into one.
+    fn assert_json_roundtrip<T>(value: T) -> Result<(), proptest::test_runner::TestCaseError>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_value(&value).unwrap();
+        let parsed: T = serde_json::from_value(json).unwrap();
+        prop_assert_eq!(value, parsed);
+        Ok(())
+    }
+
+    fn arb_permission_value() -> impl Strategy<Value = PermissionValue> {
+        prop_oneof![
+            "[a-z]{1,8}".prop_map(PermissionValue::Simple),
+            proptest::collection::btree_map("[a-z*]{1,8}", "[a-z]{1,8}", 0..3)
+                .prop_map(PermissionValue::PatternMap),
+        ]
+    }
+
+    /// Arbitrary shallow JSON value for `LspServerEntry::init_options`, which
+    /// passes through as opaque `serde_json::Value`. No `Value::Null` — that's
+    /// a real serde quirk, not a coverage gap: `Option<Value>`'s `Deserialize`
+    /// impl maps JSON `null` back to `None`, not `Some(Value::Null)`, so
+    /// `Some(Null)` can never roundtrip regardless of this adapter's code.
+    fn arb_init_options_value() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            proptest::bool::ANY.prop_map(serde_json::Value::Bool),
+            any::<i64>().prop_map(|n| serde_json::json!(n)),
+            "[a-z]{0,8}".prop_map(serde_json::Value::String),
+        ]
+    }
+
+    fn arb_lsp_server_entry() -> impl Strategy<Value = LspServerEntry> {
+        (
+            proptest::collection::vec("[a-z]{1,8}", 1..3),
+            proptest::option::of(proptest::collection::vec("[a-z]{1,6}", 0..3)),
+            proptest::option::of(arb_string_map()),
+            proptest::option::of(arb_init_options_value()),
+        )
+            .prop_map(|(command, extensions, env, init_options)| LspServerEntry {
+                command,
+                extensions,
+                env,
+                init_options,
+            })
+    }
+
+    fn arb_opencode_model_limit() -> impl Strategy<Value = OpencodeModelLimit> {
+        (0u32..1_000_000, 0u32..1_000_000)
+            .prop_map(|(context, output)| OpencodeModelLimit { context, output })
+    }
+
+    fn arb_opencode_model_cost() -> impl Strategy<Value = OpencodeModelCost> {
+        (
+            0.0..100.0f64,
+            0.0..100.0f64,
+            proptest::option::of(0.0..100.0f64),
+            proptest::option::of(0.0..100.0f64),
+        )
+            .prop_map(
+                |(input, output, cache_read, cache_write)| OpencodeModelCost {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                },
+            )
+    }
+
+    fn arb_opencode_modalities() -> impl Strategy<Value = OpencodeModalities> {
+        proptest::collection::vec("[a-z]{1,8}", 0..3).prop_map(|input| OpencodeModalities { input })
+    }
+
+    fn arb_opencode_model_entry() -> impl Strategy<Value = OpencodeModelEntry> {
+        (
+            proptest::option::of("[a-z ]{1,10}"),
+            proptest::option::of(proptest::bool::ANY),
+            proptest::option::of(arb_opencode_model_limit()),
+            proptest::option::of(arb_opencode_model_cost()),
+            proptest::option::of(arb_opencode_modalities()),
+        )
+            .prop_map(
+                |(name, reasoning, limit, cost, modalities)| OpencodeModelEntry {
+                    name,
+                    reasoning,
+                    limit,
+                    cost,
+                    modalities,
+                },
+            )
+    }
+
+    fn arb_opencode_provider_options() -> impl Strategy<Value = OpencodeProviderOptions> {
+        (
+            proptest::option::of("https?://[a-z0-9.]{3,20}"),
+            proptest::option::of("[a-z0-9]{1,16}"),
+            proptest::option::of(arb_string_map()),
+        )
+            .prop_map(|(base_url, api_key, headers)| OpencodeProviderOptions {
+                base_url,
+                api_key,
+                headers,
+            })
+    }
+
+    fn arb_opencode_provider_entry() -> impl Strategy<Value = OpencodeProviderEntry> {
+        (
+            "[a-z@/-]{1,20}",
+            proptest::option::of("[a-z ]{1,10}"),
+            arb_opencode_provider_options(),
+            proptest::option::of(proptest::collection::btree_map(
+                "[a-z0-9_-]{1,10}",
+                arb_opencode_model_entry(),
+                0..3,
+            )),
+        )
+            .prop_map(|(npm, name, options, models)| OpencodeProviderEntry {
+                npm,
+                name,
+                options,
+                models,
+            })
+    }
+
+    fn arb_opencode_config() -> impl Strategy<Value = OpencodeConfig> {
+        (
+            proptest::option::of(proptest::collection::vec("[a-z][a-z0-9_-]{0,10}", 0..3)),
+            proptest::option::of(proptest::collection::btree_map(
+                "[a-z][a-z0-9_-]{0,8}",
+                arb_lsp_server_entry(),
+                0..3,
+            )),
+            "[a-z0-9./-]{1,20}",
+            proptest::option::of(proptest::collection::vec("[a-z/.]{1,10}", 0..3)),
+            proptest::option::of(proptest::collection::btree_map(
+                "[a-z][a-z0-9_-]{0,8}",
+                arb_permission_value(),
+                0..3,
+            )),
+            proptest::option::of("[a-z][a-z0-9_/-]{0,15}"),
+            proptest::option::of("[a-z][a-z0-9_/-]{0,15}"),
+        )
+            .prop_map(
+                |(plugin, lsp, schema, instructions, permission, model, small_model)| {
+                    OpencodeConfig {
+                        plugin,
+                        mcp: None,
+                        lsp,
+                        schema,
+                        instructions,
+                        permission,
+                        provider: None,
+                        model,
+                        small_model,
+                    }
+                },
+            )
+    }
+
     proptest! {
         /// #1011: `McpEntry` must roundtrip losslessly through JSON — the
         /// type is only privately used inside `materialize`, so nothing else
         /// exercises `Deserialize` today.
         #[test]
         fn mcp_entry_roundtrips_through_json(entry in arb_mcp_entry()) {
-            let value = serde_json::to_value(&entry).unwrap();
-            let parsed: McpEntry = serde_json::from_value(value).unwrap();
-            prop_assert_eq!(entry, parsed);
+            assert_json_roundtrip(entry)?;
         }
-    }
 
-    /// Strategy for one `ResolvedMcp`'s kind/headers/timeout, keyed separately
-    /// by name so callers can build a name-unique list (see `arb_mcp_list`).
-    fn arb_mcp_body() -> impl Strategy<Value = (ResolvedKind, BTreeMap<String, String>, Option<u32>)>
-    {
-        let stdio = (
-            "[a-z]{1,8}",
-            proptest::collection::vec("[a-z]{1,6}", 0..3),
-            arb_string_map(),
-        )
-            .prop_map(|(command, args, env)| ResolvedKind::Stdio { command, args, env });
-        let remote = (
-            "https?://[a-z0-9.]{3,20}",
-            prop_oneof![
-                Just(crate::config::McpTransport::Http),
-                Just(crate::config::McpTransport::Sse),
-            ],
-        )
-            .prop_map(|(url, transport)| ResolvedKind::Remote { url, transport });
-        (
-            prop_oneof![stdio, remote],
-            arb_string_map(),
-            proptest::option::of(0u32..10_000),
-        )
-    }
+        /// Untagged enums are easy to get wrong (serde tries variants in
+        /// declaration order) — a roundtrip test is a stronger check than
+        /// most for that reason.
+        #[test]
+        fn permission_value_roundtrips_through_json(value in arb_permission_value()) {
+            assert_json_roundtrip(value)?;
+        }
 
-    /// A list of `ResolvedMcp` with distinct names — `materialize` keys the
-    /// `mcp` object by name, so duplicate names aren't a scenario the
-    /// MCP-assembly loop needs to handle.
-    fn arb_mcp_list() -> impl Strategy<Value = Vec<ResolvedMcp>> {
-        proptest::collection::btree_map("[a-z]{1,6}", arb_mcp_body(), 0..5).prop_map(|map| {
-            map.into_iter()
-                .map(|(name, (kind, headers, timeout))| ResolvedMcp {
-                    name,
-                    kind,
-                    headers,
-                    timeout,
-                    disabled_tools: vec![],
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                })
-                .collect()
-        })
+        #[test]
+        fn lsp_server_entry_roundtrips_through_json(entry in arb_lsp_server_entry()) {
+            assert_json_roundtrip(entry)?;
+        }
+
+        #[test]
+        fn opencode_model_entry_roundtrips_through_json(entry in arb_opencode_model_entry()) {
+            assert_json_roundtrip(entry)?;
+        }
+
+        #[test]
+        fn opencode_provider_options_roundtrips_through_json(
+            options in arb_opencode_provider_options()
+        ) {
+            assert_json_roundtrip(options)?;
+        }
+
+        /// #1016: `OpencodeProviderEntry` composes `OpencodeProviderOptions`
+        /// and `OpencodeModelEntry` (which itself composes
+        /// `OpencodeModelLimit`/`OpencodeModelCost`/`OpencodeModalities`), so
+        /// this roundtrip transitively exercises all of them.
+        #[test]
+        fn opencode_provider_entry_roundtrips_through_json(entry in arb_opencode_provider_entry()) {
+            assert_json_roundtrip(entry)?;
+        }
+
+        /// #1016: `OpencodeConfig` is the root type composing the typed
+        /// fields (`lsp`, `permission`) directly — `mcp`/`provider` stay
+        /// `serde_json::Value` here since that's their real field type (they
+        /// go through a native-overlay merge after construction), covered
+        /// separately by `mcp_entry_roundtrips_through_json` and
+        /// `opencode_provider_entry_roundtrips_through_json`.
+        #[test]
+        fn opencode_config_roundtrips_through_json(config in arb_opencode_config()) {
+            assert_json_roundtrip(config)?;
+        }
     }
 
     proptest! {
@@ -3577,7 +3761,7 @@ mod tests {
         /// `ResolvedKind` — and never panics regardless of headers/timeout.
         #[test]
         fn mcp_assembly_produces_one_entry_per_server_with_correct_type(
-            mcps in arb_mcp_list()
+            mcps in arb_distinct_resolved_mcps()
         ) {
             let tmp = tempfile::tempdir().unwrap();
             let manifest = MergedManifest {
@@ -3616,7 +3800,7 @@ mod tests {
         /// follow-up can extend the strategy if those drift too.
         #[test]
         fn materialized_top_level_keys_are_declared_in_schema(
-            mcps in arb_mcp_list(),
+            mcps in arb_distinct_resolved_mcps(),
             allow in proptest::collection::vec(arb_permission_rule(), 0..3),
             large_model in proptest::option::of(("[a-z]{2,6}", "[a-z]{2,6}")),
             small_model in proptest::option::of(("[a-z]{2,6}", "[a-z]{2,6}")),
