@@ -40,6 +40,8 @@ enum McpEntry {
         timeout: Option<u32>,
     },
     Remote {
+        /// Deliberately unvalidated passthrough — see the doc comment on
+        /// `ResolvedKind::Remote::url` (#1017) for why.
         url: String,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
@@ -3414,6 +3416,18 @@ mod tests {
             let hooks_path = tmp.path().join("hooks.json");
             std::fs::write(&hooks_path, &content).unwrap();
             let _ = parse_plugin_hooks(&hooks_path, tmp.path(), "test-plugin");
+        }
+
+        /// #1017: `parse_plugin_mcp_entries` deserializes a plugin-provided
+        /// `LLM_PROVIDER_MCP_JSON` file — genuinely untrusted input, unlike
+        /// the adapter's own `McpEntry` construction path — and must never
+        /// panic regardless of content.
+        #[test]
+        fn parse_plugin_mcp_entries_never_panics_on_arbitrary_content(content in ".{0,200}") {
+            let tmp = tempfile::tempdir().unwrap();
+            let mcp_path = tmp.path().join("LLM_PROVIDER_MCP_JSON");
+            std::fs::write(&mcp_path, &content).unwrap();
+            let _ = parse_plugin_mcp_entries(&mcp_path, "test-plugin");
         }
     }
 
