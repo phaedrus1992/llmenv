@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.9.0] - 2026-08-10
+
 All bug fixes, no new features. The inherited-session-state work from 3.8.0
 continues: Claude Code's own `session-logs/` now survives a cache-folder
 change the same way `/resume` history and OAuth tokens already did (#1064),
@@ -764,7 +766,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.8.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.9.0...HEAD
+[3.9.0]: https://github.com/phaedrus1992/llmenv/compare/v3.8.0...v3.9.0
 [3.8.0]: https://github.com/phaedrus1992/llmenv/compare/v3.7.0...v3.8.0
 [3.7.0]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...v3.7.0
 [3.6.1]: https://github.com/phaedrus1992/llmenv/compare/v3.6.0...v3.6.1
