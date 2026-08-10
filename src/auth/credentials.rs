@@ -474,59 +474,25 @@ fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<Credentials>> {
     }
 }
 
-/// Store a credential in the keychain via the `security` CLI.
+/// Store a credential in the keychain via the Security framework directly
+/// (#1061) — never through the `security` CLI's argv.
 ///
-/// The token is passed as an argv entry (`-w <blob>`), which means it is readable
-/// from `ps` by other processes **of the same user** for the child's lifetime.
-/// That is a known and deliberate tradeoff, not an oversight:
-///
-/// - Feeding the secret over stdin (bare `-w`) is not viable: `security`'s
-///   interactive read truncates at 128 bytes and real credential blobs are ~510,
-///   so it would silently store a corrupt token with no error. Measured, not
-///   assumed.
-/// - The exposure does not grant new access. Anything running as this user can
-///   already read the keychain item outright, or `.credentials.json` on the file
-///   backend.
-///
-/// Closing it properly means talking to the Security framework directly instead
-/// of shelling out — tracked separately (#1061).
+/// `security_framework::passwords::set_generic_password` wraps
+/// `SecItemAdd`/`SecItemUpdate` (falling back to update on `errSecDuplicateItem`,
+/// the same "create or update in place" semantics the old `-U` flag gave), with
+/// the secret passed as an in-memory buffer. That closes both problems the CLI
+/// approach had: the blob no longer sits in a child's argv (readable via `ps` by
+/// other processes of the same user for the child's lifetime), and there's no
+/// length limit to trip — the CLI's stdin form truncates at exactly 128 bytes
+/// (measured), far short of a real ~510-byte credential blob, so it would have
+/// silently stored a corrupt token with no error.
 #[cfg(target_os = "macos")]
 fn keychain_write(config_dir: &Path, creds: &Credentials) -> anyhow::Result<()> {
     let service = keychain_service(config_dir);
     let account = keychain_account()?;
     let blob = creds.to_blob()?;
-    // `-U` updates in place when the item already exists. `blob` must never reach
-    // a log line or error message.
-    let out = std::process::Command::new(SECURITY_BIN)
-        .args([
-            "add-generic-password",
-            "-U",
-            "-s",
-            &service,
-            "-a",
-            &account,
-            "-w",
-            &blob,
-        ])
-        .stdout(std::process::Stdio::null())
-        .output()
-        .map_err(|e| anyhow::anyhow!("running `security add-generic-password`: {e}"))?;
-    let stderr = redact_blob_from_stderr(&String::from_utf8_lossy(&out.stderr), &blob);
-    anyhow::ensure!(
-        out.status.success(),
-        "`security add-generic-password` failed for service {service} (status {}): {}",
-        out.status,
-        stderr.trim()
-    );
-    Ok(())
-}
-
-/// `blob` must never reach a log line or error message (see [`keychain_write`]'s
-/// doc comment): redact it from `stderr` on the off chance a future `security`
-/// diagnostic echoes back its own argv.
-#[cfg(target_os = "macos")]
-fn redact_blob_from_stderr(stderr: &str, blob: &str) -> String {
-    stderr.replace(blob, "<redacted>")
+    security_framework::passwords::set_generic_password(&service, &account, blob.as_bytes())
+        .map_err(|e| anyhow::anyhow!("writing keychain item for service {service}: {e}"))
 }
 
 /// Wall clock in epoch milliseconds — the unit Claude Code's expiry fields use.
@@ -569,25 +535,6 @@ mod tests {
                 "exit code {code} should classify as Other"
             );
         }
-    }
-
-    // -- keychain_write stderr redaction (#1092) --
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn redacts_blob_from_stderr_when_present() {
-        let blob = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-TESTONLY"}}"#;
-        let stderr = format!("security: usage error near argument `{blob}`\n");
-        let redacted = redact_blob_from_stderr(&stderr, blob);
-        assert!(!redacted.contains(blob), "blob leaked into: {redacted}");
-        assert!(redacted.contains("<redacted>"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn redact_blob_from_stderr_is_a_noop_when_blob_absent() {
-        let stderr = "security: SecKeychainAddGenericPassword: Permission denied\n";
-        assert_eq!(redact_blob_from_stderr(stderr, "some-blob"), stderr);
     }
 
     /// Comfortably in the past, so a blob using it is expired under any real clock.
