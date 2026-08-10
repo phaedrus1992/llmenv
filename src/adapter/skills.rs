@@ -432,6 +432,31 @@ pub(crate) fn arb_distinct_resolved_mcps()
         })
 }
 
+/// Strategy for a structured [`crate::config::PermissionRule`], shared by adapter
+/// test modules (`claude_code.rs`, `opencode.rs`) that fuzz permission rendering.
+/// Tool names are mixed-case (`Bash`, `WebFetch`) because real tool names are.
+/// Patterns and paths stay paren-free so a generated value never resembles the
+/// native `Tool(pattern)` grammar the renderers emit, which would make a
+/// round-trip assertion pass for the wrong reason. The pattern may be an empty
+/// string: `Some("")` is reachable from user config and both renderers must
+/// handle it.
+#[cfg(test)]
+pub(crate) fn arb_permission_rule()
+-> impl proptest::prelude::Strategy<Value = crate::config::PermissionRule> {
+    use proptest::prelude::Strategy;
+
+    (
+        "[A-Za-z]{1,8}",
+        proptest::option::of("[^()]{0,10}"),
+        proptest::collection::vec("[^()]{1,8}", 0..3),
+    )
+        .prop_map(|(tool, pattern, paths)| crate::config::PermissionRule {
+            tool,
+            pattern,
+            paths,
+        })
+}
+
 /// Recursively-shaped arbitrary YAML for fragment fuzzing, shared by adapter test
 /// modules (`claude_code.rs`, `crush.rs`) that need to fuzz native-fragment merging.
 /// Bounded depth keeps generation cheap while still exercising nested

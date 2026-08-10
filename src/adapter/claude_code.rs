@@ -3851,18 +3851,7 @@ mod tests {
 
     // ---- generate_settings_json (#720): property-based invariants ----
 
-    fn arb_permission_rule() -> impl Strategy<Value = PermissionRule> {
-        (
-            "[A-Za-z]{1,8}",
-            proptest::option::of("[^()]{0,10}"),
-            proptest::collection::vec("[^()]{1,8}", 0..3),
-        )
-            .prop_map(|(tool, pattern, paths)| PermissionRule {
-                tool,
-                pattern,
-                paths,
-            })
-    }
+    use crate::adapter::skills::arb_permission_rule;
 
     // Generates both handler kinds so the render exercises the `command`
     // insertion path AND the `mcp_tool`/`tool` path — the two branches whose
