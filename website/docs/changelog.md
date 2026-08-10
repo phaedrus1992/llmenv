@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.9.0] - 2026-08-10
+
 All bug fixes, no new features. The inherited-session-state work from 3.8.0
 continues: Claude Code's own `session-logs/` now survives a cache-folder
 change the same way `/resume` history and OAuth tokens already did (#1064),
