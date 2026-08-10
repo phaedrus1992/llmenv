@@ -24,6 +24,12 @@ use anyhow::Context as _;
 
 /// Subdirectory of the durable state dir holding Claude Code's transcripts.
 pub const PROJECTS_DIR: &str = "projects";
+/// Subdirectory holding Claude Code's own internal session logs — unlike
+/// `projects/`'s per-session transcripts, these accumulate as one file per
+/// *calendar day* across every session, so a hash-directory change would
+/// otherwise silently truncate the visible history to whatever's been
+/// written since the last config edit (#1064).
+pub const SESSION_LOGS_DIR: &str = "session-logs";
 /// Prompt-history file (`↑` recall) inherited alongside the transcripts.
 pub const HISTORY_FILE: &str = "history.jsonl";
 /// Claude Code's record of which MCP servers still need an OAuth authorization.
@@ -38,6 +44,32 @@ pub const MCP_NEEDS_AUTH_FILE: &str = "mcp-needs-auth-cache.json";
 /// is never overwritten.
 const COPIED_FILES: &[&str] = &[HISTORY_FILE, MCP_NEEDS_AUTH_FILE];
 
+/// Point `<config_dir>/<name>` at `<state_dir>/<name>`, folding in a
+/// pre-existing real directory first so its contents survive.
+///
+/// Shared by [`link_projects_dir`] and [`link_session_logs_dir`] — both are
+/// "one durable directory per config dir" cases with identical fold/link
+/// semantics, differing only in which name and which dir the caller is
+/// durably relocating. Idempotent: a link already pointing at the target is
+/// left untouched.
+///
+/// # Errors
+/// Returns an error when the durable dir cannot be created, an existing tree
+/// cannot be folded in, or the link cannot be created.
+fn link_durable_dir(name: &str, state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    let target = state_dir.join(name);
+    // 0o700, not create_dir_all's 0o777&~umask: both callers' directories hold
+    // sensitive content (project paths and transcripts; session logs) that
+    // shouldn't be group/world-readable.
+    crate::adapter::skills::create_dir_owner_only(&target)
+        .with_context(|| format!("creating durable dir {}", target.display()))?;
+    let link = config_dir.join(name);
+    if clear_link_site(&link, &target)? {
+        attach_store(&target, &link)?;
+    }
+    Ok(())
+}
+
 /// Point `<config_dir>/projects` at `<state_dir>/projects`.
 ///
 /// A pre-existing real `projects/` directory is folded into the state dir before
@@ -48,16 +80,20 @@ const COPIED_FILES: &[&str] = &[HISTORY_FILE, MCP_NEEDS_AUTH_FILE];
 /// Returns an error when the durable dir cannot be created, an existing tree
 /// cannot be folded in, or the link cannot be created.
 pub fn link_projects_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
-    let target = state_dir.join(PROJECTS_DIR);
-    // 0o700, not create_dir_all's 0o777&~umask: this directory's listing is every
-    // project the user has ever opened, and the transcripts under it are 0o600.
-    crate::adapter::skills::create_dir_owner_only(&target)
-        .with_context(|| format!("creating durable transcript dir {}", target.display()))?;
-    let link = config_dir.join(PROJECTS_DIR);
-    if clear_link_site(&link, &target)? {
-        attach_store(&target, &link)?;
-    }
-    Ok(())
+    link_durable_dir(PROJECTS_DIR, state_dir, config_dir)
+}
+
+/// Point `<config_dir>/session-logs` at `<state_dir>/session-logs` (#1064).
+///
+/// Same fold-then-link treatment as [`link_projects_dir`]: a pre-existing
+/// real `session-logs/` directory is folded into the state dir before being
+/// replaced by the link, so history already in the folder survives.
+///
+/// # Errors
+/// Returns an error when the durable dir cannot be created, an existing tree
+/// cannot be folded in, or the link cannot be created.
+pub fn link_session_logs_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    link_durable_dir(SESSION_LOGS_DIR, state_dir, config_dir)
 }
 
 /// Copy each [`COPIED_FILES`] entry from the durable store into a folder that
@@ -345,6 +381,41 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(std::fs::read_link(&link).unwrap(), state.join(PROJECTS_DIR));
+    }
+
+    /// #1064: `session-logs/` gets the same fold-then-link treatment as
+    /// `projects/` — a fresh folder's `session-logs/` becomes a symlink into
+    /// the state dir, and a pre-existing real directory's content survives
+    /// the fold.
+    #[cfg(unix)]
+    #[test]
+    fn link_session_logs_dir_creates_symlink_and_folds_existing_content() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("TAG-hash");
+        write(
+            &cfg.join(SESSION_LOGS_DIR).join("2026-08-01.jsonl"),
+            "log-line",
+        );
+
+        link_session_logs_dir(&state, &cfg).unwrap();
+
+        let link = cfg.join(SESSION_LOGS_DIR);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            state.join(SESSION_LOGS_DIR)
+        );
+        assert_eq!(
+            std::fs::read_to_string(state.join(SESSION_LOGS_DIR).join("2026-08-01.jsonl")).unwrap(),
+            "log-line",
+            "pre-existing session logs must survive the fold into the durable store"
+        );
     }
 
     /// A pre-existing real `projects/` dir is folded into the state dir, then
