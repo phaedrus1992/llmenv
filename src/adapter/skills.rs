@@ -353,6 +353,85 @@ pub(crate) fn project_plugin_skills(plugin_dir: &Path, out: &Path) -> anyhow::Re
     write_first_class_skills(out, &skills)
 }
 
+/// Small string→string map for arbitrary environment/header fuzzing, shared
+/// by adapter test modules. Keys are mixed-case — this codebase's proptest
+/// string generators default to lowercase-only unless a field's real-world
+/// values are meaningfully non-lowercase, and env var names (`API_TOKEN`)
+/// and HTTP header names (`X-Api-Key`) join that list alongside URLs and
+/// tool names like `Bash`. Values stay lowercase-only: unlike keys, map
+/// values have no real-world casing convention to exercise.
+#[cfg(test)]
+pub(crate) fn arb_string_map()
+-> impl proptest::prelude::Strategy<Value = std::collections::BTreeMap<String, String>> {
+    proptest::collection::btree_map("[a-zA-Z][a-zA-Z0-9_-]{0,7}", "[a-z0-9_ ]{0,12}", 0..3)
+}
+
+/// Strategy for one `ResolvedMcp`'s kind/headers/timeout, keyed separately by
+/// name so callers can build a name-unique list (see
+/// [`arb_distinct_resolved_mcps`]) without the name generated here colliding
+/// with a key generated elsewhere.
+#[cfg(test)]
+pub(crate) fn arb_resolved_mcp_body() -> impl proptest::prelude::Strategy<
+    Value = (
+        crate::mcp::resolve::ResolvedKind,
+        std::collections::BTreeMap<String, String>,
+        Option<u32>,
+    ),
+> {
+    use proptest::prelude::*;
+
+    use crate::mcp::resolve::ResolvedKind;
+
+    let stdio = (
+        "[a-z]{1,8}",
+        proptest::collection::vec("[a-z]{1,6}", 0..3),
+        arb_string_map(),
+    )
+        .prop_map(|(command, args, env)| ResolvedKind::Stdio { command, args, env });
+    let remote = (
+        "https?://[a-z0-9.]{3,20}",
+        prop_oneof![
+            Just(crate::config::McpTransport::Http),
+            Just(crate::config::McpTransport::Sse),
+        ],
+    )
+        .prop_map(|(url, transport)| ResolvedKind::Remote { url, transport });
+
+    (
+        prop_oneof![stdio, remote],
+        arb_string_map(),
+        proptest::option::of(0u32..10_000),
+    )
+}
+
+/// A list of arbitrary `ResolvedMcp` with distinct names, keyed by name so
+/// duplicates collapse naturally rather than needing a filter pass. Shared by
+/// adapter test modules whose consuming code (`merge_mcp_into_claude_json`,
+/// opencode's MCP-assembly loop) keys servers by name and can't handle
+/// same-name-different-content collisions.
+#[cfg(test)]
+pub(crate) fn arb_distinct_resolved_mcps()
+-> impl proptest::prelude::Strategy<Value = Vec<crate::mcp::resolve::ResolvedMcp>> {
+    use proptest::prelude::*;
+
+    use crate::mcp::resolve::ResolvedMcp;
+
+    proptest::collection::btree_map("[a-z][a-z0-9_-]{0,10}", arb_resolved_mcp_body(), 0..5)
+        .prop_map(|map| {
+            map.into_iter()
+                .map(|(name, (kind, headers, timeout))| ResolvedMcp {
+                    name,
+                    kind,
+                    headers,
+                    timeout,
+                    disabled_tools: vec![],
+                    mcp_permissions: None,
+                    wakeup_max_tokens: None,
+                })
+                .collect()
+        })
+}
+
 /// Recursively-shaped arbitrary YAML for fragment fuzzing, shared by adapter test
 /// modules (`claude_code.rs`, `crush.rs`) that need to fuzz native-fragment merging.
 /// Bounded depth keeps generation cheap while still exercising nested

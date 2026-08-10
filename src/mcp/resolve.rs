@@ -58,6 +58,14 @@ pub enum ResolvedKind {
     },
     /// Remote endpoint reached by URL. `transport` distinguishes `http`/`sse`
     /// for adapters that care; `stdio` never reaches this variant.
+    ///
+    /// `url` is deliberately permissive passthrough, not a validated/parsed
+    /// URL type (#1017): `remote_kind` below only checks it's present, not
+    /// that it's well-formed, and every adapter (`claude_code.rs`,
+    /// `opencode.rs`) renders it as an opaque string with no format check of
+    /// its own. Adding real validation would be a resolver-level policy
+    /// change (which schemes are acceptable? all adapters need to agree),
+    /// not something to bolt on in one adapter's rendering path.
     Remote {
         url: String,
         transport: McpTransport,

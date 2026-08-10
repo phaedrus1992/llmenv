@@ -2130,7 +2130,9 @@ mod tests {
         render_marketplace_source, render_permission_rule, seed_install_method, seed_status_line,
         strip_json_nulls,
     };
-    use crate::adapter::skills::{arb_yaml_value, reject_hardcoded_config_path, validate_skills};
+    use crate::adapter::skills::{
+        arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,
+    };
     use crate::config::PermissionRule;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use crate::merge::MergedManifest;
@@ -2506,7 +2508,7 @@ mod tests {
         // appears under `.claude.json` → top-level `mcpServers` in valid,
         // re-parseable JSON. Remote entries carry the `type` discriminator.
         #[test]
-        fn merge_mcp_roundtrips_distinct_servers(mcps in arb_distinct_mcps()) {
+        fn merge_mcp_roundtrips_distinct_servers(mcps in arb_distinct_resolved_mcps()) {
             let dir = tempfile::tempdir().unwrap();
             merge_mcp_into_claude_json(dir.path(), &mcps, None).unwrap();
 
@@ -2564,7 +2566,7 @@ mod tests {
         // #244 overlay determinism: an empty native overlay onto the server set
         // is a deterministic no-op on the merged `.claude.json` content.
         #[test]
-        fn merge_mcp_empty_overlay_is_deterministic(mcps in arb_distinct_mcps()) {
+        fn merge_mcp_empty_overlay_is_deterministic(mcps in arb_distinct_resolved_mcps()) {
             let empty = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
 
             let dir_a = tempfile::tempdir().unwrap();
@@ -2583,7 +2585,7 @@ mod tests {
         // it carries the user's Claude state plus server credentials / URLs.
         #[cfg(unix)]
         #[test]
-        fn merge_mcp_writes_owner_only_permissions(mcps in arb_distinct_mcps()) {
+        fn merge_mcp_writes_owner_only_permissions(mcps in arb_distinct_resolved_mcps()) {
             use std::os::unix::fs::PermissionsExt;
             prop_assume!(!mcps.is_empty());
             let dir = tempfile::tempdir().unwrap();
@@ -2598,7 +2600,7 @@ mod tests {
         // #151/#244: merged output round-trips through serde_json — every byte
         // written deserializes back to a parsable Value with identical structure.
         #[test]
-        fn merge_mcp_serde_roundtrip(mcps in arb_distinct_mcps()) {
+        fn merge_mcp_serde_roundtrip(mcps in arb_distinct_resolved_mcps()) {
             prop_assume!(!mcps.is_empty());
             let dir = tempfile::tempdir().unwrap();
             merge_mcp_into_claude_json(dir.path(), &mcps, None).unwrap();
@@ -2622,54 +2624,6 @@ mod tests {
             proptest::collection::vec("[a-z]{0,6}".prop_map(serde_yaml::Value::String), 0..4)
                 .prop_map(serde_yaml::Value::Sequence),
         ]
-    }
-
-    // A vector of ResolvedMcp with unique names (write_mcp_json hard-errors on
-    // same-name-different-content, so the roundtrip properties require distinct
-    // names to stay in the success path).
-    fn arb_distinct_mcps() -> impl Strategy<Value = Vec<ResolvedMcp>> {
-        proptest::collection::vec(arb_mcp(), 0..5).prop_map(|mcps| {
-            let mut seen = std::collections::BTreeSet::new();
-            mcps.into_iter()
-                .filter(|m| seen.insert(m.name.clone()))
-                .collect()
-        })
-    }
-
-    fn arb_mcp() -> impl Strategy<Value = ResolvedMcp> {
-        let stdio = (
-            "[a-z][a-z0-9_-]{0,10}",
-            "[a-z]{1,8}",
-            proptest::collection::vec("[a-z]{0,6}", 0..3),
-            // Sometimes empty, sometimes populated — exercises both the
-            // env-omitted and env-serialized branches of write_mcp_json.
-            proptest::collection::btree_map("[A-Z][A-Z_]{0,5}", "[a-z0-9]{0,8}", 0..3),
-        )
-            .prop_map(|(name, command, args, env)| ResolvedMcp {
-                name,
-                kind: ResolvedKind::Stdio { command, args, env },
-                headers: std::collections::BTreeMap::new(),
-                timeout: None,
-                disabled_tools: vec![],
-                mcp_permissions: None,
-                wakeup_max_tokens: None,
-            });
-        let remote =
-            ("[a-z][a-z0-9_-]{0,10}", "https://[a-z]{1,8}\\.test").prop_map(|(name, url)| {
-                ResolvedMcp {
-                    name,
-                    kind: ResolvedKind::Remote {
-                        url,
-                        transport: crate::config::McpTransport::Http,
-                    },
-                    headers: std::collections::BTreeMap::new(),
-                    timeout: None,
-                    disabled_tools: vec![],
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                }
-            });
-        prop_oneof![stdio, remote]
     }
 
     // ---- generate_settings_json: permission render ----
