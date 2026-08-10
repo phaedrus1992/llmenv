@@ -173,17 +173,21 @@ pub(super) fn memory_orphaned_by_disable_bundles(
     active: &crate::scope::ActiveScopes,
     bundle_caps: &Capabilities,
 ) -> Vec<String> {
-    let declares_memory = |caps: &Option<crate::config::Features>| {
-        caps.as_ref().is_some_and(|f| !f.memory.is_empty())
+    // Tag-active, not merely present (#1140): a `features.memory` entry gated
+    // on a `when` tag that isn't active right now supplies nothing, so its
+    // mere existence must not mask the disabled bundle actually being the
+    // only supplier the active scope has.
+    let declares_active_memory = |caps: &Option<crate::config::Features>| {
+        caps.as_ref().is_some_and(|f| {
+            f.memory
+                .iter()
+                .any(|m| m.when.iter().any(|t| active.tags.contains(t)))
+        })
     };
-    if declares_memory(&config.features) || declares_memory(&bundle_caps.features) {
+    if declares_active_memory(&config.features) || declares_active_memory(&bundle_caps.features) {
         return Vec::new();
     }
-    crate::hook_run::suppressed_bundle_capabilities(config, config_dir, active)
-        .into_iter()
-        .filter(|(_, caps)| declares_memory(&caps.features))
-        .map(|(name, _)| name)
-        .collect()
+    crate::hook_run::suppressed_memory_bundles(config, config_dir, active)
 }
 
 /// Check whether a host address string is a loopback / local-only address.
@@ -1257,6 +1261,44 @@ mod tests {
             )
             .is_empty(),
             "a top-level features.memory entry still supplies the backend"
+        );
+    }
+
+    // #1140: a top-level features.memory entry exists but is gated on a tag
+    // that isn't active — it supplies nothing for this scope, so it must not
+    // mask the disabled bundle being the only *active* supplier. Before the
+    // fix, `declares_memory` checked mere presence and returned empty here.
+    #[test]
+    fn doctor_still_flags_disabled_bundle_when_other_memory_entry_is_tag_inactive() {
+        let (root, mut config, active) = disabled_memory_bundle_fixture();
+        config.features = Some(Features {
+            memory: vec![Memory {
+                server_host: "elsewhere".into(),
+                port: 7878,
+                listen_host: "127.0.0.1".into(),
+                when: vec!["othertag".into()],
+                default_topics: vec![],
+                default_type: None,
+                default_importance: None,
+                type_importance: BTreeMap::new(),
+                retention: None,
+                auto_prune: false,
+                consolidation: None,
+                mcp_permissions: None,
+                wakeup_max_tokens: None,
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            memory_orphaned_by_disable_bundles(
+                &config,
+                root.path(),
+                &active,
+                &Capabilities::default()
+            ),
+            vec!["b".to_string()],
+            "a tag-inactive features.memory entry supplies nothing and must not \
+             mask the disabled bundle being the active scope's only supplier"
         );
     }
 

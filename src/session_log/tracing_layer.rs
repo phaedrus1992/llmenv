@@ -62,6 +62,27 @@ impl<S: Subscriber> Layer<S> for FileLogLayer {
     }
 }
 
+/// Run `f` under a `tracing` subscriber that captures `level`-and-above
+/// events into a `FileSink` at `log_path`.
+///
+/// Shared by the detached hook children's failure-logging tests
+/// (`hook_run::detached_store`, `session_log::detached`, `hook_run`) so the
+/// tempdir/`FileSink`/`FileLogLayer`/`with_default` scaffold — and which
+/// level it filters at — can't drift between them (#1141). Each of those
+/// tests asserts that a specific failure logs at a level the default
+/// `EnvFilter` (ERROR-only with `RUST_LOG` unset) actually passes.
+#[cfg(test)]
+pub(crate) fn capture_logs_at<R>(
+    log_path: &std::path::Path,
+    level: tracing_subscriber::filter::LevelFilter,
+    f: impl FnOnce() -> R,
+) -> R {
+    use tracing_subscriber::prelude::*;
+    let sub = tracing_subscriber::registry()
+        .with(FileLogLayer::new(FileSink::new(log_path.to_path_buf())).with_filter(level));
+    tracing::subscriber::with_default(sub, f)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
