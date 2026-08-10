@@ -3807,21 +3807,19 @@ pub(crate) fn marker_disabled_bundle_names(active: &ActiveScopes) -> HashSet<Str
 /// Whether `bundle` would be selected by tag intersection or explicit
 /// `enable_bundles`, ignoring `disable_bundles` entirely — the shared "would
 /// this fire" core. `firing_bundles` layers the `disable_bundles` subtraction
-/// on top; `hook_run::suppressed_bundle_capabilities` needs the inverse (only
-/// bundles disable_bundles turns off) and reimplemented this same predicate
+/// (and its own, CLI-only `--tag` narrowing) on top; `hook_run::
+/// suppressed_bundle_capabilities` needs the inverse (only bundles
+/// disable_bundles turns off) and reimplemented this same predicate
 /// separately until #1141 factored it out here so the two selection rules
-/// can't drift apart.
+/// can't drift apart. Deliberately 3-param, not 4: the `--tag` flag is a
+/// display-only narrowing orthogonal to "would this fire," not part of the
+/// rule itself, so it stays a separate filter stage in `firing_bundles`
+/// rather than a dummy `None` every non-CLI caller has to pass.
 pub(crate) fn tag_or_marker_selected(
     bundle: &Bundle,
     active: &ActiveScopes,
     manually_enabled: &HashSet<String>,
-    tag_filter: Option<&str>,
 ) -> bool {
-    if let Some(t) = tag_filter
-        && !bundle.when.iter().any(|w| w == t)
-    {
-        return false;
-    }
     bundle.when.iter().any(|bt| active.tags.contains(bt)) || manually_enabled.contains(&bundle.name)
 }
 
@@ -3848,7 +3846,8 @@ pub(crate) fn firing_bundles<'a>(
     bundles
         .iter()
         .filter(|b| !disabled.contains(&b.name))
-        .filter(|b| tag_or_marker_selected(b, active, &manually_enabled, tag_filter))
+        .filter(|b| tag_filter.is_none_or(|t| b.when.iter().any(|w| w == t)))
+        .filter(|b| tag_or_marker_selected(b, active, &manually_enabled))
         .collect()
 }
 

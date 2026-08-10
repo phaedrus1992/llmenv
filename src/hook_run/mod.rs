@@ -1728,7 +1728,7 @@ pub(crate) fn suppressed_bundle_capabilities(
         .bundle
         .iter()
         .filter(|b| disabled.contains(&b.name))
-        .filter(|b| crate::cli::tag_or_marker_selected(b, active, &manually_enabled, None))
+        .filter(|b| crate::cli::tag_or_marker_selected(b, active, &manually_enabled))
         .collect();
     crate::cli::build_bundle_refs(config_dir, active, &would_fire)
         .into_iter()
@@ -3911,6 +3911,29 @@ mod tests {
 
     // ===== #1143: MemoryEndpoint::into_url() message formatting =====
 
+    /// Every `into_url()` variant that carries a name list uses `.join(", ")`
+    /// unconditionally — shared assertion so the three variant-specific
+    /// proptests below don't each restate it (pre-pr-review finding for
+    /// #1234).
+    fn assert_message_preserves_names(
+        msg: &str,
+        names: &[String],
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        for name in names {
+            if !msg.contains(name.as_str()) {
+                return Err(proptest::test_runner::TestCaseError::fail(format!(
+                    "message must preserve {name:?}: {msg}"
+                )));
+            }
+        }
+        if !names.is_empty() && !msg.contains(&names.join(", ")) {
+            return Err(proptest::test_runner::TestCaseError::fail(format!(
+                "names must appear joined with \", \": {msg}"
+            )));
+        }
+        Ok(())
+    }
+
     proptest! {
         // NotDeclared's message must preserve every skipped-bundle name and
         // join them with the same separator regardless of list length or the
@@ -3923,15 +3946,7 @@ mod tests {
                 .into_url()
                 .unwrap_err()
                 .to_string();
-            for name in &names {
-                prop_assert!(msg.contains(name), "message must preserve {name:?}: {msg}");
-            }
-            if !names.is_empty() {
-                prop_assert!(
-                    msg.contains(&names.join(", ")),
-                    "names must appear joined with \", \": {msg}"
-                );
-            }
+            assert_message_preserves_names(&msg, &names)?;
         }
 
         #[test]
@@ -3942,10 +3957,7 @@ mod tests {
                 .into_url()
                 .unwrap_err()
                 .to_string();
-            for name in &names {
-                prop_assert!(msg.contains(name), "message must preserve {name:?}: {msg}");
-            }
-            prop_assert!(msg.contains(&names.join(", ")));
+            assert_message_preserves_names(&msg, &names)?;
         }
 
         #[test]
@@ -3956,10 +3968,7 @@ mod tests {
                 .into_url()
                 .unwrap_err()
                 .to_string();
-            for host in &hosts {
-                prop_assert!(msg.contains(host), "message must preserve {host:?}: {msg}");
-            }
-            prop_assert!(msg.contains(&hosts.join(", ")));
+            assert_message_preserves_names(&msg, &hosts)?;
         }
     }
 
