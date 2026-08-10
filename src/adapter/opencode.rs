@@ -2983,20 +2983,7 @@ mod tests {
     // `materialize` API rather than the private helper fns.
     use proptest::prelude::*;
 
-    /// Strategy for a structured permission rule. Tool names and patterns stay
-    /// paren-free so they never resemble the native `Tool(pattern)` grammar.
-    fn arb_permission_rule() -> impl Strategy<Value = crate::config::PermissionRule> {
-        (
-            "[A-Za-z]{1,6}",
-            proptest::option::of("[^()]{1,8}"),
-            proptest::collection::vec("[^()]{1,8}", 0..3),
-        )
-            .prop_map(|(tool, pattern, paths)| crate::config::PermissionRule {
-                tool,
-                pattern,
-                paths,
-            })
-    }
+    use crate::adapter::skills::arb_permission_rule;
 
     /// Materialize a manifest carrying only `caps` and return the emitted
     /// `permission` value (or `Null` when the key is absent).

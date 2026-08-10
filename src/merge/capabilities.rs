@@ -1182,14 +1182,40 @@ mod tests {
                 "[a-z]{1,6}",
                 prop::collection::vec("[a-z]{1,4}", 0..3),
                 prop::collection::btree_map(".[a-z]{1,4}", "[a-z]{1,8}", 0..3),
+                prop::collection::vec("[a-z]{1,4}", 0..3),
+                prop::collection::btree_map("[A-Z_]{1,6}", "[a-z]{1,8}", 0..3),
+                any::<bool>(),
+                prop::collection::vec("[a-z]{1,4}", 0..3),
+                prop::collection::vec("[a-z.]{1,6}", 0..3),
+                prop::option::of("[a-z]{1,6}".prop_map(serde_yaml::Value::String)),
+                prop::option::of(0u32..100_000),
             )
-                .prop_map(|(name, tags, extension_to_language)| LspServer {
-                    name,
-                    when: tags,
-                    command: "lsp-cmd".into(),
-                    extension_to_language,
-                    ..Default::default()
-                })
+                .prop_map(
+                    |(
+                        name,
+                        tags,
+                        extension_to_language,
+                        args,
+                        env,
+                        disabled,
+                        filetypes,
+                        root_markers,
+                        init_options,
+                        timeout,
+                    )| LspServer {
+                        name,
+                        when: tags,
+                        command: "lsp-cmd".into(),
+                        extension_to_language,
+                        args,
+                        env,
+                        disabled,
+                        filetypes,
+                        root_markers,
+                        init_options,
+                        timeout,
+                    },
+                )
         }
 
         fn arb_skill_source() -> impl Strategy<Value = SkillSource> {

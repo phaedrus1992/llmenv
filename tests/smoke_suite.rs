@@ -25,12 +25,34 @@ fn current_user() -> String {
         .unwrap_or_else(|_| "runner".to_string())
 }
 
+/// Placeholder every config scaffold below writes for `cache.cache_dir`, which
+/// [`setup_config`] rewrites to a path inside the test's own temp dir.
+const CACHE_DIR_PLACEHOLDER: &str = "__CACHE_DIR__";
+
 /// Write `config.yaml` into a fresh temp dir and return the dir (kept alive for
 /// the test) plus its path. The dir doubles as `LLMENV_CONFIG_DIR`.
+///
+/// Rewrites [`CACHE_DIR_PLACEHOLDER`] to a per-test cache directory. Without
+/// that, `cache.cache_dir` defaults to the real `~/.cache/llmenv` and the
+/// materialized folder is `<adapter>/<version>/<selection-shape>` — so every
+/// test here that declares the same tags and bundles resolves to the *same*
+/// folder, and concurrent tests overwrite each other's output (#1254). It also
+/// kept the suite writing into the developer's and CI runner's actual llmenv
+/// cache.
 fn setup_config(content: &str) -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
     let config_path = dir.path().join("config.yaml");
-    fs::write(&config_path, content).unwrap();
+    assert!(
+        content.contains(CACHE_DIR_PLACEHOLDER),
+        "config scaffold must declare cache.cache_dir as {CACHE_DIR_PLACEHOLDER}, \
+         or the test shares the real ~/.cache/llmenv with every other test"
+    );
+    let cache_dir = dir.path().join("cache");
+    fs::write(
+        &config_path,
+        content.replace(CACHE_DIR_PLACEHOLDER, &cache_dir.display().to_string()),
+    )
+    .unwrap();
     (dir, config_path)
 }
 
@@ -51,6 +73,7 @@ tag:
   test: ""
 
 cache:
+  cache_dir: "__CACHE_DIR__"
   sync_interval_minutes: 60
 
 adapter:
@@ -89,6 +112,7 @@ features:
       when: [test]
 
 cache:
+  cache_dir: "__CACHE_DIR__"
   sync_interval_minutes: 60
 
 adapter:
@@ -125,6 +149,7 @@ bundle:
     when: [test]
 
 cache:
+  cache_dir: "__CACHE_DIR__"
   sync_interval_minutes: 60
 
 adapter:
@@ -164,6 +189,7 @@ features:
     - when: [test]
 
 cache:
+  cache_dir: "__CACHE_DIR__"
   sync_interval_minutes: 60
 
 adapter:
@@ -193,16 +219,24 @@ fn llmenv_cmd(
     cmd
 }
 
-/// Budget for cheap operations (a single hook event). Contention-tolerant
-/// (#1096): the binary runs all ~28 of this suite's tests in parallel, and
-/// under load any one of them can lose the race against a fixed 5s budget —
-/// this isn't specific to any one test. Still tight enough to fail fast on a
-/// genuine hang (the DNS-resolution hang in #547, the multi-minute backend
-/// crash in #548).
+/// Budget for cheap operations (a single hook event).
+///
+/// These budgets are hang detectors, not performance assertions — they exist to
+/// fail fast on the DNS-resolution hang in #547 and the multi-minute backend
+/// crash in #548. The commands themselves take tens of milliseconds; nearly all
+/// of the measured time is spawning and paging in two large debug binaries.
+///
+/// That overhead grows with how much else is running concurrently, so the budget
+/// is only meaningful when this suite's concurrency is bounded — see the
+/// `cli-subprocess` test group in `.config/nextest.toml`, without which a
+/// full-workspace run made these budgets a race against the rest of the suite
+/// rather than a hang check (#1096 raised them for that reason; #1254 removed
+/// the cause). Any new test binary that spawns llmenv under a timeout belongs in
+/// that group.
 const SHORT_TIMEOUT_SECS: u64 = 15;
 /// Budget for heavier operations (anything other than a single hook event —
-/// `export`, `regenerate`, `doctor`, `status`). Same contention-tolerance
-/// rationale as `SHORT_TIMEOUT_SECS` (#1096).
+/// `export`, `regenerate`, `doctor`, `status`). Same rationale as
+/// [`SHORT_TIMEOUT_SECS`].
 const LONG_TIMEOUT_SECS: u64 = 30;
 
 /// Run a command with an explicit timeout and assert it completes within that time.

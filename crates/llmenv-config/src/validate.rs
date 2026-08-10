@@ -942,6 +942,73 @@ mod tests {
             })
     }
 
+    /// Arbitrary opaque YAML, bounded depth. The `native_*` maps hold values
+    /// llmenv never interprets, so the round-trip has to survive whatever a user
+    /// writes: scalars whose text form is ambiguous with another type (`"123"`,
+    /// `"true"`, `"~"` as strings must come back as strings), non-string mapping
+    /// keys, empty containers, and nesting.
+    fn arb_yaml_value(depth: u32) -> impl Strategy<Value = serde_yaml::Value> {
+        let ambiguous = prop::sample::select(vec![
+            "123",
+            "0",
+            "-1",
+            "1.5",
+            "true",
+            "false",
+            "null",
+            "~",
+            "yes",
+            "no",
+            "on",
+            "off",
+            "",
+            " leading",
+            "trailing ",
+            "a: b",
+            "#comment",
+            "*anchor",
+            "&alias",
+            "\"quoted\"",
+            "\n",
+        ])
+        .prop_map(|s| serde_yaml::Value::String(s.to_owned()));
+        let leaf = prop_oneof![
+            Just(serde_yaml::Value::Null),
+            any::<bool>().prop_map(serde_yaml::Value::Bool),
+            any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
+            arb_string().prop_map(serde_yaml::Value::String),
+            ambiguous,
+            // A tagged scalar (`!Tag value`). Users reach for these in native
+            // passthrough blocks, and the tag is part of the value's identity —
+            // losing it on round-trip would silently change what an adapter
+            // renders.
+            (r"[A-Za-z][A-Za-z0-9]{0,7}", arb_string()).prop_map(|(tag, value)| {
+                serde_yaml::Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
+                    tag: serde_yaml::value::Tag::new(tag),
+                    value: serde_yaml::Value::String(value),
+                }))
+            }),
+        ];
+        leaf.prop_recursive(depth, 12, 3, |inner| {
+            let key = prop_oneof![
+                arb_string().prop_map(serde_yaml::Value::String),
+                // YAML mapping keys need not be strings; the passthrough must
+                // preserve an integer key as an integer.
+                any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
+            ];
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..3).prop_map(serde_yaml::Value::Sequence),
+                prop::collection::vec((key, inner), 0..3)
+                    .prop_map(|pairs| serde_yaml::Value::Mapping(pairs.into_iter().collect())),
+            ]
+        })
+    }
+
+    /// Engine-keyed opaque passthrough map, as used by every `native_*` field.
+    fn arb_native_map() -> impl Strategy<Value = BTreeMap<String, serde_yaml::Value>> {
+        prop::collection::btree_map(arb_string(), arb_yaml_value(3), 0..3)
+    }
+
     fn arb_capabilities() -> impl Strategy<Value = Capabilities> {
         (
             arb_permissions(),
@@ -949,17 +1016,40 @@ mod tests {
             prop::collection::vec(arb_string(), 0..3),
             prop::collection::vec(arb_mcp_server(), 0..3),
             prop::collection::btree_map(arb_string(), arb_native_rules(), 0..3),
+            arb_native_map(),
+            arb_native_map(),
+            arb_native_map(),
+            arb_native_map(),
+            arb_native_map(),
         )
-            .prop_map(|(permissions, hooks, plugins, mcp, native_permissions)| {
-                Capabilities {
+            .prop_map(
+                |(
                     permissions,
                     hooks,
                     plugins,
                     mcp,
                     native_permissions,
-                    ..Default::default()
-                }
-            })
+                    native_hooks,
+                    native_plugins,
+                    native_mcp,
+                    native_model_providers,
+                    native,
+                )| {
+                    Capabilities {
+                        permissions,
+                        hooks,
+                        plugins,
+                        mcp,
+                        native_permissions,
+                        native_hooks,
+                        native_plugins,
+                        native_mcp,
+                        native_model_providers,
+                        native,
+                        ..Default::default()
+                    }
+                },
+            )
     }
 
     fn arb_transport() -> impl Strategy<Value = McpTransport> {
@@ -979,9 +1069,13 @@ mod tests {
             prop::collection::vec(arb_string(), 0..3),
             prop::collection::btree_map(arb_string(), arb_string(), 0..3),
             arb_opt_string(),
+            prop::collection::btree_map(arb_string(), arb_string(), 0..3),
+            any::<bool>(),
+            prop::collection::vec(arb_string(), 0..3),
+            prop::option::of(0u32..100_000),
         )
             .prop_map(
-                |(name, when, transport, command, args, env, url)| McpServer {
+                |(
                     name,
                     when,
                     transport,
@@ -989,7 +1083,22 @@ mod tests {
                     args,
                     env,
                     url,
-                    ..Default::default()
+                    headers,
+                    disabled,
+                    disabled_tools,
+                    timeout,
+                )| McpServer {
+                    name,
+                    when,
+                    transport,
+                    command,
+                    args,
+                    env,
+                    url,
+                    headers,
+                    disabled,
+                    disabled_tools,
+                    timeout,
                 },
             )
     }
@@ -1245,6 +1354,7 @@ mod tests {
                 // Nested (rather than a 13th top-level tuple element) —
                 // proptest's tuple `Strategy` impl tops out at arity 12.
                 prop::option::of(arb_context_mode()),
+                arb_native_map(),
             ),
         )
             .prop_map(
@@ -1259,7 +1369,7 @@ mod tests {
                     host,
                     capabilities,
                     marketplace,
-                    (plugin_collection, session_log, context_mode),
+                    (plugin_collection, session_log, context_mode, native),
                 )| {
                     Config {
                         disabled_engines: vec![],
@@ -1271,7 +1381,7 @@ mod tests {
                             content: vec![],
                         },
                         capabilities,
-                        native: Default::default(),
+                        native,
                         bundle,
                         mcp,
                         features: if memory.is_empty()
