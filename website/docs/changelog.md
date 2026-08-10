@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The "bundle(s) X fired but have no content directory" hook-run message no longer claims that as the sole cause when a firing bundle was actually skipped for a rejected/unsafe name instead — the wording now covers both. (#1142)
 - `llmenv status read-once` now shows `(unreadable)` instead of `(none)` when the ReadOnce cache directory exists but can't be read (e.g. a permission error) — the two used to look identical. `llmenv setup`'s project-config scan and `doctor`'s version-skew check now log a read failure there instead of silently showing nothing. (#1180)
 - Folding a stranded transcript directory into the durable state store (`export`'s inherit step) no longer writes through a same-user-planted symlink. The copy fallback used when `rename` fails cross-device wrote through a symlink at the destination instead of replacing it, the newest-file comparison read a symlink's target's mtime instead of its own, and creating the destination directory silently succeeded when it already resolved through a symlink to somewhere else. Same-user hardening, not reachable privilege escalation. (#1065)
+- Session consolidation no longer panics when the LLM backend returns a rule over 500 characters containing non-ASCII text. The truncation sliced by byte offset while the length bound is documented in characters, so a multi-byte character straddling that offset crashed the parse instead of truncating cleanly. (#1166)
 
 ## [3.8.0] - 2026-08-10
 
