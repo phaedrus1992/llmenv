@@ -2662,15 +2662,12 @@ mod tests {
             ValueKind::Sequence => proptest::collection::vec(scalar, 1..4)
                 .prop_map(serde_yaml::Value::Sequence)
                 .boxed(),
-            ValueKind::Mapping => proptest::collection::vec(("[a-z]{1,6}", scalar), 1..4)
-                .prop_map(|pairs| {
-                    let mut map = serde_yaml::Mapping::new();
-                    for (k, v) in pairs {
-                        map.insert(serde_yaml::Value::String(k), v);
-                    }
-                    serde_yaml::Value::Mapping(map)
-                })
-                .boxed(),
+            ValueKind::Mapping => proptest::collection::vec(
+                ("[a-z]{1,6}".prop_map(serde_yaml::Value::String), scalar),
+                1..4,
+            )
+            .prop_map(|pairs| serde_yaml::Value::Mapping(pairs.into_iter().collect()))
+            .boxed(),
         }
     }
 
@@ -4020,15 +4017,71 @@ mod tests {
             })
     }
 
+    /// Top-level `settings.json` keys `generate_settings_json` renders that the
+    /// catch-all `native` block is allowed to collide with. `permissions` and
+    /// `hooks` are excluded on purpose — `reject_modeled_keys_in_catch_all`
+    /// refuses those, so generating one would make the render error out instead
+    /// of exercising the overlay.
+    const OVERRIDABLE_SETTINGS_KEYS: [&str; 3] =
+        ["autoMemoryEnabled", "effortLevel", "advisorSize"];
+
+    /// Arbitrary `native.claude_code` catch-all fragment. Keys are drawn from
+    /// both fresh names (the insert path) and the keys the renderer actually
+    /// emits (the shared-key overwrite path) — the renderer emits those before
+    /// the overlay specifically so `native` can override them, so the overwrite
+    /// path is reachable in production and must be covered.
+    ///
+    /// One case is held back: a null value on a key the renderer already emitted
+    /// currently renders an explicit JSON `null`, violating the no-null-keys
+    /// invariant from #720. That is a live rendering bug tracked in #1264, not
+    /// something this generator should quietly assert away — drop the exclusion
+    /// when #1264 is fixed.
+    fn arb_native_fragment()
+    -> impl Strategy<Value = std::collections::BTreeMap<String, serde_yaml::Value>> {
+        let key = prop_oneof![
+            "[a-z]{1,8}".prop_map(String::from),
+            proptest::sample::select(OVERRIDABLE_SETTINGS_KEYS.as_slice()).prop_map(String::from),
+        ];
+        proptest::collection::vec((key, arb_yaml_value(2)), 0..4).prop_map(|pairs| {
+            let mut fragment = serde_yaml::Mapping::new();
+            for (k, v) in pairs {
+                if MODELED_SETTINGS_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
+                if v.is_null() && OVERRIDABLE_SETTINGS_KEYS.contains(&k.as_str()) {
+                    continue; // #1264
+                }
+                fragment.insert(serde_yaml::Value::String(k), v);
+            }
+            std::collections::BTreeMap::from([(
+                "claude_code".to_owned(),
+                serde_yaml::Value::Mapping(fragment),
+            )])
+        })
+    }
+
     fn arb_merged_manifest() -> impl Strategy<Value = crate::merge::MergedManifest> {
         (
             proptest::collection::vec(arb_permission_rule(), 0..4),
             proptest::collection::vec(arb_permission_rule(), 0..4),
             proptest::collection::vec(arb_hook(), 0..4),
             any::<bool>(),
+            arb_native_fragment(),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of("[a-z]{1,8}"),
+            proptest::option::of("[a-z]{1,8}"),
         )
             .prop_map(
-                |(allow, deny, hooks, transcript_on)| crate::merge::MergedManifest {
+                |(
+                    allow,
+                    deny,
+                    hooks,
+                    transcript_on,
+                    native,
+                    auto_memory_enabled,
+                    effort_level,
+                    advisor_size,
+                )| crate::merge::MergedManifest {
                     capabilities: crate::config::Capabilities {
                         permissions: crate::config::Permissions {
                             default_mode: None,
@@ -4038,6 +4091,9 @@ mod tests {
                             deny,
                         },
                         hooks,
+                        auto_memory_enabled,
+                        effort_level,
+                        advisor_size,
                         ..Default::default()
                     },
                     session_log: crate::config::SessionLog {
@@ -4048,6 +4104,7 @@ mod tests {
                         }),
                         ..Default::default()
                     },
+                    native,
                     ..Default::default()
                 },
             )

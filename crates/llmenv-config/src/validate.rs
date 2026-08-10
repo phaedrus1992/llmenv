@@ -978,6 +978,16 @@ mod tests {
             any::<i64>().prop_map(|n| serde_yaml::Value::Number(n.into())),
             arb_string().prop_map(serde_yaml::Value::String),
             ambiguous,
+            // A tagged scalar (`!Tag value`). Users reach for these in native
+            // passthrough blocks, and the tag is part of the value's identity —
+            // losing it on round-trip would silently change what an adapter
+            // renders.
+            (r"[A-Za-z][A-Za-z0-9]{0,7}", arb_string()).prop_map(|(tag, value)| {
+                serde_yaml::Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
+                    tag: serde_yaml::value::Tag::new(tag),
+                    value: serde_yaml::Value::String(value),
+                }))
+            }),
         ];
         leaf.prop_recursive(depth, 12, 3, |inner| {
             let key = prop_oneof![
@@ -988,13 +998,8 @@ mod tests {
             ];
             prop_oneof![
                 prop::collection::vec(inner.clone(), 0..3).prop_map(serde_yaml::Value::Sequence),
-                prop::collection::vec((key, inner), 0..3).prop_map(|pairs| {
-                    let mut map = serde_yaml::Mapping::new();
-                    for (k, v) in pairs {
-                        map.insert(k, v);
-                    }
-                    serde_yaml::Value::Mapping(map)
-                }),
+                prop::collection::vec((key, inner), 0..3)
+                    .prop_map(|pairs| serde_yaml::Value::Mapping(pairs.into_iter().collect())),
             ]
         })
     }
@@ -1064,9 +1069,13 @@ mod tests {
             prop::collection::vec(arb_string(), 0..3),
             prop::collection::btree_map(arb_string(), arb_string(), 0..3),
             arb_opt_string(),
+            prop::collection::btree_map(arb_string(), arb_string(), 0..3),
+            any::<bool>(),
+            prop::collection::vec(arb_string(), 0..3),
+            prop::option::of(0u32..100_000),
         )
             .prop_map(
-                |(name, when, transport, command, args, env, url)| McpServer {
+                |(
                     name,
                     when,
                     transport,
@@ -1074,7 +1083,22 @@ mod tests {
                     args,
                     env,
                     url,
-                    ..Default::default()
+                    headers,
+                    disabled,
+                    disabled_tools,
+                    timeout,
+                )| McpServer {
+                    name,
+                    when,
+                    transport,
+                    command,
+                    args,
+                    env,
+                    url,
+                    headers,
+                    disabled,
+                    disabled_tools,
+                    timeout,
                 },
             )
     }

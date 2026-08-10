@@ -1,21 +1,33 @@
-# Cap the concurrency of the smoke suite (#1254).
+# Cap the concurrency of tests that spawn the llmenv binary under a wall-clock
+# budget (#1254).
 #
-# Every test in `tests/smoke_suite.rs` spawns the real `llmenv` binary and
-# asserts it finishes inside a wall-clock budget (`SHORT_TIMEOUT_SECS` /
-# `LONG_TIMEOUT_SECS`). The operation under test costs ~60ms; the rest of the
-# measured time is process spawn and paging of two large debug binaries. That
-# overhead scales with whatever else is running, not with the work — under
-# `cargo nextest run --workspace` (2500+ tests, 47 binaries) the same test that
-# takes 3.7s with only this binary running reached ~12s against its 30s budget
-# on a 10-core machine, and CI runners are smaller.
+# Every test in these binaries spawns the real `llmenv` binary and asserts it
+# finishes inside a fixed timeout. The operation under test costs ~60ms; the
+# rest of the measured time is process spawn and paging of two large debug
+# binaries. That overhead scales with whatever else is running, not with the
+# work — under `cargo nextest run --workspace` (2500+ tests, 47 binaries) a
+# bundle export that takes 3.7s with only its own binary running reached ~12s
+# against its 30s budget on a 10-core machine, and CI runners are smaller.
 #
 # Capping the group keeps the measured time near the uncontended case, so the
 # budgets stay what they were written to be — a detector for genuine hangs like
-# #547 (DNS resolution) and #548 (backend crash) — instead of a race against
-# the size of the rest of the suite.
-[test-groups.smoke]
-max-threads = 2
+# #547 (DNS resolution) and #548 (backend crash) — instead of a race against the
+# size of the rest of the suite. `shell_hook` and `hook_run_failsoft` use 10s
+# budgets, tighter than `smoke_suite`'s, so they need this at least as much.
+#
+# Membership rule: a test binary belongs here if it asserts a timeout on a
+# spawned llmenv process. Binaries that spawn llmenv without a timeout
+# (`config_context`, `task_cli`, …) are not affected by contention this way and
+# are deliberately left out.
+[test-groups.cli-subprocess]
+max-threads = 4
 
 [[profile.default.overrides]]
-filter = 'binary(smoke_suite)'
-test-group = 'smoke'
+filter = '''
+    binary(smoke_suite)
+    + binary(setup_smoke)
+    + binary(shell_hook)
+    + binary(hook_run_failsoft)
+    + binary(statusline_smoke)
+'''
+test-group = 'cli-subprocess'

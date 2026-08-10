@@ -201,10 +201,12 @@ fn llmenv_cmd(
 /// of the measured time is spawning and paging in two large debug binaries.
 ///
 /// That overhead grows with how much else is running concurrently, so the budget
-/// is only meaningful when this suite's concurrency is bounded — see the `smoke`
-/// test group in `.config/nextest.toml`, without which a full-workspace run made
-/// these budgets a race against the rest of the suite rather than a hang check
-/// (#1096 raised them for that reason; #1254 removed the cause).
+/// is only meaningful when this suite's concurrency is bounded — see the
+/// `cli-subprocess` test group in `.config/nextest.toml`, without which a
+/// full-workspace run made these budgets a race against the rest of the suite
+/// rather than a hang check (#1096 raised them for that reason; #1254 removed
+/// the cause). Any new test binary that spawns llmenv under a timeout belongs in
+/// that group.
 const SHORT_TIMEOUT_SECS: u64 = 15;
 /// Budget for heavier operations (anything other than a single hook event —
 /// `export`, `regenerate`, `doctor`, `status`). Same rationale as

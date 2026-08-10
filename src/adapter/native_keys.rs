@@ -507,6 +507,34 @@ mod tests {
             }
         }
 
+        /// A key that names no registered adapter is dead in every map position,
+        /// with `UnknownEngine` rather than `MapNotRead` — the map an unknown
+        /// engine was written under is irrelevant, since no adapter reads any of
+        /// them under that name.
+        #[test]
+        fn unregistered_engine_is_always_unknown(
+            key in "[a-z_]{1,10}".prop_filter(
+                "must not name a registered engine",
+                |k| !crate::adapter::known_engine_ids().contains(k),
+            ),
+            slot in 0usize..SLOTS.len(),
+        ) {
+            let (label, map) = SLOTS[slot];
+            let mut keys: [BTreeSet<String>; 7] = Default::default();
+            keys[slot].insert(key.clone());
+            let (caps, top) = caps_with_keys(&keys);
+
+            prop_assert_eq!(
+                dead_native_engine_keys(&caps, &top),
+                vec![DeadNativeKey {
+                    label: label.to_string(),
+                    map,
+                    key,
+                    reason: DeadKeyReason::UnknownEngine,
+                }]
+            );
+        }
+
         /// Across arbitrary keys in every position: the function reports at most
         /// one finding per key, is deterministic, and emits findings in map
         /// declaration order with each map's keys sorted.
