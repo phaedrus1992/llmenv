@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.8.0] - 2026-08-10
+
 Mostly a hardening release. A long directory-permission series locks down
 nearly every cache/state directory llmenv creates to owner-only (`0700`),
 and a parallel pass on the memory and consolidation lifecycle closes a
