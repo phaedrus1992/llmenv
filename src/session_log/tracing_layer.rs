@@ -72,7 +72,7 @@ impl<S: Subscriber> Layer<S> for FileLogLayer {
 /// tests asserts that a specific failure logs at a level the default
 /// `EnvFilter` (ERROR-only with `RUST_LOG` unset) actually passes.
 #[cfg(test)]
-pub(crate) fn capture_logs_at<R>(
+pub(crate) fn capture_file_logs_at<R>(
     log_path: &std::path::Path,
     level: tracing_subscriber::filter::LevelFilter,
     f: impl FnOnce() -> R,
@@ -87,17 +87,18 @@ pub(crate) fn capture_logs_at<R>(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use tracing_subscriber::prelude::*;
 
     #[test]
     fn info_event_is_written_as_internal_jsonl() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let layer = FileLogLayer::new(FileSink::new(path.clone()));
-        let sub = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(sub, || {
-            tracing::info!(target: "llmenv::materialize", "materialized 3 files");
-        });
+        capture_file_logs_at(
+            &path,
+            tracing_subscriber::filter::LevelFilter::TRACE,
+            || {
+                tracing::info!(target: "llmenv::materialize", "materialized 3 files");
+            },
+        );
         let body = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
         assert_eq!(v["kind"], "internal");
@@ -116,11 +117,13 @@ mod tests {
     fn debug_event_is_not_written() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let layer = FileLogLayer::new(FileSink::new(path.clone()));
-        let sub = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(sub, || {
-            tracing::debug!("should not appear");
-        });
+        capture_file_logs_at(
+            &path,
+            tracing_subscriber::filter::LevelFilter::TRACE,
+            || {
+                tracing::debug!("should not appear");
+            },
+        );
         assert!(!path.exists());
     }
 }

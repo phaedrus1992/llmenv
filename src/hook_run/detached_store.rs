@@ -66,7 +66,7 @@ mod tests {
     fn run_icm_store_rejects_malformed_payload_json_and_logs_at_error_level() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("events.jsonl");
-        let err = crate::session_log::tracing_layer::capture_logs_at(
+        let err = crate::session_log::tracing_layer::capture_file_logs_at(
             &log,
             tracing_subscriber::filter::LevelFilter::ERROR,
             || run_icm_store("not json").unwrap_err(),

@@ -181,7 +181,7 @@ pub(super) fn memory_orphaned_by_disable_bundles(
         caps.as_ref().is_some_and(|f| {
             f.memory
                 .iter()
-                .any(|m| m.when.iter().any(|t| active.tags.contains(t)))
+                .any(|m| crate::mcp::resolve::memory_is_tag_active(m, &active.tags))
         })
     };
     if declares_active_memory(&config.features) || declares_active_memory(&bundle_caps.features) {
