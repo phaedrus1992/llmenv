@@ -58,6 +58,7 @@ impl DeadNativeKey {
             key,
             reason,
         } = self;
+        let key = crate::util::display_safe(key);
         match reason {
             DeadKeyReason::UnknownEngine => format!(
                 "{label} key '{key}' is not a registered engine (known: {}) — the block is \
@@ -355,6 +356,23 @@ mod tests {
         for id in crate::adapter::known_engine_ids() {
             assert!(msg.contains(&id), "message should list {id}: {msg}");
         }
+    }
+
+    // #1076: a `native_*` key can arrive from a shared or marketplace
+    // `bundle.yaml` (this function reads the *merged* manifest) — a key
+    // containing an ANSI escape must not reach the terminal verbatim, or a
+    // bundle author could rewrite/hide doctor's other output.
+    #[test]
+    fn dead_key_message_escapes_control_characters_in_the_key() {
+        let msg = DeadNativeKey {
+            label: NATIVE_MCP.to_string(),
+            map: NATIVE_MCP,
+            key: "evil\x1b[2Khidden".into(),
+            reason: DeadKeyReason::UnknownEngine,
+        }
+        .message();
+        assert!(!msg.contains('\x1b'), "{msg}");
+        assert!(msg.contains("\\u{001b}"), "{msg}");
     }
 
     #[test]
