@@ -192,6 +192,16 @@ fn attach_store(_target: &Path, _link: &Path) -> anyhow::Result<()> {
 fn move_dir_newest_wins(src: &Path, dst: &Path) -> anyhow::Result<()> {
     crate::adapter::skills::create_dir_owner_only(dst)
         .with_context(|| format!("creating {}", dst.display()))?;
+    // `create_dir_owner_only`/`create_dir_all` is a no-op (success) when `dst`
+    // already resolves through a symlink to an existing directory — it never
+    // lstats first. Without this check every following `rename`/`copy` in
+    // this call would land inside the symlink's target instead of the
+    // intended tree (#1065).
+    anyhow::ensure!(
+        std::fs::symlink_metadata(dst).is_ok_and(|md| md.file_type().is_dir()),
+        "durable transcript dir {} is not a real directory",
+        dst.display()
+    );
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let entry = entry.with_context(|| format!("reading entry in {}", src.display()))?;
         let file_type = entry.file_type()?;
@@ -213,21 +223,36 @@ fn move_file(from: &Path, to: &Path) -> anyhow::Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    std::fs::copy(from, to)
-        .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
+    copy_replacing(from, to)?;
     if let Err(e) = std::fs::remove_file(from) {
         tracing::debug!("inherit: could not drop {} after copy: {e}", from.display());
     }
     Ok(())
 }
 
+/// Copy `from` onto `to`, replacing whatever is at `to` first — including a
+/// symlink. `std::fs::copy` alone resolves a symlink at `to` and writes
+/// through it rather than replacing it, unlike `rename(2)`'s replace
+/// semantics; this fallback exists specifically so `rename` failing
+/// (cross-device) doesn't downgrade to that weaker behavior (#1065).
+fn copy_replacing(from: &Path, to: &Path) -> anyhow::Result<()> {
+    let _ = std::fs::remove_file(to);
+    std::fs::copy(from, to)
+        .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
+    Ok(())
+}
+
 /// True when `from` is newer than `to`, or `to` does not exist yet.
-/// An unreadable source mtime is treated as "not newer" — never clobber on a stat failure.
+/// An unreadable source mtime is treated as "not newer" — never clobber on a
+/// stat failure. Uses `symlink_metadata` on both sides (#1065): following a
+/// symlink at `to` would compare against its *target's* mtime, which can
+/// read as "safe to clobber" and select the vulnerable `move_file` path for
+/// a `to` that's actually a symlink an attacker planted.
 fn is_newer(from: &Path, to: &Path) -> bool {
-    let Ok(src) = from.metadata().and_then(|m| m.modified()) else {
+    let Ok(src) = std::fs::symlink_metadata(from).and_then(|m| m.modified()) else {
         return false;
     };
-    match to.metadata().and_then(|m| m.modified()) {
+    match std::fs::symlink_metadata(to).and_then(|m| m.modified()) {
         Ok(dst) => src > dst,
         Err(_) => true,
     }
@@ -638,5 +663,88 @@ mod tests {
     fn projects_and_history_names_are_stable() {
         assert_eq!(PathBuf::from(PROJECTS_DIR), PathBuf::from("projects"));
         assert_eq!(HISTORY_FILE, "history.jsonl");
+    }
+
+    // #1065: `copy_replacing`'s whole contract is "never write through a
+    // symlink at `to`" — a plain `std::fs::copy` would follow the symlink
+    // and overwrite whatever it points at instead of replacing the symlink
+    // itself.
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_does_not_follow_a_symlink_at_destination() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let from = tmp.path().join("from");
+        write(&from, "new-content");
+        let victim = tmp.path().join("victim");
+        write(&victim, "must-not-be-touched");
+        let to = tmp.path().join("to-symlink");
+        std::os::unix::fs::symlink(&victim, &to).unwrap();
+
+        copy_replacing(&from, &to).unwrap();
+
+        assert!(
+            !std::fs::symlink_metadata(&to)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink at `to` must be replaced, not written through"
+        );
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "new-content");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "must-not-be-touched",
+            "the symlink's target must be untouched"
+        );
+    }
+
+    // #1065: following a symlink at `to` for the mtime comparison would read
+    // the *target's* mtime — an old target makes a planted symlink look
+    // "safe to clobber" and select the vulnerable `move_file` path.
+    #[cfg(unix)]
+    #[test]
+    fn is_newer_does_not_follow_a_symlink_at_destination() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let from = tmp.path().join("from");
+        write(&from, "content");
+        // An old target: if `is_newer` followed the symlink, `from` would
+        // read as newer than this ancient mtime.
+        let old_target = tmp.path().join("old-target");
+        write(&old_target, "old");
+        filetime::set_file_mtime(&old_target, filetime::FileTime::from_unix_time(1, 0)).unwrap();
+        let to = tmp.path().join("to-symlink");
+        std::os::unix::fs::symlink(&old_target, &to).unwrap();
+
+        // The symlink itself is freshly created (now), so its own mtime is
+        // recent — `from` must not read as newer than the symlink's own
+        // metadata just because the target underneath it is ancient.
+        assert!(
+            !is_newer(&from, &to),
+            "a symlink at `to` must be compared by its own metadata, not its target's"
+        );
+    }
+
+    // #1065: `create_dir_owner_only`/`create_dir_all` succeeds (no-op) when
+    // `dst` already resolves through a symlink to an existing directory —
+    // it never lstats first. `move_dir_newest_wins` must refuse to proceed
+    // rather than silently folding into the symlink's target.
+    #[cfg(unix)]
+    #[test]
+    fn move_dir_newest_wins_rejects_a_symlinked_destination() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        write(&src.join("a.jsonl"), "content");
+        let real_other_dir = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&real_other_dir).unwrap();
+        let dst = tmp.path().join("dst-symlink");
+        std::os::unix::fs::symlink(&real_other_dir, &dst).unwrap();
+
+        let err = move_dir_newest_wins(&src, &dst).expect_err(
+            "a destination that resolves through a symlink must be rejected, not folded into",
+        );
+        assert!(err.to_string().contains("not a real directory"));
+        assert!(
+            std::fs::read_dir(&real_other_dir).unwrap().next().is_none(),
+            "nothing must have been written into the symlink's target"
+        );
     }
 }
