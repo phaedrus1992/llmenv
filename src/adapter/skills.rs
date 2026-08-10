@@ -353,14 +353,17 @@ pub(crate) fn project_plugin_skills(plugin_dir: &Path, out: &Path) -> anyhow::Re
     write_first_class_skills(out, &skills)
 }
 
-/// Small string→string map for arbitrary environment/header fuzzing, shared by
-/// adapter test modules. Lowercase-only alphabet — this codebase's proptest
-/// string generators default to lowercase unless a field's real-world values
-/// are meaningfully non-lowercase (e.g. URLs, tool names like `Bash`).
+/// Small string→string map for arbitrary environment/header fuzzing, shared
+/// by adapter test modules. Keys are mixed-case — this codebase's proptest
+/// string generators default to lowercase-only unless a field's real-world
+/// values are meaningfully non-lowercase, and env var names (`API_TOKEN`)
+/// and HTTP header names (`X-Api-Key`) join that list alongside URLs and
+/// tool names like `Bash`. Values stay lowercase-only: unlike keys, map
+/// values have no real-world casing convention to exercise.
 #[cfg(test)]
 pub(crate) fn arb_string_map()
 -> impl proptest::prelude::Strategy<Value = std::collections::BTreeMap<String, String>> {
-    proptest::collection::btree_map("[a-z][a-z0-9_]{0,7}", "[a-z0-9_ ]{0,12}", 0..3)
+    proptest::collection::btree_map("[a-zA-Z][a-zA-Z0-9_-]{0,7}", "[a-z0-9_ ]{0,12}", 0..3)
 }
 
 /// Strategy for one `ResolvedMcp`'s kind/headers/timeout, keyed separately by

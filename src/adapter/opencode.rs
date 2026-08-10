@@ -3533,23 +3533,23 @@ mod tests {
         prop_oneof![local, remote]
     }
 
-    proptest! {
-        /// #1011: `McpEntry` must roundtrip losslessly through JSON — the
-        /// type is only privately used inside `materialize`, so nothing else
-        /// exercises `Deserialize` today.
-        #[test]
-        fn mcp_entry_roundtrips_through_json(entry in arb_mcp_entry()) {
-            let value = serde_json::to_value(&entry).unwrap();
-            let parsed: McpEntry = serde_json::from_value(value).unwrap();
-            prop_assert_eq!(entry, parsed);
-        }
-    }
-
     // -- property-based tests: remaining typed opencode.json structs roundtrip --
     //
     // Follow-up from pre-pr-review of #1013 (#1016): #1013 only covered
     // `McpEntry`. The same Serialize-only-but-should-roundtrip pattern exists
     // on the rest of the typed `opencode.json` output structs.
+
+    /// Shared JSON-roundtrip assertion for the `#[cfg_attr(test, derive(...))]`
+    /// structs below — six identical three-line bodies collapsed into one.
+    fn assert_json_roundtrip<T>(value: T) -> Result<(), proptest::test_runner::TestCaseError>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_value(&value).unwrap();
+        let parsed: T = serde_json::from_value(json).unwrap();
+        prop_assert_eq!(value, parsed);
+        Ok(())
+    }
 
     fn arb_permission_value() -> impl Strategy<Value = PermissionValue> {
         prop_oneof![
@@ -3559,26 +3559,15 @@ mod tests {
         ]
     }
 
-    proptest! {
-        /// Untagged enums are easy to get wrong (serde tries variants in
-        /// declaration order) — a roundtrip test is a stronger check than
-        /// most for that reason.
-        #[test]
-        fn permission_value_roundtrips_through_json(value in arb_permission_value()) {
-            let json = serde_json::to_value(&value).unwrap();
-            let parsed: PermissionValue = serde_json::from_value(json).unwrap();
-            prop_assert_eq!(value, parsed);
-        }
-    }
-
     /// Arbitrary shallow JSON value for `LspServerEntry::init_options`, which
     /// passes through as opaque `serde_json::Value`. No `Value::Null` — that's
     /// a real serde quirk, not a coverage gap: `Option<Value>`'s `Deserialize`
     /// impl maps JSON `null` back to `None`, not `Some(Value::Null)`, so
     /// `Some(Null)` can never roundtrip regardless of this adapter's code.
-    fn arb_json_leaf() -> impl Strategy<Value = serde_json::Value> {
+    fn arb_init_options_value() -> impl Strategy<Value = serde_json::Value> {
         prop_oneof![
             proptest::bool::ANY.prop_map(serde_json::Value::Bool),
+            any::<i64>().prop_map(|n| serde_json::json!(n)),
             "[a-z]{0,8}".prop_map(serde_json::Value::String),
         ]
     }
@@ -3588,7 +3577,7 @@ mod tests {
             proptest::collection::vec("[a-z]{1,8}", 1..3),
             proptest::option::of(proptest::collection::vec("[a-z]{1,6}", 0..3)),
             proptest::option::of(arb_string_map()),
-            proptest::option::of(arb_json_leaf()),
+            proptest::option::of(arb_init_options_value()),
         )
             .prop_map(|(command, extensions, env, init_options)| LspServerEntry {
                 command,
@@ -3596,15 +3585,6 @@ mod tests {
                 env,
                 init_options,
             })
-    }
-
-    proptest! {
-        #[test]
-        fn lsp_server_entry_roundtrips_through_json(entry in arb_lsp_server_entry()) {
-            let json = serde_json::to_value(&entry).unwrap();
-            let parsed: LspServerEntry = serde_json::from_value(json).unwrap();
-            prop_assert_eq!(entry, parsed);
-        }
     }
 
     fn arb_opencode_model_limit() -> impl Strategy<Value = OpencodeModelLimit> {
@@ -3652,15 +3632,6 @@ mod tests {
             )
     }
 
-    proptest! {
-        #[test]
-        fn opencode_model_entry_roundtrips_through_json(entry in arb_opencode_model_entry()) {
-            let json = serde_json::to_value(&entry).unwrap();
-            let parsed: OpencodeModelEntry = serde_json::from_value(json).unwrap();
-            prop_assert_eq!(entry, parsed);
-        }
-    }
-
     fn arb_opencode_provider_options() -> impl Strategy<Value = OpencodeProviderOptions> {
         (
             proptest::option::of("https?://[a-z0-9.]{3,20}"),
@@ -3672,15 +3643,6 @@ mod tests {
                 api_key,
                 headers,
             })
-    }
-
-    proptest! {
-        #[test]
-        fn opencode_provider_options_roundtrips_through_json(options in arb_opencode_provider_options()) {
-            let json = serde_json::to_value(&options).unwrap();
-            let parsed: OpencodeProviderOptions = serde_json::from_value(json).unwrap();
-            prop_assert_eq!(options, parsed);
-        }
     }
 
     fn arb_opencode_provider_entry() -> impl Strategy<Value = OpencodeProviderEntry> {
@@ -3700,19 +3662,6 @@ mod tests {
                 options,
                 models,
             })
-    }
-
-    proptest! {
-        /// #1016: `OpencodeProviderEntry` composes `OpencodeProviderOptions`
-        /// and `OpencodeModelEntry` (which itself composes
-        /// `OpencodeModelLimit`/`OpencodeModelCost`/`OpencodeModalities`), so
-        /// this roundtrip transitively exercises all of them.
-        #[test]
-        fn opencode_provider_entry_roundtrips_through_json(entry in arb_opencode_provider_entry()) {
-            let json = serde_json::to_value(&entry).unwrap();
-            let parsed: OpencodeProviderEntry = serde_json::from_value(json).unwrap();
-            prop_assert_eq!(entry, parsed);
-        }
     }
 
     fn arb_opencode_config() -> impl Strategy<Value = OpencodeConfig> {
@@ -3751,6 +3700,48 @@ mod tests {
     }
 
     proptest! {
+        /// #1011: `McpEntry` must roundtrip losslessly through JSON — the
+        /// type is only privately used inside `materialize`, so nothing else
+        /// exercises `Deserialize` today.
+        #[test]
+        fn mcp_entry_roundtrips_through_json(entry in arb_mcp_entry()) {
+            assert_json_roundtrip(entry)?;
+        }
+
+        /// Untagged enums are easy to get wrong (serde tries variants in
+        /// declaration order) — a roundtrip test is a stronger check than
+        /// most for that reason.
+        #[test]
+        fn permission_value_roundtrips_through_json(value in arb_permission_value()) {
+            assert_json_roundtrip(value)?;
+        }
+
+        #[test]
+        fn lsp_server_entry_roundtrips_through_json(entry in arb_lsp_server_entry()) {
+            assert_json_roundtrip(entry)?;
+        }
+
+        #[test]
+        fn opencode_model_entry_roundtrips_through_json(entry in arb_opencode_model_entry()) {
+            assert_json_roundtrip(entry)?;
+        }
+
+        #[test]
+        fn opencode_provider_options_roundtrips_through_json(
+            options in arb_opencode_provider_options()
+        ) {
+            assert_json_roundtrip(options)?;
+        }
+
+        /// #1016: `OpencodeProviderEntry` composes `OpencodeProviderOptions`
+        /// and `OpencodeModelEntry` (which itself composes
+        /// `OpencodeModelLimit`/`OpencodeModelCost`/`OpencodeModalities`), so
+        /// this roundtrip transitively exercises all of them.
+        #[test]
+        fn opencode_provider_entry_roundtrips_through_json(entry in arb_opencode_provider_entry()) {
+            assert_json_roundtrip(entry)?;
+        }
+
         /// #1016: `OpencodeConfig` is the root type composing the typed
         /// fields (`lsp`, `permission`) directly — `mcp`/`provider` stay
         /// `serde_json::Value` here since that's their real field type (they
@@ -3759,9 +3750,7 @@ mod tests {
         /// `opencode_provider_entry_roundtrips_through_json`.
         #[test]
         fn opencode_config_roundtrips_through_json(config in arb_opencode_config()) {
-            let json = serde_json::to_value(&config).unwrap();
-            let parsed: OpencodeConfig = serde_json::from_value(json).unwrap();
-            prop_assert_eq!(config, parsed);
+            assert_json_roundtrip(config)?;
         }
     }
 
