@@ -193,16 +193,22 @@ fn llmenv_cmd(
     cmd
 }
 
-/// Budget for cheap operations (a single hook event). Contention-tolerant
-/// (#1096): the binary runs all ~28 of this suite's tests in parallel, and
-/// under load any one of them can lose the race against a fixed 5s budget —
-/// this isn't specific to any one test. Still tight enough to fail fast on a
-/// genuine hang (the DNS-resolution hang in #547, the multi-minute backend
-/// crash in #548).
+/// Budget for cheap operations (a single hook event).
+///
+/// These budgets are hang detectors, not performance assertions — they exist to
+/// fail fast on the DNS-resolution hang in #547 and the multi-minute backend
+/// crash in #548. The commands themselves take tens of milliseconds; nearly all
+/// of the measured time is spawning and paging in two large debug binaries.
+///
+/// That overhead grows with how much else is running concurrently, so the budget
+/// is only meaningful when this suite's concurrency is bounded — see the `smoke`
+/// test group in `.config/nextest.toml`, without which a full-workspace run made
+/// these budgets a race against the rest of the suite rather than a hang check
+/// (#1096 raised them for that reason; #1254 removed the cause).
 const SHORT_TIMEOUT_SECS: u64 = 15;
 /// Budget for heavier operations (anything other than a single hook event —
-/// `export`, `regenerate`, `doctor`, `status`). Same contention-tolerance
-/// rationale as `SHORT_TIMEOUT_SECS` (#1096).
+/// `export`, `regenerate`, `doctor`, `status`). Same rationale as
+/// [`SHORT_TIMEOUT_SECS`].
 const LONG_TIMEOUT_SECS: u64 = 30;
 
 /// Run a command with an explicit timeout and assert it completes within that time.
