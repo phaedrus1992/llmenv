@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+All bug fixes, no new features. The inherited-session-state work from 3.8.0
+continues: Claude Code's own `session-logs/` now survives a cache-folder
+change the same way `/resume` history and OAuth tokens already did (#1064),
+and the macOS keychain write behind that OAuth login no longer passes the
+secret through a child process's argv, closing a `ps`-visible exposure
+window (#1061). Wraps up the #1139 memory-classification review: `hook-run`
+now names the real cause — tag-inactive, no content directory, or a
+rejected bundle name — instead of a generic "no memory backend" message
+(#1140, #1142), and `llmenv status read-once` distinguishes an unreadable
+cache dir from a genuinely empty one (#1180). Also fixes a symlink-hardening
+gap in transcript inheritance (#1065), a byte-vs-character truncation panic
+in session consolidation (#1166), unescaped control characters in
+`doctor`/`export`'s printed config strings (#1076), and a
+`features.repeat_detect` Stop-reminder that repeated forever instead of
+backing off (#1247).
+
 ### Fixed
 
 - `no memory backend active for this scope` no longer misreports a declared `features.memory` entry as "nothing declared" when the entry is simply gated on a `when` tag that isn't active right now — hook-run now reports that case distinctly, naming the affected `server_host`(s). `llmenv doctor --all`'s `disable_bundles` orphan check had the same "does it exist" instead of "is it tag-active" bug, including mis-attributing a disabled bundle as the cause when its only memory entry was itself tag-inactive — both are fixed the same way. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#project-markers) (#1140)
