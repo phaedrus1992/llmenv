@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.8.0] - 2026-08-10
+
 Mostly a hardening release. A long directory-permission series locks down
 nearly every cache/state directory llmenv creates to owner-only (`0700`),
 and a parallel pass on the memory and consolidation lifecycle closes a
@@ -734,7 +736,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.7.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.8.0...HEAD
+[3.8.0]: https://github.com/phaedrus1992/llmenv/compare/v3.7.0...v3.8.0
 [3.7.0]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...v3.7.0
 [3.6.1]: https://github.com/phaedrus1992/llmenv/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/phaedrus1992/llmenv/compare/v3.5.1...v3.6.0
