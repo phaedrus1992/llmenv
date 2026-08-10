@@ -784,11 +784,25 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> Option<PrInfo> 
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+    // One retry after a brief backoff (#1062): a `spawn` failure under heavy
+    // concurrent process load (fork/exec resource exhaustion) is transient,
+    // not "gh isn't installed" — the two look identical from `Command::spawn`'s
+    // `Err`, but only one is worth a second attempt. A permanently-missing
+    // binary fails the retry too and still degrades to `None`, just one
+    // attempt later.
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(e) => {
-            tracing::debug!("gh pr view: spawn failed (non-fatal): {e}");
-            return None;
+        Err(first_err) => {
+            std::thread::sleep(Duration::from_millis(20));
+            match cmd.spawn() {
+                Ok(child) => child,
+                Err(e) => {
+                    tracing::debug!(
+                        "gh pr view: spawn failed twice (non-fatal): {first_err}, then {e}"
+                    );
+                    return None;
+                }
+            }
         }
     };
     let deadline = Instant::now() + gh.timeout;
