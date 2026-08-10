@@ -64,7 +64,7 @@ fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
         // worth a log line (#1180) — anything else (e.g. EACCES) is.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return projects,
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
                 error = %e,
                 dir = %projects_dir.display(),
                 "failed to read project configs"
@@ -513,7 +513,7 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
             // (#1180).
             let count = std::fs::read_dir(&projects_dir)
                 .inspect_err(|e| {
-                    tracing::warn!(
+                    tracing::error!(
                         error = %e,
                         dir = %projects_dir.display(),
                         "failed to read project configs"
@@ -630,7 +630,7 @@ pub(super) fn run_setup(
             // (#1180).
             let count = std::fs::read_dir(&projects_dir)
                 .inspect_err(|e| {
-                    tracing::warn!(
+                    tracing::error!(
                         error = %e,
                         dir = %projects_dir.display(),
                         "failed to read project configs"

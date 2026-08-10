@@ -492,7 +492,7 @@ fn read_dir_or_status_label(dir: &std::path::Path) -> Result<std::fs::ReadDir, &
         Ok(entries) => Ok(entries),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("(none)"),
         Err(e) => {
-            tracing::warn!(error = %e, dir = %dir.display(), "failed to read directory");
+            tracing::error!(error = %e, dir = %dir.display(), "failed to read directory");
             Err("(unreadable)")
         }
     }
