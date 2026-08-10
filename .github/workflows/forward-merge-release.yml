@@ -121,8 +121,14 @@ jobs:
               continue
             fi
 
-            FETCH_STDERR=$(git fetch origin "$CURRENT" "$TARGET" 2>&1 >/dev/null)
-            FETCH_RC=$?
+            # `if VAR=$(cmd); then` (not a bare `VAR=$(cmd); RC=$?`) — under
+            # `set -e`, a bare assignment's exit status IS the command's, so a
+            # failing command here would kill the script before RC=$? ever ran.
+            if FETCH_STDERR=$(git fetch origin "$CURRENT" "$TARGET" 2>&1 >/dev/null); then
+              FETCH_RC=0
+            else
+              FETCH_RC=$?
+            fi
             if [[ $FETCH_RC -ne 0 ]]; then
               if [[ -n "$FETCH_STDERR" ]]; then
                 echo "::warning::fetch of $CURRENT $TARGET failed: ${FETCH_STDERR//$'\n'/ }"
@@ -195,8 +201,12 @@ jobs:
             # release branch, with no manual step. If a target is branch-protected
             # the push is rejected; fall back to opening a PR and halt so the
             # remaining (now un-merged) targets aren't silently skipped.
-            PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null)
-            PUSH_RC=$?
+            # See the FETCH_RC comment above — same set -e hazard.
+            if PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
+              PUSH_RC=0
+            else
+              PUSH_RC=$?
+            fi
             if [[ $PUSH_RC -eq 0 ]]; then
               echo "Pushed directly to $TARGET"
               # A push made with GITHUB_TOKEN deliberately doesn't trigger other
@@ -206,7 +216,7 @@ jobs:
               if [[ "$TARGET" == "main" ]] && [[ -n "$TARGET_SHA" ]] \
                   && ! git diff --quiet "$TARGET_SHA" HEAD -- website/; then
                 echo "website/ changed on main; triggering docs deploy"
-                gh workflow run docs.yml --ref main
+                gh workflow run docs.yml --ref main || echo "::warning::failed to dispatch docs.yml"
               fi
             else
               # Log the actual error so operators can distinguish protection
@@ -216,8 +226,13 @@ jobs:
               else
                 echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
               fi
-              git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1
-              ls_rc=$?
+              # Same set -e hazard as FETCH_RC above — a bare command's exit
+              # status would kill the script before ls_rc=$? ever ran.
+              if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
+                ls_rc=0
+              else
+                ls_rc=$?
+              fi
               if [[ $ls_rc -eq 0 ]]; then
                 echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
                 echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
