@@ -381,7 +381,11 @@ pub(super) fn claude_only_colon_permission_patterns(
         let pattern = rule.pattern.as_deref()?;
         uses_colon_prefix_syntax(pattern).then(|| ColonPrefixRule {
             tier,
-            rule: format!("{}({pattern})", rule.tool),
+            rule: format!(
+                "{}({})",
+                crate::util::display_safe(&rule.tool),
+                crate::util::display_safe(pattern)
+            ),
         })
     })
     .collect()
@@ -575,22 +579,25 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     for name in bundles_with_missing_dirs(&config.bundle, &bundles_dir) {
         eprintln!(
-            "{info} Bundle '{name}' declared but directory does not exist at {}",
+            "{info} Bundle '{}' declared but directory does not exist at {}",
+            crate::util::display_safe(name),
             bundles_dir.join(name).display(),
         );
     }
 
     for name in unused_marketplaces(&config) {
         eprintln!(
-            "{warn} Marketplace '{name}' is defined but not referenced by any plugin collection",
+            "{warn} Marketplace '{}' is defined but not referenced by any plugin collection",
+            crate::util::display_safe(name),
         );
     }
 
     for hit in hooks_with_glob_like_matchers(&config) {
         eprintln!(
-            "{warn} hook {hit} looks like a file-extension glob, but Claude Code matches \
+            "{warn} hook {} looks like a file-extension glob, but Claude Code matches \
              hook.matcher against tool name only, never file path — use a `scope.content` \
              glob to gate the hook's bundle by file type instead",
+            crate::util::display_safe(&hit),
         );
     }
 
@@ -1528,6 +1535,19 @@ mod tests {
         let found = claude_only_colon_permission_patterns(&caps, true);
         assert_eq!(rule_strings(&found), vec!["Bash(git commit:*)"]);
         assert_eq!(found[0].tier, "allow");
+    }
+
+    // #1076: a permission pattern can arrive from a shared bundle.yaml — an
+    // ANSI escape in it must not reach the terminal verbatim via the
+    // rendered rule string, or a bundle author could rewrite/hide doctor's
+    // other output.
+    #[test]
+    fn colon_pattern_rule_string_escapes_control_characters() {
+        let caps = caps_with_allow("Bash", "evil\x1b[2K:*");
+        let found = claude_only_colon_permission_patterns(&caps, true);
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].rule.contains('\x1b'), "{}", found[0].rule);
+        assert!(found[0].rule.contains("\\u{001b}"), "{}", found[0].rule);
     }
 
     #[test]
