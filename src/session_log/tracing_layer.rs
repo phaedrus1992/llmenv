@@ -62,21 +62,43 @@ impl<S: Subscriber> Layer<S> for FileLogLayer {
     }
 }
 
+/// Run `f` under a `tracing` subscriber that captures `level`-and-above
+/// events into a `FileSink` at `log_path`.
+///
+/// Shared by the detached hook children's failure-logging tests
+/// (`hook_run::detached_store`, `session_log::detached`, `hook_run`) so the
+/// tempdir/`FileSink`/`FileLogLayer`/`with_default` scaffold — and which
+/// level it filters at — can't drift between them (#1141). Each of those
+/// tests asserts that a specific failure logs at a level the default
+/// `EnvFilter` (ERROR-only with `RUST_LOG` unset) actually passes.
+#[cfg(test)]
+pub(crate) fn capture_file_logs_at<R>(
+    log_path: &std::path::Path,
+    level: tracing_subscriber::filter::LevelFilter,
+    f: impl FnOnce() -> R,
+) -> R {
+    use tracing_subscriber::prelude::*;
+    let sub = tracing_subscriber::registry()
+        .with(FileLogLayer::new(FileSink::new(log_path.to_path_buf())).with_filter(level));
+    tracing::subscriber::with_default(sub, f)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use tracing_subscriber::prelude::*;
 
     #[test]
     fn info_event_is_written_as_internal_jsonl() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let layer = FileLogLayer::new(FileSink::new(path.clone()));
-        let sub = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(sub, || {
-            tracing::info!(target: "llmenv::materialize", "materialized 3 files");
-        });
+        capture_file_logs_at(
+            &path,
+            tracing_subscriber::filter::LevelFilter::TRACE,
+            || {
+                tracing::info!(target: "llmenv::materialize", "materialized 3 files");
+            },
+        );
         let body = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
         assert_eq!(v["kind"], "internal");
@@ -95,11 +117,13 @@ mod tests {
     fn debug_event_is_not_written() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let layer = FileLogLayer::new(FileSink::new(path.clone()));
-        let sub = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(sub, || {
-            tracing::debug!("should not appear");
-        });
+        capture_file_logs_at(
+            &path,
+            tracing_subscriber::filter::LevelFilter::TRACE,
+            || {
+                tracing::debug!("should not appear");
+            },
+        );
         assert!(!path.exists());
     }
 }

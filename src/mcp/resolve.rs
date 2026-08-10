@@ -132,7 +132,7 @@ pub fn resolve_mcps(
     }
     let active_mem: Vec<&Memory> = memory
         .iter()
-        .filter(|m| m.when.iter().any(|t| active_tags.contains(t)))
+        .filter(|m| memory_is_tag_active(m, active_tags))
         .collect();
     match active_mem.len() {
         0 => {}
@@ -181,6 +181,17 @@ pub fn resolve_bundle_mcps(
         }
     }
     Ok(out)
+}
+
+/// True if `m`'s `when` intersects `active_tags` — the exact rule
+/// `resolve_mcps` uses to select an active `Memory` entry. Exposed as a
+/// sibling (rather than inlined) so diagnostics that need to distinguish "no
+/// `features.memory` declared" from "declared, but tag-inactive" — hook_run's
+/// `classify_missing_memory`/`suppressed_memory_bundles` and doctor's
+/// `memory_orphaned_by_disable_bundles` — can't drift from the selection rule
+/// itself by reimplementing the intersection check separately (#1140/#1141).
+pub(crate) fn memory_is_tag_active(m: &Memory, active_tags: &BTreeSet<String>) -> bool {
+    m.when.iter().any(|t| active_tags.contains(t))
 }
 
 fn is_valid_mcp_name(name: &str) -> bool {

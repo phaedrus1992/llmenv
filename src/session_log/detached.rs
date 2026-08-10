@@ -196,17 +196,13 @@ mod tests {
     // capture order-dependent.
     #[test]
     fn run_record_rejects_malformed_payload_json_and_logs_at_error_level() {
-        use tracing_subscriber::prelude::*;
-
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("events.jsonl");
-        let sub = tracing_subscriber::registry().with(
-            crate::session_log::tracing_layer::FileLogLayer::new(
-                crate::session_log::file_sink::FileSink::new(log.clone()),
-            )
-            .with_filter(tracing_subscriber::filter::LevelFilter::ERROR),
+        let err = crate::session_log::tracing_layer::capture_file_logs_at(
+            &log,
+            tracing_subscriber::filter::LevelFilter::ERROR,
+            || run_record("not json").unwrap_err(),
         );
-        let err = tracing::subscriber::with_default(sub, || run_record("not json").unwrap_err());
 
         assert!(err.to_string().to_lowercase().contains("expected"));
         let body = std::fs::read_to_string(&log).unwrap_or_default();
