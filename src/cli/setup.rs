@@ -58,13 +58,19 @@ fn read_gemini_md(home: &Path) -> Option<String> {
 fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
     let mut projects = BTreeMap::new();
     let projects_dir = home.join(".claude").join("projects");
-    let Ok(entries) = std::fs::read_dir(&projects_dir).inspect_err(|e| {
-        eprintln!(
-            "llmenv: failed to read project configs from {}: {e:#}",
-            projects_dir.display()
-        )
-    }) else {
-        return projects;
+    let entries = match std::fs::read_dir(&projects_dir) {
+        Ok(e) => e,
+        // NotFound is the ordinary "Claude Code never ran here" case, not
+        // worth a log line (#1180) — anything else (e.g. EACCES) is.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return projects,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                dir = %projects_dir.display(),
+                "failed to read project configs"
+            );
+            return projects;
+        }
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -501,7 +507,18 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
         }
         let projects_dir = h.join(".claude").join("projects");
         if projects_dir.is_dir() {
+            // Already confirmed to exist above, so a read_dir failure here is
+            // a real error (e.g. EACCES), not the ordinary "doesn't exist"
+            // case — worth logging rather than silently showing nothing
+            // (#1180).
             let count = std::fs::read_dir(&projects_dir)
+                .inspect_err(|e| {
+                    tracing::error!(
+                        error = %e,
+                        dir = %projects_dir.display(),
+                        "failed to read project configs"
+                    );
+                })
                 .map(|e| e.flatten().count())
                 .unwrap_or(0);
             if count > 0 {
@@ -607,7 +624,18 @@ pub(super) fn run_setup(
         }
         let projects_dir = h.join(".claude").join("projects");
         if projects_dir.is_dir() {
+            // Already confirmed to exist above, so a read_dir failure here is
+            // a real error (e.g. EACCES), not the ordinary "doesn't exist"
+            // case — worth logging rather than silently showing nothing
+            // (#1180).
             let count = std::fs::read_dir(&projects_dir)
+                .inspect_err(|e| {
+                    tracing::error!(
+                        error = %e,
+                        dir = %projects_dir.display(),
+                        "failed to read project configs"
+                    );
+                })
                 .map(|e| e.flatten().count())
                 .unwrap_or(0);
             if count > 0 {
@@ -894,6 +922,32 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let projects = read_project_configs(dir.path());
         assert!(projects.is_empty(), "no projects dir should return empty");
+    }
+
+    // #1180: an unreadable (not just missing) projects/ dir must still
+    // degrade to an empty map rather than panicking or propagating — the
+    // fix is that this case now logs a warning distinguishing it from the
+    // ordinary "never used Claude Code here" case above.
+    #[cfg(unix)]
+    #[test]
+    fn test_read_project_configs_unreadable_dir_degrades_to_empty() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let projects_dir = dir.path().join(".claude").join("projects");
+        std::fs::create_dir_all(&projects_dir).expect("test");
+        std::fs::set_permissions(&projects_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("test");
+        let readable_anyway = std::fs::read_dir(&projects_dir).is_ok();
+
+        let projects = read_project_configs(dir.path());
+
+        std::fs::set_permissions(&projects_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("test");
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(projects.is_empty());
     }
 
     #[test]
