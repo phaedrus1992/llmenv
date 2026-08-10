@@ -104,13 +104,15 @@ mod tests {
 
     use proptest::prelude::*;
 
-    /// Arbitrary JSON leaf value (no nested containers).
+    /// Arbitrary JSON leaf value (no nested containers). Lowercase-only string
+    /// alphabet — see `adapter::skills::arb_string_map`'s doc comment for this
+    /// codebase's proptest string-generator convention (#1019).
     fn arb_json_leaf() -> impl Strategy<Value = Value> {
         prop_oneof![
             Just(Value::Null),
             proptest::bool::ANY.prop_map(Value::Bool),
             any::<i64>().prop_map(|n| json!(n)),
-            "[a-zA-Z0-9 ]{0,10}".prop_map(Value::String),
+            "[a-z0-9 ]{0,10}".prop_map(Value::String),
         ]
     }
 
