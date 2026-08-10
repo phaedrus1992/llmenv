@@ -302,9 +302,13 @@ fn parse_bullets(text: &str) -> Vec<String> {
         .filter(|l| l.starts_with("- ") && l.len() > 2)
         .map(|l| {
             let rule = l[2..].trim();
-            if rule.len() > MAX_RULE_LENGTH {
-                // Ponytail: truncate overlong rules with a marker.
-                format!("{}… (truncated)", &rule[..MAX_RULE_LENGTH])
+            if rule.chars().count() > MAX_RULE_LENGTH {
+                // Ponytail: truncate overlong rules with a marker. Truncates
+                // by character count, not byte length — MAX_RULE_LENGTH is a
+                // character bound, and byte-slicing panics when a multi-byte
+                // char straddles the cut point (#1166).
+                let truncated: String = rule.chars().take(MAX_RULE_LENGTH).collect();
+                format!("{truncated}… (truncated)")
             } else {
                 rule.to_string()
             }
@@ -520,6 +524,24 @@ mod tests {
         assert!(bullets[0].len() <= MAX_RULE_LENGTH + "… (truncated)".len());
     }
 
+    // #1166: MAX_RULE_LENGTH is documented as a *character* bound, but the
+    // truncation sliced by *byte* index — a multi-byte char straddling byte
+    // index MAX_RULE_LENGTH panics ("byte index is not a char boundary").
+    // "x" (1 byte) then "é" (2 bytes) repeated puts the boundary mid-char.
+    #[test]
+    fn parse_bullets_truncates_multibyte_rule_without_panicking() {
+        let long = "x".to_string() + &"é".repeat(MAX_RULE_LENGTH);
+        let text = format!("- {long}");
+        let bullets = parse_bullets(&text);
+        assert_eq!(bullets.len(), 1);
+        assert!(bullets[0].ends_with("… (truncated)"));
+        assert_eq!(
+            bullets[0].chars().count(),
+            MAX_RULE_LENGTH + "… (truncated)".chars().count(),
+            "truncation must count characters, not bytes"
+        );
+    }
+
     #[test]
     fn parse_bullets_strips_leading_dash_space() {
         let text = "-  hello world";
@@ -687,6 +709,82 @@ mod tests {
             for token in ["{max_rules}", "{summaries}"] {
                 prop_assert!(!out.contains(token), "placeholder {token} left unconsumed in {out:?}");
             }
+        }
+    }
+
+    // ===== #1166: property-test coverage for parse_bullets and parse_recall_output =====
+
+    /// A single simulated line of `icm_memory_recall` output.
+    fn arb_recall_line() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("--- record ---".to_string()),
+            "summary: .{0,20}".prop_map(|s| s),
+            ".{0,20}".prop_map(|s| s),
+        ]
+    }
+
+    proptest! {
+        /// The model's raw text response is arbitrary as far as `parse_bullets`
+        /// is concerned — no input should panic. Multi-line, multi-byte
+        /// content is exactly the case #1166 found panicking.
+        #[test]
+        fn parse_bullets_never_panics(
+            lines in proptest::collection::vec(".{0,600}", 0..10),
+        ) {
+            let text = lines.join("\n");
+            let _ = parse_bullets(&text);
+        }
+
+        /// Every returned bullet is bounded by MAX_RULE_LENGTH characters
+        /// (plus the truncation marker) regardless of the input's byte/char
+        /// composition — the invariant the byte/char confusion violated.
+        #[test]
+        fn parse_bullets_never_exceeds_max_length(
+            rule in ".{0,600}",
+        ) {
+            let text = format!("- {rule}");
+            let bullets = parse_bullets(&text);
+            let marker_len = "… (truncated)".chars().count();
+            for bullet in &bullets {
+                prop_assert!(
+                    bullet.chars().count() <= MAX_RULE_LENGTH + marker_len,
+                    "bullet {bullet:?} exceeds the length bound"
+                );
+            }
+        }
+
+        /// Arbitrary recall-output text — including delimiter lines with no
+        /// `summary:` field, and `summary:` lines outside any delimiter —
+        /// must never panic.
+        #[test]
+        fn parse_recall_output_never_panics(
+            lines in proptest::collection::vec(arb_recall_line(), 0..10),
+        ) {
+            let text = lines.join("\n");
+            let _ = parse_recall_output(&text);
+        }
+
+        /// A record can only be produced once a `--- ... ---` delimiter has
+        /// opened it, so the output can never contain more records than
+        /// there are delimiter lines in the input — true regardless of how
+        /// many (or few) `summary:` lines follow each one.
+        #[test]
+        fn parse_recall_output_never_exceeds_delimiter_count(
+            lines in proptest::collection::vec(arb_recall_line(), 0..10),
+        ) {
+            // Match parse_recall_output's own delimiter predicate, not the
+            // literal synthetic delimiter string — a random ".{0,20}" junk
+            // line could otherwise coincidentally match "--- ... ---" too.
+            let delimiter_count = lines
+                .iter()
+                .filter(|l| {
+                    let t = l.trim();
+                    t.starts_with("--- ") && t.ends_with(" ---")
+                })
+                .count();
+            let text = lines.join("\n");
+            let records = parse_recall_output(&text);
+            prop_assert!(records.len() <= delimiter_count);
         }
     }
 }
