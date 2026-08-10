@@ -707,9 +707,13 @@ mod tests {
 
     /// Test convenience: `SsrfPolicy::PublicOnly` with a generous timeout,
     /// matching every pre-existing test's expectations before `SsrfPolicy` and
-    /// per-call DNS timeouts were introduced.
+    /// per-call DNS timeouts were introduced. 10s, not 2s (#1236): a real DNS
+    /// lookup (`validate_url_accepts_public_ips`'s `example.com`) contending
+    /// with the rest of a `--workspace` parallel test run for CPU/network
+    /// blew a 2s budget intermittently — this is test-only slack, not a
+    /// change to production's own timeout policy.
     fn validate(url: &str) -> anyhow::Result<(String, Vec<SocketAddr>)> {
-        validate_url_production(url, SsrfPolicy::PublicOnly, Duration::from_secs(2))
+        validate_url_production(url, SsrfPolicy::PublicOnly, Duration::from_secs(10))
     }
 
     #[test]
