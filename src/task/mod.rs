@@ -2587,6 +2587,11 @@ mod tests {
                 let input_slugs: HashSet<String> = tasks.iter().map(|t| t.slug.clone()).collect();
                 let a_id_set: HashSet<String> = a_ids.into_iter().collect();
 
+                let expected_count = tasks
+                    .iter()
+                    .filter(|t| t.session.as_deref().is_some_and(|s| a_id_set.contains(s)))
+                    .count();
+
                 let result = filter_tasks_for_project(dir.path(), "proj-a", tasks);
 
                 for t in &result {
@@ -2595,6 +2600,11 @@ mod tests {
                     // Membership: every returned task's session is a proj-a session.
                     prop_assert!(t.session.as_deref().is_some_and(|s| a_id_set.contains(s)));
                 }
+                // Complement: nothing that should have been kept was dropped —
+                // without this, the two checks above pass vacuously whenever
+                // `result` is empty, and "drops_sessionless" (the test's own
+                // name) was never actually pinned (#1121 pre-pr-review).
+                prop_assert_eq!(result.len(), expected_count);
             }
 
             // -- #1121: resolve_current_task --
