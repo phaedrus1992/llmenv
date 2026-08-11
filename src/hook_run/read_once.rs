@@ -274,19 +274,7 @@ pub(crate) fn handle_pre_tool_use(
         entry.first_read_at = now;
         entry.hits = 0;
         entry.tokens_saved = 0;
-        crate::cache_trace::emit_cache_trace(
-            "read_once",
-            false,
-            lookup_start.elapsed(),
-            Some(&extra),
-        );
     } else {
-        crate::cache_trace::emit_cache_trace(
-            "read_once",
-            false,
-            lookup_start.elapsed(),
-            Some(&extra),
-        );
         // New entry
         cache.entries.insert(
             path_key,
@@ -299,6 +287,9 @@ pub(crate) fn handle_pre_tool_use(
             },
         );
     }
+    // Both branches above fall through here only on a miss — the hit branch
+    // returns early — so one emit covers both (mtime/TTL miss and new entry).
+    crate::cache_trace::emit_cache_trace("read_once", false, lookup_start.elapsed(), Some(&extra));
 
     if let Err(e) = cache.save(state_dir) {
         eprintln!("llmenv: failed to save read-once cache: {e}");
