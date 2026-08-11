@@ -3798,6 +3798,46 @@ mod tests {
         emit_context_trace(&stats, &["memory A".to_string()]);
     }
 
+    fn arb_action_result() -> impl Strategy<Value = (bool, String)> {
+        (
+            any::<bool>(),
+            prop_oneof![Just(String::new()), "[a-z ]{1,12}"],
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn dedup_and_count_never_panics(results in prop::collection::vec(arb_action_result(), 0..8)) {
+            let _ = dedup_and_count_action_results(results);
+        }
+
+        // recall_entries counts exactly the non-empty (is_recall, text) pairs —
+        // independent of dedup, which only affects `kept`/`recall_dropped`.
+        #[test]
+        fn recall_entries_matches_non_empty_recall_input_count(
+            results in prop::collection::vec(arb_action_result(), 0..8)
+        ) {
+            let expected = results.iter().filter(|(r, t)| *r && !t.is_empty()).count();
+            let (_, stats) = dedup_and_count_action_results(results);
+            prop_assert_eq!(stats.recall_entries, expected);
+        }
+
+        // kept never carries a duplicate string, and every kept string
+        // actually came from the input (dedup can only drop, never invent).
+        #[test]
+        fn kept_has_no_duplicates_and_is_a_subset_of_input(
+            results in prop::collection::vec(arb_action_result(), 0..8)
+        ) {
+            let texts: Vec<String> = results.iter().map(|(_, t)| t.clone()).collect();
+            let (kept, _) = dedup_and_count_action_results(results);
+            let mut seen = std::collections::HashSet::new();
+            for text in &kept {
+                prop_assert!(seen.insert(text.clone()), "kept must not repeat {text:?}");
+                prop_assert!(texts.contains(text), "kept must only contain input text");
+            }
+        }
+    }
+
     #[test]
     fn turn_start_expands_one_recall_tag_per_active_tag() {
         let tags = vec!["rust".to_string(), "work-vpn".to_string()];
