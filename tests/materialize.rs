@@ -77,10 +77,10 @@ fn different_manifests_produce_different_dirs() {
 
 #[test]
 fn normal_mode_reuses_one_folder_across_manifests() {
-    // #246: normal mode names the folder after <version_mm>/<shape>, not the
-    // content hash. Two different manifests sharing the same selection shape
-    // therefore render into the SAME folder (last-writer-wins), unlike strict
-    // mode above.
+    // #246: normal mode names the folder after <version_major>/<shape>, not
+    // the content hash. Two different manifests sharing the same selection
+    // shape therefore render into the SAME folder (last-writer-wins), unlike
+    // strict mode above.
     let tmp = tempdir().expect("tempdir");
     let m_base = merge(
         &llmenv::config::Capabilities::default(),

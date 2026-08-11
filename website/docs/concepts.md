@@ -71,8 +71,8 @@ mode:
 # loose: folder named by content shape only
 <cache_dir>/<adapter>/<shape>/
 
-# normal (default): folder named by version + content shape
-<cache_dir>/<adapter>/<version_mm>/<shape>/
+# normal (default): folder named by major version + content shape
+<cache_dir>/<adapter>/<version_major>/<shape>/
 
 # strict: folder named by version tag + full content hash
 <cache_dir>/<adapter>/<VERSION_TAG>-<content_hash>/
@@ -82,9 +82,10 @@ Where `shape` is a 12-hex SHA-256 over the active tags ∪ enabled bundles.
 
 - **`loose`** — no version component; the folder is stable across binary upgrades.
   Content edits re-render into the same folder.
-- **`normal`** (default) — folder name includes the major.minor version. Churns on
-  minor version bumps; stable within a release. Content edits re-render into the
-  same folder, so a running agent only picks up changes when you relaunch it. This
+- **`normal`** (default) — folder name includes the major version only (added in
+  v3.10.0; before that, `major.minor`). Churns on major version bumps; stable
+  across minor/patch releases. Content edits re-render into the same folder, so
+  a running agent only picks up changes when you relaunch it. This
   keeps the folder stable for the whole session — important because that folder is
   the agent's live config dir and holds in-session state llmenv doesn't own
   (Claude's runtime files, third-party plugin state). The content hash lives in
