@@ -2338,6 +2338,47 @@ mod tests {
                 })
         }
 
+        /// Like [`arb_forest`], but each task also carries 0..2 `blocked_on`
+        /// refs to earlier-or-equal indices (including itself, exercising
+        /// [`is_done_including_descendants`]'s cycle guard) — the shape
+        /// `resolve_next_task`'s blocker-resolution invariants need (#1121).
+        fn arb_forest_with_blockers() -> impl Strategy<Value = Vec<Task>> {
+            proptest::collection::vec(
+                (
+                    arb_task_state(),
+                    proptest::option::of(0usize..7),
+                    proptest::collection::vec(0usize..7, 0..2),
+                ),
+                1..8,
+            )
+            .prop_map(|specs| {
+                let n = specs.len();
+                specs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (state, parent_pick, blocker_picks))| {
+                        let parent = parent_pick.filter(|&p| p < i).map(|p| format!("t{p}"));
+                        let blocked_on = blocker_picks
+                            .into_iter()
+                            .filter(|&b| b < n)
+                            .map(|b| format!("t{b}"))
+                            .collect();
+                        Task {
+                            slug: format!("t{i}"),
+                            title: format!("task {i}"),
+                            state,
+                            parent,
+                            blocked_on,
+                            notes: Vec::new(),
+                            session: Some("s".to_string()),
+                            created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
+                            updated_at: "2026-01-01T00:00:00Z".to_string(),
+                        }
+                    })
+                    .collect()
+            })
+        }
+
         proptest! {
             #[test]
             fn task_note_json_roundtrips(note in arb_task_note()) {
@@ -2489,6 +2530,166 @@ mod tests {
                     prop_assert_ne!(next.state, TaskState::Done);
                     prop_assert_ne!(next.state, TaskState::Waiting);
                 }
+            }
+
+            // -- #1121: filter_tasks_for_project --
+
+            #[test]
+            fn filter_tasks_for_project_membership_subset_and_drops_sessionless(
+                n_a in 0usize..4,
+                n_b in 0usize..4,
+                task_kinds in proptest::collection::vec(0usize..3, 0..10),
+            ) {
+                let dir = TempDir::new().unwrap();
+
+                let mut a_ids = Vec::new();
+                for _ in 0..n_a {
+                    let StartOutcome::Created(s) =
+                        start_session(dir.path(), None, None, "proj-a", StartDecision::New).unwrap()
+                    else {
+                        panic!("StartDecision::New always creates");
+                    };
+                    a_ids.push(s.id);
+                }
+                let mut b_ids = Vec::new();
+                for _ in 0..n_b {
+                    let StartOutcome::Created(s) =
+                        start_session(dir.path(), None, None, "proj-b", StartDecision::New).unwrap()
+                    else {
+                        panic!("StartDecision::New always creates");
+                    };
+                    b_ids.push(s.id);
+                }
+
+                let tasks: Vec<Task> = task_kinds
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &kind)| {
+                        let session = match kind {
+                            1 if !a_ids.is_empty() => Some(a_ids[i % a_ids.len()].clone()),
+                            2 if !b_ids.is_empty() => Some(b_ids[i % b_ids.len()].clone()),
+                            _ => None,
+                        };
+                        Task {
+                            slug: format!("t{i}"),
+                            title: format!("task {i}"),
+                            state: TaskState::Open,
+                            parent: None,
+                            blocked_on: Vec::new(),
+                            notes: Vec::new(),
+                            session,
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            updated_at: "2026-01-01T00:00:00Z".to_string(),
+                        }
+                    })
+                    .collect();
+
+                let input_slugs: HashSet<String> = tasks.iter().map(|t| t.slug.clone()).collect();
+                let a_id_set: HashSet<String> = a_ids.into_iter().collect();
+
+                let expected_count = tasks
+                    .iter()
+                    .filter(|t| t.session.as_deref().is_some_and(|s| a_id_set.contains(s)))
+                    .count();
+
+                let result = filter_tasks_for_project(dir.path(), "proj-a", tasks);
+
+                for t in &result {
+                    // Subset: every returned task was in the input.
+                    prop_assert!(input_slugs.contains(&t.slug));
+                    // Membership: every returned task's session is a proj-a session.
+                    prop_assert!(t.session.as_deref().is_some_and(|s| a_id_set.contains(s)));
+                }
+                // Complement: nothing that should have been kept was dropped —
+                // without this, the two checks above pass vacuously whenever
+                // `result` is empty, and "drops_sessionless" (the test's own
+                // name) was never actually pinned (#1121 pre-pr-review).
+                prop_assert_eq!(result.len(), expected_count);
+            }
+
+            // -- #1121: resolve_current_task --
+
+            #[test]
+            fn resolve_current_task_never_returns_done(tasks in arb_forest()) {
+                if let Some(current) = resolve_current_task(&tasks) {
+                    prop_assert_ne!(current.state, TaskState::Done);
+                }
+            }
+
+            #[test]
+            fn resolve_current_task_prefers_wip_when_present(tasks in arb_forest()) {
+                if tasks.iter().any(|t| t.state == TaskState::Wip) {
+                    let current = resolve_current_task(&tasks);
+                    prop_assert_eq!(current.map(|t| t.state), Some(TaskState::Wip));
+                }
+            }
+
+            #[test]
+            fn resolve_current_task_none_when_everything_done(mut tasks in arb_forest()) {
+                for t in &mut tasks {
+                    t.state = TaskState::Done;
+                }
+                prop_assert_eq!(resolve_current_task(&tasks), None);
+            }
+
+            // -- #1121: resolve_next_task --
+
+            #[test]
+            fn resolve_next_task_blockers_all_resolve_to_done(
+                tasks in arb_forest_with_blockers(),
+                idx in 0usize..8,
+            ) {
+                let current = tasks[idx % tasks.len()].clone();
+                if let Some(next) = resolve_next_task(&tasks, &tasks, &current) {
+                    let by_slug: HashMap<&str, &Task> =
+                        tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+                    for blocker in &next.blocked_on {
+                        prop_assert!(is_done_including_descendants(blocker, &by_slug));
+                    }
+                }
+            }
+
+            #[test]
+            fn resolve_next_task_comes_strictly_after_current_in_execution_order(
+                tasks in arb_forest(),
+                idx in 0usize..8,
+            ) {
+                let current = tasks[idx % tasks.len()].clone();
+                if let Some(next) = resolve_next_task(&tasks, &tasks, &current) {
+                    let order = execution_order(&tasks);
+                    let current_pos = order
+                        .iter()
+                        .position(|t| t.slug == current.slug)
+                        .expect("current came from tasks, so execution_order(tasks) must contain it");
+                    let next_pos = order
+                        .iter()
+                        .position(|t| t.slug == next.slug)
+                        .expect("resolve_next_task draws next from execution_order(tasks) itself");
+                    prop_assert!(next_pos > current_pos);
+                }
+            }
+
+            #[test]
+            fn resolve_next_task_none_when_current_not_in_session_tasks(tasks in arb_forest()) {
+                let dangling = Task {
+                    slug: "not-in-forest".to_string(),
+                    title: "dangling".to_string(),
+                    state: TaskState::Open,
+                    parent: None,
+                    blocked_on: Vec::new(),
+                    notes: Vec::new(),
+                    session: Some("s".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                };
+                prop_assert_eq!(resolve_next_task(&tasks, &tasks, &dangling), None);
+            }
+
+            #[test]
+            fn resolve_next_task_none_when_current_is_last_in_execution_order(tasks in arb_forest()) {
+                let order = execution_order(&tasks);
+                let last = order.last().unwrap().clone();
+                prop_assert_eq!(resolve_next_task(&tasks, &tasks, &last), None);
             }
         }
     }

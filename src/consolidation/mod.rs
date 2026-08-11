@@ -710,6 +710,29 @@ mod tests {
                 prop_assert!(!out.contains(token), "placeholder {token} left unconsumed in {out:?}");
             }
         }
+
+        /// The *substituted* values must be correct, not just that the
+        /// placeholders are gone (that's the "consumed" test above). The
+        /// `max_rules_per_session` number must render literally, and the
+        /// summaries must appear joined by the same `\n---\n` delimiter
+        /// `build_prompt` uses internally (#862).
+        #[test]
+        fn build_prompt_substitutes_correct_values(
+            max_rules_per_session in 0u32..1000,
+            summaries in proptest::collection::vec(".{0,50}", 0..5),
+        ) {
+            let config = config_with_max_rules(max_rules_per_session);
+            let out = build_prompt(&config, &summaries);
+            prop_assert!(
+                out.contains(&max_rules_per_session.to_string()),
+                "max_rules value {max_rules_per_session} missing from {out:?}"
+            );
+            let joined = summaries.join("\n---\n");
+            prop_assert!(
+                out.contains(&joined),
+                "joined summaries {joined:?} missing from {out:?}"
+            );
+        }
     }
 
     // ===== #1166: property-test coverage for parse_bullets and parse_recall_output =====
