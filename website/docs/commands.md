@@ -305,7 +305,7 @@ re-ingestion on the next turn.
 ## `task`
 
 ```text
-llmenv task add <title> [--parent SLUG] [--session <id>]
+llmenv task add <title> [--parent SLUG | --no-parent] [--session <id>]
 llmenv task start <id> [--force]
 llmenv task done <id>
 llmenv task wait <id> [reason]
@@ -324,12 +324,19 @@ In-engine task tracker (#231): durable, cross-session "what am I working on"
 state, backed by one JSON file per task. `<id>` accepts an exact slug or any
 unambiguous prefix of one.
 
-- `task add <title> [--parent SLUG] [--session <id>]` — create a task
-  (`open` state); pass `--parent` to record it as a sub-task instead of
-  starting unrelated top-level work. **A task must belong to a session**
-  (see below): with exactly one session open for the current project it
-  auto-resolves; pass `--session <id>` when two or more are open; errors
-  with actionable guidance when none is open.
+- `task add <title> [--parent SLUG | --no-parent] [--session <id>]` — create
+  a task (`open` state). (added in v3.10.0) Omitting `--parent` no longer
+  means "no parent": it defaults to the most recently *created* task in the
+  same session, so a run of plain `task add`s forms an ordered chain by
+  default — the order agents add tasks in is usually the order they intend
+  to execute them. Pass `--parent SLUG` to nest under a specific task
+  instead (bypassing the chain), or `--no-parent` to force a deliberate
+  top-level task (the two flags conflict with each other). The chain never
+  crosses sessions — a new session's first task always starts with no
+  parent, regardless of what was last added in a different session. **A
+  task must belong to a session** (see below): with exactly one session open
+  for the current project it auto-resolves; pass `--session <id>` when two
+  or more are open; errors with actionable guidance when none is open.
 - `task start <id> [--force]` — claim a task, moving it to `wip`. Also the
   resume action for a `waiting` task — it accepts any non-`done` state as its
   starting point. `parent` and `blocked_on` (added in v3.8.0) are enforced
