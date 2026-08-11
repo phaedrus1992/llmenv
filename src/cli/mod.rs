@@ -4553,7 +4553,7 @@ fn run_prune(
     // sweep the live config dir. Loose mode has no version axis (every shape is
     // current) and strict mode is identified by the prefix test — both pass None.
     let current_version = match config.cache.hashing {
-        crate::config::HashingMode::Normal => Some(crate::materialize::cache::version_mm()),
+        crate::config::HashingMode::Normal => Some(crate::materialize::cache::version_major()),
         crate::config::HashingMode::Loose | crate::config::HashingMode::Strict => None,
     };
 

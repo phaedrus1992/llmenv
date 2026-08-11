@@ -24,8 +24,8 @@ use crate::merge::MergedManifest;
 pub const VERSION_TAG: &str = env!("LLMENV_VERSION_TAG");
 
 /// Bare package version (`X.Y.Z`, or a semver prerelease like `1.2.3-rc.1`),
-/// baked in by `build.rs`. Source for the `normal`-mode `version_mm` folder
-/// segment.
+/// baked in by `build.rs`. Source for the `normal`-mode [`version_major`]
+/// folder segment.
 pub const PKG_VERSION: &str = env!("LLMENV_PKG_VERSION");
 
 /// Short git commit hash, or empty when built outside a git checkout (crates.io
@@ -37,9 +37,12 @@ pub const GIT_HASH: &str = env!("LLMENV_GIT_HASH");
 ///
 /// - [`HashingMode::Loose`] → `<shape>`. Selection-addressed only; a binary
 ///   upgrade reuses the same folder, so this returns just the shape digest.
-/// - [`HashingMode::Normal`] → `<version_mm>/<shape>`. Nests the shape under the
-///   `major.minor` version so a minor bump or selection change mints a new
-///   folder while content edits re-render in place.
+/// - [`HashingMode::Normal`] → `<version_major>/<shape>`. Nests the shape under
+///   the major version, so only a major bump (where the materialized layout
+///   may genuinely change incompatibly) mints a new folder — a minor/patch
+///   release shares the existing one, since the manifest dotfile's content
+///   hash already drives drift detection and reconciliation regardless of
+///   version (#1263). Content edits re-render in place either way.
 /// - [`HashingMode::Strict`] → `{VERSION_TAG}-{content_hash}`. Splitting the
 ///   version off the content hash keeps the hash a function of inputs only, so
 ///   two folders that differ in version prefix but share the same content hash
@@ -48,26 +51,26 @@ pub const GIT_HASH: &str = env!("LLMENV_GIT_HASH");
 pub fn folder_name(mode: HashingMode, shape: &str, content_hash: &str) -> String {
     match mode {
         HashingMode::Loose => shape.to_string(),
-        HashingMode::Normal => format!("{}/{}", version_mm(), shape),
+        HashingMode::Normal => format!("{}/{}", version_major(), shape),
         HashingMode::Strict => format!("{VERSION_TAG}-{content_hash}"),
     }
 }
 
-/// The `major.minor` version segment used to nest `normal`-mode folders,
-/// composed from [`PKG_VERSION`] (baked in by `build.rs`). Filesystem-safe:
-/// package versions contain only `[0-9A-Za-z.+-]`.
+/// The major-version segment used to nest `normal`-mode folders, composed
+/// from [`PKG_VERSION`] (baked in by `build.rs`). Filesystem-safe: package
+/// versions contain only `[0-9A-Za-z.+-]`.
 ///
-/// A version of `1.2.3` yields `1.2`. A shorter-than-expected version (e.g. a
-/// bare `1`) degrades gracefully to whatever leading components exist.
+/// A version of `1.2.3` yields `1`. Before #1263 this was `major.minor`
+/// (`1.2`) — every minor release minted a whole new cache tree, orphaning
+/// every materialized folder on each upgrade for no reason the manifest's
+/// own content-hash drift detection required.
 #[must_use]
-pub fn version_mm() -> String {
-    let mut parts = PKG_VERSION.split('.');
-    let first = parts.next().unwrap_or_default();
-    if let Some(second) = parts.next() {
-        format!("{first}.{second}")
-    } else {
-        first.to_string()
-    }
+pub fn version_major() -> String {
+    PKG_VERSION
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// 12-hex-char digest of the active *selection shape* (#246): the set of active
@@ -250,8 +253,8 @@ pub struct PruneReport {
 /// - [`HashingMode::Loose`] — every shape folder is current (no version axis);
 ///   `current_version` is ignored. `StaleOnly` therefore removes nothing but
 ///   `*.tmp`, and only `All`/`OlderThan` trim shapes.
-/// - [`HashingMode::Normal`] — `current_version` is the live `version_mm`
-///   segment (e.g. `1.2`); the direct child of that name is current.
+/// - [`HashingMode::Normal`] — `current_version` is the live `version_major`
+///   segment (e.g. `3`); the direct child of that name is current.
 /// - [`HashingMode::Strict`] — a `{VERSION_TAG}-…` folder is current;
 ///   `current_version` is ignored.
 ///
@@ -409,9 +412,9 @@ fn is_expired(now: SystemTime, mtime: SystemTime, older_than: Duration) -> bool 
 /// collection applies (#738):
 /// - [`HashingMode::Loose`] — every shape folder is a direct child of
 ///   `cache_root`; each is age-checked individually.
-/// - [`HashingMode::Normal`] — direct children are `<version_mm>` generation
+/// - [`HashingMode::Normal`] — direct children are `<version_major>` generation
 ///   dirs. When a child matches the current generation (computed internally
-///   from [`version_mm()`]), [`gc_normal_shapes`] walks into it and age-checks
+///   from [`version_major()`]), [`gc_normal_shapes`] walks into it and age-checks
 ///   each per-shape leaf dir individually, so a single stale shape doesn't
 ///   block cleanup of the others. Non-current generation dirs are age-checked
 ///   as a unit (they'll be collected entirely next upgrade).
@@ -429,7 +432,7 @@ pub fn gc(
     };
     let now = SystemTime::now();
     let current_version = match hashing {
-        HashingMode::Normal => Some(version_mm()),
+        HashingMode::Normal => Some(version_major()),
         _ => None,
     };
     for entry in entries {
@@ -480,7 +483,7 @@ pub fn gc(
     Ok(report)
 }
 
-/// Age-check each per-shape leaf directory under a `<version_mm>` generation
+/// Age-check each per-shape leaf directory under a `<version_major>` generation
 /// dir individually, rather than collecting the whole generation at once.
 ///
 /// This is the per-shape collection for [`HashingMode::Normal`] (#738): a
@@ -597,33 +600,27 @@ mod tests {
     }
 
     #[test]
-    fn normal_folder_name_nests_shape_under_version_mm() {
+    fn normal_folder_name_nests_shape_under_version_major() {
         let s = empty_shape();
-        // Normal mode nests the shape under the major.minor version; the content
-        // hash is not part of the name (it lives in the manifest dotfile).
+        // Normal mode nests the shape under the major version (#1263); the
+        // content hash is not part of the name (it lives in the manifest
+        // dotfile).
         let name = folder_name(HashingMode::Normal, &s, "ignored-hash");
-        assert_eq!(name, format!("{}/{}", version_mm(), s));
+        assert_eq!(name, format!("{}/{}", version_major(), s));
     }
 
     #[test]
-    fn version_mm_is_two_leading_components() {
-        // version_mm takes the leading `major.minor` of PKG_VERSION (baked at
-        // build time), or degrades to whatever leading components exist.
-        let mm = version_mm();
+    fn version_major_is_leading_component_only() {
+        // #1263: version_major takes only the leading major component of
+        // PKG_VERSION (baked at build time) — no minor/patch, unlike the
+        // pre-#1263 `major.minor` behavior.
+        let major = version_major();
+        let expected = PKG_VERSION.split('.').next().unwrap_or_default();
+        assert_eq!(major, expected);
         assert!(
-            PKG_VERSION.starts_with(&mm),
-            "version_mm ({mm}) must be a prefix of PKG_VERSION ({PKG_VERSION})"
+            !major.contains('.'),
+            "version_major ({major}) must not contain a dot"
         );
-        let dots = PKG_VERSION.split('.').count();
-        if dots >= 2 {
-            let expected = {
-                let mut parts = PKG_VERSION.split('.');
-                let major = parts.next().unwrap();
-                let minor = parts.next().unwrap();
-                format!("{major}.{minor}")
-            };
-            assert_eq!(mm, expected, "version_mm is exactly major.minor");
-        }
     }
 
     #[test]
@@ -762,17 +759,17 @@ mod tests {
 
     #[test]
     fn prune_stale_only_keeps_normal_version_folder() {
-        // #246: a normal-mode generation dir (e.g. "1.2") has no `{VERSION_TAG}-`
-        // prefix, so `StaleOnly` must be told the current `version_mm` segment
+        // #246: a normal-mode generation dir (e.g. "3") has no `{VERSION_TAG}-`
+        // prefix, so `StaleOnly` must be told the current `version_major` segment
         // explicitly or it would wrongly sweep the live config dir.
         let tmp = tempfile::tempdir().unwrap();
-        let current = touch_dir(tmp.path(), "1.2");
-        let stale = touch_dir(tmp.path(), "1.1");
+        let current = touch_dir(tmp.path(), "3");
+        let stale = touch_dir(tmp.path(), "2");
         let report = prune(
             tmp.path(),
             PruneMode::StaleOnly,
             HashingMode::Normal,
-            Some("1.2"),
+            Some("3"),
             false,
         )
         .unwrap();
@@ -981,12 +978,12 @@ mod tests {
     #[test]
     fn gc_normal_mode_collects_shapes_individually() {
         // In Normal mode, the top-level children of cache_root are
-        // `<version_mm>` generation containers. Per-shape GC (#738) must walk
+        // `<version_major>` generation containers. Per-shape GC (#738) must walk
         // into the live generation dir and age-check each shape individually
         // so a single stale shape doesn't keep others from being cleaned up.
         use crate::materialize::state::STATE_DIR_NAME;
         let tmp = tempfile::tempdir().unwrap();
-        let v = version_mm();
+        let v = version_major();
 
         // A stale shape — backdate both the dir and any files inside so that
         // `newest_mtime` finds nothing recent in the subtree.
@@ -1209,8 +1206,8 @@ mod tests {
                 let name2 = folder_name(HashingMode::Normal, &s, &hash2);
                 // Normal mode ignores the content hash: same shape → same folder.
                 prop_assert_eq!(&name1, &name2, "normal mode must ignore the hash argument");
-                prop_assert_eq!(name1, format!("{}/{}", version_mm(), s),
-                    "normal mode nests <shape> under <version_mm>");
+                prop_assert_eq!(name1, format!("{}/{}", version_major(), s),
+                    "normal mode nests <shape> under <version_major>");
             }
 
             #[test]

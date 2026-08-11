@@ -627,7 +627,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         crate::config::HashingMode::Normal => {
             eprintln!(
                 "{pass} Cache hashing: normal (folder: {}/<shape>)",
-                crate::materialize::cache::version_mm()
+                crate::materialize::cache::version_major()
             );
         }
         crate::config::HashingMode::Strict => {
@@ -661,7 +661,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                 }
                 cached_versions.sort();
                 cached_versions.dedup();
-                let version_folder = crate::materialize::cache::version_mm();
+                let version_folder = crate::materialize::cache::version_major();
                 let current_built = |v: &String| v == super::VERSION_TAG || *v == version_folder;
                 if !cached_versions.is_empty() {
                     let cached_versions_str = cached_versions.join(", ");

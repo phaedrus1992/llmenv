@@ -332,7 +332,7 @@ fn collect_config_stale(booted: Option<&str>, current: &str) -> Option<bool> {
 /// no filesystem mutation ever happens just to report a stat.
 fn collect_cache(cache_root: &Path, hashing: HashingMode) -> Option<CacheData> {
     let current_version =
-        matches!(hashing, HashingMode::Normal).then(crate::materialize::cache::version_mm);
+        matches!(hashing, HashingMode::Normal).then(crate::materialize::cache::version_major);
     let report = match crate::materialize::cache::prune(
         cache_root,
         crate::materialize::cache::PruneMode::StaleOnly,

@@ -86,7 +86,7 @@ A single dial with three positions. The folder path is:
 | Mode | Folder layout | When to use |
 | ------ | --------------- | ------------- |
 | `loose` | `<adapter>/<shape>/` | Maximum cache reuse across upgrades |
-| `normal` (default) | `<adapter>/<version_mm>/<shape>/` | Balanced: stable within a release, churns on minor bumps |
+| `normal` (default) | `<adapter>/<version_major>/<shape>/` | Balanced: stable across minor/patch releases, churns on major bumps (added in v3.10.0; before that, `<version_mm>`/minor bumps) |
 | `strict` | `<adapter>/<VERSION_TAG>-<content_hash>/` | Maximum isolation; new folder on any input change |
 
 `shape` is a 12-hex SHA-256 over the active tags ∪ enabled bundles. Config edits

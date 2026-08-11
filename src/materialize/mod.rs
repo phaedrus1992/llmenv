@@ -32,8 +32,8 @@ pub struct Rendered {
 ///
 /// - [`HashingMode::Loose`]: folder = `<shape>`. Selection-addressed, version
 ///   agnostic; written in place (folder reused across content edits + upgrades).
-/// - [`HashingMode::Normal`]: folder = `<version_mm>/<shape>`. Reused across
-///   content edits within a `major.minor` generation; written in place.
+/// - [`HashingMode::Normal`]: folder = `<version_major>/<shape>`. Reused across
+///   content edits within a major-version generation; written in place.
 /// - [`HashingMode::Strict`]: folder = `{VERSION_TAG}-{hash}`. Writes are staged
 ///   to a per-call `.tmp/` dir and atomically renamed into place; an existing
 ///   destination is a no-op (byte-identical by construction).
