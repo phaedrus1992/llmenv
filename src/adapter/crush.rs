@@ -25,6 +25,10 @@ impl AgentAdapter for CrushAdapter {
         "crush"
     }
 
+    fn is_active(&self) -> bool {
+        std::env::var("CRUSH_GLOBAL_CONFIG").is_ok()
+    }
+
     fn binary_name(&self) -> &'static str {
         "crush"
     }
