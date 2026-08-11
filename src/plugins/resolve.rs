@@ -15,7 +15,7 @@ use crate::config::{Config, Marketplace, split_plugin_ref};
 /// A fully resolved plugin ready for an adapter to render. Carries the
 /// originating marketplace and plugin name split out from the
 /// `<marketplace>:<plugin>` config form.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct ResolvedPlugin {
     /// Marketplace name (left half of the config `marketplace:plugin` string).
     pub marketplace: String,
@@ -112,8 +112,7 @@ fn inject_context_mode(
             marketplace: crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
             plugin: crate::config::CONTEXT_MODE_PLUGIN.to_string(),
             collection: "context_mode (built-in)".to_string(),
-            install_path: None,
-            git_commit_sha: None,
+            ..Default::default()
         });
     } else {
         // The user manually declared context-mode:context-mode in a
@@ -190,8 +189,7 @@ pub fn resolve_plugins(
                 marketplace: marketplace.to_string(),
                 plugin: name.to_string(),
                 collection: collection.name.clone(),
-                install_path: None,
-                git_commit_sha: None,
+                ..Default::default()
             });
         }
     }
