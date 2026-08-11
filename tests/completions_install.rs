@@ -4,9 +4,12 @@
 
 use assert_cmd::Command;
 use std::fs;
+use std::path::Path;
 
-fn llmenv_cmd() -> Command {
-    Command::cargo_bin("llmenv").expect("find llmenv binary")
+mod support;
+
+fn llmenv_cmd(home: &Path) -> Command {
+    support::isolated_llmenv_cmd(home)
 }
 
 #[test]
@@ -14,8 +17,7 @@ fn install_writes_bash_completion_to_custom_dir() {
     let home = tempfile::TempDir::new().expect("tempdir");
     let install_dir = tempfile::TempDir::new().expect("tempdir");
 
-    llmenv_cmd()
-        .env("HOME", home.path())
+    llmenv_cmd(home.path())
         .arg("completions")
         .arg("bash")
         .arg("--install")
@@ -38,8 +40,7 @@ fn install_writes_zsh_completion_with_underscore_prefix() {
     let home = tempfile::TempDir::new().expect("tempdir");
     let install_dir = tempfile::TempDir::new().expect("tempdir");
 
-    llmenv_cmd()
-        .env("HOME", home.path())
+    llmenv_cmd(home.path())
         .arg("completions")
         .arg("zsh")
         .arg("--install")
@@ -56,8 +57,7 @@ fn install_refuses_to_overwrite_without_force() {
     let home = tempfile::TempDir::new().expect("tempdir");
     let install_dir = tempfile::TempDir::new().expect("tempdir");
 
-    llmenv_cmd()
-        .env("HOME", home.path())
+    llmenv_cmd(home.path())
         .arg("completions")
         .arg("bash")
         .arg("--install")
@@ -65,8 +65,7 @@ fn install_refuses_to_overwrite_without_force() {
         .arg(install_dir.path())
         .assert()
         .success();
-    let output = llmenv_cmd()
-        .env("HOME", home.path())
+    let output = llmenv_cmd(home.path())
         .arg("completions")
         .arg("bash")
         .arg("--install")
@@ -92,8 +91,7 @@ fn install_overwrites_with_force() {
     let script = install_dir.path().join("llmenv");
     fs::write(&script, "stale content").expect("seed stale file");
 
-    llmenv_cmd()
-        .env("HOME", home.path())
+    llmenv_cmd(home.path())
         .arg("completions")
         .arg("bash")
         .arg("--install")
@@ -112,8 +110,7 @@ fn install_without_shell_arg_uses_shell_env() {
     let home = tempfile::TempDir::new().expect("tempdir");
     let install_dir = tempfile::TempDir::new().expect("tempdir");
 
-    llmenv_cmd()
-        .env("HOME", home.path())
+    llmenv_cmd(home.path())
         .env("SHELL", "/bin/zsh")
         .arg("completions")
         .arg("--install")
@@ -133,8 +130,7 @@ fn install_without_shell_arg_or_shell_env_fails_clearly() {
     let home = tempfile::TempDir::new().expect("tempdir");
     let install_dir = tempfile::TempDir::new().expect("tempdir");
 
-    let output = llmenv_cmd()
-        .env("HOME", home.path())
+    let output = llmenv_cmd(home.path())
         .env_remove("SHELL")
         .arg("completions")
         .arg("--install")
@@ -153,7 +149,8 @@ fn install_without_shell_arg_or_shell_env_fails_clearly() {
 #[test]
 fn plain_completions_still_prints_to_stdout() {
     // Non-regression: the pre-#756 behavior (no --install) must keep working.
-    let output = llmenv_cmd()
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let output = llmenv_cmd(home.path())
         .arg("completions")
         .arg("bash")
         .output()

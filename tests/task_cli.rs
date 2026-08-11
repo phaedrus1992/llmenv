@@ -17,10 +17,10 @@ use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use tempfile::TempDir;
 
+mod support;
+
 fn llmenv(state_dir: &std::path::Path) -> Command {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_STATE_DIR", state_dir);
-    cmd
+    support::isolated_llmenv_cmd(state_dir)
 }
 
 /// Start a session so subsequent `task add` calls auto-resolve to it.
