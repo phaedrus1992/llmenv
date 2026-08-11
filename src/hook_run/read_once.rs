@@ -241,6 +241,8 @@ pub(crate) fn handle_pre_tool_use(
     let tokens_saved = (file_size / 4) as u64;
 
     // Check existing entry
+    let lookup_start = std::time::Instant::now();
+    let extra = format!("path={file_path}");
     if let Some(entry) = cache.entries.get_mut(&path_key) {
         if entry.mtime_unix == mtime
             && now.saturating_sub(entry.first_read_at) < config.ttl_seconds as i64
@@ -250,6 +252,12 @@ pub(crate) fn handle_pre_tool_use(
             // get accurately written on the next miss-path save.
             entry.hits = entry.hits.saturating_add(1);
             entry.tokens_saved = entry.tokens_saved.saturating_add(tokens_saved);
+            crate::cache_trace::emit_cache_trace(
+                "read_once",
+                true,
+                lookup_start.elapsed(),
+                Some(&extra),
+            );
 
             let msg = format!(
                 "{file_path} was already read this session (~{tokens_saved} tokens saved from re-read). \
@@ -279,6 +287,9 @@ pub(crate) fn handle_pre_tool_use(
             },
         );
     }
+    // Both branches above fall through here only on a miss — the hit branch
+    // returns early — so one emit covers both (mtime/TTL miss and new entry).
+    crate::cache_trace::emit_cache_trace("read_once", false, lookup_start.elapsed(), Some(&extra));
 
     if let Err(e) = cache.save(state_dir) {
         eprintln!("llmenv: failed to save read-once cache: {e}");

@@ -60,6 +60,7 @@ pub fn materialize_with_mode(
     mode: HashingMode,
     shape: &str,
 ) -> anyhow::Result<Rendered> {
+    let cache_start = std::time::Instant::now();
     let hash = cache::hash_manifest(m)?;
     let folder = cache::folder_name(mode, shape, &hash);
     let dest = cache_root.join(&folder);
@@ -75,7 +76,9 @@ pub fn materialize_with_mode(
     match mode {
         // Loose/normal reuse one folder across content edits: write in place,
         // never swap (the folder is the agent's live home). Stale-file cleanup
-        // is the orchestrator's job via the owned-set manifest.
+        // is the orchestrator's job via the owned-set manifest. Not part of
+        // the content_hash cache's hit/miss telemetry (#1260): every call
+        // writes, there's no hit/miss distinction to report.
         HashingMode::Loose | HashingMode::Normal => {
             write_in_place(m, &dest)?;
             return Ok(Rendered { path: dest, hash });
@@ -83,10 +86,12 @@ pub fn materialize_with_mode(
         // Strict mode: a content-hashed folder that already exists is
         // byte-identical, so reuse it untouched.
         HashingMode::Strict if dest.exists() => {
+            crate::cache_trace::emit_cache_trace("content_hash", true, cache_start.elapsed(), None);
             return Ok(Rendered { path: dest, hash });
         }
         HashingMode::Strict => {}
     }
+    crate::cache_trace::emit_cache_trace("content_hash", false, cache_start.elapsed(), None);
 
     // Per-call staging directory: `<folder>.<pid>.<nanos>.tmp`. Each concurrent
     // writer gets its own staging path, so they cannot clobber each other on
