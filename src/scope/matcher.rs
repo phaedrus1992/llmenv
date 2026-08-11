@@ -1,6 +1,6 @@
 use crate::config::{ContentScope, HostScope, NetworkScope, UserScope};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -230,6 +230,34 @@ pub(crate) fn sanitize_tags(raw: Vec<String>, source: &str) -> Vec<String> {
         valid.truncate(MAX_TAGS_PER_SOURCE);
     }
     valid
+}
+
+/// Cap the *union* of tags across every source (`config.yaml`'s network/
+/// host/user/content scopes, `.llmenv.yaml`, `$LLMENV_EXTRA_TAGS`, `env.os`)
+/// to [`MAX_TAGS_PER_SOURCE`] — [`sanitize_tags`] already bounds each source
+/// individually, but several active scopes plus a large `.llmenv.yaml` plus
+/// `$LLMENV_EXTRA_TAGS` can still combine into several hundred tags, each
+/// becoming one `Action::RecallTag` per turn (#1041). Reuses
+/// `MAX_TAGS_PER_SOURCE` as the aggregate bound too, rather than a second
+/// magic number: the same "one source's worth" ceiling that's already
+/// accepted as tolerable for a single source is exactly the ceiling worth
+/// enforcing on the combination.
+///
+/// Keeps the alphabetically-first entries (`BTreeSet`'s natural iteration
+/// order) — the same "keep the first N, warn about the rest" policy
+/// `sanitize_tags` uses per-source, just applied to the union so no one
+/// source is treated as more important than another when something has to
+/// be dropped.
+pub(crate) fn cap_aggregate_tags(tags: BTreeSet<String>) -> BTreeSet<String> {
+    let total = tags.len();
+    if total <= MAX_TAGS_PER_SOURCE {
+        return tags;
+    }
+    tracing::warn!(
+        "aggregate tag count {total} exceeds cap of {MAX_TAGS_PER_SOURCE} across all sources \
+         combined; keeping the alphabetically-first {MAX_TAGS_PER_SOURCE}"
+    );
+    tags.into_iter().take(MAX_TAGS_PER_SOURCE).collect()
 }
 
 fn detect_hostname() -> Option<String> {
@@ -515,10 +543,11 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        ContentScope, Env, MAX_TAGS_PER_SOURCE, discover_project, glob_matches,
+        ContentScope, Env, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, discover_project, glob_matches,
         is_valid_tag_charset, matches_content_all, parse_extra_tags, sanitize_tags,
     };
     use proptest::prelude::*;
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     #[test]
@@ -569,6 +598,34 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         assert_eq!(parse_extra_tags(&raw).len(), MAX_TAGS_PER_SOURCE);
+    }
+
+    #[test]
+    fn cap_aggregate_tags_below_cap_is_unchanged() {
+        let tags: BTreeSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(cap_aggregate_tags(tags.clone()), tags);
+    }
+
+    #[test]
+    fn cap_aggregate_tags_at_exactly_the_cap_is_unchanged() {
+        let tags: BTreeSet<String> = (0..MAX_TAGS_PER_SOURCE)
+            .map(|i| format!("t{i:03}"))
+            .collect();
+        assert_eq!(cap_aggregate_tags(tags.clone()), tags);
+    }
+
+    #[test]
+    fn cap_aggregate_tags_over_the_cap_keeps_alphabetically_first_n() {
+        // #1041: several sources, each within their own MAX_TAGS_PER_SOURCE
+        // limit, can still union into more than MAX_TAGS_PER_SOURCE tags —
+        // the aggregate cap keeps the alphabetically-first N.
+        let tags: BTreeSet<String> = (0..(MAX_TAGS_PER_SOURCE + 10))
+            .map(|i| format!("t{i:03}"))
+            .collect();
+        let capped = cap_aggregate_tags(tags);
+        assert_eq!(capped.len(), MAX_TAGS_PER_SOURCE);
+        assert!(capped.contains("t000"));
+        assert!(!capped.contains(&format!("t{:03}", MAX_TAGS_PER_SOURCE + 9)));
     }
 
     #[test]
@@ -988,6 +1045,22 @@ mod tests {
                 ..Env::empty()
             };
             let _ = discover_project(&env);
+        }
+
+        // #1041: for any input, cap_aggregate_tags never exceeds the cap,
+        // never introduces a tag that wasn't in the input, and leaves an
+        // already-within-cap input untouched.
+        #[test]
+        fn cap_aggregate_tags_never_exceeds_cap_and_is_a_subset(
+            tags in prop::collection::btree_set("[a-z][a-z0-9-]{0,10}", 0..(MAX_TAGS_PER_SOURCE * 2))
+        ) {
+            let original = tags.clone();
+            let capped = cap_aggregate_tags(tags);
+            prop_assert!(capped.len() <= MAX_TAGS_PER_SOURCE);
+            prop_assert!(capped.is_subset(&original));
+            if original.len() <= MAX_TAGS_PER_SOURCE {
+                prop_assert_eq!(capped, original);
+            }
         }
 
         // Malformed YAML never panics; always degrades to defaults.
