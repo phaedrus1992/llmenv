@@ -1047,6 +1047,22 @@ mod tests {
             let _ = discover_project(&env);
         }
 
+        // #1041: for any input, cap_aggregate_tags never exceeds the cap,
+        // never introduces a tag that wasn't in the input, and leaves an
+        // already-within-cap input untouched.
+        #[test]
+        fn cap_aggregate_tags_never_exceeds_cap_and_is_a_subset(
+            tags in prop::collection::btree_set("[a-z][a-z0-9-]{0,10}", 0..(MAX_TAGS_PER_SOURCE * 2))
+        ) {
+            let original = tags.clone();
+            let capped = cap_aggregate_tags(tags);
+            prop_assert!(capped.len() <= MAX_TAGS_PER_SOURCE);
+            prop_assert!(capped.is_subset(&original));
+            if original.len() <= MAX_TAGS_PER_SOURCE {
+                prop_assert_eq!(capped, original);
+            }
+        }
+
         // Malformed YAML never panics; always degrades to defaults.
         #[test]
         fn malformed_yaml_never_panics(body in r"\PC*") {
