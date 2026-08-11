@@ -583,6 +583,30 @@ fn merge_mcp_into_claude_json(
     let servers = build_mcp_servers(mcps)?;
     let mut doc = json!({ "mcpServers": servers });
     overlay_native(&mut doc, native)?;
+    // #1270 follow-up: record, per server, which top-level keys the native
+    // overlay just nulled — the preserve-subkeys loop below needs this,
+    // because stripping the null (next line) makes a just-deleted key and a
+    // key llmenv simply never rendered look identical (both absent).
+    // Without it, a credential-purge null on `env`/`headers` would be
+    // "filled back in" from the stale on-disk copy instead of staying gone.
+    let nulled_keys: std::collections::HashMap<String, std::collections::HashSet<String>> = doc
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .map(|servers| {
+            servers
+                .iter()
+                .filter_map(|(name, entry)| {
+                    let nulls: std::collections::HashSet<String> = entry
+                        .as_object()?
+                        .iter()
+                        .filter(|(_, v)| v.is_null())
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    (!nulls.is_empty()).then(|| (name.clone(), nulls))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     // #1270: a native null on a key already rendered into a server entry must
     // delete the key rather than persist an explicit JSON null into the real,
     // persistent `.claude.json`. `doc` is a scratch value scoped to llmenv's
@@ -636,8 +660,11 @@ fn merge_mcp_into_claude_json(
                 if let Some(existing) = servers_obj.get(&name).and_then(|v| v.as_object())
                     && let Some(ref mut new_obj) = entry.as_object_mut()
                 {
+                    let explicitly_nulled = nulled_keys.get(&name);
                     for (k, v) in existing.iter() {
-                        if !new_obj.contains_key(k) {
+                        let was_explicitly_deleted =
+                            explicitly_nulled.is_some_and(|nulled| nulled.contains(k));
+                        if !new_obj.contains_key(k) && !was_explicitly_deleted {
                             new_obj.insert(k.clone(), v.clone());
                         }
                     }
@@ -4366,6 +4393,49 @@ mod tests {
             doc["mcpServers"]["icm"].get("command").is_none(),
             "`native_mcp.claude_code.mcpServers.icm.command: null` must delete \
              the key, got: {doc}"
+        );
+    }
+
+    /// #1270 follow-up: the preserve-runtime-subkeys loop below the strip must
+    /// not resurrect a key the native fragment explicitly nulled. Before this
+    /// fix, stripping the null off the scratch `doc` also erased the "this key
+    /// was explicitly deleted" signal the loop checks via `contains_key`, so a
+    /// credential-purge null on `env`/`headers` silently restored the stale
+    /// on-disk value on every re-render — the exact case the #1270 changelog
+    /// entry claims is fixed. Uses a non-empty `env` so llmenv's own render
+    /// emits the key (an empty env renders no key at all either way).
+    #[test]
+    fn merge_mcp_native_null_does_not_resurrect_preserved_subkey() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({
+                "mcpServers": { "icm": { "command": "icm-bin", "env": { "TOKEN": "leaked-old-value" } } }
+            }),
+        );
+        let mcp = ResolvedMcp {
+            name: "icm".into(),
+            kind: ResolvedKind::Stdio {
+                command: "icm-bin".into(),
+                args: vec![],
+                env: std::collections::BTreeMap::from([("TOKEN".into(), "resolved-value".into())]),
+            },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
+            mcp_permissions: None,
+            wakeup_max_tokens: None,
+        };
+        let native: serde_yaml::Value =
+            serde_yaml::from_str("mcpServers:\n  icm:\n    env: null\n").unwrap();
+        merge_mcp_into_claude_json(tmp.path(), &[mcp], Some(&native)).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            doc["mcpServers"]["icm"].get("env").is_none(),
+            "`native_mcp.claude_code.mcpServers.icm.env: null` must delete the \
+             key, not resurrect the on-disk value, got: {doc}"
         );
     }
 
