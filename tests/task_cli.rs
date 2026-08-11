@@ -174,6 +174,306 @@ fn block_on_unknown_target_fails() {
         .failure();
 }
 
+// --- Edit (#930) ---
+
+#[test]
+fn edit_retitles_a_task() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Original title", "--no-parent"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "edit", "original-title", "--title", "New title"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Updated"));
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "original-title"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["title"], "New title");
+}
+
+#[test]
+fn edit_sets_and_clears_parent() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Parent", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Child", "--no-parent"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "edit", "child", "--parent", "parent"])
+        .assert()
+        .success();
+    let show = llmenv(dir.path())
+        .args(["task", "show", "child"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["parent"], "parent");
+
+    llmenv(dir.path())
+        .args(["task", "edit", "child", "--no-parent"])
+        .assert()
+        .success();
+    let show = llmenv(dir.path())
+        .args(["task", "show", "child"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["parent"], serde_json::Value::Null);
+}
+
+#[test]
+fn edit_parent_and_no_parent_flags_conflict() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Solo", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "edit", "solo", "--parent", "solo", "--no-parent"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn edit_parent_to_unknown_id_fails() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Solo", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "edit", "solo", "--parent", "no-such-task"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn edit_parent_creating_a_cycle_fails() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "A", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "B", "--parent", "a"])
+        .assert()
+        .success();
+
+    // A -> B already; making A's parent B would make A its own ancestor.
+    llmenv(dir.path())
+        .args(["task", "edit", "a", "--parent", "b"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn edit_adds_and_removes_blocked_on() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Blocker", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Blocked", "--no-parent"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "edit", "blocked", "--block-on", "blocker"])
+        .assert()
+        .success();
+    let show = llmenv(dir.path())
+        .args(["task", "show", "blocked"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["blocked_on"][0], "blocker");
+
+    llmenv(dir.path())
+        .args(["task", "edit", "blocked", "--unblock", "blocker"])
+        .assert()
+        .success();
+    let show = llmenv(dir.path())
+        .args(["task", "show", "blocked"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert!(task["blocked_on"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn edit_block_on_self_fails() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Solo", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "edit", "solo", "--block-on", "solo"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn edit_add_note_appends_and_delete_note_removes_by_index() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Task", "--no-parent"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "edit", "task", "--add-note", "first note"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "edit", "task", "--add-note", "second note"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "task"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["notes"][0]["text"], "first note");
+    assert_eq!(task["notes"][1]["text"], "second note");
+
+    llmenv(dir.path())
+        .args(["task", "edit", "task", "--delete-note", "0"])
+        .assert()
+        .success();
+    let show = llmenv(dir.path())
+        .args(["task", "show", "task"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(task["notes"][0]["text"], "second note");
+}
+
+#[test]
+fn edit_add_note_reads_from_stdin_when_given_empty() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Task", "--no-parent"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "edit", "task", "--add-note", ""])
+        .write_stdin("note via stdin")
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "task"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["notes"][0]["text"], "note via stdin");
+}
+
+#[test]
+fn edit_delete_note_by_timestamp() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Task", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "note", "task", "only note"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "task"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    let at = task["notes"][0]["at"].as_str().unwrap().to_string();
+
+    llmenv(dir.path())
+        .args(["task", "edit", "task", "--delete-note", &at])
+        .assert()
+        .success();
+    let show = llmenv(dir.path())
+        .args(["task", "show", "task"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert!(task["notes"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn edit_delete_note_out_of_range_fails() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Task", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "edit", "task", "--delete-note", "0"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn edit_with_no_flags_is_a_noop_that_succeeds() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Task", "--no-parent"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "edit", "task"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "task"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["title"], "Task");
+    assert_eq!(task["parent"], serde_json::Value::Null);
+}
+
+#[test]
+fn edit_on_unknown_task_fails() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "edit", "no-such-task", "--title", "New"])
+        .assert()
+        .failure();
+}
+
 // --- Nesting scenarios ---
 
 #[test]

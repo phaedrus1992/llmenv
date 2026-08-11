@@ -459,6 +459,34 @@ enum TaskCommand {
         #[arg(long)]
         on: String,
     },
+    /// Mutate an existing task: retitle it, re-parent it, add/remove
+    /// `blocked_on` dependencies, or add/delete a note. Every flag is
+    /// optional — an edit with no flags is a no-op that still bumps
+    /// `updated_at` (#930).
+    Edit {
+        id: String,
+        /// New title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Set the parent to this task. Mutually exclusive with `--no-parent`.
+        #[arg(long, conflicts_with = "no_parent")]
+        parent: Option<String>,
+        /// Clear the parent.
+        #[arg(long)]
+        no_parent: bool,
+        /// Add a `blocked_on` dependency. Repeatable.
+        #[arg(long = "block-on")]
+        block_on: Vec<String>,
+        /// Remove a `blocked_on` dependency. Repeatable.
+        #[arg(long)]
+        unblock: Vec<String>,
+        /// Append a note. Reads from stdin if given as an empty string.
+        #[arg(long = "add-note")]
+        add_note: Option<String>,
+        /// Delete a note by its 0-based index or exact RFC3339 timestamp.
+        #[arg(long = "delete-note")]
+        delete_note: Option<String>,
+    },
     /// Delete task(s) outright — for a batch of work that's being
     /// deliberately abandoned, not just reshuffled. Provide explicit ids, or
     /// `--session <id>` to clear every task tagged to a session in one shot.
@@ -3241,6 +3269,38 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 task.slug,
                 task.blocked_on.join(", ")
             );
+        }
+        TaskCommand::Edit {
+            id,
+            title,
+            parent,
+            no_parent,
+            block_on,
+            unblock,
+            add_note,
+            delete_note,
+        } => {
+            let add_note = match add_note.as_deref() {
+                Some("") => {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)?;
+                    Some(buf.trim().to_string())
+                }
+                Some(t) => Some(t.to_string()),
+                None => None,
+            };
+            let edit = crate::task::TaskEdit {
+                title: title.as_deref(),
+                parent: parent.as_deref(),
+                no_parent,
+                block_on: &block_on,
+                unblock: &unblock,
+                add_note: add_note.as_deref(),
+                delete_note: delete_note.as_deref(),
+            };
+            let task = crate::task::edit_task(&state_dir, &id, &edit)?;
+            println!("Updated '{}'", task.slug);
         }
         TaskCommand::Clear { ids, session } => {
             if let Some(session_id) = session {

@@ -118,7 +118,7 @@ fn with_store_lock<T>(
     f()
 }
 
-/// Current RFC3339 timestamp (UTC, second precision).
+/// Current RFC3339 timestamp (UTC).
 /// Nanosecond precision, not seconds: [`ParentSpec::Auto`] (#929) picks the
 /// implicit-chain parent by comparing `created_at` strings, and several
 /// sequential `task add` invocations (agent tool calls, shell loops) commonly
@@ -770,6 +770,144 @@ pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Tas
         save_task(state_dir, &task)?;
         Ok(task)
     })
+}
+
+/// What to change in an [`edit_task`] call. Every field defaults to "leave
+/// unchanged" / "nothing to add or remove" — a call with every field at its
+/// default is a legal no-op (#930), still bumping `updated_at`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskEdit<'a> {
+    /// New title, if changing it.
+    pub title: Option<&'a str>,
+    /// Set the parent to this id. Mutually exclusive with `no_parent` — the
+    /// CLI enforces this with `conflicts_with`; if both are set here,
+    /// `parent` wins.
+    pub parent: Option<&'a str>,
+    /// Clear the parent.
+    pub no_parent: bool,
+    /// Ids to add to `blocked_on`. Idempotent — an id already present is a
+    /// no-op, same as `block_task`.
+    pub block_on: &'a [String],
+    /// Ids to remove from `blocked_on`. Idempotent — an id not present is a
+    /// no-op.
+    pub unblock: &'a [String],
+    /// Append a new note.
+    pub add_note: Option<&'a str>,
+    /// Remove a note, identified by its 0-based index or its exact RFC3339
+    /// `at` timestamp.
+    pub delete_note: Option<&'a str>,
+}
+
+/// Mutate an existing task's title, parent, `blocked_on` set, and notes in a
+/// single load-mutate-save cycle (#930).
+///
+/// # Errors
+/// - `edit.parent` doesn't resolve to an existing task, names `input` itself,
+///   or would make `input` its own ancestor (cycle) — see [`reject_cycle`].
+/// - Any `edit.block_on` id doesn't resolve to an existing task, or names
+///   `input` itself — same eager-validation reasoning as [`block_task`].
+/// - Any `edit.unblock` id doesn't resolve to an existing task.
+/// - `edit.delete_note` doesn't match an existing note's index or timestamp.
+pub fn edit_task(state_dir: &Path, input: &str, edit: &TaskEdit<'_>) -> anyhow::Result<Task> {
+    let task = with_store_lock(state_dir, || {
+        let slug = resolve_identifier(state_dir, input)?;
+        let mut task = load_task(state_dir, &slug)?;
+
+        if let Some(title) = edit.title {
+            task.title = title.to_string();
+        }
+
+        if let Some(parent_input) = edit.parent {
+            let parent_slug = resolve_identifier(state_dir, parent_input)?;
+            if parent_slug == slug {
+                anyhow::bail!("task '{slug}' cannot be its own parent");
+            }
+            reject_cycle(state_dir, &slug, &parent_slug)?;
+            task.parent = Some(parent_slug);
+        } else if edit.no_parent {
+            task.parent = None;
+        }
+
+        for on in edit.block_on {
+            let on_slug = resolve_identifier(state_dir, on)?;
+            if on_slug == slug {
+                anyhow::bail!("task '{slug}' cannot be blocked on itself");
+            }
+            if !task.blocked_on.contains(&on_slug) {
+                task.blocked_on.push(on_slug);
+            }
+        }
+
+        for on in edit.unblock {
+            let on_slug = resolve_identifier(state_dir, on)?;
+            task.blocked_on.retain(|b| b != &on_slug);
+        }
+
+        if let Some(text) = edit.add_note {
+            task.notes.push(TaskNote {
+                at: now_rfc3339(),
+                text: text.to_string(),
+            });
+        }
+
+        if let Some(id) = edit.delete_note {
+            let idx = resolve_note_index(&task.notes, id)?;
+            task.notes.remove(idx);
+        }
+
+        task.updated_at = now_rfc3339();
+        save_task(state_dir, &task)?;
+        Ok(task)
+    })?;
+    touch_task_session(state_dir, &task);
+    Ok(task)
+}
+
+/// Resolve a `--delete-note` argument to an index into `notes`: either a
+/// literal 0-based index, or the exact RFC3339 `at` timestamp of a note (the
+/// `at` values `task show` prints alongside each note).
+fn resolve_note_index(notes: &[TaskNote], id: &str) -> anyhow::Result<usize> {
+    if let Ok(idx) = id.parse::<usize>() {
+        return if idx < notes.len() {
+            Ok(idx)
+        } else {
+            Err(anyhow::anyhow!(
+                "note index {idx} out of range ({} note(s))",
+                notes.len()
+            ))
+        };
+    }
+    notes
+        .iter()
+        .position(|n| n.at == id)
+        .ok_or_else(|| anyhow::anyhow!("no note found with index or timestamp '{id}'"))
+}
+
+/// Errs if setting `slug`'s parent to `new_parent` would make `slug` its own
+/// ancestor — walks up from `new_parent` and checks `slug` never reappears. A
+/// `visited` guard (mirroring [`append_forest`]'s) makes a pre-existing
+/// malformed cycle elsewhere in the store terminate instead of looping
+/// forever; that's not this call's problem to fix. A corrupt/unreadable file
+/// encountered while walking up also stops the walk there (treated the same
+/// as "no parent") — same fail-open tolerance `append_forest` and
+/// `start_task`'s dangling-`blocked_on` handling already use for a broken
+/// link elsewhere in the store; it can't itself be part of a cycle back to
+/// `slug` since the walk can't see past it either way.
+fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Result<()> {
+    let mut current = new_parent.to_string();
+    let mut visited = HashSet::new();
+    loop {
+        if current == slug {
+            anyhow::bail!("setting parent to '{new_parent}' would make '{slug}' its own ancestor");
+        }
+        if !visited.insert(current.clone()) {
+            return Ok(());
+        }
+        match load_task(state_dir, &current).ok().and_then(|t| t.parent) {
+            Some(p) => current = p,
+            None => return Ok(()),
+        }
+    }
 }
 
 /// SessionStart hook: if any `wip` tasks exist, build a reminder listing them
@@ -1669,6 +1807,234 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Solo task", None).expect("test");
         assert!(block_task(dir.path(), &task.slug, &task.slug).is_err());
+    }
+
+    #[test]
+    fn edit_task_retitles() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Original title", None).expect("test");
+        let edit = TaskEdit {
+            title: Some("New title"),
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert_eq!(updated.title, "New title");
+    }
+
+    #[test]
+    fn edit_task_sets_and_clears_parent() {
+        let dir = TempDir::new().expect("test");
+        let parent = mk(dir.path(), "Parent", None).expect("test");
+        let task = mk(dir.path(), "Child", None).expect("test");
+
+        let edit = TaskEdit {
+            parent: Some(&parent.slug),
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert_eq!(updated.parent, Some(parent.slug.clone()));
+
+        let edit = TaskEdit {
+            no_parent: true,
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert_eq!(updated.parent, None);
+    }
+
+    #[test]
+    fn edit_task_parent_to_unknown_id_errors() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let edit = TaskEdit {
+            parent: Some("no-such-task"),
+            ..Default::default()
+        };
+        assert!(edit_task(dir.path(), &task.slug, &edit).is_err());
+    }
+
+    #[test]
+    fn edit_task_parent_to_self_errors() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let edit = TaskEdit {
+            parent: Some(&task.slug),
+            ..Default::default()
+        };
+        assert!(edit_task(dir.path(), &task.slug, &edit).is_err());
+    }
+
+    #[test]
+    fn edit_task_parent_creating_a_cycle_errors() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "A", None).expect("test");
+        let b = mk(dir.path(), "B", Some(&a.slug)).expect("test");
+        // A -> B already; making A's parent B would make A its own ancestor.
+        let edit = TaskEdit {
+            parent: Some(&b.slug),
+            ..Default::default()
+        };
+        assert!(edit_task(dir.path(), &a.slug, &edit).is_err());
+    }
+
+    #[test]
+    fn edit_task_adds_and_removes_blocked_on() {
+        let dir = TempDir::new().expect("test");
+        let blocker = mk(dir.path(), "Blocker", None).expect("test");
+        let task = mk(dir.path(), "Blocked", None).expect("test");
+
+        let block_on = vec![blocker.slug.clone()];
+        let edit = TaskEdit {
+            block_on: &block_on,
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert_eq!(updated.blocked_on, vec![blocker.slug.clone()]);
+
+        let unblock = vec![blocker.slug.clone()];
+        let edit = TaskEdit {
+            unblock: &unblock,
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert!(updated.blocked_on.is_empty());
+    }
+
+    #[test]
+    fn edit_task_block_on_is_idempotent() {
+        let dir = TempDir::new().expect("test");
+        let blocker = mk(dir.path(), "Blocker", None).expect("test");
+        let task = mk(dir.path(), "Blocked", None).expect("test");
+        let block_on = vec![blocker.slug.clone(), blocker.slug.clone()];
+        let edit = TaskEdit {
+            block_on: &block_on,
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert_eq!(updated.blocked_on, vec![blocker.slug]);
+    }
+
+    #[test]
+    fn edit_task_unblock_absent_id_is_a_noop() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let other = mk(dir.path(), "Other", None).expect("test");
+        let unblock = vec![other.slug];
+        let edit = TaskEdit {
+            unblock: &unblock,
+            ..Default::default()
+        };
+        assert!(edit_task(dir.path(), &task.slug, &edit).is_ok());
+    }
+
+    #[test]
+    fn edit_task_block_on_self_errors() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let block_on = vec![task.slug.clone()];
+        let edit = TaskEdit {
+            block_on: &block_on,
+            ..Default::default()
+        };
+        assert!(edit_task(dir.path(), &task.slug, &edit).is_err());
+    }
+
+    #[test]
+    fn edit_task_block_on_unknown_id_errors() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let block_on = vec!["no-such-task".to_string()];
+        let edit = TaskEdit {
+            block_on: &block_on,
+            ..Default::default()
+        };
+        assert!(edit_task(dir.path(), &task.slug, &edit).is_err());
+    }
+
+    #[test]
+    fn edit_task_adds_a_note() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let edit = TaskEdit {
+            add_note: Some("progress note"),
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert_eq!(updated.notes.len(), 1);
+        assert_eq!(updated.notes[0].text, "progress note");
+    }
+
+    #[test]
+    fn edit_task_deletes_a_note_by_index() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        note_task(dir.path(), &task.slug, "first").expect("test");
+        note_task(dir.path(), &task.slug, "second").expect("test");
+        let edit = TaskEdit {
+            delete_note: Some("0"),
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert_eq!(updated.notes.len(), 1);
+        assert_eq!(updated.notes[0].text, "second");
+    }
+
+    #[test]
+    fn edit_task_deletes_a_note_by_timestamp() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let with_note = note_task(dir.path(), &task.slug, "only note").expect("test");
+        let at = with_note.notes[0].at.clone();
+        let edit = TaskEdit {
+            delete_note: Some(&at),
+            ..Default::default()
+        };
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert!(updated.notes.is_empty());
+    }
+
+    #[test]
+    fn edit_task_delete_note_out_of_range_errors() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let edit = TaskEdit {
+            delete_note: Some("0"),
+            ..Default::default()
+        };
+        assert!(edit_task(dir.path(), &task.slug, &edit).is_err());
+    }
+
+    #[test]
+    fn edit_task_delete_note_unknown_timestamp_errors() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        note_task(dir.path(), &task.slug, "only note").expect("test");
+        let edit = TaskEdit {
+            delete_note: Some("2020-01-01T00:00:00Z"),
+            ..Default::default()
+        };
+        assert!(edit_task(dir.path(), &task.slug, &edit).is_err());
+    }
+
+    #[test]
+    fn edit_task_with_no_fields_is_a_noop_but_bumps_updated_at() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Task", None).expect("test");
+        let original_updated_at = task.updated_at.clone();
+        let edit = TaskEdit::default();
+        let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
+        assert_eq!(updated.title, task.title);
+        assert_eq!(updated.parent, task.parent);
+        assert_eq!(updated.blocked_on, task.blocked_on);
+        assert_eq!(updated.notes, task.notes);
+        assert_ne!(updated.updated_at, original_updated_at);
+    }
+
+    #[test]
+    fn edit_task_on_unknown_task_errors() {
+        let dir = TempDir::new().expect("test");
+        let edit = TaskEdit::default();
+        assert!(edit_task(dir.path(), "no-such-task", &edit).is_err());
     }
 
     #[test]
@@ -2773,6 +3139,54 @@ mod tests {
                 let order = execution_order(&tasks);
                 let last = order.last().unwrap().clone();
                 prop_assert_eq!(resolve_next_task(&tasks, &tasks, &last), None);
+            }
+
+            // -- #930: edit_task parent-change cycle rejection --
+
+            #[test]
+            fn edit_task_parent_change_cycle_rejection_matches_forest_structure(
+                forest in arb_forest(),
+                a_idx in 0usize..8,
+                b_idx in 0usize..8,
+            ) {
+                let a = forest[a_idx % forest.len()].clone();
+                let b = forest[b_idx % forest.len()].clone();
+                prop_assume!(a.slug != b.slug);
+
+                let dir = TempDir::new().unwrap();
+                for t in &forest {
+                    save_task(dir.path(), t).unwrap();
+                }
+
+                // Independent reference computation (doesn't call reject_cycle):
+                // is `a` among `b`'s ancestors, per the forest's own `parent`
+                // links? `arb_forest` guarantees every parent index is earlier
+                // than its child's, so this walk always terminates.
+                let mut a_is_ancestor_of_b = false;
+                let mut current = b.parent.clone();
+                while let Some(p) = current {
+                    if p == a.slug {
+                        a_is_ancestor_of_b = true;
+                        break;
+                    }
+                    current = forest.iter().find(|t| t.slug == p).and_then(|t| t.parent.clone());
+                }
+
+                let edit = TaskEdit {
+                    parent: Some(&b.slug),
+                    ..Default::default()
+                };
+                let result = edit_task(dir.path(), &a.slug, &edit);
+
+                prop_assert_eq!(
+                    result.is_err(),
+                    a_is_ancestor_of_b,
+                    "setting '{}' parent to '{}': expected cycle rejection = {}, got is_err = {}",
+                    a.slug,
+                    b.slug,
+                    a_is_ancestor_of_b,
+                    result.is_err(),
+                );
             }
         }
     }

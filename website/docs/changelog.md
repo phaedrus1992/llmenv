@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Opt-in per-MCP-call timing — one `[LLMENV_MCP_CALL] <tool> <duration>us` stderr line per MCP tool call (`icm_wake_up`, `icm_memory_recall`, `icm_memory_store`, etc.), gated behind the same `LLMENV_TRACE_TIMING` var. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-per-mcp-call-timing) (#1259)
 - Opt-in memory-recall/context-size telemetry for `TurnStart` — one `[LLMENV_CONTEXT] recall_entries=N recall_bytes=N injected_entries=N injected_bytes=N advisory_stripped=N` stderr line, gated behind the same `LLMENV_TRACE_TIMING` var. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-memory-recall-and-injected-context-size) (#1261)
 - `task add --no-parent` forces a top-level task, overriding the new implicit-chain default (see Changed below). See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#929)
+- `llmenv task edit <id>` mutates an existing task in place — retitle it, re-parent or detach it, add/remove `blocked_on` dependencies, or add/delete a note — instead of requiring delete-and-recreate. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#930)
 
 ### Changed
 
