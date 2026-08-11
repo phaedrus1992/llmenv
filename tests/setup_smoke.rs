@@ -1,7 +1,6 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -9,13 +8,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 mod support;
+use support::isolated_llmenv_cmd as llmenv_cmd;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Build a `Command` for `llmenv` fully isolated to `config_dir` (#1266).
-fn llmenv_cmd(config_dir: &Path) -> Command {
-    support::isolated_llmenv_cmd(config_dir)
-}
 
 /// Assert the standard set of files created by `llmenv setup --no-launch`.
 ///

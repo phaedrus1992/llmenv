@@ -13,15 +13,11 @@
 //! resolved project tag is the same for all `llmenv task` calls within a
 //! test; sessions are isolated per test via a temp `LLMENV_STATE_DIR`.
 
-use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use tempfile::TempDir;
 
 mod support;
-
-fn llmenv(state_dir: &std::path::Path) -> Command {
-    support::isolated_llmenv_cmd(state_dir)
-}
+use support::isolated_llmenv_cmd as llmenv;
 
 /// Start a session so subsequent `task add` calls auto-resolve to it.
 fn start_session(dir: &std::path::Path, name: &str) {

@@ -439,37 +439,6 @@ fn overlay_native(
     Ok(())
 }
 
-/// Recursively drop object keys whose value is `null`.
-///
-/// #1264: a `null` in a `native.<engine>` block means "delete this key" — emit
-/// nothing and let the engine apply its own default, which is what a user
-/// writing `null` in an escape hatch expects. [`merge_json`] already skips
-/// nulls when inserting a *fresh* key, but its shared-key overwrite arm assigns
-/// wholesale and deliberately does not null-strip (an explicit null there is
-/// documented as intentional, not an `Option::None` artifact). So a null on a
-/// key the renderer already emitted — `autoMemoryEnabled`, `effortLevel`,
-/// `advisorSize` — survived into the output and violated #720's
-/// no-null-valued-keys invariant.
-///
-/// Applied adapter-locally as the last step of the settings render rather than
-/// inside `merge_json`, so every other caller keeps the documented semantics.
-fn strip_null_valued_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            map.retain(|_, v| !v.is_null());
-            for v in map.values_mut() {
-                strip_null_valued_keys(v);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items.iter_mut() {
-                strip_null_valued_keys(item);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Top-level settings.json keys that a modeled capability renders. The
 /// top-level `native` catch-all (D3) is for keys NO modeled feature owns, so
 /// these must never appear there — they belong in the `native_<feature>`
@@ -1452,8 +1421,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     overlay_native(&mut settings_value, manifest.native.get("claude_code"))?;
 
     // #1264: a native `null` deletes the key rather than emitting an explicit
-    // JSON null. Runs after the last overlay so it catches every layer.
-    strip_null_valued_keys(&mut settings_value);
+    // JSON null — `merge_json`'s shared-key overwrite arm deliberately does not
+    // null-strip, so a null on a key the renderer already emitted survived to
+    // here. Runs after the last overlay so it catches every layer.
+    strip_json_nulls(&mut settings_value);
 
     let settings_path = out.join("settings.json");
 
@@ -4198,13 +4169,24 @@ mod tests {
     /// Null values are generated freely, including on colliding keys: since
     /// #1264 a native `null` deletes the key, so the render upholds #720's
     /// no-null-valued-keys invariant either way.
+    ///
+    /// The null-on-a-colliding-key pair gets its own generator arm rather than
+    /// relying on `arb_yaml_value` happening to produce a top-level null. That
+    /// is the exact shape #1264 regressed on, and `prop_recursive` favours
+    /// container recursion over leaf termination hard enough that it otherwise
+    /// lands in roughly 1% of fragments — a handful of hits per default
+    /// 256-case run, with enough variance to miss the regression outright.
     fn arb_native_fragment()
     -> impl Strategy<Value = std::collections::BTreeMap<String, serde_yaml::Value>> {
-        let key = prop_oneof![
-            "[a-z]{1,8}".prop_map(String::from),
-            proptest::sample::select(OVERRIDABLE_SETTINGS_KEYS.as_slice()).prop_map(String::from),
+        let overridable = || {
+            proptest::sample::select(OVERRIDABLE_SETTINGS_KEYS.as_slice()).prop_map(String::from)
+        };
+        let pair = prop_oneof![
+            2 => ("[a-z]{1,8}".prop_map(String::from), arb_yaml_value(2)),
+            2 => (overridable(), arb_yaml_value(2)),
+            1 => (overridable(), Just(serde_yaml::Value::Null)),
         ];
-        proptest::collection::vec((key, arb_yaml_value(2)), 0..4).prop_map(|pairs| {
+        proptest::collection::vec(pair, 0..4).prop_map(|pairs| {
             let mut fragment = serde_yaml::Mapping::new();
             for (k, v) in pairs {
                 if MODELED_SETTINGS_KEYS.contains(&k.as_str()) {

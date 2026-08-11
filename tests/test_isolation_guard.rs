@@ -19,6 +19,8 @@
 use std::fs;
 use std::path::Path;
 
+use walkdir::WalkDir;
+
 const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 /// Files allowed to name `Command::cargo_bin` directly.
@@ -27,36 +29,32 @@ const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 /// it necessarily contains the string it searches for.
 const ALLOWED: &[&str] = &["support/mod.rs", "test_isolation_guard.rs"];
 
-/// Every `.rs` file under `tests/`, relative to the tests dir, recursively.
-fn integration_test_sources(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) {
-    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|e| panic!("read entry in {}: {e}", dir.display()));
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let rel = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        if path.is_dir() {
-            // `fixtures/` holds config scaffolds, not test code.
-            if name != "fixtures" {
-                integration_test_sources(&path, &rel, out);
-            }
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            let body = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            out.push((rel, body));
-        }
-    }
+/// Every `.rs` file under `tests/` as `(path relative to tests/, contents)`.
+fn integration_test_sources(tests_dir: &Path) -> Vec<(String, String)> {
+    WalkDir::new(tests_dir)
+        .into_iter()
+        // `fixtures/` holds config scaffolds, not test code.
+        .filter_entry(|e| e.file_name() != "fixtures")
+        .map(|e| e.unwrap_or_else(|err| panic!("walk {}: {err}", tests_dir.display())))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+        .map(|e| {
+            let rel = e
+                .path()
+                .strip_prefix(tests_dir)
+                .unwrap_or_else(|err| panic!("strip prefix: {err}"))
+                .to_string_lossy()
+                .into_owned();
+            let body = fs::read_to_string(e.path())
+                .unwrap_or_else(|err| panic!("read {}: {err}", e.path().display()));
+            (rel, body)
+        })
+        .collect()
 }
 
 #[test]
 fn integration_tests_spawn_llmenv_through_the_isolation_helper() {
     let tests_dir = Path::new(MANIFEST_DIR).join("tests");
-    let mut sources = Vec::new();
-    integration_test_sources(&tests_dir, "", &mut sources);
+    let sources = integration_test_sources(&tests_dir);
 
     assert!(
         sources.len() > 10,

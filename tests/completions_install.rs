@@ -2,15 +2,10 @@
 //! #756: `llmenv completions --install` writes the shell's completion script
 //! to its standard directory instead of just printing to stdout.
 
-use assert_cmd::Command;
 use std::fs;
-use std::path::Path;
 
 mod support;
-
-fn llmenv_cmd(home: &Path) -> Command {
-    support::isolated_llmenv_cmd(home)
-}
+use support::isolated_llmenv_cmd as llmenv_cmd;
 
 #[test]
 fn install_writes_bash_completion_to_custom_dir() {
