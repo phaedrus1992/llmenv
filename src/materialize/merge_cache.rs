@@ -61,9 +61,14 @@ pub fn read_if_matching(
     cache_root: &Path,
     key: &str,
 ) -> Option<(Vec<Memory>, BTreeMap<String, HostEntry>)> {
-    let bytes = std::fs::read(cache_file(cache_root)).ok()?;
-    let entry: PersistedMergeCache = serde_json::from_slice(&bytes).ok()?;
-    (entry.key == key).then_some((entry.bundle_memory, entry.bundle_host))
+    let start = std::time::Instant::now();
+    let result = (|| {
+        let bytes = std::fs::read(cache_file(cache_root)).ok()?;
+        let entry: PersistedMergeCache = serde_json::from_slice(&bytes).ok()?;
+        (entry.key == key).then_some((entry.bundle_memory, entry.bundle_host))
+    })();
+    crate::cache_trace::emit_cache_trace("merge_sig", result.is_some(), start.elapsed(), None);
+    result
 }
 
 #[cfg(test)]

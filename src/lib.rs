@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod auth;
+pub(crate) mod cache_trace;
 pub mod cli;
 pub mod config;
 pub mod consolidation;

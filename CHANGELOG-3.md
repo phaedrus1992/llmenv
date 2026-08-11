@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Opt-in cache hit/miss telemetry for the content-hash materialize cache, the merge-signature cache, the read-once dedup cache, and the plugin marketplace cache — one `[LLMENV_CACHE] <name> <hit|miss> <duration>ms` stderr line per cache lookup, gated behind the same `LLMENV_TRACE_TIMING` var that already gates hook-run's per-phase timing markers. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-cache-hitmiss-rates) (#1260)
+
 ### Fixed
 
 - `llmenv regenerate` no longer leaves a 0-byte `CLAUDE.md` in the materialized Claude Code folder when there is no `AGENTS.md`/rules content and no fragment applies — the file is omitted entirely, and a copy left by an earlier render is cleaned up rather than going stale. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines) (#1262)

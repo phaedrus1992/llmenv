@@ -182,8 +182,15 @@ fn sync_git(
 
     let dest = marketplace_path(cache_dir, &m.name);
     let pinned = split_source_ref(&m.source).1.is_some();
+    let sync_start = std::time::Instant::now();
+    // A hit reuses the existing clone (as-is, or fast-forwarded via `pull`);
+    // a pinned refresh forces a fresh re-clone regardless of what's on disk
+    // (#496), which is a deliberate cache invalidation — a miss, not a hit.
+    let already_cloned = dest.join(".git").exists();
+    let hit = already_cloned && !(refresh && pinned);
+    let extra = format!("name={}", m.name);
 
-    if dest.join(".git").exists() {
+    if already_cloned {
         if refresh {
             if pinned {
                 // #496: a pinned source is frozen by definition — pulling would
@@ -226,6 +233,12 @@ fn sync_git(
         // Marketplace not yet cloned and we're not refreshing (export path).
         // This is a non-fatal condition — the marketplace just isn't available
         // on this machine yet.
+        crate::cache_trace::emit_cache_trace(
+            "plugin_marketplace",
+            hit,
+            sync_start.elapsed(),
+            Some(&extra),
+        );
         return Err(SyncError::NotCloned {
             name: m.name.clone(),
         });
@@ -240,6 +253,12 @@ fn sync_git(
                 source: e,
             })?;
     }
+    crate::cache_trace::emit_cache_trace(
+        "plugin_marketplace",
+        hit,
+        sync_start.elapsed(),
+        Some(&extra),
+    );
 
     let head = git.head(&dest);
     // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,

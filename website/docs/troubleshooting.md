@@ -133,6 +133,35 @@ emitted this marker for events reaching the full memory-dispatch stage (4 of
 invisible. Runs that error before the marker point still emit nothing. The var
 is off by default and adds no measurable overhead when unset.
 
+## Profiling cache hit/miss rates
+
+(added in v3.10.0) The same `LLMENV_TRACE_TIMING` var also enables cache
+telemetry: one stderr line per cache lookup, across every persistent cache
+layer llmenv has —
+
+```text
+[LLMENV_CACHE] content_hash hit 0.012ms
+[LLMENV_CACHE] merge_sig miss 0.412ms
+[LLMENV_CACHE] read_once hit 0.001ms path=CLAUDE.md
+[LLMENV_CACHE] plugin_marketplace miss 842.100ms name=my-marketplace
+```
+
+- `content_hash` — the materialize cache's `HashingMode::Strict` folder reuse
+  (`materialize`). Loose/Normal mode always writes in place and has no
+  hit/miss concept, so it emits nothing.
+- `merge_sig` — the disk-persisted bundle-merge memory/host slice
+  (`materialize::merge_cache`), read by `hook-run` to skip a full merge.
+- `read_once` — the per-session read-once dedup cache (`hook-run`'s
+  `PreToolUse` handler), tagged with the file `path` that was looked up.
+- `plugin_marketplace` — whether a plugin marketplace's git clone was already
+  present, tagged with the marketplace `name`. A pinned marketplace's forced
+  refresh (re-clone to converge on the pin) always reports `miss`, even when
+  a clone already existed, since it's a deliberate cache invalidation rather
+  than a reuse.
+
+Off by default, same as the per-phase timing markers above — enabling one
+enables both.
+
 ## Sync conflicts
 
 `llmenv sync` runs `git add`/`commit`/`push` on the config repo. If the remote
