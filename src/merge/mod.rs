@@ -189,7 +189,7 @@ pub fn merge(
 /// `precedence` is hashed per bundle (not just `name`/`bundle.yaml` bytes):
 /// `merge_capabilities` uses it to resolve `host`-key collisions across
 /// bundles firing at different scope tiers, so a config edit that only
-/// reassigns which scope kind fires a bundle (network/host/user/project —
+/// reassigns which scope kind fires a bundle (network/host/user/content/project —
 /// see `cli::build_bundle_refs`) can flip the resolved `host` entry without
 /// touching any `bundle.yaml` content. Without hashing precedence, that edit
 /// would leave the signature unchanged and a stale cache entry would be

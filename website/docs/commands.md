@@ -67,8 +67,9 @@ config parses. With a subcommand, show a detailed listing for that category:
   current environment.
 - `status tags` — list all tags across scopes and contributors, marking active
   and orphaned tags.
-- `status scopes` — list configured scopes (network/host/user/project), marking
-  which are active and which are orphaned.
+- `status scopes` — list configured scopes (network/host/user/content/project),
+  marking which are active and which are orphaned. `content` scopes joined
+  this listing in v3.10.0 — they were previously omitted entirely (#845).
 - `status mcps` — list MCP servers selected for the current environment, with
   each server's resolved role and transport (stdio / http / sse).
 - `status marketplaces` — list configured plugin marketplaces, marking those

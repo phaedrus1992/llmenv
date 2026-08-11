@@ -2634,20 +2634,30 @@ fn sync_plugin_payloads(
 }
 
 /// Resolve firing bundles to on-disk `BundleRef`s in scope precedence order
-/// (network → host → user → project), then unscoped tags in declaration
-/// order. Bundles with no content directory under `<config_dir>/bundles/<name>/`
-/// are dropped silently — tag-only bundles (no content directory) are valid.
+/// (network → host → user → content → project), then unscoped tags in
+/// declaration order. Bundles with no content directory under
+/// `<config_dir>/bundles/<name>/` are dropped silently — tag-only bundles (no
+/// content directory) are valid.
+///
+/// `content` sits between `user` and `project` (#845): it's an environment
+/// signal like network/host/user (file patterns incidentally present under
+/// the cwd, not authored intent — see [`ActiveScopes::non_project_tags`]'s
+/// own network/host/user/content grouping), but more specific than a bare
+/// user-level match since it's derived from the actual project's file layout.
+/// An explicit `.llmenv.yaml` (`project`) still outranks it — deliberately
+/// authored project config beats an incidental glob match.
+///
 /// `pub(crate)`: also called by `hook_run::memory_url`, which needs the same
 /// scope-kind precedence assignment as `regenerate`/`export` — a bundle firing
-/// via a `host`/`user`/`network` scope must get the same rank in both places,
-/// or a persisted merge-cache entry keyed on that precedence (`merge_signature`)
-/// would never match hook-run's own recomputation (#920).
+/// via a `host`/`user`/`network`/`content` scope must get the same rank in
+/// both places, or a persisted merge-cache entry keyed on that precedence
+/// (`merge_signature`) would never match hook-run's own recomputation (#920).
 pub(crate) fn build_bundle_refs(
     config_dir: &Path,
     active: &ActiveScopes,
     firing: &[&Bundle],
 ) -> Vec<BundleRef> {
-    const PRECEDENCE: &[&str] = &["network", "host", "user", "project"];
+    const PRECEDENCE: &[&str] = &["network", "host", "user", "content", "project"];
 
     let bundles_dir = config_dir.join("bundles");
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -2844,7 +2854,7 @@ state:
 
 ## Scopes & Tags
 
-Scopes (network, host, user, project) emit **tags** when they match. Bundles and other
+Scopes (network, host, user, content, project) emit **tags** when they match. Bundles and other
 resources fire when one of their tags is in the active tag set. See `config.yaml` comments
 for examples.
 
@@ -2870,7 +2880,7 @@ This directory contains your llmenv configuration.
 
 - **config.yaml** — Main configuration file. Declares scopes, bundles, MCP servers,
   plugins, and the memory backend. Edit this to define which environments activate
-  in which contexts (networks, hosts, users, projects).
+  in which contexts (networks, hosts, users, project directory contents, projects).
 
 - **.llmenv.yaml** — Project markers (one per project). Drop a marker file at the
   root of any project directory to give that project its own scope, tags, and
@@ -2908,7 +2918,7 @@ This directory contains your llmenv configuration.
 
 ## Concepts
 
-- **Scopes** — Describe where you are (network/host/user/project). Each emits **tags**.
+- **Scopes** — Describe where you are (network/host/user/content/project). Each emits **tags**.
 - **Tags** — Labels that trigger bundles, MCP servers, plugins, and memory.
 - **Bundles** — Fire when their tags match the active set. Contribute config, env vars, and capabilities.
 - **Materialize** — llmenv combines active scopes/bundles into a content-addressed config directory.
@@ -4887,6 +4897,81 @@ mod tests {
             firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
             vec!["github-issues"]
         );
+    }
+
+    // ===== Tests for build_bundle_refs precedence (#845) =====
+
+    /// Creates an empty content directory for `name` under `config_dir/bundles/`
+    /// — `build_bundle_refs` silently drops any bundle without one.
+    fn with_bundle_dir(config_dir: &std::path::Path, name: &str) {
+        std::fs::create_dir_all(config_dir.join("bundles").join(name)).expect("test");
+    }
+
+    #[test]
+    fn build_bundle_refs_orders_by_scope_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["net-b", "host-b", "user-b", "content-b", "project-b"] {
+            with_bundle_dir(tmp.path(), name);
+        }
+        let bundles = vec![
+            bundle("net-b", &["t-net"]),
+            bundle("host-b", &["t-host"]),
+            bundle("user-b", &["t-user"]),
+            bundle("content-b", &["t-content"]),
+            bundle("project-b", &["t-project"]),
+        ];
+        let active = active(vec![
+            active_scope("network", &["t-net"], &[], &[]),
+            active_scope("host", &["t-host"], &[], &[]),
+            active_scope("user", &["t-user"], &[], &[]),
+            active_scope("content", &["t-content"], &[], &[]),
+            active_scope("project", &["t-project"], &[], &[]),
+        ]);
+        let firing = firing_bundles(&bundles, &active, None);
+        let refs = build_bundle_refs(tmp.path(), &active, &firing);
+        let ranks: std::collections::BTreeMap<&str, u8> = refs
+            .iter()
+            .map(|r| (r.name.as_str(), r.precedence))
+            .collect();
+        assert!(
+            ranks["net-b"] > ranks["host-b"]
+                && ranks["host-b"] > ranks["user-b"]
+                && ranks["user-b"] > ranks["content-b"]
+                && ranks["content-b"] > ranks["project-b"],
+            "expected network > host > user > content > project, got {ranks:?}"
+        );
+    }
+
+    #[test]
+    fn build_bundle_refs_content_scope_is_not_lowest_rank() {
+        // Regression for #845: content used to fall through PRECEDENCE's
+        // catch-all (rank 0) because it wasn't listed at all, ranking below
+        // every other scope kind regardless of specificity.
+        let tmp = tempfile::tempdir().unwrap();
+        with_bundle_dir(tmp.path(), "content-only");
+        let bundles = vec![bundle("content-only", &["t-content"])];
+        let active = active(vec![active_scope("content", &["t-content"], &[], &[])]);
+        let firing = firing_bundles(&bundles, &active, None);
+        let refs = build_bundle_refs(tmp.path(), &active, &firing);
+        assert_eq!(refs.len(), 1);
+        assert!(
+            refs[0].precedence > 0,
+            "a content-only-fired bundle must not land in the catch-all lowest rank: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn build_bundle_refs_unmatched_enable_bundles_falls_to_catch_all() {
+        // A bundle fired only via `enable_bundles` (no scope's tags cover it)
+        // has no tier to place into and lands in the defensive catch-all.
+        let tmp = tempfile::tempdir().unwrap();
+        with_bundle_dir(tmp.path(), "manual-b");
+        let bundles = vec![bundle("manual-b", &[])];
+        let active = active(vec![active_scope("project", &[], &["manual-b"], &[])]);
+        let firing = firing_bundles(&bundles, &active, None);
+        let refs = build_bundle_refs(tmp.path(), &active, &firing);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].precedence, 0);
     }
 
     // ===== Tests for statusline_data_path_with_env (#836) =====
