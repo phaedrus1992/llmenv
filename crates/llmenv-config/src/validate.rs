@@ -797,14 +797,7 @@ mod tests {
     // Arbitrary SessionLog so the round-trip exercises the custom Deserialize
     // (mapping form) and every sink configuration.
     fn arb_session_log() -> impl Strategy<Value = crate::SessionLog> {
-        use crate::LogLevel;
-        fn arb_level() -> impl Strategy<Value = LogLevel> {
-            prop_oneof![
-                Just(LogLevel::Info),
-                Just(LogLevel::Debug),
-                Just(LogLevel::Trace),
-            ]
-        }
+        use crate::schema::tests::arb_level;
         (
             prop::option::of((any::<bool>(), arb_level(), arb_opt_string())),
             (any::<bool>(), arb_level()),

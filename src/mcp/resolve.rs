@@ -378,6 +378,7 @@ fn remote_kind(m: &McpServer, transport: McpTransport) -> Result<ResolvedKind, R
 mod tests {
     use super::*;
     use crate::config::{McpServer, Memory};
+    use proptest::strategy::Strategy;
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {
         ts.iter().map(|s| (*s).to_string()).collect()
@@ -390,6 +391,29 @@ mod tests {
                 addr: "still.local".to_string(),
             },
         )])
+    }
+
+    /// A resolvable stdio server with a fixed command, parameterised on a
+    /// name prefix + index and a tag set, so resolution never fails on
+    /// missing fields and callers can reason purely about selection. Shared
+    /// by the plain-mcp (`props`) and bundle-mcp (`bundle_mcps::props`)
+    /// proptest generators below (#1265) — the two were near-duplicated,
+    /// differing only in the literal name prefix, which no assertion in
+    /// either module actually depends on.
+    fn arb_named_server(
+        prefix: &'static str,
+        idx: usize,
+    ) -> impl proptest::prelude::Strategy<Value = McpServer> {
+        proptest::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |ts| McpServer {
+            name: format!("{prefix}-{idx}"),
+            when: ts,
+            transport: McpTransport::Stdio,
+            command: Some("echo".into()),
+            args: vec![],
+            env: BTreeMap::new(),
+            url: None,
+            ..Default::default()
+        })
     }
 
     fn stdio_server(name: &str, tags: &[&str], command: &str) -> McpServer {
@@ -845,20 +869,8 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
-        // A resolvable stdio server with a fixed command, parameterised on a
-        // unique name and a tag set, so resolution never fails on missing
-        // fields and we can reason purely about selection.
         fn arb_server(idx: usize) -> impl Strategy<Value = McpServer> {
-            prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |ts| McpServer {
-                name: format!("srv-{idx}"),
-                when: ts,
-                transport: McpTransport::Stdio,
-                command: Some("echo".into()),
-                args: vec![],
-                env: BTreeMap::new(),
-                url: None,
-                ..Default::default()
-            })
+            super::arb_named_server("srv", idx)
         }
 
         fn arb_mcp_and_tags() -> impl Strategy<Value = (Vec<McpServer>, BTreeSet<String>)> {
@@ -993,18 +1005,8 @@ mod tests {
             use super::*;
             use proptest::prelude::*;
 
-            // A resolvable stdio server at index idx, with arbitrary tags.
             fn arb_bundle_server(idx: usize) -> impl Strategy<Value = McpServer> {
-                prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |ts| McpServer {
-                    name: format!("bsrv-{idx}"),
-                    when: ts,
-                    transport: McpTransport::Stdio,
-                    command: Some("echo".into()),
-                    args: vec![],
-                    env: BTreeMap::new(),
-                    url: None,
-                    ..Default::default()
-                })
+                super::super::arb_named_server("bsrv", idx)
             }
 
             fn arb_servers_and_tags() -> impl Strategy<Value = (Vec<McpServer>, BTreeSet<String>)> {

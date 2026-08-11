@@ -457,6 +457,64 @@ pub(crate) fn arb_permission_rule()
         })
 }
 
+/// Strategy for a single [`crate::config::HookHandler`], covering both handler
+/// kinds — `Command` (a shell command string) and `McpTool` (an MCP tool
+/// name) — since a hook config can be either. Shared by adapter test modules.
+#[cfg(test)]
+pub(crate) fn arb_hook_handler()
+-> impl proptest::prelude::Strategy<Value = crate::config::HookHandler> {
+    use proptest::prelude::*;
+
+    prop_oneof![
+        "[a-z][a-z ./-]{0,20}".prop_map(|command| crate::config::HookHandler {
+            kind: crate::config::HookHandlerKind::Command,
+            command: Some(command),
+            tool: None,
+        }),
+        "[a-z_]{1,16}".prop_map(|tool| crate::config::HookHandler {
+            kind: crate::config::HookHandlerKind::McpTool,
+            command: None,
+            tool: Some(tool),
+        }),
+    ]
+}
+
+/// Strategy for a single [`crate::config::Hook`], shared by adapter test
+/// modules (`claude_code.rs`, `opencode.rs`). Hoisted for #1265: the two
+/// adapters used to define their own `arb_hook`, and they had already
+/// drifted — opencode's covered strictly less of `Hook`'s shape (command-only
+/// handler, no matcher, unconstrained event names) than claude_code's
+/// (both handler kinds, optional matcher, a fixed list of real event names).
+/// This generates the union of both: real event names *and* arbitrary alpha
+/// event strings, both handler kinds, and an optional matcher.
+#[cfg(test)]
+pub(crate) fn arb_hook() -> impl proptest::prelude::Strategy<Value = crate::config::Hook> {
+    use proptest::prelude::*;
+
+    let event = prop_oneof![
+        proptest::sample::select(vec![
+            "SessionStart",
+            "PreToolUse",
+            "PostToolUse",
+            "UserPromptSubmit",
+            "Stop",
+        ])
+        .prop_map(str::to_owned),
+        "[A-Za-z]{3,16}",
+    ];
+    (
+        event,
+        proptest::option::of("[a-zA-Z*]{1,8}"),
+        arb_hook_handler(),
+    )
+        .prop_map(|(event, matcher, handler)| crate::config::Hook {
+            event,
+            matcher,
+            handler,
+            bundle_origin: None,
+        })
+}
+
 /// Recursively-shaped arbitrary YAML for fragment fuzzing, shared by adapter test
 /// modules (`claude_code.rs`, `crush.rs`) that need to fuzz native-fragment merging.
 /// Bounded depth keeps generation cheap while still exercising nested
@@ -588,6 +646,49 @@ mod tests {
                 });
             prop_assert_eq!(is_yaml_noncharacter(c), naive);
             prop_assert!(!(c.is_control() && is_yaml_noncharacter(c)));
+        }
+
+        /// Arbitrary frontmatter-shaped text must never make the line-splicing
+        /// logic panic — `quote_yaml_scalar` itself is covered above, but the
+        /// surrounding `strip_prefix`/indexing here is a separate risk (#862).
+        #[test]
+        fn requote_name_and_description_never_panics(frontmatter in "(?s).{0,300}") {
+            let _ = requote_name_and_description(&frontmatter);
+        }
+
+        /// When `name`/`description` carry unquoted scalar values, requoting
+        /// must produce a line that re-parses to the *original* value — the
+        /// round-trip guarantee `quote_yaml_scalar` already has, verified here
+        /// through the full frontmatter-requoting path rather than just the
+        /// inner escaping function (#862). The first character excludes
+        /// whitespace and the quote/block-scalar sentinels so the generated
+        /// value matches what `value.trim_start()` + the sentinel check inside
+        /// `requote_name_and_description` will actually quote. `\r` is
+        /// excluded everywhere: as the final character of a single-line
+        /// value it sits immediately before the `\n` this test appends, and
+        /// `str::lines()` (which `requote_name_and_description` splits on)
+        /// treats a trailing `\r` as part of the line terminator and strips
+        /// it — a `str::lines()` quirk, not something the requoting logic
+        /// itself does.
+        #[test]
+        fn requote_name_and_description_round_trips(
+            name in "[^\\s\"'|>\n\r][^\n\r]{0,80}",
+            description in "[^\\s\"'|>\n\r][^\n\r]{0,80}",
+        ) {
+            let frontmatter = format!("name: {name}\ndescription: {description}\n");
+            let requoted = requote_name_and_description(&frontmatter);
+            let mapping: serde_yaml::Mapping = serde_yaml::from_str(&requoted)
+                .expect("requoted frontmatter must parse as valid YAML");
+            let parsed_name = mapping
+                .get("name")
+                .and_then(serde_yaml::Value::as_str)
+                .expect("name must be a string scalar");
+            let parsed_description = mapping
+                .get("description")
+                .and_then(serde_yaml::Value::as_str)
+                .expect("description must be a string scalar");
+            prop_assert_eq!(parsed_name, name.as_str());
+            prop_assert_eq!(parsed_description, description.as_str());
         }
     }
 
