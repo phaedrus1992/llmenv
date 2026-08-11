@@ -195,6 +195,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     }
     let extra_tags: BTreeSet<String> = env.extra_tags.iter().cloned().collect();
     tags.extend(extra_tags.iter().cloned());
+    let tags = matcher::cap_aggregate_tags(tags);
     ActiveScopes {
         scopes,
         tags,
