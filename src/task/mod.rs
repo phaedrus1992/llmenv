@@ -2657,8 +2657,14 @@ mod tests {
                 let current = tasks[idx % tasks.len()].clone();
                 if let Some(next) = resolve_next_task(&tasks, &tasks, &current) {
                     let order = execution_order(&tasks);
-                    let current_pos = order.iter().position(|t| t.slug == current.slug).unwrap();
-                    let next_pos = order.iter().position(|t| t.slug == next.slug).unwrap();
+                    let current_pos = order
+                        .iter()
+                        .position(|t| t.slug == current.slug)
+                        .expect("current came from tasks, so execution_order(tasks) must contain it");
+                    let next_pos = order
+                        .iter()
+                        .position(|t| t.slug == next.slug)
+                        .expect("resolve_next_task draws next from execution_order(tasks) itself");
                     prop_assert!(next_pos > current_pos);
                 }
             }
