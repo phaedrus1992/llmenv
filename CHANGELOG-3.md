@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `task add --no-parent` forces a top-level task, overriding the new implicit-chain default (see Changed below). See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#929)
 - `llmenv task edit <id>` mutates an existing task in place — retitle it, re-parent or detach it, add/remove `blocked_on` dependencies, or add/delete a note — instead of requiring delete-and-recreate. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#930)
 - `llmenv task session summary [<id>] [--format json]` rolls up a session's tasks, notes, and states into one artifact — e.g. for a memory write or a status report at the end of a session. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#931)
+- The active-tag count is now also capped across every source combined (network/host/user/content scopes, `.llmenv.yaml`, `$LLMENV_EXTRA_TAGS`), not just per source — each could individually stay within its own 64-tag cap while the union still ballooned to several hundred, and every active tag becomes one recall query per turn. See [Concepts](https://phaedrus1992.github.io/llmenv/docs/concepts#project-markers) (#1041)
 
 ### Changed
 
