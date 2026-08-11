@@ -280,8 +280,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
             claude_md_content.push_str(COMPACT_SURVIVAL_FRAGMENT);
         }
 
-        crate::paths::write_owner_only(&out.join("CLAUDE.md"), claude_md_content.as_bytes())?;
-        owned.push(PathBuf::from("CLAUDE.md"));
+        // #1262: skip the file entirely when nothing resolved, rather than
+        // leaving a 0-byte CLAUDE.md. Staying out of `owned` also means a copy
+        // written by an earlier render is reconciled away as a ghost.
+        if !claude_md_content.trim().is_empty() {
+            crate::paths::write_owner_only(&out.join("CLAUDE.md"), claude_md_content.as_bytes())?;
+            owned.push(PathBuf::from("CLAUDE.md"));
+        }
 
         // Claude Code has a native rules-directory convention, so write each
         // `rules/*.md` file verbatim (frontmatter preserved) into `<out>/rules/`.
@@ -2139,6 +2144,63 @@ mod tests {
     use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
     use proptest::prelude::*;
     use std::path::PathBuf;
+
+    /// #1262: an empty `agents_md` with no applicable fragment must not leave a
+    /// 0-byte `CLAUDE.md` on disk.
+    #[test]
+    fn materialize_omits_claude_md_when_there_is_no_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest::default();
+        let owned = ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+
+        assert!(
+            !tmp.path().join("CLAUDE.md").exists(),
+            "no agents_md and no fragment must write no CLAUDE.md at all"
+        );
+        assert!(
+            !owned.contains(&PathBuf::from("CLAUDE.md")),
+            "CLAUDE.md must be absent from the owned set so a stale copy from a \
+             prior render is reconciled away as a ghost"
+        );
+    }
+
+    /// #1262: whitespace-only content is as empty as the empty string — writing
+    /// it would produce a file whose only content is a newline.
+    #[test]
+    fn materialize_omits_claude_md_when_content_is_only_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            agents_md: "  \n\t\n".into(),
+            ..MergedManifest::default()
+        };
+        ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+
+        assert!(
+            !tmp.path().join("CLAUDE.md").exists(),
+            "whitespace-only agents_md must write no CLAUDE.md"
+        );
+    }
+
+    /// #1262 non-regression: real content still lands verbatim.
+    #[test]
+    fn materialize_writes_claude_md_when_there_is_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            agents_md: "# Project rules\n".into(),
+            ..MergedManifest::default()
+        };
+        let owned = ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+
+        let written = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(written, "# Project rules\n");
+        assert!(owned.contains(&PathBuf::from("CLAUDE.md")));
+    }
 
     #[test]
     fn materialize_emits_no_schema_sidecar_when_adapter_has_none() {
