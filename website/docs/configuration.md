@@ -302,6 +302,26 @@ native:
 Putting a modeled-feature key (`permissions`, `hooks`) here is a hard error — use
 the `native_<feature>` siblings under `capabilities:` instead.
 
+### Deleting a key with `null`
+
+Setting a key to `null` removes it from the generated config entirely, so the
+engine falls back to its own default. This works even for keys llmenv itself
+renders — those are emitted before the `native:` overlay precisely so you can
+override them:
+
+```yaml
+capabilities:
+  auto_memory_enabled: true
+native:
+  claude_code:
+    autoMemoryEnabled: null   # omit the key; let Claude Code decide
+```
+
+The generated `settings.json` contains no `autoMemoryEnabled` key at all,
+rather than `"autoMemoryEnabled": null`. Nulls nested inside an object value
+are stripped the same way. (behavior changed in v3.10.0; before that a `null`
+on a key llmenv had already rendered emitted an explicit JSON `null`)
+
 ## `bundle:`
 
 A bundle is a named content set that fires when one of its tags is active, or
