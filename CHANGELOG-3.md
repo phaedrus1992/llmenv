@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Opt-in cache hit/miss telemetry for the content-hash materialize cache, the merge-signature cache, the read-once dedup cache, and the plugin marketplace cache — one `[LLMENV_CACHE] <name> <hit|miss> <duration>ms` stderr line per cache lookup, gated behind the same `LLMENV_TRACE_TIMING` var that already gates hook-run's per-phase timing markers. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-cache-hitmiss-rates) (#1260)
 - Opt-in per-MCP-call timing — one `[LLMENV_MCP_CALL] <tool> <duration>us` stderr line per MCP tool call (`icm_wake_up`, `icm_memory_recall`, `icm_memory_store`, etc.), gated behind the same `LLMENV_TRACE_TIMING` var. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-per-mcp-call-timing) (#1259)
+- Opt-in memory-recall/context-size telemetry for `TurnStart` — one `[LLMENV_CONTEXT] recall_entries=N recall_bytes=N injected_entries=N injected_bytes=N advisory_stripped=N` stderr line, gated behind the same `LLMENV_TRACE_TIMING` var. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-memory-recall-and-injected-context-size) (#1261)
 
 ### Fixed
 
