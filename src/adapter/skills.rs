@@ -515,7 +515,7 @@ pub(crate) fn arb_hook() -> impl proptest::prelude::Strategy<Value = crate::conf
     ];
     (
         event,
-        llmenv_util::testkit::arb_hook_matcher(),
+        proptest::option::of(llmenv_util::testkit::arb_hook_matcher()),
         arb_hook_handler(),
     )
         .prop_map(|(event, matcher, handler)| crate::config::Hook {

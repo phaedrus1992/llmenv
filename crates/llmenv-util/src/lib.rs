@@ -249,24 +249,30 @@ pub mod testkit {
     // would either weaken the round-trip coverage or bloat the merge-fuzz
     // generator with cases irrelevant to what it tests.
 
-    /// A hook `matcher` string — an event glob/regex fragment. `Option`
-    /// because a hook commonly has no matcher (fires on every event).
-    pub fn arb_hook_matcher() -> impl Strategy<Value = Option<String>> {
-        proptest::option::of(r#"[a-zA-Z*][a-zA-Z*\\"'$`{}\n]{0,7}"#)
+    /// A hook `matcher` string — an event glob/regex fragment. Plain
+    /// `String`, not `Option<String>` (a hook commonly has no matcher) —
+    /// callers wrap in `proptest::option::of` themselves, matching
+    /// [`arb_hook_command_str`]/[`arb_hook_tool_str`]'s interface.
+    pub fn arb_hook_matcher() -> impl Strategy<Value = String> {
+        r#"[a-zA-Z0-9*][a-zA-Z0-9*\\"'$`{}\n]{0,7}"#
     }
 
     /// A hook's `command` string (the `Command`-kind handler's shell
-    /// command). Charset covers path-like shapes (`.`, `/`, `-`) alongside
-    /// the escaping-relevant characters.
+    /// command). Charset covers path-like shapes (`.`, `/`, `-`) and digits
+    /// alongside the escaping-relevant characters — digits so this doesn't
+    /// regress `llmenv-config`'s prior plain-alnum coverage (#1281
+    /// pre-pr-review finding: dropping digits loses the YAML
+    /// scalar-ambiguity class of round-trip bug, e.g. an unquoted `123`).
     pub fn arb_hook_command_str() -> impl Strategy<Value = String> {
-        r#"[a-z][a-z ./\\"'$`{}\n-]{0,20}"#
+        r#"[a-z0-9][a-z0-9 ./\\"'$`{}\n-]{0,20}"#
     }
 
     /// A hook's `tool` string (the `McpTool`-kind handler's MCP tool name).
-    /// Charset covers underscore-separated identifier shapes alongside the
-    /// escaping-relevant characters.
+    /// Charset covers underscore-separated identifier shapes and digits
+    /// alongside the escaping-relevant characters (see
+    /// [`arb_hook_command_str`] for why digits matter here).
     pub fn arb_hook_tool_str() -> impl Strategy<Value = String> {
-        r#"[a-z_][a-z_\\"'$`{}\n]{0,15}"#
+        r#"[a-z0-9_][a-z0-9_\\"'$`{}\n]{0,15}"#
     }
 }
 

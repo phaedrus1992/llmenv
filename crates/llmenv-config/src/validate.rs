@@ -922,7 +922,7 @@ mod tests {
     fn arb_hook() -> impl Strategy<Value = Hook> {
         (
             arb_string(),
-            llmenv_util::testkit::arb_hook_matcher(),
+            prop::option::of(llmenv_util::testkit::arb_hook_matcher()),
             prop_oneof![
                 prop::option::of(llmenv_util::testkit::arb_hook_command_str()).prop_map(
                     |command| HookHandler {

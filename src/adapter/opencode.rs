@@ -3920,8 +3920,9 @@ mod tests {
             matcher in proptest::option::of("[a-z]{1,8}"),
             commands in proptest::collection::vec(
                 prop_oneof![
-                    "[a-z/. ]{1,12}",
-                    "[a-z/. ]{0,8}".prop_map(|s| format!("{s}${{CLAUDE_PLUGIN_ROOT}}{s}")),
+                    llmenv_util::testkit::arb_hook_command_str(),
+                    llmenv_util::testkit::arb_hook_command_str()
+                        .prop_map(|s| format!("{s}${{CLAUDE_PLUGIN_ROOT}}{s}")),
                 ],
                 1..4,
             ),
