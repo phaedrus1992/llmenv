@@ -176,6 +176,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         "claude-code"
     }
 
+    fn is_active(&self) -> bool {
+        std::env::var("CLAUDE_CONFIG_DIR").is_ok()
+    }
+
     fn binary_name(&self) -> &'static str {
         "claude"
     }

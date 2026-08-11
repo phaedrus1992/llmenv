@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 
-use super::{AgentAdapter, yaml_value_kind_name};
+use super::{AgentAdapter, binary_on_path, yaml_value_kind_name};
 use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
 
@@ -459,6 +459,10 @@ fn parse_plugin_mcp_entries(
 impl AgentAdapter for OpencodeAdapter {
     fn name(&self) -> &'static str {
         "opencode"
+    }
+
+    fn is_active(&self) -> bool {
+        std::env::var("OPENCODE_CONFIG_DIR").is_ok() || binary_on_path("opencode")
     }
 
     fn binary_name(&self) -> &'static str {
