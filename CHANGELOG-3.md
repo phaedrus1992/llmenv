@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `llmenv regenerate` no longer leaves a 0-byte `CLAUDE.md` in the materialized Claude Code folder when there is no `AGENTS.md`/rules content and no fragment applies — the file is omitted entirely, and a copy left by an earlier render is cleaned up rather than going stale. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines) (#1262)
 - A `null` in the catch-all `native.<engine>` block now deletes the key from the generated `settings.json` so the engine applies its own default, instead of emitting an explicit JSON `null`. This only ever showed up on keys llmenv renders itself (`autoMemoryEnabled`, `effortLevel`, `advisorSize`), which are emitted before the overlay precisely so `native` can override them; a `null` on any other key was already dropped. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#deleting-a-key-with-null) (#1264)
+- The opencode adapter no longer leaves a 0-byte `AGENTS.md` in the materialized folder when there is no rules content — same fix as #1262, applied to the opencode adapter. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines) (#1269)
 
 ## [3.9.0] - 2026-08-10
 
