@@ -455,6 +455,75 @@ pub fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
     (done, tasks.len() as u64)
 }
 
+/// One task's fields relevant to a session summary — a stable subset of
+/// [`Task`], reshaped for the JSON-ingestion contract [`session_summary`]
+/// promises (#931): callers depend on this exact field set, so it's kept
+/// separate from `Task` rather than reusing it directly, even though today
+/// the two happen to carry the same fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSummaryTask {
+    pub slug: String,
+    pub title: String,
+    pub state: TaskState,
+    pub parent: Option<String>,
+    pub blocked_on: Vec<String>,
+    pub notes: Vec<TaskNote>,
+}
+
+/// Session metadata plus every task tagged to it, in the same
+/// parent-before-children order `task ls` displays a session's group in — a
+/// memory-ingestion-friendly rollup of "what happened" in a session (#931).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub done: u64,
+    pub total: u64,
+    pub tasks: Vec<SessionSummaryTask>,
+}
+
+/// Build a [`SessionSummary`] for `session_id`.
+///
+/// # Errors
+/// Errors if `session_id` doesn't name an existing session.
+pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<SessionSummary> {
+    let session = list_sessions(state_dir)
+        .into_iter()
+        .find(|s| s.id == session_id)
+        .ok_or_else(|| anyhow::anyhow!("no session '{session_id}' found"))?;
+    let tasks = tasks_in_session(state_dir, session_id);
+    let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
+    let total = tasks.len() as u64;
+
+    // Reuse `append_forest`'s parent-before-children ordering (the same rule
+    // `task ls` groups a session's tasks by) rather than inventing a second
+    // ordering rule for this one caller.
+    let refs: Vec<&Task> = tasks.iter().collect();
+    let mut rows = Vec::new();
+    super::append_forest(&refs, &mut rows);
+    let tasks = rows
+        .into_iter()
+        .map(|row| SessionSummaryTask {
+            slug: row.task.slug,
+            title: row.task.title,
+            state: row.task.state,
+            parent: row.task.parent,
+            blocked_on: row.task.blocked_on,
+            notes: row.task.notes,
+        })
+        .collect();
+
+    Ok(SessionSummary {
+        id: session.id,
+        name: session.name,
+        description: session.description,
+        done,
+        total,
+        tasks,
+    })
+}
+
 /// Delete every task tagged with `session_id` outright. Returns the deleted
 /// tasks. Doesn't touch the session record itself.
 pub fn delete_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Vec<Task>> {
@@ -931,6 +1000,92 @@ mod tests {
             .expect("test");
         done_task(dir.path(), &t1.slug).expect("test");
         assert_eq!(session_progress(dir.path(), &session.id), (1, 2));
+    }
+
+    #[test]
+    fn session_summary_includes_metadata_progress_and_tasks_with_notes() {
+        let dir = TempDir::new().expect("test");
+        let StartOutcome::Created(session) = start_session(
+            dir.path(),
+            Some("sprint 1"),
+            Some("dev-sprint issue 931"),
+            PROJECT_A,
+            StartDecision::Auto,
+        )
+        .expect("test") else {
+            panic!("expected Created");
+        };
+        let t1 = add_task_for_session(dir.path(), "Task one", ParentSpec::Detached, &session.id)
+            .expect("test");
+        crate::task::note_task(dir.path(), &t1.slug, "made progress").expect("test");
+        add_task_for_session(dir.path(), "Task two", ParentSpec::Detached, &session.id)
+            .expect("test");
+        done_task(dir.path(), &t1.slug).expect("test");
+
+        let summary = session_summary(dir.path(), &session.id).expect("test");
+        assert_eq!(summary.id, session.id);
+        assert_eq!(summary.name, Some("sprint 1".to_string()));
+        assert_eq!(
+            summary.description,
+            Some("dev-sprint issue 931".to_string())
+        );
+        assert_eq!((summary.done, summary.total), (1, 2));
+        assert_eq!(summary.tasks.len(), 2);
+        let one = summary
+            .tasks
+            .iter()
+            .find(|t| t.slug == t1.slug)
+            .expect("test");
+        assert_eq!(one.state, TaskState::Done);
+        assert_eq!(one.notes.len(), 1);
+        assert_eq!(one.notes[0].text, "made progress");
+    }
+
+    #[test]
+    fn session_summary_orders_tasks_parent_before_children() {
+        let dir = TempDir::new().expect("test");
+        let StartOutcome::Created(session) =
+            start_session(dir.path(), Some("s"), None, PROJECT_A, StartDecision::Auto)
+                .expect("test")
+        else {
+            panic!("expected Created");
+        };
+        let parent = add_task_for_session(dir.path(), "Parent", ParentSpec::Detached, &session.id)
+            .expect("test");
+        add_task_for_session(
+            dir.path(),
+            "Child",
+            ParentSpec::Explicit(&parent.slug),
+            &session.id,
+        )
+        .expect("test");
+
+        let summary = session_summary(dir.path(), &session.id).expect("test");
+        assert_eq!(summary.tasks[0].slug, parent.slug);
+        assert_eq!(
+            summary.tasks[1].parent.as_deref(),
+            Some(parent.slug.as_str())
+        );
+    }
+
+    #[test]
+    fn session_summary_on_unknown_session_errors() {
+        let dir = TempDir::new().expect("test");
+        assert!(session_summary(dir.path(), "no-such-session").is_err());
+    }
+
+    #[test]
+    fn session_summary_on_empty_session_has_no_tasks() {
+        let dir = TempDir::new().expect("test");
+        let StartOutcome::Created(session) =
+            start_session(dir.path(), Some("s"), None, PROJECT_A, StartDecision::Auto)
+                .expect("test")
+        else {
+            panic!("expected Created");
+        };
+        let summary = session_summary(dir.path(), &session.id).expect("test");
+        assert_eq!((summary.done, summary.total), (0, 0));
+        assert!(summary.tasks.is_empty());
     }
 
     #[test]

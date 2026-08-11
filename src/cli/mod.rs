@@ -534,6 +534,14 @@ enum TaskSessionCommand {
     Finish { id: Option<String> },
     /// Show one session's progress. Auto-resolves like `finish`.
     Show { id: Option<String> },
+    /// Roll up a session's tasks, notes, and states into one artifact —
+    /// e.g. for a memory write or a status report at the end of a session.
+    /// Auto-resolves like `finish`.
+    Summary {
+        id: Option<String>,
+        #[arg(long, value_enum)]
+        format: Option<TaskListFormat>,
+    },
     /// List every currently open session, current-project matches first.
     Ls,
 }
@@ -3101,6 +3109,42 @@ fn render_task_ls_row(row: &crate::task::DisplayRow, use_color: bool) -> String 
     line
 }
 
+/// Render a `task session summary` for a human reader: a header line (name
+/// or id, description, done/total), then each task with its state glyph and
+/// notes indented under it, in the same order the summary's JSON form lists
+/// them (#931).
+fn render_task_session_summary_human(
+    summary: &crate::task::session::SessionSummary,
+    use_color: bool,
+) -> String {
+    let mut out = String::new();
+    let title = style::sanitize_for_terminal(summary.name.as_deref().unwrap_or(&summary.id));
+    out.push_str(&style::apply_style(&title, "bold", use_color));
+    if let Some(desc) = &summary.description {
+        out.push_str(" — ");
+        out.push_str(&style::sanitize_for_terminal(desc));
+    }
+    out.push_str(&format!(" ({}/{} done)\n", summary.done, summary.total));
+    if summary.tasks.is_empty() {
+        out.push_str("No tasks.\n");
+        return out;
+    }
+    for task in &summary.tasks {
+        let glyph = style::task_state_glyph(task.state, use_color);
+        let label = format!("{:<7}", style::task_state_label(task.state));
+        let title = style::sanitize_for_terminal(&task.title);
+        out.push_str(&format!("{glyph} {label} {}  {title}\n", task.slug));
+        for note in &task.notes {
+            out.push_str(&format!(
+                "    {} {}\n",
+                note.at,
+                style::sanitize_for_terminal(&note.text)
+            ));
+        }
+    }
+    out
+}
+
 /// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
 /// `crate::task`, which owns the store logic.
 fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
@@ -3319,7 +3363,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 }
             }
         }
-        TaskCommand::Session { command } => run_task_session_command(&state_dir, command)?,
+        TaskCommand::Session { command } => run_task_session_command(&state_dir, command, color)?,
     }
     Ok(())
 }
@@ -3400,6 +3444,7 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
 fn run_task_session_command(
     state_dir: &std::path::Path,
     command: TaskSessionCommand,
+    color: ColorMode,
 ) -> anyhow::Result<()> {
     use crate::task::session::{self, StartDecision, StartOutcome};
     let project = current_project_tag()?;
@@ -3477,6 +3522,20 @@ fn run_task_session_command(
                     .map(|n| format!(" ({n})"))
                     .unwrap_or_default(),
             );
+        }
+        TaskSessionCommand::Summary { id, format } => {
+            let id = resolve_session_id(state_dir, &project, id)?;
+            let summary = session::session_summary(state_dir, &id)?;
+            match format {
+                Some(TaskListFormat::Json) => {
+                    println!("{}", serde_json::to_string_pretty(&summary)?);
+                }
+                None => {
+                    use std::io::IsTerminal;
+                    let use_color = should_use_color(Some(color), std::io::stdout().is_terminal());
+                    print!("{}", render_task_session_summary_human(&summary, use_color));
+                }
+            }
         }
         TaskSessionCommand::Ls => {
             let mut sessions: Vec<_> = session::list_sessions(state_dir)
