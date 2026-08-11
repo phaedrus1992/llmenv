@@ -3036,7 +3036,7 @@ mod tests {
     // `materialize` API rather than the private helper fns.
     use proptest::prelude::*;
 
-    use crate::adapter::skills::arb_permission_rule;
+    use crate::adapter::skills::{arb_hook, arb_permission_rule};
 
     /// Materialize a manifest carrying only `caps` and return the emitted
     /// `permission` value (or `Null` when the key is absent).
@@ -3217,19 +3217,6 @@ mod tests {
     /// or `*`, so it always takes the bare-tool wildcard path.
     fn arb_native_rule_tool() -> impl Strategy<Value = String> {
         "[A-Za-z]{1,8}".prop_map(String::from)
-    }
-
-    fn arb_hook() -> impl Strategy<Value = crate::config::Hook> {
-        ("[A-Za-z]{3,10}", "[a-z ]{1,10}").prop_map(|(event, command)| crate::config::Hook {
-            event,
-            matcher: None,
-            handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
-                command: Some(command),
-                tool: None,
-            },
-            bundle_origin: None,
-        })
     }
 
     proptest! {

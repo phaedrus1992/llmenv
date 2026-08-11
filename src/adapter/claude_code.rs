@@ -4030,45 +4030,7 @@ mod tests {
 
     // ---- generate_settings_json (#720): property-based invariants ----
 
-    use crate::adapter::skills::arb_permission_rule;
-
-    // Generates both handler kinds so the render exercises the `command`
-    // insertion path AND the `mcp_tool`/`tool` path — the two branches whose
-    // null-key omission the #720 no-null property is asserting.
-    fn arb_hook_handler() -> impl Strategy<Value = crate::config::HookHandler> {
-        prop_oneof![
-            "[a-z][a-z ./-]{0,20}".prop_map(|command| crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
-                command: Some(command),
-                tool: None,
-            }),
-            "[a-z_]{1,16}".prop_map(|tool| crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::McpTool,
-                command: None,
-                tool: Some(tool),
-            }),
-        ]
-    }
-
-    fn arb_hook() -> impl Strategy<Value = crate::config::Hook> {
-        (
-            proptest::sample::select(vec![
-                "SessionStart",
-                "PreToolUse",
-                "PostToolUse",
-                "UserPromptSubmit",
-                "Stop",
-            ]),
-            proptest::option::of("[a-zA-Z*]{1,8}"),
-            arb_hook_handler(),
-        )
-            .prop_map(|(event, matcher, handler)| crate::config::Hook {
-                event: event.to_owned(),
-                matcher,
-                handler,
-                bundle_origin: None,
-            })
-    }
+    use crate::adapter::skills::{arb_hook, arb_permission_rule};
 
     /// Top-level `settings.json` keys `generate_settings_json` renders that the
     /// catch-all `native` block is allowed to collide with. `permissions` and

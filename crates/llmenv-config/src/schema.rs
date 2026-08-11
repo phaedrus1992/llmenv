@@ -1735,11 +1735,13 @@ pub fn split_plugin_ref(s: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn arb_level() -> impl Strategy<Value = LogLevel> {
+    /// Shared with `validate.rs` (#1265) — was byte-identically duplicated
+    /// there; this is the one home.
+    pub(crate) fn arb_level() -> impl Strategy<Value = LogLevel> {
         prop_oneof![
             Just(LogLevel::Info),
             Just(LogLevel::Debug),
