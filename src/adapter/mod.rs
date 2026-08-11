@@ -73,15 +73,22 @@ pub(crate) fn strip_json_nulls(value: &mut serde_json::Value) {
 /// which can now reach persistent files this function's callers write to
 /// directly (`.claude.json`, `settings.json`, `crush.json`, `opencode.json`)
 /// — not just rebuildable cache output. Fail-closed (propagating an error
-/// instead of bailing) was considered and rejected: every one of this
-/// function's callers would need `anyhow::Result` threaded through, and two
-/// of them (`dedup_hooks_doc`'s call inside a `HashMap::retain`-adjacent
-/// `.map()`/`.or_else()` merge chain, and `normalized_hook` called from a
-/// `Vec::retain` predicate in `claude_code.rs`) can't return early with `?`
-/// without restructuring those combinators — disproportionate for an input
-/// that must already survive a full `serde_yaml`/`serde_json` parse to reach
-/// 64 levels of nesting. Realistic worst case stays what #1274 found it to
-/// be: a cosmetically wrong config, never a panic or crash.
+/// instead of bailing) was considered and rejected — not because every
+/// caller would need reworking (four of this function's six call sites
+/// already return `anyhow::Result` and use `?`: `merge_mcp_into_claude_json`,
+/// `generate_settings_json`, opencode's and crush's `materialize`), but
+/// because the other two (`dedup_hooks_doc`'s call inside a `.map()`/
+/// `.or_else()` merge chain, and `normalized_hook` called from a
+/// `Vec::retain` predicate, both in `claude_code.rs`) can't return early with
+/// `?` without restructuring those combinators. Making four call sites
+/// fail-closed while the other two stay fail-open would be an inconsistent
+/// half-fix for an input that must already survive a full `serde_yaml`/
+/// `serde_json` parse to reach 64 levels of nesting, and the null surviving
+/// past the guard is at worst equivalent to the key being absent — the
+/// deny-never-weakened invariant is enforced by
+/// `reject_modeled_keys_in_catch_all`, not by null-stripping. Realistic worst
+/// case stays what #1274 found it to be: a cosmetically wrong config, never
+/// a panic or crash.
 fn strip_json_nulls_depth(value: &mut serde_json::Value, depth: usize) {
     if depth > 64 {
         tracing::error!(
