@@ -1055,15 +1055,93 @@ async fn run_memory_actions(
     query: &str,
     chunk: &str,
 ) -> anyhow::Result<String> {
-    let mut kept: Vec<String> = Vec::new();
+    let mut results: Vec<(bool, String)> = Vec::with_capacity(actions.len());
     for action in actions {
+        let is_recall = matches!(
+            action,
+            Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_)
+        );
         let text = action.run(client, query, chunk).await?;
+        results.push((is_recall, text));
+    }
+    let (kept, stats) = dedup_and_count_action_results(results);
+    if stats.recall_entries > 0 || stats.recall_dropped > 0 {
+        emit_context_trace(&stats, &kept);
+    }
+    Ok(kept.join("\n\n"))
+}
+
+/// Recall-specific counters produced alongside [`dedup_and_count_action_results`]'s
+/// dedup pass, for [`emit_context_trace`] (#1261).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RecallStats {
+    /// Recall-type actions (`Recall`/`RecallTag`/`RecallBundle`) whose
+    /// response was non-empty after `strip_advisory`.
+    recall_entries: usize,
+    /// Total byte length of those non-empty responses.
+    recall_bytes: usize,
+    /// Recall-type actions whose response was dropped — either empty after
+    /// `strip_advisory` (advisory-only noise), or an exact duplicate of an
+    /// already-kept action's text.
+    recall_dropped: usize,
+}
+
+/// Pure core of [`run_memory_actions`]'s dedup pass, split out so it's
+/// testable without a live/mocked MCP client (#1261): given each action's
+/// `(is_recall, text)` result, in dispatch order, drop empty and
+/// exact-duplicate texts (first occurrence wins) and tally [`RecallStats`].
+///
+/// `dispatch` never mixes recall actions with `WakeUp`/`Store` in the same
+/// batch (see its own doc comment), so `is_recall` is uniform across one
+/// call in practice — checked per-entry anyway so the counters stay correct
+/// if that ever changes, rather than assuming it from the batch's first
+/// element.
+fn dedup_and_count_action_results(results: Vec<(bool, String)>) -> (Vec<String>, RecallStats) {
+    let mut kept: Vec<String> = Vec::new();
+    let mut stats = RecallStats::default();
+    for (is_recall, text) in results {
+        if is_recall && !text.is_empty() {
+            stats.recall_entries += 1;
+            stats.recall_bytes += text.len();
+        }
         if text.is_empty() || kept.contains(&text) {
+            if is_recall {
+                stats.recall_dropped += 1;
+            }
             continue;
         }
         kept.push(text);
     }
-    Ok(kept.join("\n\n"))
+    (kept, stats)
+}
+
+/// Emit `[LLMENV_CONTEXT] recall_entries=N recall_bytes=N injected_entries=N
+/// injected_bytes=N advisory_stripped=N` to stderr when `LLMENV_TRACE_TIMING`
+/// is set (#1261) — the same env var that already gates hook-run's other
+/// stderr telemetry.
+///
+/// Granularity is per recall-type *action* (one project-scoped `Recall`, one
+/// `RecallTag` per active tag, one `RecallBundle` per active bundle), not
+/// per individual memory record within an action's response: parsing ICM's
+/// recall-response text format to count records would couple this client to
+/// a format owned by a separate system (see `crate::consolidation`'s own,
+/// narrower parser, which only handles the non-compact format one specific
+/// caller uses). `advisory_stripped` covers both ways a recalled action's
+/// text ends up not injected — the whole response was advisory-only noise
+/// (empty after `strip_advisory`), or it exactly duplicated an already-kept
+/// action's text — rather than only the strictly-advisory case, since both
+/// are "recalled but not injected" from an external observer's perspective.
+fn emit_context_trace(stats: &RecallStats, kept: &[String]) {
+    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+        return;
+    }
+    let injected_entries = kept.len();
+    let injected_bytes: usize = kept.iter().map(String::len).sum();
+    eprintln!(
+        "[LLMENV_CONTEXT] recall_entries={} recall_bytes={} injected_entries={injected_entries} \
+         injected_bytes={injected_bytes} advisory_stripped={}",
+        stats.recall_entries, stats.recall_bytes, stats.recall_dropped
+    );
 }
 
 /// Borrowed inputs `run_session_log` needs, grouped to keep the function under
@@ -3680,6 +3758,44 @@ mod tests {
             dispatch(HookEvent::TurnStart, &[], &[], Some(750)),
             vec![Action::Recall]
         );
+    }
+
+    #[test]
+    fn dedup_and_count_drops_empty_and_exact_duplicate_recall_results() {
+        let results = vec![
+            (true, "memory A".to_string()),
+            (true, String::new()),          // advisory-only, stripped to empty
+            (true, "memory A".to_string()), // exact duplicate of the first
+            (true, "memory B".to_string()),
+        ];
+        let (kept, stats) = dedup_and_count_action_results(results);
+        assert_eq!(kept, vec!["memory A".to_string(), "memory B".to_string()]);
+        // recall_entries only counts non-empty responses: 3 of the 4 (the
+        // empty one never increments it), and recall_dropped counts the
+        // empty one plus the exact-duplicate — 2 of those 3 non-empty/total.
+        assert_eq!(stats.recall_entries, 3);
+        assert_eq!(stats.recall_bytes, "memory A".len() * 2 + "memory B".len());
+        assert_eq!(stats.recall_dropped, 2);
+    }
+
+    #[test]
+    fn dedup_and_count_ignores_non_recall_actions_in_the_tally() {
+        // WakeUp/Store never mix with recall actions per `dispatch`, but the
+        // tally must still be scoped to `is_recall` entries if that changes.
+        let results = vec![(false, "wake-up pack".to_string())];
+        let (kept, stats) = dedup_and_count_action_results(results);
+        assert_eq!(kept, vec!["wake-up pack".to_string()]);
+        assert_eq!(stats, RecallStats::default());
+    }
+
+    #[test]
+    fn emit_context_trace_never_panics_without_env_var() {
+        let stats = RecallStats {
+            recall_entries: 3,
+            recall_bytes: 42,
+            recall_dropped: 1,
+        };
+        emit_context_trace(&stats, &["memory A".to_string()]);
     }
 
     #[test]
