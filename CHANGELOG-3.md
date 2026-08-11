@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **Behavior change:** `llmenv task add` without `--parent` no longer creates a parentless task — it now defaults to the most recently created task in the same session, so a run of plain `task add`s forms an ordered chain by default. The chain never crosses sessions. Use the new `--no-parent` flag for a deliberate top-level task. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#929)
+- **Behavior change:** the default cache-hashing mode (`normal`) now nests materialized folders by major version only (`<adapter>/<major>/<shape>`), not `major.minor` — a minor/patch upgrade reuses the existing folder instead of minting a new one and orphaning the old tree, since the manifest dotfile's content hash already drives drift detection and reconciliation regardless of version. Only a major version bump mints a new folder now. The old `major.minor` folders become unreferenced garbage, cleaned up by the existing age-based `gc`/`prune` retention — no dedicated one-time sweep was added, since that retention already covers it. Set `cache.hashing: strict` for the old per-minor-version isolation, or `loose` for none. See [Concepts](https://phaedrus1992.github.io/llmenv/docs/concepts#materialize) (#1263)
 
 ### Fixed
 
