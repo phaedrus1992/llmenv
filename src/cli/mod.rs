@@ -382,9 +382,15 @@ enum TaskCommand {
     /// the current project (auto-resolved), or an explicit `--session`.
     Add {
         title: String,
-        /// Slug of the parent task, if this is a sub-task.
-        #[arg(long)]
+        /// Slug of the parent task, if this is a sub-task. Omit to default
+        /// to the previously-added task in the same session (#929) — pass
+        /// `--no-parent` for a deliberate top-level task instead.
+        #[arg(long, conflicts_with = "no_parent")]
         parent: Option<String>,
+        /// Force this task to have no parent, overriding the implicit
+        /// previously-added-task default (#929).
+        #[arg(long)]
+        no_parent: bool,
         /// Session id to tag this task with. Omit to auto-resolve when
         /// exactly one session is open for the current project.
         #[arg(long)]
@@ -3075,16 +3081,22 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
         TaskCommand::Add {
             title,
             parent,
+            no_parent,
             session,
         } => {
-            // New-project guard: warn before starting an unrelated top-level
-            // task while another is still in progress. CLI-side check beats
-            // a transcript heuristic — this is a plain fact about current
+            // New-project guard: warn before starting a deliberately
+            // top-level task while another is still in progress. Only fires
+            // on `--no-parent` now (#929) — omitting `--parent` no longer
+            // means "no parent", it means "chain onto the previous task in
+            // this session", so the guard's original concern (an unrelated
+            // task silently landing with no nesting) only still applies to
+            // an explicit, deliberate detach. CLI-side check beats a
+            // transcript heuristic — this is a plain fact about current
             // task state, not something to infer. Only `wip` counts: a
             // `waiting` task is correctly paused on something external, so
             // starting new work alongside it is legitimate, not a mistake to
             // warn about.
-            if parent.is_none() {
+            if no_parent {
                 let wip: Vec<String> = crate::task::list_tasks(&state_dir)
                     .into_iter()
                     .filter(|t| t.state == crate::task::TaskState::Wip)
@@ -3100,11 +3112,16 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     );
                 }
             }
+            let parent_spec = match (parent.as_deref(), no_parent) {
+                (Some(p), _) => crate::task::ParentSpec::Explicit(p),
+                (None, true) => crate::task::ParentSpec::Detached,
+                (None, false) => crate::task::ParentSpec::Auto,
+            };
             let project = current_project_tag()?;
             let task = crate::task::add_task(
                 &state_dir,
                 &title,
-                parent.as_deref(),
+                parent_spec,
                 session.as_deref(),
                 &project,
             )?;

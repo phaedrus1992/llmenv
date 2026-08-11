@@ -119,8 +119,13 @@ fn with_store_lock<T>(
 }
 
 /// Current RFC3339 timestamp (UTC, second precision).
+/// Nanosecond precision, not seconds: [`ParentSpec::Auto`] (#929) picks the
+/// implicit-chain parent by comparing `created_at` strings, and several
+/// sequential `task add` invocations (agent tool calls, shell loops) commonly
+/// land within the same wall-clock second — second precision made that tie
+/// resolve to readdir order, which is arbitrary, not creation order.
 fn now_rfc3339() -> String {
-    humantime::format_rfc3339_seconds(std::time::SystemTime::now()).to_string()
+    humantime::format_rfc3339_nanos(std::time::SystemTime::now()).to_string()
 }
 
 /// Derive a kebab-case slug from a task title: lowercase, first ~6 words,
@@ -328,9 +333,9 @@ fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
             _ => roots.push(t),
         }
     }
-    // created_at is only second-precision, so tasks created in the same second
-    // tie; fall back to slug for a deterministic, stable order (readdir order
-    // from `list_tasks` is otherwise arbitrary).
+    // created_at ties are rare but possible (legacy second-precision data,
+    // or a genuine same-instant race); fall back to slug for a deterministic,
+    // stable order (readdir order from `list_tasks` is otherwise arbitrary).
     let order = |a: &&Task, b: &&Task| {
         a.created_at
             .cmp(&b.created_at)
@@ -406,19 +411,45 @@ fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -> Option<&'
     tasks.max_by(|a, b| a.updated_at.cmp(&b.updated_at))
 }
 
+/// The most recently *created* of `tasks`, by `created_at` string comparison
+/// (RFC3339 sorts lexicographically). Used by [`ParentSpec::Auto`] to find
+/// the implicit-chain parent — `created_at`, not `updated_at`, since a task
+/// finishing (bumping `updated_at`) shouldn't retroactively change which
+/// task a *new* add chains onto. Ties resolve to `max_by`'s documented
+/// last-element-wins rule, same caveat as [`most_recently_updated`].
+fn most_recently_created<'a>(tasks: impl Iterator<Item = &'a Task>) -> Option<&'a Task> {
+    tasks.max_by(|a, b| a.created_at.cmp(&b.created_at))
+}
+
+/// How `add_task`/`add_task_for_session` should set the new task's `parent`.
+/// A plain `Option<&str>` can't distinguish "no `--parent` given, use the
+/// implicit-chain default" from "explicitly no parent" — this can (#929).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentSpec<'a> {
+    /// No `--parent` given: default to the most recently created task in
+    /// the same session (or no parent if this is the session's first task).
+    Auto,
+    /// `--parent <id>` given explicitly.
+    Explicit(&'a str),
+    /// `--no-parent` given explicitly: a deliberate top-level task, no
+    /// implicit chaining even if the session already has other tasks.
+    Detached,
+}
+
 /// Create a new task in `open` state and persist it, tagged to a resolved
 /// session (mandatory-sessions design).
 ///
 /// # Errors
-/// Errors if `parent` doesn't resolve to an existing task. Errors on session
-/// resolution: `session_id` explicit but unknown/closed → error; omitted
-/// with zero or 2+ open sessions for `project` → error telling the agent to
-/// run `llmenv task session start` or pass `--session`; omitted with exactly
-/// one open session for `project` → auto-resolved.
+/// Errors if `parent` is [`ParentSpec::Explicit`] and doesn't resolve to an
+/// existing task. Errors on session resolution: `session_id` explicit but
+/// unknown/closed → error; omitted with zero or 2+ open sessions for
+/// `project` → error telling the agent to run `llmenv task session start`
+/// or pass `--session`; omitted with exactly one open session for `project`
+/// → auto-resolved.
 pub fn add_task(
     state_dir: &Path,
     title: &str,
-    parent: Option<&str>,
+    parent: ParentSpec<'_>,
     session_id: Option<&str>,
     project: &str,
 ) -> anyhow::Result<Task> {
@@ -434,19 +465,23 @@ pub fn add_task(
 /// session id in hand, e.g. the CLI's `--session <id>` path).
 ///
 /// # Errors
-/// Errors if `parent` is provided but doesn't resolve to an existing task —
-/// same eager-validation reasoning as `block_task`'s `on`.
+/// Errors if `parent` is [`ParentSpec::Explicit`] and doesn't resolve to an
+/// existing task — same eager-validation reasoning as `block_task`'s `on`.
 pub fn add_task_for_session(
     state_dir: &Path,
     title: &str,
-    parent: Option<&str>,
+    parent: ParentSpec<'_>,
     session_id: &str,
 ) -> anyhow::Result<Task> {
     with_store_lock(state_dir, || {
         let dir = tasks_dir(state_dir);
         let parent_slug = match parent {
-            Some(p) => Some(resolve_identifier(state_dir, p)?),
-            None => None,
+            ParentSpec::Explicit(p) => Some(resolve_identifier(state_dir, p)?),
+            ParentSpec::Detached => None,
+            ParentSpec::Auto => {
+                most_recently_created(session::tasks_in_session(state_dir, session_id).iter())
+                    .map(|t| t.slug.clone())
+            }
         };
         let now = now_rfc3339();
         let mut base_slug = slugify(title);
@@ -1057,8 +1092,16 @@ mod tests {
     /// creation logic (`add_task_for_session`) the mandatory-session path
     /// resolves down to — lets the store-behavior tests below (slug/parent/
     /// nesting) skip the session-resolution dance, which has its own tests.
+    /// `None` maps to `ParentSpec::Detached`, not `Auto` — existing callers
+    /// pass `None` meaning "no parent" (independent tasks), predating #929's
+    /// implicit-chain default; a handful of dedicated tests exercise `Auto`
+    /// directly instead of through this helper.
     fn mk(dir: &Path, title: &str, parent: Option<&str>) -> anyhow::Result<Task> {
-        add_task_for_session(dir, title, parent, "test-session")
+        let parent_spec = match parent {
+            Some(p) => ParentSpec::Explicit(p),
+            None => ParentSpec::Detached,
+        };
+        add_task_for_session(dir, title, parent_spec, "test-session")
     }
 
     #[test]
@@ -1182,14 +1225,16 @@ mod tests {
     /// Create a `wip` task tagged to a real session in `project`.
     fn wip_task_in_project(dir: &Path, title: &str, project: &str) -> Task {
         let session_id = session_for_project(dir, project);
-        let task = add_task_for_session(dir, title, None, &session_id).expect("test");
+        let task =
+            add_task_for_session(dir, title, ParentSpec::Detached, &session_id).expect("test");
         start_task(dir, &task.slug, false).expect("test")
     }
 
     /// Create a `waiting` task tagged to a real session in `project`.
     fn waiting_task_in_project(dir: &Path, title: &str, project: &str, reason: &str) -> Task {
         let session_id = session_for_project(dir, project);
-        let task = add_task_for_session(dir, title, None, &session_id).expect("test");
+        let task =
+            add_task_for_session(dir, title, ParentSpec::Detached, &session_id).expect("test");
         start_task(dir, &task.slug, false).expect("test");
         wait_task(dir, &task.slug, reason).expect("test")
     }
@@ -1947,7 +1992,8 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let session_id = session_for_project(dir.path(), "proj-a");
         let in_project =
-            add_task_for_session(dir.path(), "In proj-a", None, &session_id).expect("test");
+            add_task_for_session(dir.path(), "In proj-a", ParentSpec::Detached, &session_id)
+                .expect("test");
         let other_session = t("other", TaskState::Open, None, Some("other-session"));
         let no_session = t("legacy", TaskState::Open, None, None);
         let tasks = vec![in_project.clone(), other_session, no_session];
@@ -2158,8 +2204,14 @@ mod tests {
         let session = created(
             start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).expect("test"),
         );
-        let task =
-            add_task(dir.path(), "Do thing", None, Some(&session.id), PROJECT).expect("test");
+        let task = add_task(
+            dir.path(),
+            "Do thing",
+            ParentSpec::Detached,
+            Some(&session.id),
+            PROJECT,
+        )
+        .expect("test");
         assert_eq!(task.session, Some(session.id));
     }
 
@@ -2170,7 +2222,7 @@ mod tests {
             add_task(
                 dir.path(),
                 "Do thing",
-                None,
+                ParentSpec::Detached,
                 Some("no-such-session"),
                 PROJECT
             )
@@ -2184,14 +2236,16 @@ mod tests {
         let session = created(
             start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).expect("test"),
         );
-        let task = add_task(dir.path(), "Do thing", None, None, PROJECT).expect("test");
+        let task =
+            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).expect("test");
         assert_eq!(task.session, Some(session.id));
     }
 
     #[test]
     fn add_task_errors_with_zero_open_sessions_for_project() {
         let dir = TempDir::new().expect("test");
-        let err = add_task(dir.path(), "Do thing", None, None, PROJECT).unwrap_err();
+        let err =
+            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).unwrap_err();
         assert!(err.to_string().contains("session start"));
     }
 
@@ -2214,7 +2268,8 @@ mod tests {
             StartDecision::New,
         )
         .expect("test");
-        let err = add_task(dir.path(), "Do thing", None, None, PROJECT).unwrap_err();
+        let err =
+            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).unwrap_err();
         assert!(err.to_string().contains("--session"));
     }
 
@@ -2229,7 +2284,7 @@ mod tests {
             StartDecision::Auto,
         )
         .expect("test");
-        assert!(add_task(dir.path(), "Do thing", None, None, PROJECT).is_err());
+        assert!(add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).is_err());
     }
 
     #[test]
@@ -2239,9 +2294,14 @@ mod tests {
             start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).expect("test"),
         );
         let original = session.last_activity.clone();
-        let task =
-            add_task(dir.path(), "Do thing", None, Some(&session.id), PROJECT).expect("test");
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        let task = add_task(
+            dir.path(),
+            "Do thing",
+            ParentSpec::Detached,
+            Some(&session.id),
+            PROJECT,
+        )
+        .expect("test");
         start_task(dir.path(), &task.slug, false).expect("test");
         let reloaded = open_sessions_for_project(dir.path(), PROJECT)
             .into_iter()

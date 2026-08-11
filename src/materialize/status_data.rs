@@ -973,8 +973,20 @@ mod tests {
         let session = created(
             start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).unwrap(),
         );
-        let t1 = crate::task::add_task_for_session(dir.path(), "one", None, &session.id).unwrap();
-        crate::task::add_task_for_session(dir.path(), "two", None, &session.id).unwrap();
+        let t1 = crate::task::add_task_for_session(
+            dir.path(),
+            "one",
+            crate::task::ParentSpec::Detached,
+            &session.id,
+        )
+        .unwrap();
+        crate::task::add_task_for_session(
+            dir.path(),
+            "two",
+            crate::task::ParentSpec::Detached,
+            &session.id,
+        )
+        .unwrap();
         crate::task::done_task(dir.path(), &t1.slug).unwrap();
 
         let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
@@ -1013,9 +1025,21 @@ mod tests {
         )
         .unwrap();
 
-        let t1 = crate::task::add_task_for_session(dir.path(), "a", None, &s1.id).unwrap();
+        let t1 = crate::task::add_task_for_session(
+            dir.path(),
+            "a",
+            crate::task::ParentSpec::Detached,
+            &s1.id,
+        )
+        .unwrap();
         crate::task::done_task(dir.path(), &t1.slug).unwrap();
-        crate::task::add_task_for_session(dir.path(), "b", None, &s2.id).unwrap();
+        crate::task::add_task_for_session(
+            dir.path(),
+            "b",
+            crate::task::ParentSpec::Detached,
+            &s2.id,
+        )
+        .unwrap();
 
         let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
         assert_eq!(data.session, Some(SessionProgress { done: 1, total: 2 }));
@@ -1027,8 +1051,13 @@ mod tests {
         let session = created(
             start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).unwrap(),
         );
-        let task = crate::task::add_task_for_session(dir.path(), "In progress", None, &session.id)
-            .unwrap();
+        let task = crate::task::add_task_for_session(
+            dir.path(),
+            "In progress",
+            crate::task::ParentSpec::Detached,
+            &session.id,
+        )
+        .unwrap();
         crate::task::start_task(dir.path(), &task.slug, false).unwrap();
 
         let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
