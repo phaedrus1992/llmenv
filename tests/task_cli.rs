@@ -1633,9 +1633,6 @@ fn show_current_falls_back_to_most_recently_updated_non_done_task_without_a_wip_
         .args(["task", "add", "Task two"])
         .assert()
         .success();
-    // now_rfc3339() is second-precision — sleep past the second boundary so
-    // task-two's post-note updated_at is unambiguously later than task-one's.
-    std::thread::sleep(std::time::Duration::from_secs(1));
     llmenv(dir.path())
         .args(["task", "note", "task-two", "a note"])
         .assert()

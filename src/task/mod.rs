@@ -119,8 +119,13 @@ fn with_store_lock<T>(
 }
 
 /// Current RFC3339 timestamp (UTC, second precision).
+/// Nanosecond precision, not seconds: [`ParentSpec::Auto`] (#929) picks the
+/// implicit-chain parent by comparing `created_at` strings, and several
+/// sequential `task add` invocations (agent tool calls, shell loops) commonly
+/// land within the same wall-clock second — second precision made that tie
+/// resolve to readdir order, which is arbitrary, not creation order.
 fn now_rfc3339() -> String {
-    humantime::format_rfc3339_seconds(std::time::SystemTime::now()).to_string()
+    humantime::format_rfc3339_nanos(std::time::SystemTime::now()).to_string()
 }
 
 /// Derive a kebab-case slug from a task title: lowercase, first ~6 words,
@@ -328,9 +333,9 @@ fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
             _ => roots.push(t),
         }
     }
-    // created_at is only second-precision, so tasks created in the same second
-    // tie; fall back to slug for a deterministic, stable order (readdir order
-    // from `list_tasks` is otherwise arbitrary).
+    // created_at ties are rare but possible (legacy second-precision data,
+    // or a genuine same-instant race); fall back to slug for a deterministic,
+    // stable order (readdir order from `list_tasks` is otherwise arbitrary).
     let order = |a: &&Task, b: &&Task| {
         a.created_at
             .cmp(&b.created_at)
@@ -2297,7 +2302,6 @@ mod tests {
             PROJECT,
         )
         .expect("test");
-        std::thread::sleep(std::time::Duration::from_secs(1));
         start_task(dir.path(), &task.slug, false).expect("test");
         let reloaded = open_sessions_for_project(dir.path(), PROJECT)
             .into_iter()

@@ -763,7 +763,6 @@ mod tests {
             panic!("expected Created");
         };
         let original = session.last_activity.clone();
-        std::thread::sleep(std::time::Duration::from_secs(1));
         touch_last_activity(dir.path(), &session.id).expect("test");
         let reloaded = list_sessions(dir.path())
             .into_iter()
@@ -819,7 +818,6 @@ mod tests {
             panic!("expected Created");
         };
         let original = session.last_activity.clone();
-        std::thread::sleep(std::time::Duration::from_secs(1));
         let StartOutcome::Resumed(resumed) = start_session(
             dir.path(),
             None,
