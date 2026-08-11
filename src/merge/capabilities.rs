@@ -24,7 +24,7 @@ use crate::util::{dedup, merge_yaml, normalize_yaml};
 
 /// A single source of capability fragments. `precedence` encodes scope rank
 /// (higher wins for scalars); `name` is used only in collision errors.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CapabilityContributor {
     pub name: String,
     pub precedence: u8,

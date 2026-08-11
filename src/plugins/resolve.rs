@@ -15,7 +15,7 @@ use crate::config::{Config, Marketplace, split_plugin_ref};
 /// A fully resolved plugin ready for an adapter to render. Carries the
 /// originating marketplace and plugin name split out from the
 /// `<marketplace>:<plugin>` config form.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct ResolvedPlugin {
     /// Marketplace name (left half of the config `marketplace:plugin` string).
     pub marketplace: String,
