@@ -391,8 +391,10 @@ fn checkpoint_error(existing: &[Session]) -> String {
     )
 }
 
-/// Every task currently tagged with `session_id`.
-fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
+/// Every task currently tagged with `session_id`. `pub(super)` so
+/// `add_task_for_session` (`task/mod.rs`) can find the implicit-chain
+/// parent for [`super::ParentSpec::Auto`] (#929).
+pub(super) fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
     list_tasks(state_dir)
         .into_iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
@@ -469,7 +471,7 @@ pub fn delete_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Re
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::task::{add_task_for_session, done_task, load_task, save_task};
+    use crate::task::{ParentSpec, add_task_for_session, done_task, load_task, save_task};
     use proptest::prelude::*;
     use tempfile::TempDir;
 
@@ -670,9 +672,11 @@ mod tests {
             panic!("expected Created");
         };
         let open_task =
-            add_task_for_session(dir.path(), "Still open", None, &first.id).expect("test");
+            add_task_for_session(dir.path(), "Still open", ParentSpec::Detached, &first.id)
+                .expect("test");
         let done_task_ =
-            add_task_for_session(dir.path(), "Finished", None, &first.id).expect("test");
+            add_task_for_session(dir.path(), "Finished", ParentSpec::Detached, &first.id)
+                .expect("test");
         done_task(dir.path(), &done_task_.slug).expect("test");
 
         start_session(
@@ -923,8 +927,10 @@ mod tests {
         .expect("test") else {
             panic!("expected Created");
         };
-        let t1 = add_task_for_session(dir.path(), "Task one", None, &session.id).expect("test");
-        add_task_for_session(dir.path(), "Task two", None, &session.id).expect("test");
+        let t1 = add_task_for_session(dir.path(), "Task one", ParentSpec::Detached, &session.id)
+            .expect("test");
+        add_task_for_session(dir.path(), "Task two", ParentSpec::Detached, &session.id)
+            .expect("test");
         done_task(dir.path(), &t1.slug).expect("test");
         assert_eq!(session_progress(dir.path(), &session.id), (1, 2));
     }
@@ -942,8 +948,13 @@ mod tests {
         .expect("test") else {
             panic!("expected Created");
         };
-        let in_session =
-            add_task_for_session(dir.path(), "In the session", None, &session.id).expect("test");
+        let in_session = add_task_for_session(
+            dir.path(),
+            "In the session",
+            ParentSpec::Detached,
+            &session.id,
+        )
+        .expect("test");
         let deleted = delete_tasks_in_session(dir.path(), &session.id).expect("test");
         assert_eq!(deleted.len(), 1);
         assert_eq!(deleted[0].slug, in_session.slug);
