@@ -13,6 +13,13 @@ workspace = true
 [dependencies]
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+
+[features]
+# Exposes `testkit`'s arbitrary-value generators to other workspace crates'
+# dev-dependencies (#1281) — kept as an opt-in feature, not always-on, so
+# `proptest` stays out of the default dependency graph for non-test builds.
+test-util = ["dep:proptest"]

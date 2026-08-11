@@ -3863,4 +3863,99 @@ mod tests {
             }
         }
     }
+
+    // -- property-based tests: plugin-supplied config parsing (#1282) --
+    //
+    // The no-panic property over arbitrary content already exists above
+    // (`parse_plugin_hooks_never_panics_on_arbitrary_content` /
+    // `parse_plugin_mcp_entries_never_panics_on_arbitrary_content`, #1017).
+    // What's missing is a round-trip property for *valid* manifests — added
+    // below, reusing the shared `arb_yaml_value` generator (`skills.rs`)
+    // rather than hand-rolling a new arbitrary-JSON generator for this file.
+
+    use crate::adapter::skills::arb_yaml_value;
+
+    /// A top-level YAML mapping of `name -> arbitrary value`, matching the
+    /// shape `parse_plugin_mcp_entries` actually expects (a mapping of MCP
+    /// server name to its config).
+    fn arb_mcp_entries_mapping() -> impl Strategy<Value = serde_yaml::Mapping> {
+        proptest::collection::vec(("[a-z][a-z0-9_-]{0,10}", arb_yaml_value(2)), 0..4).prop_map(
+            |pairs| {
+                let mut m = serde_yaml::Mapping::new();
+                for (k, v) in pairs {
+                    m.insert(serde_yaml::Value::String(k), v);
+                }
+                m
+            },
+        )
+    }
+
+    proptest! {
+        /// A valid top-level mapping round-trips: every key survives, and
+        /// each value converts to the same JSON shape production already
+        /// asserts (`serde_json::to_value` over the YAML mapping).
+        #[test]
+        fn parse_plugin_mcp_entries_roundtrips_valid_mapping(mapping in arb_mcp_entries_mapping()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("mcp.yaml");
+            let yaml_value = serde_yaml::Value::Mapping(mapping.clone());
+            std::fs::write(&path, serde_yaml::to_string(&yaml_value).unwrap()).unwrap();
+            let parsed = parse_plugin_mcp_entries(&path, "test-plugin").unwrap();
+            let expected = serde_json::to_value(&mapping)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone();
+            prop_assert_eq!(parsed, expected);
+        }
+
+        /// A valid manifest with one event/group and 1..4 command hooks
+        /// round-trips: every command hook is emitted in order, with its
+        /// matcher preserved and `${CLAUDE_PLUGIN_ROOT}` resolved to the
+        /// payload path — including when the placeholder appears embedded
+        /// mid-string, not just as the whole command.
+        #[test]
+        fn parse_plugin_hooks_roundtrips_valid_manifest(
+            event in "[A-Za-z]{3,12}",
+            matcher in proptest::option::of("[a-z]{1,8}"),
+            commands in proptest::collection::vec(
+                prop_oneof![
+                    llmenv_util::testkit::arb_hook_command_str(),
+                    llmenv_util::testkit::arb_hook_command_str()
+                        .prop_map(|s| format!("{s}${{CLAUDE_PLUGIN_ROOT}}{s}")),
+                ],
+                1..4,
+            ),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let hooks_path = tmp.path().join("hooks.json");
+            let payload_path = tmp.path().join("plugin-root");
+            let manifest = serde_json::json!({
+                "hooks": {
+                    event.clone(): [
+                        {
+                            "matcher": matcher,
+                            "hooks": commands
+                                .iter()
+                                .map(|c| serde_json::json!({"type": "command", "command": c}))
+                                .collect::<Vec<_>>(),
+                        }
+                    ]
+                }
+            });
+            std::fs::write(&hooks_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+            let hooks = parse_plugin_hooks(&hooks_path, &payload_path, "test-plugin")
+                .unwrap()
+                .unwrap();
+            prop_assert_eq!(hooks.len(), commands.len());
+            let payload_str = payload_path.to_string_lossy();
+            for (hook, command) in hooks.iter().zip(commands.iter()) {
+                prop_assert_eq!(&hook.event, &event);
+                prop_assert_eq!(&hook.matcher, &matcher);
+                let expected = command.replace("${CLAUDE_PLUGIN_ROOT}", &payload_str);
+                prop_assert_eq!(hook.handler.command.as_deref(), Some(expected.as_str()));
+            }
+        }
+    }
 }
