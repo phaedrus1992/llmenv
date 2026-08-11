@@ -4754,13 +4754,19 @@ mod tests {
     #[test]
     fn fold_root_features_propagates_root_scalar_into_empty_manifest() {
         let root = crate::config::Features {
-            task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+            task_tracker: Some(crate::config::TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let out = fold_root_features(Some(&root), None).expect("features present");
         assert_eq!(
             out.task_tracker,
-            Some(crate::config::TaskTracker { enabled: true }),
+            Some(crate::config::TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
             "a root-only feature scalar must land in the manifest"
         );
     }
@@ -4768,17 +4774,26 @@ mod tests {
     #[test]
     fn fold_root_features_root_scalar_wins_over_merged() {
         let root = crate::config::Features {
-            task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+            task_tracker: Some(crate::config::TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let merged = crate::config::Features {
-            task_tracker: Some(crate::config::TaskTracker { enabled: false }),
+            task_tracker: Some(crate::config::TaskTracker {
+                enabled: false,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let out = fold_root_features(Some(&root), Some(merged)).expect("features present");
         assert_eq!(
             out.task_tracker,
-            Some(crate::config::TaskTracker { enabled: true }),
+            Some(crate::config::TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
             "root config outranks a bundle-contributed scalar"
         );
     }

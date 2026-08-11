@@ -1134,12 +1134,17 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // the native tool with the equivalent `llmenv task` result. (Root-level
     // `features.task_tracker` reaches this gate because build_manifest folds
     // root features into the manifest — see fold_root_features, #987.)
+    //
+    // #980: `block_engine_task_tools` (default true) is the opt-out — a user
+    // who wants the tracker's CLAUDE.md fragment and reminders but still wants
+    // Claude's native Task tools available (e.g. for genuine multi-agent
+    // teammate coordination) can flip it off without disabling the tracker.
     if manifest
         .capabilities
         .features
         .as_ref()
         .and_then(|f| f.task_tracker.as_ref())
-        .is_some_and(|t| t.enabled)
+        .is_some_and(|t| t.enabled && t.block_engine_task_tools)
     {
         hooks_by_event
             .entry("PreToolUse".to_string())
