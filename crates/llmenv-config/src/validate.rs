@@ -910,20 +910,33 @@ mod tests {
             })
     }
 
+    // `matcher`/`command`/`tool` use `llmenv_util::testkit`'s escaping-aware
+    // string generators (#1281) rather than the plain-alnum `arb_opt_string`
+    // used elsewhere in this file: these three fields get spliced into
+    // rendered engine config (settings.json, opencode.json's generated
+    // shim), a JSON/shell/template-escaping-relevant charset earns its keep
+    // here the way it did for `llmenv`'s own `arb_hook` (#1265). `event`
+    // stays on `arb_string()` — no adapter renders event names through a
+    // string-interpolation boundary, so there's nothing escaping-relevant to
+    // stress there.
     fn arb_hook() -> impl Strategy<Value = Hook> {
         (
             arb_string(),
-            arb_opt_string(),
+            prop::option::of(llmenv_util::testkit::arb_hook_matcher()),
             prop_oneof![
-                arb_opt_string().prop_map(|command| HookHandler {
-                    kind: HookHandlerKind::Command,
-                    command,
-                    tool: None,
-                }),
-                arb_opt_string().prop_map(|tool| HookHandler {
-                    kind: HookHandlerKind::McpTool,
-                    command: None,
-                    tool,
+                prop::option::of(llmenv_util::testkit::arb_hook_command_str()).prop_map(
+                    |command| HookHandler {
+                        kind: HookHandlerKind::Command,
+                        command,
+                        tool: None,
+                    }
+                ),
+                prop::option::of(llmenv_util::testkit::arb_hook_tool_str()).prop_map(|tool| {
+                    HookHandler {
+                        kind: HookHandlerKind::McpTool,
+                        command: None,
+                        tool,
+                    }
                 }),
             ],
         )

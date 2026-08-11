@@ -3850,21 +3850,7 @@ mod tests {
         assert_eq!(entries.len(), 1, "nulls at any depth stripped before dedup");
     }
 
-    fn arb_json() -> impl Strategy<Value = serde_json::Value> {
-        let leaf = prop_oneof![
-            Just(serde_json::Value::Null),
-            any::<bool>().prop_map(serde_json::Value::Bool),
-            any::<i32>().prop_map(serde_json::Value::from),
-            "[a-z]{0,4}".prop_map(serde_json::Value::String),
-        ];
-        leaf.prop_recursive(3, 16, 4, |inner| {
-            prop_oneof![
-                prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
-                prop::collection::vec(("[a-z]{1,4}", inner), 0..4)
-                    .prop_map(|kvs| serde_json::Value::Object(kvs.into_iter().collect())),
-            ]
-        })
-    }
+    use llmenv_util::testkit::arb_json;
 
     #[test]
     fn reconcile_drops_owned_key_llmenv_no_longer_renders() {
@@ -3921,8 +3907,8 @@ mod tests {
 
     // ---- reconcile_settings (#719): property-based invariants ----
 
-    // Reuses the module-local `arb_json()` (bounded, null-bearing recursive
-    // JSON) for the on-disk `existing` side.
+    // Reuses `llmenv_util::testkit::arb_json()` (bounded, null-bearing
+    // recursive JSON, #1281) for the on-disk `existing` side.
 
     // The `fresh` side of reconcile is always a genuine llmenv render, not
     // arbitrary JSON. Deriving it from a real manifest keeps the properties

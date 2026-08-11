@@ -2311,6 +2311,21 @@ mod tests {
                 )
         }
 
+        /// Like [`arb_task`], but with the slug restricted to characters that
+        /// survive a filesystem round-trip on every platform (no NUL, no path
+        /// separators, no lone surrogates/unpaired combining marks that trip
+        /// APFS's Unicode normalization). `arb_task`'s fully-arbitrary slug is
+        /// fine for the in-memory JSON round-trip, but real `Task`s only ever
+        /// get a slug via [`slugify`] (lowercase alnum + hyphen) — this
+        /// generator matches that realistic shape for the file-backed
+        /// [`save_task`]/[`load_task`] round-trip (#1283).
+        fn arb_task_with_fs_safe_slug() -> impl Strategy<Value = Task> {
+            ("[A-Za-z0-9_-]{1,40}", arb_task()).prop_map(|(slug, mut task)| {
+                task.slug = slug;
+                task
+            })
+        }
+
         /// A single-session task forest with unique slugs `t0..tn` where each
         /// task's parent (if any) is an earlier index — guaranteeing an acyclic
         /// forest so the depth/parent-order invariants are well-defined.
@@ -2399,6 +2414,14 @@ mod tests {
                 let json = serde_json::to_string(&task).unwrap();
                 let back: Task = serde_json::from_str(&json).unwrap();
                 prop_assert_eq!(back, task);
+            }
+
+            #[test]
+            fn save_task_load_task_file_roundtrips(task in arb_task_with_fs_safe_slug()) {
+                let dir = tempfile::TempDir::new().unwrap();
+                save_task(dir.path(), &task).unwrap();
+                let loaded = load_task(dir.path(), &task.slug).unwrap();
+                prop_assert_eq!(loaded, task);
             }
 
             #[test]
