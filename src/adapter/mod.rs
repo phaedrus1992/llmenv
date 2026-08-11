@@ -66,9 +66,28 @@ pub(crate) fn strip_json_nulls(value: &mut serde_json::Value) {
 /// (config depth is normally <10 levels). The serde_json parser has its own
 /// recursion limit, but that guards _parsing_ — the value tree can be
 /// arbitrarily nested after deserialization.
+///
+/// # Fail-open, deliberately (#1274)
+///
+/// Bailing past depth 64 leaves the remaining subtree's nulls unstripped,
+/// which can now reach persistent files this function's callers write to
+/// directly (`.claude.json`, `settings.json`, `crush.json`, `opencode.json`)
+/// — not just rebuildable cache output. Fail-closed (propagating an error
+/// instead of bailing) was considered and rejected: every one of this
+/// function's callers would need `anyhow::Result` threaded through, and two
+/// of them (`dedup_hooks_doc`'s call inside a `HashMap::retain`-adjacent
+/// `.map()`/`.or_else()` merge chain, and `normalized_hook` called from a
+/// `Vec::retain` predicate in `claude_code.rs`) can't return early with `?`
+/// without restructuring those combinators — disproportionate for an input
+/// that must already survive a full `serde_yaml`/`serde_json` parse to reach
+/// 64 levels of nesting. Realistic worst case stays what #1274 found it to
+/// be: a cosmetically wrong config, never a panic or crash.
 fn strip_json_nulls_depth(value: &mut serde_json::Value, depth: usize) {
     if depth > 64 {
-        tracing::warn!("strip_json_nulls: max depth exceeded, bailing");
+        tracing::error!(
+            "strip_json_nulls: exceeded max depth (64) — bailing on the remaining subtree, \
+             which may leave stray null values in a persistent config file"
+        );
         return;
     }
     match value {
@@ -1020,9 +1039,43 @@ mod tests {
         );
     }
 
+    // #1274: pins the depth-guard's documented fail-open boundary so a future
+    // change to the bound (or an accidental fail-closed rewrite) shows up as
+    // a failing test rather than a silent behavior drift. `arb_json` above
+    // only nests ~3-4 levels deep, so this boundary is otherwise untested.
+    #[test]
+    fn strip_json_nulls_bails_open_past_depth_64() {
+        let mut v = serde_json::json!({"null_here": null, "depth": 65});
+        for depth in (0..65).rev() {
+            v = serde_json::json!({"null_here": null, "depth": depth, "next": v});
+        }
+        strip_json_nulls(&mut v);
+
+        let mut current = &v;
+        for depth in 0..=65 {
+            assert_eq!(current["depth"], depth, "walked to the wrong nesting level");
+            if depth <= 64 {
+                assert!(
+                    current.get("null_here").is_none(),
+                    "depth {depth} is within the guard's bound and must be stripped"
+                );
+            } else {
+                assert_eq!(
+                    current.get("null_here"),
+                    Some(&serde_json::Value::Null),
+                    "depth {depth} is past the guard's bound and must be left untouched"
+                );
+            }
+            if depth < 65 {
+                current = &current["next"];
+            }
+        }
+    }
+
     #[allow(clippy::expect_used)]
     mod strip_json_nulls_proptests {
         use super::strip_json_nulls;
+        use llmenv_util::testkit::arb_json;
         use proptest::prelude::*;
 
         fn contains_no_nulls(v: &serde_json::Value) -> bool {
@@ -1045,22 +1098,6 @@ mod tests {
                 serde_json::Value::Object(map) => map.values().map(count_non_null_leaves).sum(),
                 _ => 1,
             }
-        }
-
-        fn arb_json() -> impl Strategy<Value = serde_json::Value> {
-            let leaf = prop_oneof![
-                Just(serde_json::Value::Null),
-                any::<bool>().prop_map(serde_json::Value::Bool),
-                any::<i32>().prop_map(serde_json::Value::from),
-                "[a-z]{0,4}".prop_map(serde_json::Value::String),
-            ];
-            leaf.prop_recursive(3, 16, 4, |inner| {
-                prop_oneof![
-                    prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
-                    prop::collection::vec(("[a-z]{1,4}", inner), 0..4)
-                        .prop_map(|kvs| serde_json::Value::Object(kvs.into_iter().collect())),
-                ]
-            })
         }
 
         proptest! {

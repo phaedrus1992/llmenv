@@ -1340,6 +1340,7 @@ version = "3.9.0"
 dependencies = [
  "anyhow",
  "llmenv-paths",
+ "llmenv-util",
  "proptest",
  "serde",
  "serde_json",

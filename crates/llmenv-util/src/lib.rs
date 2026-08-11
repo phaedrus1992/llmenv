@@ -187,6 +187,89 @@ fn normalize_json(value: &mut serde_json::Value) {
     }
 }
 
+/// Shared `proptest` generators for llmenv's own tests and, via the
+/// `test-util` feature, for other workspace crates' dev-dependencies
+/// (`llmenv-config`, the main `llmenv` crate). Exists so generators that
+/// were drifting apart as separate copies in each crate (#1281) — same
+/// shape, no way to import one from the other across the crate boundary —
+/// have one canonical home instead.
+///
+/// `cfg(any(test, feature = "test-util"))` rather than plain `cfg(test)`:
+/// `cfg(test)` is only active while compiling *this* crate's own test
+/// target, so a downstream crate's tests never see it. `test-util` is the
+/// escape hatch — a consumer enables it only in its own `[dev-dependencies]`
+/// entry, keeping `proptest` out of the default (non-test) dependency graph.
+#[cfg(any(test, feature = "test-util"))]
+pub mod testkit {
+    use proptest::prelude::*;
+
+    /// A small recursive JSON generator: scalars, then arrays/objects of
+    /// them. Was duplicated byte-for-byte in three places (`llmenv-util`,
+    /// `src/adapter/mod.rs`, `src/adapter/claude_code.rs`) before #1281.
+    pub fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i32>().prop_map(serde_json::Value::from),
+            "[a-z]{0,4}".prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(3, 16, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                prop::collection::vec(("[a-z]{1,4}", inner), 0..4)
+                    .prop_map(|kvs| serde_json::Value::Object(kvs.into_iter().collect())),
+            ]
+        })
+    }
+
+    // -- Hook-field string generators (#1281) --
+    //
+    // `llmenv`'s `crate::config::Hook` and `llmenv-config`'s `schema::Hook`
+    // are two distinct, non-interchangeable types (one per crate) — this
+    // module can't generate either one directly, and forcing them into a
+    // single shared type isn't worth it for a test-only generator. What
+    // *was* a genuine, safe-to-share duplicate is the escaping-relevant
+    // character classes each field's strategy uses below: added to
+    // `llmenv`'s `src/adapter/skills.rs::arb_hook_handler` during #1265's
+    // pre-pr-review (a plain-alnum-only charset couldn't stress the JSON
+    // escaping the `opencode`/`claude_code` renderers rely on when splicing
+    // hook strings into their output), but never carried over to
+    // `llmenv-config`'s `validate.rs::arb_hook`, which kept a plain alnum
+    // charset for the same three fields. Sharing the charset here — instead
+    // of each crate's `arb_hook`-equivalent inlining its own regex literal —
+    // is what actually closes the "more permissive character set" gap #1281
+    // found, without needing the two `Hook` types to be the same type.
+    //
+    // `arb_yaml_value` was considered for the same treatment and rejected:
+    // `llmenv-config::validate::arb_yaml_value` and `llmenv::skills::
+    // arb_yaml_value` generate meaningfully different shapes for different
+    // purposes (the former covers YAML-ambiguous scalars, tagged values, and
+    // non-string mapping keys for round-trip fidelity; the latter is a
+    // simpler generator for native-fragment merge fuzzing) — unifying them
+    // would either weaken the round-trip coverage or bloat the merge-fuzz
+    // generator with cases irrelevant to what it tests.
+
+    /// A hook `matcher` string — an event glob/regex fragment. `Option`
+    /// because a hook commonly has no matcher (fires on every event).
+    pub fn arb_hook_matcher() -> impl Strategy<Value = Option<String>> {
+        proptest::option::of(r#"[a-zA-Z*][a-zA-Z*\\"'$`{}\n]{0,7}"#)
+    }
+
+    /// A hook's `command` string (the `Command`-kind handler's shell
+    /// command). Charset covers path-like shapes (`.`, `/`, `-`) alongside
+    /// the escaping-relevant characters.
+    pub fn arb_hook_command_str() -> impl Strategy<Value = String> {
+        r#"[a-z][a-z ./\\"'$`{}\n-]{0,20}"#
+    }
+
+    /// A hook's `tool` string (the `McpTool`-kind handler's MCP tool name).
+    /// Charset covers underscore-separated identifier shapes alongside the
+    /// escaping-relevant characters.
+    pub fn arb_hook_tool_str() -> impl Strategy<Value = String> {
+        r#"[a-z_][a-z_\\"'$`{}\n]{0,15}"#
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -320,25 +403,9 @@ mod tests {
 
     mod props {
         use super::{dedup, merge_json};
+        use crate::testkit::arb_json;
         use proptest::prelude::*;
         use serde_json::Value;
-
-        // A small recursive JSON generator: scalars, then arrays/objects of them.
-        fn arb_json() -> impl Strategy<Value = Value> {
-            let leaf = prop_oneof![
-                Just(Value::Null),
-                any::<bool>().prop_map(Value::Bool),
-                any::<i32>().prop_map(Value::from),
-                "[a-z]{0,4}".prop_map(Value::String),
-            ];
-            leaf.prop_recursive(3, 16, 4, |inner| {
-                prop_oneof![
-                    prop::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
-                    prop::collection::vec(("[a-z]{1,4}", inner), 0..4)
-                        .prop_map(|kvs| { Value::Object(kvs.into_iter().collect()) }),
-                ]
-            })
-        }
 
         proptest! {
             // merge_json never panics on arbitrary input pairs.

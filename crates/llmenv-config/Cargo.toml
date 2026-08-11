@@ -21,3 +21,5 @@ thiserror = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+# Shared proptest generators (#1281) — see llmenv-util's `testkit` module.
+llmenv-util = { path = "../llmenv-util", version = "3.9.0", features = ["test-util"] }
