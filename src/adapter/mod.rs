@@ -189,6 +189,18 @@ pub trait AgentAdapter {
     /// Stable identifier used as the cache subdirectory and in diagnostics.
     fn name(&self) -> &'static str;
 
+    /// Whether this adapter is the one running in the current process, judged
+    /// by its own environment signal (an env var the engine sets, or a binary
+    /// on `PATH`). Used by [`active_adapter`] to pick which adapter answers
+    /// for a subprocess (hook-run, throttle) that isn't told its engine
+    /// identity directly.
+    ///
+    /// Each adapter owns its own signal here instead of `active_adapter`
+    /// matching on `name()` — a registry-derived dispatch means a newly
+    /// registered adapter is detected automatically instead of silently
+    /// falling through a `_ => false` arm nobody remembered to extend (#1115).
+    fn is_active(&self) -> bool;
+
     /// Binary name that must be present on `PATH` for this adapter to be
     /// active. Used by [`binary_on_path`] to PATH-gate the adapter during
     /// export orchestration — if the binary is absent, the adapter is skipped
@@ -304,14 +316,7 @@ pub trait AgentAdapter {
 pub fn active_adapter() -> Box<dyn AgentAdapter> {
     registered_adapters()
         .into_iter()
-        .find(|a| match a.name() {
-            "claude-code" => std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
-            "crush" => std::env::var("CRUSH_GLOBAL_CONFIG").is_ok(),
-            "opencode" => {
-                std::env::var("OPENCODE_CONFIG_DIR").is_ok() || binary_on_path("opencode")
-            }
-            _ => false,
-        })
+        .find(|a| a.is_active())
         .unwrap_or_else(|| Box::new(claude_code::ClaudeCodeAdapter))
 }
 
