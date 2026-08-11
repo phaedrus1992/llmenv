@@ -922,13 +922,39 @@ pub struct McpPermissions {
 /// In-engine task tracker (#231): a file-based task store with CLI commands,
 /// injected context, and lifecycle-hook ordering enforcement. Off by default
 /// — disabled means zero materialized-output change and zero hook cost.
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+///
+/// `Default` is hand-written, not derived: `block_engine_task_tools` defaults
+/// to `true`, so a blind `#[derive(Default)]` (which would give `false`) would
+/// silently disagree with what an absent/partial config actually resolves to.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TaskTracker {
     /// Whether the task tracker's CLAUDE.md fragment and lifecycle hooks are
     /// active. The `llmenv task` CLI subcommands work regardless of this flag
     /// — it only gates the injected-context and hook-reminder side effects.
     #[serde(default)]
     pub enabled: bool,
+    /// Whether enabling the tracker also auto-injects a `PreToolUse` block
+    /// hook on the engine's own built-in task tools (Claude Code's
+    /// `TaskCreate`/`TaskList`/`TaskUpdate`), redirecting them to `llmenv
+    /// task` (#980, #985). Default `true`. Set `false` to keep the tracker's
+    /// CLAUDE.md fragment and reminders while still allowing the native tools
+    /// through — e.g. for genuine multi-agent teammate coordination that
+    /// isn't solo step tracking.
+    #[serde(default = "default_block_engine_task_tools")]
+    pub block_engine_task_tools: bool,
+}
+
+fn default_block_engine_task_tools() -> bool {
+    true
+}
+
+impl Default for TaskTracker {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            block_engine_task_tools: default_block_engine_task_tools(),
+        }
+    }
 }
 
 /// Widget layout, formatting, and colour config for `llmenv statusline`
@@ -2254,6 +2280,43 @@ index_path: /custom/index/path
         assert!(!cfg.features.unwrap().task_tracker.unwrap().enabled);
     }
 
+    /// The manual `Default` impl for `TaskTracker` must stay in sync with its
+    /// serde defaults — `block_engine_task_tools` defaults to `true`, which a
+    /// blind `#[derive(Default)]` would get wrong (#980).
+    #[test]
+    fn task_tracker_default_matches_serde_empty() {
+        let from_serde: TaskTracker =
+            serde_json::from_str("{}").expect("empty object should deserialize");
+        assert_eq!(TaskTracker::default(), from_serde);
+    }
+
+    #[test]
+    fn task_tracker_block_engine_task_tools_defaults_true() {
+        let yaml = "features:\n  task_tracker:\n    enabled: true\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            cfg.features
+                .unwrap()
+                .task_tracker
+                .unwrap()
+                .block_engine_task_tools
+        );
+    }
+
+    #[test]
+    fn task_tracker_block_engine_task_tools_opt_out() {
+        let yaml =
+            "features:\n  task_tracker:\n    enabled: true\n    block_engine_task_tools: false\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            !cfg.features
+                .unwrap()
+                .task_tracker
+                .unwrap()
+                .block_engine_task_tools
+        );
+    }
+
     /// The manual `Default` impl for SlippageControl must stay in sync with
     /// serde defaults — if a field is added to the struct with a serde default
     /// but the manual impl isn't updated, they silently diverge.
@@ -2310,7 +2373,10 @@ index_path: /custom/index/path
     #[test]
     fn features_roundtrip_task_tracker() {
         let original = Features {
-            task_tracker: Some(TaskTracker { enabled: true }),
+            task_tracker: Some(TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -2631,7 +2697,10 @@ index_path: /custom/index/path
     fn capabilities_is_empty_false_with_task_tracker() {
         let caps = Capabilities {
             features: Some(Features {
-                task_tracker: Some(TaskTracker { enabled: true }),
+                task_tracker: Some(TaskTracker {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()

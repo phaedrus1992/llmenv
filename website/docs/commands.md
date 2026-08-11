@@ -501,6 +501,13 @@ start/done/delete. The native tool is suppressed and the agent is told the
 `llmenv task` id to use for follow-up. This is Claude-Code-specific (those tools
 are Claude Code's) and off when the tracker is disabled. (#985)
 
+Set `features.task_tracker.block_engine_task_tools: false` (added in v3.10.0,
+default `true`) to keep the CLAUDE.md fragment and reminders while letting
+Claude's native Task tools through unblocked — for example, when a project
+genuinely uses them for multi-agent teammate coordination rather than solo step
+tracking. See [`features.task_tracker:`](configuration.md#featurestask_tracker)
+for the full field reference. (#980)
+
 ## `login`
 
 ```text

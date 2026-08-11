@@ -780,11 +780,13 @@ one.
 features:
   task_tracker:
     enabled: true
+    block_engine_task_tools: true  # default; set false to opt out
 ```
 
-| Field     | Required | Notes                                                                                                                                                                                           |
-|-----------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled` | no       | Default `false`. When `true`, also redirects Claude Code's built-in `TaskCreate`/`TaskList`/`TaskUpdate` tools into this tracker via an auto-injected `PreToolUse` hook (Claude-Code-specific). |
+| Field                     | Required | Notes                                                                                                                                                                                                                                                                                      |
+|---------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`                 | no       | Default `false`. When `true`, also redirects Claude Code's built-in `TaskCreate`/`TaskList`/`TaskUpdate` tools into this tracker via an auto-injected `PreToolUse` hook (Claude-Code-specific).                                                                                            |
+| `block_engine_task_tools` | no       | (added in v3.10.0) Default `true`. Set `false` to keep the tracker's CLAUDE.md fragment and reminders while still letting Claude's native Task tools through — e.g. for genuine multi-agent teammate coordination that isn't solo step tracking. Has no effect while `enabled` is `false`. |
 
 See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
 

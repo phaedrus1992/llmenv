@@ -2175,7 +2175,10 @@ mod tests {
             1,
             Capabilities {
                 features: Some(Features {
-                    task_tracker: Some(crate::config::TaskTracker { enabled: false }),
+                    task_tracker: Some(crate::config::TaskTracker {
+                        enabled: false,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2186,7 +2189,10 @@ mod tests {
             2,
             Capabilities {
                 features: Some(Features {
-                    task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+                    task_tracker: Some(crate::config::TaskTracker {
+                        enabled: true,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()
