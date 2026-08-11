@@ -1943,7 +1943,10 @@ fn compact_survival_fragment_absent_when_disabled() {
         .materialize(&manifest, tmp.path())
         .expect("materialize");
 
-    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("read CLAUDE.md");
+    // Since #1262 an empty CLAUDE.md is not written at all, and this manifest
+    // carries no agents_md — so "absent file" and "file without the fragment"
+    // are both correct outcomes for the property under test.
+    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap_or_default();
     assert!(
         !claude_md.contains("Compaction Survival Guide"),
         "CLAUDE.md must NOT contain fragment when slippage disabled"
@@ -2060,7 +2063,10 @@ fn llmenv_skill_materialized_when_task_tracker_enabled() {
         task_ref.exists(),
         "task-tracker reference must be materialized when task_tracker enabled"
     );
-    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("read CLAUDE.md");
+    // Since #1262 an empty CLAUDE.md is not written at all, and this manifest
+    // carries no agents_md — an absent file satisfies "the old fragment is
+    // gone" just as well as a file that lacks it.
+    let claude_md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap_or_default();
     assert!(
         !claude_md.contains("<!-- from task_tracker -->"),
         "the old CLAUDE.md task-tracker fragment must be gone"

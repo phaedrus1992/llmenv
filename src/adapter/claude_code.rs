@@ -439,6 +439,37 @@ fn overlay_native(
     Ok(())
 }
 
+/// Recursively drop object keys whose value is `null`.
+///
+/// #1264: a `null` in a `native.<engine>` block means "delete this key" — emit
+/// nothing and let the engine apply its own default, which is what a user
+/// writing `null` in an escape hatch expects. [`merge_json`] already skips
+/// nulls when inserting a *fresh* key, but its shared-key overwrite arm assigns
+/// wholesale and deliberately does not null-strip (an explicit null there is
+/// documented as intentional, not an `Option::None` artifact). So a null on a
+/// key the renderer already emitted — `autoMemoryEnabled`, `effortLevel`,
+/// `advisorSize` — survived into the output and violated #720's
+/// no-null-valued-keys invariant.
+///
+/// Applied adapter-locally as the last step of the settings render rather than
+/// inside `merge_json`, so every other caller keeps the documented semantics.
+fn strip_null_valued_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_null_valued_keys(v);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                strip_null_valued_keys(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Top-level settings.json keys that a modeled capability renders. The
 /// top-level `native` catch-all (D3) is for keys NO modeled feature owns, so
 /// these must never appear there — they belong in the `native_<feature>`
@@ -1419,6 +1450,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         reject_modeled_keys_in_catch_all(native)?;
     }
     overlay_native(&mut settings_value, manifest.native.get("claude_code"))?;
+
+    // #1264: a native `null` deletes the key rather than emitting an explicit
+    // JSON null. Runs after the last overlay so it catches every layer.
+    strip_null_valued_keys(&mut settings_value);
 
     let settings_path = out.join("settings.json");
 
@@ -2824,6 +2859,73 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// A manifest whose catch-all `native.claude_code` block sets `key` to
+    /// `value`, with every renderer-owned key that `native` may collide with
+    /// already emitted so the shared-key overwrite path is the one exercised.
+    fn manifest_with_native_override(
+        key: &str,
+        value: serde_yaml::Value,
+    ) -> crate::merge::MergedManifest {
+        let mut fragment = serde_yaml::Mapping::new();
+        fragment.insert(serde_yaml::Value::String(key.into()), value);
+        let mut manifest = crate::merge::MergedManifest::default();
+        manifest.capabilities.auto_memory_enabled = Some(true);
+        manifest.capabilities.effort_level = Some("high".into());
+        manifest.capabilities.advisor_size = Some("large".into());
+        manifest.native = std::collections::BTreeMap::from([(
+            "claude_code".to_owned(),
+            serde_yaml::Value::Mapping(fragment),
+        )]);
+        manifest
+    }
+
+    /// #1264: `native.<engine>.<key>: null` means "delete the key", so the
+    /// renderer must emit nothing rather than an explicit JSON `null`. Covers
+    /// every key reachable through the catch-all (`permissions` and `hooks` are
+    /// refused by `reject_modeled_keys_in_catch_all`, so they can't get here).
+    #[test]
+    fn native_null_removes_a_rendered_settings_key() {
+        for key in ["autoMemoryEnabled", "effortLevel", "advisorSize"] {
+            let settings = render_settings_for_test(&manifest_with_native_override(
+                key,
+                serde_yaml::Value::Null,
+            ));
+            assert!(
+                settings.get(key).is_none(),
+                "`native.claude_code.{key}: null` must delete the key, got: {settings}"
+            );
+        }
+    }
+
+    /// #1264: the null-strip must not stop at the top level — a null nested
+    /// inside an object value would violate #720's invariant just the same.
+    #[test]
+    fn native_null_nested_in_an_object_is_stripped_too() {
+        let nested: serde_yaml::Value = serde_yaml::from_str("outer:\n  inner: null\n").unwrap();
+        let settings = render_settings_for_test(&manifest_with_native_override("someKey", nested));
+        assert_eq!(
+            settings["someKey"],
+            serde_json::json!({ "outer": {} }),
+            "a null nested under a native key must be stripped, got: {settings}"
+        );
+    }
+
+    /// #1264 non-regression: a non-null native value still overrides the
+    /// renderer's own emission — that override is the whole point of emitting
+    /// these keys before the overlay.
+    #[test]
+    fn native_non_null_still_overrides_the_rendered_value() {
+        let settings = render_settings_for_test(&manifest_with_native_override(
+            "autoMemoryEnabled",
+            serde_yaml::Value::Bool(false),
+        ));
+        assert_eq!(
+            settings["autoMemoryEnabled"],
+            serde_json::json!(false),
+            "native must still win on a non-null collision, got: {settings}"
+        );
+    }
+
     /// Every `command` string registered for a native hook event (across all
     /// matcher-group entries), flattened for easy `contains`/`any` assertions.
     fn hook_commands_for(settings: &serde_json::Value, event: &str) -> Vec<String> {
@@ -4093,11 +4195,9 @@ mod tests {
     /// the overlay specifically so `native` can override them, so the overwrite
     /// path is reachable in production and must be covered.
     ///
-    /// One case is held back: a null value on a key the renderer already emitted
-    /// currently renders an explicit JSON `null`, violating the no-null-keys
-    /// invariant from #720. That is a live rendering bug tracked in #1264, not
-    /// something this generator should quietly assert away — drop the exclusion
-    /// when #1264 is fixed.
+    /// Null values are generated freely, including on colliding keys: since
+    /// #1264 a native `null` deletes the key, so the render upholds #720's
+    /// no-null-valued-keys invariant either way.
     fn arb_native_fragment()
     -> impl Strategy<Value = std::collections::BTreeMap<String, serde_yaml::Value>> {
         let key = prop_oneof![
@@ -4109,9 +4209,6 @@ mod tests {
             for (k, v) in pairs {
                 if MODELED_SETTINGS_KEYS.contains(&k.as_str()) {
                     continue;
-                }
-                if v.is_null() && OVERRIDABLE_SETTINGS_KEYS.contains(&k.as_str()) {
-                    continue; // #1264
                 }
                 fragment.insert(serde_yaml::Value::String(k), v);
             }
