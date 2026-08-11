@@ -248,6 +248,146 @@ fn three_level_nesting_chain_via_cli() {
     assert_eq!(by_slug("child-subtask")["parent"], "parent-story");
 }
 
+// --- Implicit parent chaining (#929) ---
+
+#[test]
+fn bare_add_chains_onto_the_previously_added_task() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    for title in ["First", "Second", "Third"] {
+        llmenv(dir.path())
+            .args(["task", "add", title])
+            .assert()
+            .success();
+    }
+
+    let ls = llmenv(dir.path())
+        .args(["task", "ls", "--format", "json", "--all"])
+        .output()
+        .unwrap();
+    let tasks: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let by_slug = |slug: &str| -> &serde_json::Value {
+        tasks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["slug"] == slug)
+            .expect("task must be present")
+    };
+    assert_eq!(by_slug("first")["parent"], serde_json::Value::Null);
+    assert_eq!(by_slug("second")["parent"], "first");
+    assert_eq!(by_slug("third")["parent"], "second");
+}
+
+#[test]
+fn explicit_parent_overrides_the_implicit_chain() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "First"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Second"])
+        .assert()
+        .success();
+    // Bypass the implicit chain and nest explicitly under "First" instead.
+    llmenv(dir.path())
+        .args(["task", "add", "Third", "--parent", "first"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "third"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["parent"], "first");
+}
+
+#[test]
+fn no_parent_flag_forces_a_top_level_task() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "First"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Deliberately unrelated", "--no-parent"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "deliberately-unrelated"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["parent"], serde_json::Value::Null);
+}
+
+#[test]
+fn parent_and_no_parent_flags_conflict() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "First"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Second", "--parent", "first", "--no-parent"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn first_task_in_a_new_session_has_no_implicit_parent() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Very first task"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "very-first-task"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(task["parent"], serde_json::Value::Null);
+}
+
+#[test]
+fn implicit_chaining_never_crosses_sessions() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint-1");
+    llmenv(dir.path())
+        .args(["task", "add", "In sprint one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish"])
+        .assert()
+        .success();
+
+    start_session(dir.path(), "sprint-2");
+    llmenv(dir.path())
+        .args(["task", "add", "In sprint two"])
+        .assert()
+        .success();
+
+    let show = llmenv(dir.path())
+        .args(["task", "show", "in-sprint-two"])
+        .output()
+        .unwrap();
+    let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(
+        task["parent"],
+        serde_json::Value::Null,
+        "a new session's first task must not chain onto a prior session's last task"
+    );
+}
+
 #[test]
 fn multiple_children_under_one_parent_via_cli() {
     let dir = TempDir::new().unwrap();
@@ -321,11 +461,37 @@ fn new_top_level_task_while_wip_exists_prints_guard_message() {
         .assert()
         .success();
 
+    // #929: a bare `task add` (no --parent) now defaults to chaining onto
+    // the previous task, so it's no longer "unrelated" — only an explicit
+    // `--no-parent` is still the deliberate top-level case the guard warns
+    // about.
     llmenv(dir.path())
-        .args(["task", "add", "Unrelated new thing"])
+        .args(["task", "add", "Unrelated new thing", "--no-parent"])
         .assert()
         .success()
         .stdout(predicates::str::contains("already in progress"));
+}
+
+#[test]
+fn implicit_chain_while_wip_exists_prints_no_guard_message() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "In progress work"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "in-progress-work"])
+        .assert()
+        .success();
+
+    // A bare `task add` chains onto "In progress work" by default (#929) —
+    // no longer the guard's "unrelated top-level task" case.
+    llmenv(dir.path())
+        .args(["task", "add", "Chained follow-up"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("already in progress").not());
 }
 
 #[test]
@@ -774,9 +940,11 @@ fn add_guard_warns_for_wip_but_not_waiting_tasks() {
         .assert()
         .success();
 
-    // A `wip` task should trip the "already in progress" guard.
+    // A `wip` task should trip the "already in progress" guard — only for
+    // an explicit --no-parent (#929): a bare `add` now chains onto "First
+    // task" by default, which is no longer the guard's "unrelated" case.
     llmenv(dir.path())
-        .args(["task", "add", "Second task"])
+        .args(["task", "add", "Second task", "--no-parent"])
         .assert()
         .success()
         .stdout(predicates::str::contains("already in progress"));
@@ -788,7 +956,7 @@ fn add_guard_warns_for_wip_but_not_waiting_tasks() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "add", "Third task"])
+        .args(["task", "add", "Third task", "--no-parent"])
         .assert()
         .success()
         .stdout(predicates::str::contains("already in progress").not());
@@ -1465,9 +1633,6 @@ fn show_current_falls_back_to_most_recently_updated_non_done_task_without_a_wip_
         .args(["task", "add", "Task two"])
         .assert()
         .success();
-    // now_rfc3339() is second-precision — sleep past the second boundary so
-    // task-two's post-note updated_at is unambiguously later than task-one's.
-    std::thread::sleep(std::time::Duration::from_secs(1));
     llmenv(dir.path())
         .args(["task", "note", "task-two", "a note"])
         .assert()

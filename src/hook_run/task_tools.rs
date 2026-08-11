@@ -121,7 +121,7 @@ fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
             "couldn't auto-start a task session ({e}); run `llmenv task session start`."
         ));
     }
-    match task::add_task(state_dir, subject, None, None, project) {
+    match task::add_task(state_dir, subject, task::ParentSpec::Auto, None, project) {
         Ok(t) => {
             let mut msg = format!(
                 "Tracked in the llmenv task tracker as '{slug}' — do NOT stop tracking and do \
