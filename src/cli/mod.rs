@@ -895,13 +895,13 @@ pub(super) fn warn_dead_native_keys(
 ///
 /// Called once per command, right after that command's own [`build_manifest`]
 /// call resolves, by every command that materializes (`export`, `regenerate`,
-/// `check-stale --fix`) plus `doctor` (which builds a manifest to inspect but
+/// `check-stale --auto-fix`) plus `doctor` (which builds a manifest to inspect but
 /// never materializes). Each call site is independent — none of these commands
 /// call each other within one process, so there's no shared gate to route
 /// through and no double-emission risk to guard against (unlike
 /// `installed_adapters`, which `doctor` calls both directly and indirectly,
 /// per #1072's reasoning for keeping this call explicit-per-command rather
-/// than attached to that gate). #1075: `check-stale --fix`'s
+/// than attached to that gate). #1075: `check-stale --auto-fix`'s
 /// `build_and_materialize` path used to skip this call entirely, found
 /// because it doesn't go through the `export`/`regenerate` loop that the
 /// other two commands share.
@@ -1598,7 +1598,7 @@ fn claude_code_only_post_materialize(
 /// and env vars the adapter wants exported.
 ///
 /// Called once per adapter from the export/regenerate loop, and once from
-/// [`build_and_materialize`] (`check-stale --fix`'s single-adapter path). The
+/// [`build_and_materialize`] (`check-stale --auto-fix`'s single-adapter path). The
 /// merged manifest is adapter-independent up until `adapter.materialize` —
 /// build it once outside a loop via [`build_manifest`] instead of rebuilding
 /// it per adapter (#708).
@@ -1777,7 +1777,7 @@ fn materialize_from_manifest(
 /// adapter wants exported. Returns `Ok(None)` when no firing bundle has a
 /// content directory on disk.
 ///
-/// `check-stale --fix`'s single-adapter path — every other production caller
+/// `check-stale --auto-fix`'s single-adapter path — every other production caller
 /// prefers building the manifest once and calling [`materialize_from_manifest`]
 /// per adapter when materializing multiple adapters in a loop (#708).
 fn build_and_materialize(
@@ -1793,9 +1793,8 @@ fn build_and_materialize(
     } = ctx;
     let built = build_manifest(config, config_dir, active, firing, false)?;
     // #1075: this is the one materialize path that doesn't go through
-    // run_export/run_regenerate's shared loop, so it needs its own call —
-    // same guarded helper, so it can never double up with theirs even if a
-    // future caller has both run in one process.
+    // run_export/run_regenerate's shared loop, so it needs its own explicit
+    // call, right after build_manifest resolves — same as those two.
     warn_dead_config(config, built.as_ref().map(|(m, _)| m), "warning:");
     let Some((mut manifest, cache_root)) = built else {
         // No content dirs — clear any stale throttle state so a since-removed
