@@ -662,12 +662,16 @@ fn fresh_render_dedups_typed_and_native_hook_duplicate() {
 }
 
 // #985: the task-tool redirect PreToolUse hook is registered only when the
-// task tracker is enabled.
-fn task_tracker_matcher_present(enabled: bool) -> bool {
+// task tracker is enabled. #980: also gated by the `block_engine_task_tools`
+// opt-out sub-toggle.
+fn task_tracker_matcher_present(enabled: bool, block_engine_task_tools: bool) -> bool {
     let m = llmenv::merge::MergedManifest {
         capabilities: llmenv::config::Capabilities {
             features: Some(llmenv::config::Features {
-                task_tracker: Some(llmenv::config::TaskTracker { enabled }),
+                task_tracker: Some(llmenv::config::TaskTracker {
+                    enabled,
+                    block_engine_task_tools,
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -692,7 +696,7 @@ fn task_tracker_matcher_present(enabled: bool) -> bool {
 #[test]
 fn task_tool_redirect_hook_registered_when_tracker_enabled() {
     assert!(
-        task_tracker_matcher_present(true),
+        task_tracker_matcher_present(true, true),
         "task-tool redirect hook must be registered when the tracker is enabled"
     );
 }
@@ -700,8 +704,17 @@ fn task_tool_redirect_hook_registered_when_tracker_enabled() {
 #[test]
 fn task_tool_redirect_hook_absent_when_tracker_disabled() {
     assert!(
-        !task_tracker_matcher_present(false),
+        !task_tracker_matcher_present(false, true),
         "task-tool redirect hook must not be registered when the tracker is disabled"
+    );
+}
+
+#[test]
+fn task_tool_redirect_hook_absent_when_opted_out() {
+    assert!(
+        !task_tracker_matcher_present(true, false),
+        "task-tool redirect hook must not be registered when \
+         block_engine_task_tools is false, even with the tracker enabled"
     );
 }
 
@@ -1961,7 +1974,10 @@ fn task_tracker_registers_stop_hook_when_session_log_disabled() {
     let m = llmenv::merge::MergedManifest {
         capabilities: llmenv::config::Capabilities {
             features: Some(llmenv::config::Features {
-                task_tracker: Some(llmenv::config::TaskTracker { enabled: true }),
+                task_tracker: Some(llmenv::config::TaskTracker {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2043,7 +2059,10 @@ fn no_stop_hook_when_task_tracker_and_session_log_both_disabled() {
 fn llmenv_skill_materialized_when_task_tracker_enabled() {
     let caps = llmenv::config::Capabilities {
         features: Some(llmenv::config::Features {
-            task_tracker: Some(llmenv::config::TaskTracker { enabled: true }),
+            task_tracker: Some(llmenv::config::TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         }),
         ..Default::default()
@@ -2078,7 +2097,10 @@ fn llmenv_skill_materialized_when_task_tracker_enabled() {
 fn llmenv_skill_absent_when_no_features_enabled() {
     let caps = llmenv::config::Capabilities {
         features: Some(llmenv::config::Features {
-            task_tracker: Some(llmenv::config::TaskTracker { enabled: false }),
+            task_tracker: Some(llmenv::config::TaskTracker {
+                enabled: false,
+                ..Default::default()
+            }),
             ..Default::default()
         }),
         ..Default::default()

@@ -612,7 +612,10 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let caps = Capabilities {
             features: Some(crate::config::Features {
-                task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+                task_tracker: Some(crate::config::TaskTracker {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1013,7 +1016,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let caps = Capabilities {
             features: Some(crate::config::Features {
-                task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+                task_tracker: Some(crate::config::TaskTracker {
+                    enabled: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()

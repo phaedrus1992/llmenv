@@ -1512,7 +1512,10 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let mut manifest = MergedManifest::default();
         manifest.capabilities.features = Some(crate::config::Features {
-            task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+            task_tracker: Some(crate::config::TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         });
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();

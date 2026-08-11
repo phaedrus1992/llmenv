@@ -77,7 +77,10 @@ mod tests {
         codebase_memory: bool,
     ) -> Features {
         Features {
-            task_tracker: task_tracker.then_some(TaskTracker { enabled: true }),
+            task_tracker: task_tracker.then_some(TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
             memory: if memory {
                 vec![serde_yaml::from_str("server_host: h\nport: 1").unwrap()]
             } else {
