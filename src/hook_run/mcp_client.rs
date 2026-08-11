@@ -80,6 +80,26 @@ fn is_stale_session_status(status: reqwest::StatusCode) -> bool {
     )
 }
 
+/// Emit `[LLMENV_MCP_CALL] <tool> <duration>us` to stderr when
+/// `LLMENV_TRACE_TIMING` is set (#1259) — the same env var that already gates
+/// hook-run's per-phase timing markers and the cache hit/miss telemetry, so
+/// there's one flag to know about, not three. Bare `eprintln!`, matching
+/// `emit_trace_timing`'s precedent, for the same reason: a machine-parseable
+/// protocol line must not depend on the tracing subscriber's config.
+///
+/// Deliberately reports timing only, not a result/entry count (the issue's
+/// own examples show a count suffix only for `icm_memory_recall`, none for
+/// `icm_memory_store`) — this client is a generic MCP transport with no
+/// notion of what a "result" means for any given tool, and parsing ICM's
+/// recall-specific text format here would be a layering violation.
+fn emit_mcp_call_trace(tool: &str, elapsed: Duration) {
+    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+        return;
+    }
+    let us = elapsed.as_micros();
+    eprintln!("[LLMENV_MCP_CALL] {tool} {us}us");
+}
+
 impl McpHttpClient {
     /// Build a client for `url` whose every request is bounded by `timeout`.
     ///
@@ -213,7 +233,8 @@ impl McpHttpClient {
     /// (after the one stale-session retry), a JSON-RPC `error` field, or a
     /// response missing `result.content[].text`.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> anyhow::Result<String> {
-        match self.try_call_tool(name, &arguments).await {
+        let start = std::time::Instant::now();
+        let result = match self.try_call_tool(name, &arguments).await {
             Ok(text) => Ok(text),
             Err(CallToolError::StaleSession(first_err)) => {
                 tracing::warn!(
@@ -230,7 +251,17 @@ impl McpHttpClient {
                     })
             }
             Err(CallToolError::Fatal(e)) => Err(e),
+        };
+        // Only the single entry point for every MCP tool call this process
+        // makes (#1259) — includes a stale-session retry's full cost when one
+        // happens, which is exactly the "MCP proxy latency" #1259 wants
+        // visible. Emitted on success only, matching emit_trace_timing's and
+        // emit_cache_trace's precedent (the failure itself already logs via
+        // the tracing::warn!/Action::run's own error path).
+        if result.is_ok() {
+            emit_mcp_call_trace(name, start.elapsed());
         }
+        result
     }
 
     /// One attempt at `call_tool`, distinguishing a stale-session rejection
@@ -503,6 +534,11 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn emit_mcp_call_trace_never_panics_without_env_var() {
+        emit_mcp_call_trace("icm_memory_recall", Duration::from_micros(2340));
+    }
 
     #[tokio::test]
     async fn call_tool_returns_text_content() {

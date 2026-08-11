@@ -159,8 +159,27 @@ layer llmenv has —
   a clone already existed, since it's a deliberate cache invalidation rather
   than a reuse.
 
-Off by default, same as the per-phase timing markers above — enabling one
-enables both.
+## Profiling per-MCP-call timing
+
+(added in v3.10.0) The same `LLMENV_TRACE_TIMING` var also enables per-call
+MCP timing: one stderr line per tool call, covering every MCP call the
+process makes (`icm_wake_up`, `icm_memory_recall`, `icm_memory_store`,
+`icm_transcript_show`, and so on), not just the aggregate `mcp_us` bucket in
+the per-phase marker above —
+
+```text
+[LLMENV_MCP_CALL] icm_wake_up 66544us
+[LLMENV_MCP_CALL] icm_memory_recall 2340us
+```
+
+The duration includes a stale-session retry's full cost when one happens
+(the retry itself already logs a warning) — this is deliberately "wall time
+this call actually took", not "time excluding recovery". No result or entry
+count is reported: the client has no notion of what a "result" means for an
+arbitrary tool.
+
+Off by default, same as the markers above — enabling `LLMENV_TRACE_TIMING`
+enables all three (per-phase, cache, per-MCP-call).
 
 ## Sync conflicts
 
