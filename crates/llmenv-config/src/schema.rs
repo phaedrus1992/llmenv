@@ -718,7 +718,7 @@ pub enum PermissionMode {
 
 /// A neutral permission rule: a tool plus either a glob `pattern` or a list of
 /// path roots. The adapter renders this to the engine's string grammar.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct PermissionRule {
     pub tool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -839,7 +839,7 @@ pub struct ContentMatch {
     pub depth: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Bundle {
     pub name: String,
@@ -849,7 +849,7 @@ pub struct Bundle {
 
 /// A reachable address for a named host, used by the `memory` backend to
 /// construct a client URL pointing at whichever host runs the server.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct HostEntry {
     /// Hostname, DNS name, or IP literal (e.g. `"still.local"`, `"10.0.0.4"`).
     pub addr: String,
@@ -1318,6 +1318,31 @@ pub struct Memory {
     pub wakeup_max_tokens: Option<u32>,
 }
 
+/// Manual, not derived (#1044): `listen_host`'s real default is
+/// `default_listen_host()` (`"127.0.0.1"`), not `String::default()`
+/// (`""`) — a bare `#[derive(Default)]` would silently diverge from the
+/// `#[serde(default = "default_listen_host")]` value every other
+/// construction path (deserialization) actually uses.
+impl Default for Memory {
+    fn default() -> Self {
+        Self {
+            server_host: String::new(),
+            port: 0,
+            listen_host: default_listen_host(),
+            when: Vec::new(),
+            default_topics: Vec::new(),
+            default_type: None,
+            default_importance: None,
+            type_importance: std::collections::BTreeMap::new(),
+            consolidation: None,
+            retention: None,
+            auto_prune: false,
+            mcp_permissions: None,
+            wakeup_max_tokens: None,
+        }
+    }
+}
+
 /// Valid range for [`Memory::wakeup_max_tokens`] — the range icm's own MCP
 /// handler clamps to. Shared by every place that validates the field (top-
 /// level `Config::validate()`, the bundle-contributed mirror in
@@ -1331,7 +1356,7 @@ pub const WAKEUP_MAX_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 20..=4000;
 /// and `CBM_ALLOWED_ROOT` are always computed by llmenv (state dir +
 /// project root), never user-configurable, so a declared entry can't
 /// accidentally scope the indexer outside the intended project.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct CodebaseMemory {
     /// Tags that activate this server, intersected with active scope tags
     /// (same selection model as `mcp`/`memory`).
@@ -1767,6 +1792,16 @@ index_path: /custom/index/path
     fn features_codebase_memory_defaults_to_empty() {
         let features: Features = serde_yaml::from_str("{}").unwrap();
         assert!(features.codebase_memory.is_empty());
+    }
+
+    #[test]
+    fn memory_default_agrees_with_parsed_absent_listen_host() {
+        // #1044: Memory's Default impl is manual, not derived, specifically
+        // so it can't diverge from what deserializing with listen_host
+        // absent produces (default_listen_host(), not String::default()).
+        let memory: Memory = serde_yaml::from_str("server_host: h\nport: 1\n").unwrap();
+        assert_eq!(memory.listen_host, "127.0.0.1");
+        assert_eq!(Memory::default().listen_host, "127.0.0.1");
     }
 
     #[test]

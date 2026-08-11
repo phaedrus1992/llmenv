@@ -34,7 +34,7 @@ pub(crate) fn capture_stdout(label: &str, program: &str, args: &[&str]) -> Optio
     String::from_utf8(out.stdout).ok()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ActiveScope {
     pub id: String,
     pub kind: &'static str,
@@ -118,12 +118,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 id: s.id.clone(),
                 kind: "network",
                 tags: matcher::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
-                project_root: None,
-                enable_bundles: Vec::new(),
-                disable_bundles: Vec::new(),
-                name: None,
-                description: None,
-                unknown_fields: Vec::new(),
+                ..Default::default()
             });
         }
     }
@@ -133,12 +128,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 id: s.id.clone(),
                 kind: "host",
                 tags: matcher::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
-                project_root: None,
-                enable_bundles: Vec::new(),
-                disable_bundles: Vec::new(),
-                name: None,
-                description: None,
-                unknown_fields: Vec::new(),
+                ..Default::default()
             });
         }
     }
@@ -148,12 +138,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 id: s.id.clone(),
                 kind: "user",
                 tags: matcher::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
-                project_root: None,
-                enable_bundles: Vec::new(),
-                disable_bundles: Vec::new(),
-                name: None,
-                description: None,
-                unknown_fields: Vec::new(),
+                ..Default::default()
             });
         }
     }
@@ -166,12 +151,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                     id: s.id.clone(),
                     kind: "content",
                     tags: matcher::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
-                    project_root: None,
-                    enable_bundles: Vec::new(),
-                    disable_bundles: Vec::new(),
-                    name: None,
-                    description: None,
-                    unknown_fields: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
