@@ -211,7 +211,7 @@ fn bash_rule(pattern: &str) -> PermissionRule {
     PermissionRule {
         tool: "Bash".to_string(),
         pattern: Some(pattern.to_string()),
-        paths: Vec::new(),
+        ..Default::default()
     }
 }
 
