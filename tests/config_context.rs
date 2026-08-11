@@ -6,9 +6,10 @@
 //! `hookSpecificOutput` (not at the top level), which is the structure
 //! Claude Code requires for SessionStart hook payloads.
 
-use assert_cmd::Command;
 use std::fs;
 use tempfile::TempDir;
+
+mod support;
 
 fn setup_config() -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
@@ -26,9 +27,8 @@ fn config_context_places_hook_event_name_inside_hook_specific_output() {
     let (_dir, config_path) = setup_config();
     let config_dir = _dir.path();
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(config_dir);
     cmd.env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", config_dir)
         .arg("config-context")
         .write_stdin(r#"{"hook_event_name":"SessionStart"}"#);
 
@@ -72,34 +72,27 @@ fn config_context_includes_task_tracker_reminder_for_wip_tasks() {
     .unwrap();
     let state_dir = TempDir::new().unwrap();
 
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", state_dir.path())
         .args(["task", "session", "start", "sprint"])
         .assert()
         .success();
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", state_dir.path())
         .args(["task", "add", "Left over from last session"])
         .assert()
         .success();
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", state_dir.path())
         .args(["task", "start", "left-over-from-last"])
         .assert()
         .success();
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
     cmd.env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", state_dir.path())
         .arg("config-context")
         .write_stdin(r#"{"hook_event_name":"SessionStart"}"#);
@@ -121,26 +114,21 @@ fn config_context_no_task_tracker_reminder_when_disabled() {
     let (dir, config_path) = setup_config();
     let state_dir = TempDir::new().unwrap();
 
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", state_dir.path())
         .args(["task", "session", "start", "sprint"])
         .assert()
         .success();
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", state_dir.path())
         .args(["task", "add", "Some open task"])
         .assert()
         .success();
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
     cmd.env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
         .env("LLMENV_STATE_DIR", state_dir.path())
         .arg("config-context")
         .write_stdin(r#"{"hook_event_name":"SessionStart"}"#);
@@ -162,9 +150,8 @@ fn config_context_exits_zero_on_empty_stdin() {
     let (_dir, config_path) = setup_config();
     let config_dir = _dir.path();
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(config_dir);
     cmd.env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", config_dir)
         .arg("config-context")
         .write_stdin("");
 

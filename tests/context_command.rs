@@ -1,8 +1,9 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
+
+mod support;
 
 /// Get current user for test config
 fn get_current_user() -> String {
@@ -53,10 +54,8 @@ adapter:
     let (_dir, config_path) = setup_config(&config);
     let config_dir = _dir.path();
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_CONFIG", config_path)
-        .env("LLMENV_CONFIG_DIR", config_dir)
-        .arg("context");
+    let mut cmd = support::isolated_llmenv_cmd(config_dir);
+    cmd.env("LLMENV_CONFIG", config_path).arg("context");
 
     cmd.assert()
         .success()
@@ -104,10 +103,8 @@ adapter:
     let (_dir, config_path) = setup_config(&config);
     let config_dir = _dir.path();
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_CONFIG", config_path)
-        .env("LLMENV_CONFIG_DIR", config_dir)
-        .arg("context");
+    let mut cmd = support::isolated_llmenv_cmd(config_dir);
+    cmd.env("LLMENV_CONFIG", config_path).arg("context");
 
     cmd.assert()
         .success()
@@ -158,10 +155,8 @@ adapter:
     let (_dir, config_path) = setup_config(&config);
     let config_dir = _dir.path();
 
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_CONFIG", config_path)
-        .env("LLMENV_CONFIG_DIR", config_dir)
-        .arg("context");
+    let mut cmd = support::isolated_llmenv_cmd(config_dir);
+    cmd.env("LLMENV_CONFIG", config_path).arg("context");
 
     cmd.assert()
         .success()

@@ -8,6 +8,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+mod support;
+
 /// A config dir whose `config.yaml` holds `content`.
 fn config_dir_with(content: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
@@ -16,10 +18,8 @@ fn config_dir_with(content: &str) -> TempDir {
 }
 
 fn statusline(dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_CONFIG_DIR", dir.path())
-        .arg("statusline")
-        .write_stdin("{}");
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
+    cmd.arg("statusline").write_stdin("{}");
     cmd
 }
 
@@ -47,9 +47,8 @@ fn malformed_yaml_config_renders_an_error_row() {
 fn valid_config_renders_widgets_not_the_error_row() {
     // Guards against the error row becoming unconditional.
     let dir = config_dir_with("statusline:\n  rows:\n    - \"{model}\"\n");
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_CONFIG_DIR", dir.path())
-        .arg("statusline")
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
+    cmd.arg("statusline")
         .write_stdin(r#"{"model":{"display_name":"Opus 4.8"}}"#);
     cmd.assert()
         .success()
