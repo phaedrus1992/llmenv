@@ -319,6 +319,7 @@ llmenv task clear <id>... | --session <id>
 llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
 llmenv task session finish [<id>]
 llmenv task session show [<id>]
+llmenv task session summary [<id>] [--format json]
 llmenv task session ls
 ```
 
@@ -456,6 +457,14 @@ project's hook.
   tasks) is a legitimate historical record.
 - `task session show [<id>]` — print a session's progress; auto-resolves
   like `finish`.
+- `task session summary [<id>] [--format json]` — (added in v3.10.0) roll up
+  a session's tasks, notes, and states into one artifact — e.g. for a memory
+  write or a status report at the end of a session. Auto-resolves like
+  `finish`. The human format prints a header (name or id, description,
+  done/total) followed by each task's state glyph and notes, in the same
+  parent-before-children order `task ls` groups a session's tasks in.
+  `--format json` is the stable, memory-ingestion-friendly form: session
+  metadata plus an array of tasks (slug/title/state/parent/blocked_on/notes).
 - `task session ls` — list every currently open session (id, name, project,
   description), current-project matches first. This is the recovery path
   after a compaction: with one session open for the project there's exactly
