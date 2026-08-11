@@ -1028,6 +1028,142 @@ fn session_show_reports_progress() {
         .stdout(predicates::str::contains("1/1 done"));
 }
 
+// --- Session summary (#931) ---
+
+#[test]
+fn session_summary_json_includes_tasks_and_notes() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "note", "ship-the-release", "made progress"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "done", "ship-the-release"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "session", "summary", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["name"], "sprint");
+    assert_eq!(summary["done"], 1);
+    assert_eq!(summary["total"], 1);
+    assert_eq!(summary["tasks"][0]["slug"], "ship-the-release");
+    assert_eq!(summary["tasks"][0]["state"], "done");
+    assert_eq!(summary["tasks"][0]["notes"][0]["text"], "made progress");
+}
+
+#[test]
+fn session_summary_human_format_lists_tasks_and_notes() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "note", "ship-the-release", "made progress"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "session", "summary"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("sprint"));
+    assert!(stdout.contains("0/1 done"));
+    assert!(stdout.contains("ship-the-release"));
+    assert!(stdout.contains("made progress"));
+}
+
+#[test]
+fn session_summary_by_explicit_id_works_with_no_open_session() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish", "sprint"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "session", "summary", "sprint", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["total"], 1);
+}
+
+#[test]
+fn session_summary_orders_tasks_parent_before_children() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Parent", "--no-parent"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "add", "Child", "--parent", "parent"])
+        .assert()
+        .success();
+
+    let out = llmenv(dir.path())
+        .args(["task", "session", "summary", "--format", "json"])
+        .output()
+        .unwrap();
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["tasks"][0]["slug"], "parent");
+    assert_eq!(summary["tasks"][1]["slug"], "child");
+}
+
+#[test]
+fn session_summary_on_empty_session_has_no_tasks() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+
+    let out = llmenv(dir.path())
+        .args(["task", "session", "summary", "--format", "json"])
+        .output()
+        .unwrap();
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["total"], 0);
+    assert!(summary["tasks"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn session_summary_unknown_id_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "summary", "no-such-session"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no session"));
+}
+
+#[test]
+fn session_summary_with_no_open_session_and_no_id_fails() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args(["task", "session", "summary"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no open session"));
+}
+
 #[test]
 fn tasks_added_during_a_session_are_tagged_and_survive_it_finishing() {
     let dir = TempDir::new().unwrap();
