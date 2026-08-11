@@ -583,6 +583,35 @@ fn merge_mcp_into_claude_json(
     let servers = build_mcp_servers(mcps)?;
     let mut doc = json!({ "mcpServers": servers });
     overlay_native(&mut doc, native)?;
+    // #1270 follow-up: record, per server, which top-level keys the native
+    // overlay just nulled — the preserve-subkeys loop below needs this,
+    // because stripping the null (next line) makes a just-deleted key and a
+    // key llmenv simply never rendered look identical (both absent).
+    // Without it, a credential-purge null on `env`/`headers` would be
+    // "filled back in" from the stale on-disk copy instead of staying gone.
+    let nulled_keys: std::collections::HashMap<String, std::collections::HashSet<String>> = doc
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .map(|servers| {
+            servers
+                .iter()
+                .filter_map(|(name, entry)| {
+                    let nulls: std::collections::HashSet<String> = entry
+                        .as_object()?
+                        .iter()
+                        .filter(|(_, v)| v.is_null())
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    (!nulls.is_empty()).then(|| (name.clone(), nulls))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // #1270: a native null on a key already rendered into a server entry must
+    // delete the key rather than persist an explicit JSON null into the real,
+    // persistent `.claude.json`. `doc` is a scratch value scoped to llmenv's
+    // own server set, so stripping it here doesn't touch any foreign key.
+    super::strip_json_nulls(&mut doc);
     let llmenv_servers = doc
         .get("mcpServers")
         .and_then(|v| v.as_object())
@@ -631,8 +660,11 @@ fn merge_mcp_into_claude_json(
                 if let Some(existing) = servers_obj.get(&name).and_then(|v| v.as_object())
                     && let Some(ref mut new_obj) = entry.as_object_mut()
                 {
+                    let explicitly_nulled = nulled_keys.get(&name);
                     for (k, v) in existing.iter() {
-                        if !new_obj.contains_key(k) {
+                        let was_explicitly_deleted =
+                            explicitly_nulled.is_some_and(|nulled| nulled.contains(k));
+                        if !new_obj.contains_key(k) && !was_explicitly_deleted {
                             new_obj.insert(k.clone(), v.clone());
                         }
                     }
@@ -1424,7 +1456,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // JSON null — `merge_json`'s shared-key overwrite arm deliberately does not
     // null-strip, so a null on a key the renderer already emitted survived to
     // here. Runs after the last overlay so it catches every layer.
-    strip_json_nulls(&mut settings_value);
+    super::strip_json_nulls(&mut settings_value);
 
     let settings_path = out.join("settings.json");
 
@@ -1693,7 +1725,7 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
 /// sources (typed hooks, the `native_hooks` overlay, prior render generations)
 /// converge to one entry per event, matcher, and command.
 fn dedup_hooks_doc(hooks: &mut serde_json::Value) {
-    strip_json_nulls(hooks);
+    super::strip_json_nulls(hooks);
     if let Some(obj) = hooks.as_object_mut() {
         for entries in obj.values_mut() {
             if let Some(arr) = entries.as_array_mut() {
@@ -1811,7 +1843,7 @@ fn reconcile_settings(
 /// (same basis [`dedup_hooks_doc`] uses).
 fn normalized_hook(entry: &serde_json::Value) -> serde_json::Value {
     let mut clone = entry.clone();
-    strip_json_nulls(&mut clone);
+    super::strip_json_nulls(&mut clone);
     clone
 }
 
@@ -1854,45 +1886,6 @@ fn purge_stale_owned_hooks(
         if let Some(arr) = existing_obj.get_mut(event).and_then(|v| v.as_array_mut()) {
             arr.retain(|e| !stale.contains(&normalized_hook(e)));
         }
-    }
-}
-
-/// Recursively remove null-valued keys from every JSON object in `value`.
-///
-/// This makes objects that differ only by null vs absent key compare equal
-/// under [`PartialEq`], which [`merge_json`]'s array dedup uses. Needed
-/// because `generate_settings_json` conditionally omits keys when their
-/// value is `None` (e.g. `"tool"` for command-type hooks), but older
-/// on-disk copies may have `"tool": null` from a previous serialization
-/// path — the two compare unequal and pile up as duplicates across renders.
-fn strip_json_nulls(value: &mut serde_json::Value) {
-    strip_json_nulls_depth(value, 0);
-}
-
-/// Depth-limited implementation of [`strip_json_nulls`].
-///
-/// The depth guard prevents stack overflow on pathological JSON nesting
-/// (config depth is normally <10 levels). The serde_json parser has its
-/// own recursion limit, but that guards _parsing_ — the value tree can
-/// be arbitrarily nested after deserialization.
-fn strip_json_nulls_depth(value: &mut serde_json::Value, depth: usize) {
-    if depth > 64 {
-        tracing::warn!("strip_json_nulls: max depth exceeded, bailing");
-        return;
-    }
-    match value {
-        serde_json::Value::Array(items) => {
-            for item in items.iter_mut() {
-                strip_json_nulls_depth(item, depth + 1);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            map.retain(|_, v| !v.is_null());
-            for v in map.values_mut() {
-                strip_json_nulls_depth(v, depth + 1);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -2139,7 +2132,6 @@ mod tests {
         merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
         read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
         render_marketplace_source, render_permission_rule, seed_install_method, seed_status_line,
-        strip_json_nulls,
     };
     use crate::adapter::skills::{
         arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,
@@ -3858,45 +3850,6 @@ mod tests {
         assert_eq!(entries.len(), 1, "nulls at any depth stripped before dedup");
     }
 
-    #[test]
-    fn strip_json_nulls_removes_null_vals() {
-        let mut v = serde_json::json!({
-            "a": null,
-            "b": 1,
-            "c": { "d": null, "e": [{"f": null, "g": 2}] }
-        });
-        strip_json_nulls(&mut v);
-        assert_eq!(
-            v,
-            serde_json::json!({
-                "b": 1,
-                "c": { "e": [{ "g": 2 }] }
-            })
-        );
-    }
-
-    fn contains_no_nulls(v: &serde_json::Value) -> bool {
-        match v {
-            // Only check for null-valued *keys in objects* — that's what
-            // strip_json_nulls removes. Bare null or null array elements
-            // are not touched, so don't flag them.
-            serde_json::Value::Array(items) => items.iter().all(contains_no_nulls),
-            serde_json::Value::Object(map) => {
-                !map.values().any(|v| v.is_null()) && map.values().all(contains_no_nulls)
-            }
-            _ => true,
-        }
-    }
-
-    fn count_non_null_leaves(v: &serde_json::Value) -> usize {
-        match v {
-            serde_json::Value::Null => 0,
-            serde_json::Value::Array(items) => items.iter().map(count_non_null_leaves).sum(),
-            serde_json::Value::Object(map) => map.values().map(count_non_null_leaves).sum(),
-            _ => 1,
-        }
-    }
-
     fn arb_json() -> impl Strategy<Value = serde_json::Value> {
         let leaf = prop_oneof![
             Just(serde_json::Value::Null),
@@ -3911,41 +3864,6 @@ mod tests {
                     .prop_map(|kvs| serde_json::Value::Object(kvs.into_iter().collect())),
             ]
         })
-    }
-
-    proptest! {
-        // strip_json_nulls never panics on arbitrary JSON input.
-        #[test]
-        fn strip_json_nulls_total(mut v in arb_json()) {
-            strip_json_nulls(&mut v);
-        }
-
-        // Idempotency: applying strip_json_nulls twice equals applying it once.
-        #[test]
-        fn strip_json_nulls_idempotent(v in arb_json()) {
-            let mut once = v.clone();
-            strip_json_nulls(&mut once);
-            let mut twice = once.clone();
-            strip_json_nulls(&mut twice);
-            prop_assert_eq!(once, twice);
-        }
-
-        // Completeness: after strip_json_nulls, no Value::Null exists at any depth.
-        #[test]
-        fn strip_json_nulls_no_nulls_remain(mut v in arb_json()) {
-            strip_json_nulls(&mut v);
-            prop_assert!(contains_no_nulls(&v), "null values remain after strip_json_nulls");
-        }
-
-        // Non-null preservation: non-null leaf values are structurally preserved.
-        #[test]
-        fn strip_json_nulls_preserves_non_null(mut v in arb_json()) {
-            let expected = count_non_null_leaves(&v);
-            strip_json_nulls(&mut v);
-            let actual = count_non_null_leaves(&v);
-            prop_assert_eq!(expected, actual,
-                "strip_json_nulls should not remove non-null values");
-        }
     }
 
     #[test]
@@ -4453,6 +4371,72 @@ mod tests {
         assert_eq!(doc["mcpServers"]["extra"]["command"], "native-bin");
         // enabledMcpjsonServers is never emitted into .claude.json (#244).
         assert!(doc.get("enabledMcpjsonServers").is_none());
+    }
+
+    /// #1270: a native `null` on a key llmenv already rendered into
+    /// `.claude.json` must delete the key rather than persist an explicit
+    /// JSON null, mirroring #1264's fix for `settings.json`. This is the
+    /// highest-priority write path from #1270 — `.claude.json` is real,
+    /// persistent user state, not a rebuildable cache folder, so a stray
+    /// null here survives across renders instead of being rebuilt away.
+    #[test]
+    fn merge_mcp_native_null_removes_a_rendered_server_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let native: serde_yaml::Value =
+            serde_yaml::from_str("mcpServers:\n  icm:\n    command: null\n").unwrap();
+        merge_mcp_into_claude_json(tmp.path(), &[stdio_mcp("icm", "icm-bin")], Some(&native))
+            .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join(CLAUDE_JSON_FILE)).unwrap())
+                .unwrap();
+        assert!(
+            doc["mcpServers"]["icm"].get("command").is_none(),
+            "`native_mcp.claude_code.mcpServers.icm.command: null` must delete \
+             the key, got: {doc}"
+        );
+    }
+
+    /// #1270 follow-up: the preserve-runtime-subkeys loop below the strip must
+    /// not resurrect a key the native fragment explicitly nulled. Before this
+    /// fix, stripping the null off the scratch `doc` also erased the "this key
+    /// was explicitly deleted" signal the loop checks via `contains_key`, so a
+    /// credential-purge null on `env`/`headers` silently restored the stale
+    /// on-disk value on every re-render — the exact case the #1270 changelog
+    /// entry claims is fixed. Uses a non-empty `env` so llmenv's own render
+    /// emits the key (an empty env renders no key at all either way).
+    #[test]
+    fn merge_mcp_native_null_does_not_resurrect_preserved_subkey() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({
+                "mcpServers": { "icm": { "command": "icm-bin", "env": { "TOKEN": "leaked-old-value" } } }
+            }),
+        );
+        let mcp = ResolvedMcp {
+            name: "icm".into(),
+            kind: ResolvedKind::Stdio {
+                command: "icm-bin".into(),
+                args: vec![],
+                env: std::collections::BTreeMap::from([("TOKEN".into(), "resolved-value".into())]),
+            },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
+            mcp_permissions: None,
+            wakeup_max_tokens: None,
+        };
+        let native: serde_yaml::Value =
+            serde_yaml::from_str("mcpServers:\n  icm:\n    env: null\n").unwrap();
+        merge_mcp_into_claude_json(tmp.path(), &[mcp], Some(&native)).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            doc["mcpServers"]["icm"].get("env").is_none(),
+            "`native_mcp.claude_code.mcpServers.icm.env: null` must delete the \
+             key, not resurrect the on-disk value, got: {doc}"
+        );
     }
 
     #[test]

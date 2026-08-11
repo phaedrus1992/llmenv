@@ -391,6 +391,11 @@ impl AgentAdapter for CrushAdapter {
         }
         let mut doc_value = serde_json::Value::Object(doc);
         super::overlay_native_json(&mut doc_value, manifest.native.get("crush"), "native.crush")?;
+        // #1270: a native null on a key already rendered must delete the key
+        // rather than persist an explicit JSON null (mirrors #1264's fix for
+        // the Claude Code adapter's settings.json). Runs after the last
+        // overlay so it catches every layer.
+        super::strip_json_nulls(&mut doc_value);
 
         // 7. Write crush.json
         let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
@@ -996,6 +1001,33 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(doc["custom_key"], serde_json::json!("custom_value"));
+    }
+
+    /// #1270: `native.crush: {options: null}` must delete a key the render
+    /// already emitted, mirroring #1264's fix for the Claude Code adapter's
+    /// `settings.json`. `options` is rendered whenever the llmenv skill is
+    /// materialized (a feature flag, not an external fixture), and it is not
+    /// in `CRUSH_MODELED_KEYS`, so the catch-all accepts overriding it.
+    #[test]
+    fn materialize_native_null_removes_a_rendered_crush_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let caps = Capabilities {
+            features: Some(crate::config::Features {
+                task_tracker: Some(crate::config::TaskTracker { enabled: true }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut manifest = manifest_with_caps(caps);
+        let frag: serde_yaml::Value = serde_yaml::from_str("options: null").unwrap();
+        manifest.native.insert("crush".into(), frag);
+        CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("options").is_none(),
+            "`native.crush.options: null` must delete the key, got: {doc}"
+        );
     }
 
     // ── materialize: native_permissions passthrough ───────────────────────────

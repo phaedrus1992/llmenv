@@ -513,9 +513,14 @@ impl AgentAdapter for OpencodeAdapter {
         let mut owned: Vec<PathBuf> = Vec::new();
 
         // 1. AGENTS.md
+        // #1269: skip the file entirely when nothing resolved, rather than
+        // leaving a 0-byte AGENTS.md. Staying out of `owned` also means a copy
+        // written by an earlier render is reconciled away as a ghost.
         super::skills::reject_hardcoded_config_path(&manifest.agents_md, "AGENTS.md")?;
-        crate::paths::write_owner_only(&out.join("AGENTS.md"), manifest.agents_md.as_bytes())?;
-        owned.push(PathBuf::from("AGENTS.md"));
+        if !manifest.agents_md.trim().is_empty() {
+            crate::paths::write_owner_only(&out.join("AGENTS.md"), manifest.agents_md.as_bytes())?;
+            owned.push(PathBuf::from("AGENTS.md"));
+        }
 
         // 2. rules/*.md — written verbatim; paths collected for instructions[]
         let mut instructions: Vec<String> = Vec::new();
@@ -995,6 +1000,11 @@ impl AgentAdapter for OpencodeAdapter {
             manifest.native.get("opencode"),
             "native.opencode",
         )?;
+        // #1270: a native null on a key already rendered must delete the key
+        // rather than persist an explicit JSON null (mirrors #1264's fix for
+        // the Claude Code adapter's settings.json). Runs after the last
+        // overlay so it catches every layer.
+        super::strip_json_nulls(&mut doc_value);
         let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
         let out_path = out.join(OPENCODE_JSON_FILE);
         crate::paths::write_owner_only(&out_path, &json_bytes)?;
@@ -1361,18 +1371,40 @@ mod tests {
 
     const VALID_FRONTMATTER: &str = "---\nname: x\ndescription: y\n---\nbody\n";
 
+    /// #1269: an empty `agents_md` must not leave a 0-byte `AGENTS.md` on disk,
+    /// mirroring #1262's fix for the Claude Code adapter's `CLAUDE.md`.
     #[test]
-    fn materialize_empty_manifest_writes_agents_md_and_json() {
+    fn materialize_omits_agents_md_when_there_is_no_content() {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = MergedManifest::default();
         let owned = OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         assert!(
-            owned.contains(&PathBuf::from("AGENTS.md")),
-            "owned must include AGENTS.md, got: {owned:?}"
+            !tmp.path().join("AGENTS.md").exists(),
+            "no agents_md must write no AGENTS.md at all"
+        );
+        assert!(
+            !owned.contains(&PathBuf::from("AGENTS.md")),
+            "AGENTS.md must be absent from the owned set so a stale copy from a \
+             prior render is reconciled away as a ghost"
         );
         assert!(
             owned.contains(&PathBuf::from(OPENCODE_JSON_FILE)),
             "owned must include opencode.json, got: {owned:?}"
+        );
+    }
+
+    /// #1269: whitespace-only content is as empty as the empty string.
+    #[test]
+    fn materialize_omits_agents_md_when_content_is_only_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            agents_md: "  \n\t\n".into(),
+            ..MergedManifest::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        assert!(
+            !tmp.path().join("AGENTS.md").exists(),
+            "whitespace-only agents_md must write no AGENTS.md"
         );
     }
 
@@ -1389,6 +1421,7 @@ mod tests {
         );
     }
 
+    /// #1269 non-regression: real content still lands verbatim and is owned.
     #[test]
     fn materialize_agents_md_content_is_preserved() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1396,9 +1429,10 @@ mod tests {
             agents_md: "# Test Rules\n\nSome content here.".to_string(),
             ..Default::default()
         };
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let owned = OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let content = std::fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap();
         assert_eq!(content, "# Test Rules\n\nSome content here.");
+        assert!(owned.contains(&PathBuf::from("AGENTS.md")));
     }
 
     #[test]
@@ -1889,6 +1923,25 @@ mod tests {
             .materialize(&manifest, tmp.path())
             .unwrap_err();
         assert!(err.to_string().contains("provider"), "{err}");
+    }
+
+    /// #1270: `native.opencode: {$schema: null}` must delete a key the render
+    /// already emitted, mirroring #1264's fix for the Claude Code adapter's
+    /// `settings.json`. `$schema` is always rendered and is not in
+    /// `OPENCODE_MODELED_KEYS`, so the catch-all accepts overriding it.
+    #[test]
+    fn materialize_native_null_removes_a_rendered_opencode_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        let frag: serde_yaml::Value = serde_yaml::from_str("$schema: null").unwrap();
+        manifest.native.insert("opencode".into(), frag);
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("$schema").is_none(),
+            "`native.opencode.$schema: null` must delete the key, got: {doc}"
+        );
     }
 
     #[test]
