@@ -611,8 +611,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
   `native_model_providers.claude_code`, `native_hooks.opencode`). Either way the
   block parses and merges but is never rendered. Checked against the merged
   config, so bundle-contributed keys are covered. `llmenv export` and
-  `llmenv regenerate` warn about the same thing, and `llmenv validate` fails on
-  an unknown engine id. See
+  `llmenv regenerate` warn about the same thing, as does
+  `llmenv check-stale --auto-fix` (since v3.10.0 — it re-materializes too, but
+  didn't run this check before then, #1075), and `llmenv validate` fails on an
+  unknown engine id. See
   [Engines](engines.md#engine-keys-are-validated).
 - Claude-only permission patterns under opencode (added in v3.8.0) — warns when a
   `capabilities.permissions` pattern uses Claude Code's colon-prefix syntax
@@ -623,7 +625,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
   isn't blocked. Use a space-separated pattern (`git commit *`) for a rule both
   engines honour, or move the Claude-only form to
   `native_permissions.claude_code`. `llmenv export` and `llmenv regenerate`
-  report this too.
+  report this too, as does `llmenv check-stale --auto-fix` since v3.10.0
+  (#1075).
 - legacy shell tools without their recommended replacement (added in v3.8.0) —
   warns when `capabilities.permissions.allow` grants `grep`/`find` without also
   granting `rg`/`fd`, the replacements this project's own bundled rules
