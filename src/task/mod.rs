@@ -887,7 +887,12 @@ fn resolve_note_index(notes: &[TaskNote], id: &str) -> anyhow::Result<usize> {
 /// ancestor — walks up from `new_parent` and checks `slug` never reappears. A
 /// `visited` guard (mirroring [`append_forest`]'s) makes a pre-existing
 /// malformed cycle elsewhere in the store terminate instead of looping
-/// forever; that's not this call's problem to fix.
+/// forever; that's not this call's problem to fix. A corrupt/unreadable file
+/// encountered while walking up also stops the walk there (treated the same
+/// as "no parent") — same fail-open tolerance `append_forest` and
+/// `start_task`'s dangling-`blocked_on` handling already use for a broken
+/// link elsewhere in the store; it can't itself be part of a cycle back to
+/// `slug` since the walk can't see past it either way.
 fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Result<()> {
     let mut current = new_parent.to_string();
     let mut visited = HashSet::new();
@@ -3134,6 +3139,54 @@ mod tests {
                 let order = execution_order(&tasks);
                 let last = order.last().unwrap().clone();
                 prop_assert_eq!(resolve_next_task(&tasks, &tasks, &last), None);
+            }
+
+            // -- #930: edit_task parent-change cycle rejection --
+
+            #[test]
+            fn edit_task_parent_change_cycle_rejection_matches_forest_structure(
+                forest in arb_forest(),
+                a_idx in 0usize..8,
+                b_idx in 0usize..8,
+            ) {
+                let a = forest[a_idx % forest.len()].clone();
+                let b = forest[b_idx % forest.len()].clone();
+                prop_assume!(a.slug != b.slug);
+
+                let dir = TempDir::new().unwrap();
+                for t in &forest {
+                    save_task(dir.path(), t).unwrap();
+                }
+
+                // Independent reference computation (doesn't call reject_cycle):
+                // is `a` among `b`'s ancestors, per the forest's own `parent`
+                // links? `arb_forest` guarantees every parent index is earlier
+                // than its child's, so this walk always terminates.
+                let mut a_is_ancestor_of_b = false;
+                let mut current = b.parent.clone();
+                while let Some(p) = current {
+                    if p == a.slug {
+                        a_is_ancestor_of_b = true;
+                        break;
+                    }
+                    current = forest.iter().find(|t| t.slug == p).and_then(|t| t.parent.clone());
+                }
+
+                let edit = TaskEdit {
+                    parent: Some(&b.slug),
+                    ..Default::default()
+                };
+                let result = edit_task(dir.path(), &a.slug, &edit);
+
+                prop_assert_eq!(
+                    result.is_err(),
+                    a_is_ancestor_of_b,
+                    "setting '{}' parent to '{}': expected cycle rejection = {}, got is_err = {}",
+                    a.slug,
+                    b.slug,
+                    a_is_ancestor_of_b,
+                    result.is_err(),
+                );
             }
         }
     }
