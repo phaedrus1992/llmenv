@@ -1000,6 +1000,11 @@ impl AgentAdapter for OpencodeAdapter {
             manifest.native.get("opencode"),
             "native.opencode",
         )?;
+        // #1270: a native null on a key already rendered must delete the key
+        // rather than persist an explicit JSON null (mirrors #1264's fix for
+        // the Claude Code adapter's settings.json). Runs after the last
+        // overlay so it catches every layer.
+        super::strip_json_nulls(&mut doc_value);
         let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
         let out_path = out.join(OPENCODE_JSON_FILE);
         crate::paths::write_owner_only(&out_path, &json_bytes)?;
@@ -1918,6 +1923,25 @@ mod tests {
             .materialize(&manifest, tmp.path())
             .unwrap_err();
         assert!(err.to_string().contains("provider"), "{err}");
+    }
+
+    /// #1270: `native.opencode: {$schema: null}` must delete a key the render
+    /// already emitted, mirroring #1264's fix for the Claude Code adapter's
+    /// `settings.json`. `$schema` is always rendered and is not in
+    /// `OPENCODE_MODELED_KEYS`, so the catch-all accepts overriding it.
+    #[test]
+    fn materialize_native_null_removes_a_rendered_opencode_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        let frag: serde_yaml::Value = serde_yaml::from_str("$schema: null").unwrap();
+        manifest.native.insert("opencode".into(), frag);
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("$schema").is_none(),
+            "`native.opencode.$schema: null` must delete the key, got: {doc}"
+        );
     }
 
     #[test]
