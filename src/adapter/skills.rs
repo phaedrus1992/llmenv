@@ -460,18 +460,25 @@ pub(crate) fn arb_permission_rule()
 /// Strategy for a single [`crate::config::HookHandler`], covering both handler
 /// kinds — `Command` (a shell command string) and `McpTool` (an MCP tool
 /// name) — since a hook config can be either. Shared by adapter test modules.
+///
+/// The character classes deliberately include JSON/shell/template-escaping-
+/// relevant characters (`"`, `\`, newline, `$`, `` ` ``, `{`, `}`, `'`) —
+/// found missing during #1265's pre-pr-review: the plain-alnum-only charset
+/// this replaced could never stress the JSON escaping `generate_shim_js`
+/// (opencode) and the `settings.json` renderer (claude_code) both rely on
+/// when splicing a hook command into their output.
 #[cfg(test)]
 pub(crate) fn arb_hook_handler()
 -> impl proptest::prelude::Strategy<Value = crate::config::HookHandler> {
     use proptest::prelude::*;
 
     prop_oneof![
-        "[a-z][a-z ./-]{0,20}".prop_map(|command| crate::config::HookHandler {
+        r#"[a-z][a-z ./\\"'$`{}\n-]{0,20}"#.prop_map(|command| crate::config::HookHandler {
             kind: crate::config::HookHandlerKind::Command,
             command: Some(command),
             tool: None,
         }),
-        "[a-z_]{1,16}".prop_map(|tool| crate::config::HookHandler {
+        r#"[a-z_][a-z_\\"'$`{}\n]{0,15}"#.prop_map(|tool| crate::config::HookHandler {
             kind: crate::config::HookHandlerKind::McpTool,
             command: None,
             tool: Some(tool),
@@ -504,7 +511,7 @@ pub(crate) fn arb_hook() -> impl proptest::prelude::Strategy<Value = crate::conf
     ];
     (
         event,
-        proptest::option::of("[a-zA-Z*]{1,8}"),
+        proptest::option::of(r#"[a-zA-Z*][a-zA-Z*\\"'$`{}\n]{0,7}"#),
         arb_hook_handler(),
     )
         .prop_map(|(event, matcher, handler)| crate::config::Hook {
