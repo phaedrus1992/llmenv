@@ -890,9 +890,21 @@ pub(super) fn warn_dead_native_keys(
 /// can never match (#838).
 ///
 /// Reads the merged manifest when one was built, so bundle-contributed settings
-/// are covered, and falls back to the raw config when no bundle fired. Shared by
-/// `export`, `regenerate`, and `doctor` so a new materialize path can't quietly
-/// opt out of the diagnostics.
+/// are covered, and falls back to the raw config when no bundle fired — so it
+/// still has something to report even when nothing ends up materializing.
+///
+/// Called once per command, right after that command's own [`build_manifest`]
+/// call resolves, by every command that materializes (`export`, `regenerate`,
+/// `check-stale --auto-fix`) plus `doctor` (which builds a manifest to inspect but
+/// never materializes). Each call site is independent — none of these commands
+/// call each other within one process, so there's no shared gate to route
+/// through and no double-emission risk to guard against (unlike
+/// `installed_adapters`, which `doctor` calls both directly and indirectly,
+/// per #1072's reasoning for keeping this call explicit-per-command rather
+/// than attached to that gate). #1075: `check-stale --auto-fix`'s
+/// `build_and_materialize` path used to skip this call entirely, found
+/// because it doesn't go through the `export`/`regenerate` loop that the
+/// other two commands share.
 ///
 /// Deliberately does **not** include the #975 legacy-tool lint
 /// (`legacy_tools_missing_replacement`): unlike the two checks here, an
@@ -1585,9 +1597,11 @@ fn claude_code_only_post_materialize(
 /// Materialize a pre-built manifest through `adapter`, returning the cache path
 /// and env vars the adapter wants exported.
 ///
-/// Called once per adapter from the export/regenerate loop. The merged manifest
-/// is adapter-independent up until `adapter.materialize` — build it once outside
-/// the loop via [`build_manifest`] instead of rebuilding it per adapter (#708).
+/// Called once per adapter from the export/regenerate loop, and once from
+/// [`build_and_materialize`] (`check-stale --auto-fix`'s single-adapter path). The
+/// merged manifest is adapter-independent up until `adapter.materialize` —
+/// build it once outside a loop via [`build_manifest`] instead of rebuilding
+/// it per adapter (#708).
 fn materialize_from_manifest(
     adapter: &dyn AgentAdapter,
     manifest: &mut MergedManifest,
@@ -1763,7 +1777,8 @@ fn materialize_from_manifest(
 /// adapter wants exported. Returns `Ok(None)` when no firing bundle has a
 /// content directory on disk.
 ///
-/// Prefer building the manifest once and calling [`materialize_from_manifest`]
+/// `check-stale --auto-fix`'s single-adapter path — every other production caller
+/// prefers building the manifest once and calling [`materialize_from_manifest`]
 /// per adapter when materializing multiple adapters in a loop (#708).
 fn build_and_materialize(
     adapter: &dyn AgentAdapter,
@@ -1776,9 +1791,12 @@ fn build_and_materialize(
         active,
         firing,
     } = ctx;
-    let Some((mut manifest, cache_root)) =
-        build_manifest(config, config_dir, active, firing, false)?
-    else {
+    let built = build_manifest(config, config_dir, active, firing, false)?;
+    // #1075: this is the one materialize path that doesn't go through
+    // run_export/run_regenerate's shared loop, so it needs its own explicit
+    // call, right after build_manifest resolves — same as those two.
+    warn_dead_config(config, built.as_ref().map(|(m, _)| m), "warning:");
+    let Some((mut manifest, cache_root)) = built else {
         // No content dirs — clear any stale throttle state so a since-removed
         // throttle config doesn't keep throttling.
         if let Err(e) = crate::throttle::store_active_throttle(None) {
