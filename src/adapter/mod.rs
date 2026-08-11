@@ -44,6 +44,49 @@ pub(crate) fn overlay_native_json(
     Ok(())
 }
 
+/// Recursively remove null-valued keys from every JSON object in `value`.
+///
+/// #1264: a native `null` on a key the renderer already emitted lands as an
+/// explicit JSON `null` rather than deleting the key — `merge_json`'s
+/// shared-key overwrite arm deliberately does not null-strip (an explicit
+/// null is intentional data, not an `Option::None` artifact), so the caller
+/// must strip at the write boundary instead. Every adapter write path that
+/// overlays a `native*` catch-all fragment onto already-rendered output calls
+/// this as its last step, after the final overlay, so it catches every layer.
+///
+/// Also makes objects that differ only by null vs absent key compare equal
+/// under [`PartialEq`], which `merge_json`'s array dedup relies on.
+pub(crate) fn strip_json_nulls(value: &mut serde_json::Value) {
+    strip_json_nulls_depth(value, 0);
+}
+
+/// Depth-limited implementation of [`strip_json_nulls`].
+///
+/// The depth guard prevents stack overflow on pathological JSON nesting
+/// (config depth is normally <10 levels). The serde_json parser has its own
+/// recursion limit, but that guards _parsing_ — the value tree can be
+/// arbitrarily nested after deserialization.
+fn strip_json_nulls_depth(value: &mut serde_json::Value, depth: usize) {
+    if depth > 64 {
+        tracing::warn!("strip_json_nulls: max depth exceeded, bailing");
+        return;
+    }
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                strip_json_nulls_depth(item, depth + 1);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_json_nulls_depth(v, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Human-readable YAML value kind, for error messages when a config value has
 /// the wrong shape (e.g. a native fragment that isn't a mapping).
 pub(crate) fn yaml_value_kind_name(value: &serde_yaml::Value) -> &'static str {
@@ -518,7 +561,7 @@ mod tests {
     use super::{
         AgentAdapter, binary_on_path, emit_hook_context, engine_id, known_engine_ids,
         modeled_key_redirect, overlay_native_json, registered_adapters, remote_transport_type_str,
-        resolve_bundle_relative_paths, resolve_command_paths_against_files,
+        resolve_bundle_relative_paths, resolve_command_paths_against_files, strip_json_nulls,
     };
 
     /// #1008: the rejection message must never invent a `native_*` field. Keys
@@ -956,6 +999,102 @@ mod tests {
                         "resolved token {token:?} not absolute under bundle dir"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn strip_json_nulls_removes_null_vals() {
+        let mut v = serde_json::json!({
+            "a": null,
+            "b": 1,
+            "c": { "d": null, "e": [{"f": null, "g": 2}] }
+        });
+        strip_json_nulls(&mut v);
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "b": 1,
+                "c": { "e": [{ "g": 2 }] }
+            })
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    mod strip_json_nulls_proptests {
+        use super::strip_json_nulls;
+        use proptest::prelude::*;
+
+        fn contains_no_nulls(v: &serde_json::Value) -> bool {
+            match v {
+                // Only check for null-valued *keys in objects* — that's what
+                // strip_json_nulls removes. Bare null or null array elements
+                // are not touched, so don't flag them.
+                serde_json::Value::Array(items) => items.iter().all(contains_no_nulls),
+                serde_json::Value::Object(map) => {
+                    !map.values().any(|v| v.is_null()) && map.values().all(contains_no_nulls)
+                }
+                _ => true,
+            }
+        }
+
+        fn count_non_null_leaves(v: &serde_json::Value) -> usize {
+            match v {
+                serde_json::Value::Null => 0,
+                serde_json::Value::Array(items) => items.iter().map(count_non_null_leaves).sum(),
+                serde_json::Value::Object(map) => map.values().map(count_non_null_leaves).sum(),
+                _ => 1,
+            }
+        }
+
+        fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+            let leaf = prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::Bool),
+                any::<i32>().prop_map(serde_json::Value::from),
+                "[a-z]{0,4}".prop_map(serde_json::Value::String),
+            ];
+            leaf.prop_recursive(3, 16, 4, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                    prop::collection::vec(("[a-z]{1,4}", inner), 0..4)
+                        .prop_map(|kvs| serde_json::Value::Object(kvs.into_iter().collect())),
+                ]
+            })
+        }
+
+        proptest! {
+            // strip_json_nulls never panics on arbitrary JSON input.
+            #[test]
+            fn strip_json_nulls_total(mut v in arb_json()) {
+                strip_json_nulls(&mut v);
+            }
+
+            // Idempotency: applying strip_json_nulls twice equals applying it once.
+            #[test]
+            fn strip_json_nulls_idempotent(v in arb_json()) {
+                let mut once = v.clone();
+                strip_json_nulls(&mut once);
+                let mut twice = once.clone();
+                strip_json_nulls(&mut twice);
+                prop_assert_eq!(once, twice);
+            }
+
+            // Completeness: after strip_json_nulls, no Value::Null exists at any depth.
+            #[test]
+            fn strip_json_nulls_no_nulls_remain(mut v in arb_json()) {
+                strip_json_nulls(&mut v);
+                prop_assert!(contains_no_nulls(&v), "null values remain after strip_json_nulls");
+            }
+
+            // Non-null preservation: non-null leaf values are structurally preserved.
+            #[test]
+            fn strip_json_nulls_preserves_non_null(mut v in arb_json()) {
+                let expected = count_non_null_leaves(&v);
+                strip_json_nulls(&mut v);
+                let actual = count_non_null_leaves(&v);
+                prop_assert_eq!(expected, actual,
+                    "strip_json_nulls should not remove non-null values");
             }
         }
     }

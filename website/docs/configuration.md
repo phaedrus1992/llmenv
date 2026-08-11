@@ -322,6 +322,14 @@ rather than `"autoMemoryEnabled": null`. Nulls nested inside an object value
 are stripped the same way. (behavior changed in v3.10.0; before that a `null`
 on a key llmenv had already rendered emitted an explicit JSON `null`)
 
+This is a uniform rule across every engine and every write path that overlays
+a `native*` catch-all fragment onto already-rendered output: Claude Code's
+`settings.json`, Crush's `crush.json` (`native.crush`), opencode's
+`opencode.json` (`native.opencode`), and the `mcpServers` block llmenv merges
+into the real, persistent `.claude.json` (`native_mcp.claude_code`) all strip
+a `null` down to a deleted key rather than persisting an explicit JSON `null`
+(added in v3.10.0).
+
 ## `bundle:`
 
 A bundle is a named content set that fires when one of its tags is active, or
