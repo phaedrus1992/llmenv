@@ -1,23 +1,16 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+mod support;
+use support::isolated_llmenv_cmd as llmenv_cmd;
 
-/// Build a `Command` for `llmenv` with `LLMENV_CONFIG_DIR` and `LLMENV_STATE_DIR`
-/// set to `config_dir`.
-fn llmenv_cmd(config_dir: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
-    cmd.env("LLMENV_CONFIG_DIR", config_dir)
-        .env("LLMENV_STATE_DIR", config_dir);
-    cmd
-}
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Assert the standard set of files created by `llmenv setup --no-launch`.
 ///
@@ -85,8 +78,10 @@ fn setup_no_launch_creates_config_dir_owner_only() {
 #[test]
 fn setup_custom_path() {
     let dir = TempDir::new().unwrap();
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    // Isolation anchored on a *different* dir than the positional target, so
+    // the assertion still proves the positional arg wins over the env var.
+    let elsewhere = TempDir::new().unwrap();
+    llmenv_cmd(elsewhere.path())
         .arg("setup")
         .arg(dir.path().to_str().unwrap())
         .arg("--no-launch")

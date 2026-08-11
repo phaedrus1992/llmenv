@@ -19,6 +19,8 @@ use std::fs;
 use std::time::Duration;
 use tempfile::TempDir;
 
+mod support;
+
 /// Write `config.yaml` into a fresh temp dir and return the dir (kept alive
 /// for the test) plus its path. The dir is used as `LLMENV_CONFIG_DIR`; the
 /// separate `CLAUDE_CONFIG_DIR` data-file dir is set up by callers via
@@ -38,10 +40,8 @@ fn statusline_cmd(
     config_path: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> Command {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(config_dir);
     cmd.env("LLMENV_CONFIG", config_path)
-        .env("LLMENV_CONFIG_DIR", config_dir)
-        .env("LLMENV_STATE_DIR", config_dir)
         .env("CLAUDE_CONFIG_DIR", data_dir)
         .arg("statusline");
     cmd

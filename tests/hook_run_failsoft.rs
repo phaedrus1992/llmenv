@@ -23,6 +23,8 @@ use std::fs;
 use std::time::Duration;
 use tempfile::TempDir;
 
+mod support;
+
 /// Current OS user, used to make a user scope match in test configs.
 fn current_user() -> String {
     std::env::var("USER")
@@ -151,10 +153,8 @@ adapter:
 /// Build a `Command` for `llmenv hook-run <event>` pointed at the temp config
 /// dir, with HOME-derived state redirected so the test never touches real config.
 fn hook_cmd(config_dir: &std::path::Path, config_path: &std::path::Path, event: &str) -> Command {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(config_dir);
     cmd.env("LLMENV_CONFIG", config_path)
-        .env("LLMENV_CONFIG_DIR", config_dir)
-        .env("LLMENV_STATE_DIR", config_dir)
         .arg("hook-run")
         .arg(event);
     cmd
@@ -833,27 +833,18 @@ adapter:
 fn stop_with_task_tracker_and_file_session_log_writes_log_and_reminder() {
     let (dir, config_path) = setup_config(&config_with_task_tracker_and_file_session_log());
 
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
-        .env("LLMENV_STATE_DIR", dir.path())
         .args(["task", "session", "start", "sprint"])
         .assert()
         .success();
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
-        .env("LLMENV_STATE_DIR", dir.path())
         .args(["task", "add", "Wrap up the release notes"])
         .assert()
         .success();
-    Command::cargo_bin("llmenv")
-        .unwrap()
+    support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
-        .env("LLMENV_CONFIG_DIR", dir.path())
-        .env("LLMENV_STATE_DIR", dir.path())
         .args(["task", "start", "wrap-up-the-release"])
         .assert()
         .success();

@@ -280,8 +280,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
             claude_md_content.push_str(COMPACT_SURVIVAL_FRAGMENT);
         }
 
-        crate::paths::write_owner_only(&out.join("CLAUDE.md"), claude_md_content.as_bytes())?;
-        owned.push(PathBuf::from("CLAUDE.md"));
+        // #1262: skip the file entirely when nothing resolved, rather than
+        // leaving a 0-byte CLAUDE.md. Staying out of `owned` also means a copy
+        // written by an earlier render is reconciled away as a ghost.
+        if !claude_md_content.trim().is_empty() {
+            crate::paths::write_owner_only(&out.join("CLAUDE.md"), claude_md_content.as_bytes())?;
+            owned.push(PathBuf::from("CLAUDE.md"));
+        }
 
         // Claude Code has a native rules-directory convention, so write each
         // `rules/*.md` file verbatim (frontmatter preserved) into `<out>/rules/`.
@@ -1415,6 +1420,12 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     }
     overlay_native(&mut settings_value, manifest.native.get("claude_code"))?;
 
+    // #1264: a native `null` deletes the key rather than emitting an explicit
+    // JSON null — `merge_json`'s shared-key overwrite arm deliberately does not
+    // null-strip, so a null on a key the renderer already emitted survived to
+    // here. Runs after the last overlay so it catches every layer.
+    strip_json_nulls(&mut settings_value);
+
     let settings_path = out.join("settings.json");
 
     // #991: the hooks llmenv is rendering this round, captured before reconcile
@@ -2140,6 +2151,63 @@ mod tests {
     use proptest::prelude::*;
     use std::path::PathBuf;
 
+    /// #1262: an empty `agents_md` with no applicable fragment must not leave a
+    /// 0-byte `CLAUDE.md` on disk.
+    #[test]
+    fn materialize_omits_claude_md_when_there_is_no_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest::default();
+        let owned = ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+
+        assert!(
+            !tmp.path().join("CLAUDE.md").exists(),
+            "no agents_md and no fragment must write no CLAUDE.md at all"
+        );
+        assert!(
+            !owned.contains(&PathBuf::from("CLAUDE.md")),
+            "CLAUDE.md must be absent from the owned set so a stale copy from a \
+             prior render is reconciled away as a ghost"
+        );
+    }
+
+    /// #1262: whitespace-only content is as empty as the empty string — writing
+    /// it would produce a file whose only content is a newline.
+    #[test]
+    fn materialize_omits_claude_md_when_content_is_only_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            agents_md: "  \n\t\n".into(),
+            ..MergedManifest::default()
+        };
+        ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+
+        assert!(
+            !tmp.path().join("CLAUDE.md").exists(),
+            "whitespace-only agents_md must write no CLAUDE.md"
+        );
+    }
+
+    /// #1262 non-regression: real content still lands verbatim.
+    #[test]
+    fn materialize_writes_claude_md_when_there_is_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MergedManifest {
+            agents_md: "# Project rules\n".into(),
+            ..MergedManifest::default()
+        };
+        let owned = ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+
+        let written = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(written, "# Project rules\n");
+        assert!(owned.contains(&PathBuf::from("CLAUDE.md")));
+    }
+
     #[test]
     fn materialize_emits_no_schema_sidecar_when_adapter_has_none() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2760,6 +2828,73 @@ mod tests {
         generate_settings_json(tmp.path(), manifest).unwrap();
         let bytes = std::fs::read(tmp.path().join("settings.json")).unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A manifest whose catch-all `native.claude_code` block sets `key` to
+    /// `value`, with every renderer-owned key that `native` may collide with
+    /// already emitted so the shared-key overwrite path is the one exercised.
+    fn manifest_with_native_override(
+        key: &str,
+        value: serde_yaml::Value,
+    ) -> crate::merge::MergedManifest {
+        let mut fragment = serde_yaml::Mapping::new();
+        fragment.insert(serde_yaml::Value::String(key.into()), value);
+        let mut manifest = crate::merge::MergedManifest::default();
+        manifest.capabilities.auto_memory_enabled = Some(true);
+        manifest.capabilities.effort_level = Some("high".into());
+        manifest.capabilities.advisor_size = Some("large".into());
+        manifest.native = std::collections::BTreeMap::from([(
+            "claude_code".to_owned(),
+            serde_yaml::Value::Mapping(fragment),
+        )]);
+        manifest
+    }
+
+    /// #1264: `native.<engine>.<key>: null` means "delete the key", so the
+    /// renderer must emit nothing rather than an explicit JSON `null`. Covers
+    /// every key reachable through the catch-all (`permissions` and `hooks` are
+    /// refused by `reject_modeled_keys_in_catch_all`, so they can't get here).
+    #[test]
+    fn native_null_removes_a_rendered_settings_key() {
+        for key in ["autoMemoryEnabled", "effortLevel", "advisorSize"] {
+            let settings = render_settings_for_test(&manifest_with_native_override(
+                key,
+                serde_yaml::Value::Null,
+            ));
+            assert!(
+                settings.get(key).is_none(),
+                "`native.claude_code.{key}: null` must delete the key, got: {settings}"
+            );
+        }
+    }
+
+    /// #1264: the null-strip must not stop at the top level — a null nested
+    /// inside an object value would violate #720's invariant just the same.
+    #[test]
+    fn native_null_nested_in_an_object_is_stripped_too() {
+        let nested: serde_yaml::Value = serde_yaml::from_str("outer:\n  inner: null\n").unwrap();
+        let settings = render_settings_for_test(&manifest_with_native_override("someKey", nested));
+        assert_eq!(
+            settings["someKey"],
+            serde_json::json!({ "outer": {} }),
+            "a null nested under a native key must be stripped, got: {settings}"
+        );
+    }
+
+    /// #1264 non-regression: a non-null native value still overrides the
+    /// renderer's own emission — that override is the whole point of emitting
+    /// these keys before the overlay.
+    #[test]
+    fn native_non_null_still_overrides_the_rendered_value() {
+        let settings = render_settings_for_test(&manifest_with_native_override(
+            "autoMemoryEnabled",
+            serde_yaml::Value::Bool(false),
+        ));
+        assert_eq!(
+            settings["autoMemoryEnabled"],
+            serde_json::json!(false),
+            "native must still win on a non-null collision, got: {settings}"
+        );
     }
 
     /// Every `command` string registered for a native hook event (across all
@@ -4031,25 +4166,31 @@ mod tests {
     /// the overlay specifically so `native` can override them, so the overwrite
     /// path is reachable in production and must be covered.
     ///
-    /// One case is held back: a null value on a key the renderer already emitted
-    /// currently renders an explicit JSON `null`, violating the no-null-keys
-    /// invariant from #720. That is a live rendering bug tracked in #1264, not
-    /// something this generator should quietly assert away — drop the exclusion
-    /// when #1264 is fixed.
+    /// Null values are generated freely, including on colliding keys: since
+    /// #1264 a native `null` deletes the key, so the render upholds #720's
+    /// no-null-valued-keys invariant either way.
+    ///
+    /// The null-on-a-colliding-key pair gets its own generator arm rather than
+    /// relying on `arb_yaml_value` happening to produce a top-level null. That
+    /// is the exact shape #1264 regressed on, and `prop_recursive` favours
+    /// container recursion over leaf termination hard enough that it otherwise
+    /// lands in roughly 1% of fragments — a handful of hits per default
+    /// 256-case run, with enough variance to miss the regression outright.
     fn arb_native_fragment()
     -> impl Strategy<Value = std::collections::BTreeMap<String, serde_yaml::Value>> {
-        let key = prop_oneof![
-            "[a-z]{1,8}".prop_map(String::from),
-            proptest::sample::select(OVERRIDABLE_SETTINGS_KEYS.as_slice()).prop_map(String::from),
+        let overridable = || {
+            proptest::sample::select(OVERRIDABLE_SETTINGS_KEYS.as_slice()).prop_map(String::from)
+        };
+        let pair = prop_oneof![
+            2 => ("[a-z]{1,8}".prop_map(String::from), arb_yaml_value(2)),
+            2 => (overridable(), arb_yaml_value(2)),
+            1 => (overridable(), Just(serde_yaml::Value::Null)),
         ];
-        proptest::collection::vec((key, arb_yaml_value(2)), 0..4).prop_map(|pairs| {
+        proptest::collection::vec(pair, 0..4).prop_map(|pairs| {
             let mut fragment = serde_yaml::Mapping::new();
             for (k, v) in pairs {
                 if MODELED_SETTINGS_KEYS.contains(&k.as_str()) {
                     continue;
-                }
-                if v.is_null() && OVERRIDABLE_SETTINGS_KEYS.contains(&k.as_str()) {
-                    continue; // #1264
                 }
                 fragment.insert(serde_yaml::Value::String(k), v);
             }

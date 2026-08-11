@@ -13,13 +13,16 @@
 //! Both guards must appear *inside* the function body, *before* the `source <(llmenv export)`
 //! line, so they short-circuit before any render work is done.
 
-use assert_cmd::Command;
 use std::time::Duration;
+use tempfile::TempDir;
+
+mod support;
 
 /// The non-interactive guard must appear inside the zsh hook function.
 #[test]
 fn zsh_hook_has_non_interactive_guard() {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let home = TempDir::new().unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(home.path());
     cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "zsh"]).output().unwrap();
 
@@ -38,7 +41,8 @@ fn zsh_hook_has_non_interactive_guard() {
 /// The already-active guard must appear inside the zsh hook function.
 #[test]
 fn zsh_hook_has_already_active_guard() {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let home = TempDir::new().unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(home.path());
     cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "zsh"]).output().unwrap();
 
@@ -56,7 +60,8 @@ fn zsh_hook_has_already_active_guard() {
 /// Guards must appear before `source <(llmenv export)` in the zsh hook.
 #[test]
 fn zsh_hook_guards_precede_source() {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let home = TempDir::new().unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(home.path());
     cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "zsh"]).output().unwrap();
 
@@ -86,7 +91,8 @@ fn zsh_hook_guards_precede_source() {
 /// The non-interactive guard must appear inside the bash hook function.
 #[test]
 fn bash_hook_has_non_interactive_guard() {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let home = TempDir::new().unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(home.path());
     cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "bash"]).output().unwrap();
 
@@ -104,7 +110,8 @@ fn bash_hook_has_non_interactive_guard() {
 /// The already-active guard must appear inside the bash hook function.
 #[test]
 fn bash_hook_has_already_active_guard() {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let home = TempDir::new().unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(home.path());
     cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "bash"]).output().unwrap();
 
@@ -122,7 +129,8 @@ fn bash_hook_has_already_active_guard() {
 /// Guards must appear before `source <(llmenv export)` in the bash hook.
 #[test]
 fn bash_hook_guards_precede_source() {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let home = TempDir::new().unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(home.path());
     cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "bash"]).output().unwrap();
 
@@ -155,7 +163,8 @@ fn bash_hook_guards_precede_source() {
 /// — i.e. the `precmd_functions` / `PROMPT_COMMAND` wiring is still emitted.
 #[test]
 fn zsh_hook_still_registers_precmd_function() {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let home = TempDir::new().unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(home.path());
     cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "zsh"]).output().unwrap();
 
@@ -171,7 +180,8 @@ fn zsh_hook_still_registers_precmd_function() {
 /// Interactive shells (no sentinel var set) must still wire up PROMPT_COMMAND.
 #[test]
 fn bash_hook_still_registers_prompt_command() {
-    let mut cmd = Command::cargo_bin("llmenv").unwrap();
+    let home = TempDir::new().unwrap();
+    let mut cmd = support::isolated_llmenv_cmd(home.path());
     cmd.timeout(Duration::from_secs(10));
     let output = cmd.args(["hook", "bash"]).output().unwrap();
 
