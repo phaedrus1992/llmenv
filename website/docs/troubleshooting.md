@@ -179,7 +179,34 @@ count is reported: the client has no notion of what a "result" means for an
 arbitrary tool.
 
 Off by default, same as the markers above — enabling `LLMENV_TRACE_TIMING`
-enables all three (per-phase, cache, per-MCP-call).
+enables all four (per-phase, cache, per-MCP-call, context/recall).
+
+## Profiling memory-recall and injected-context size
+
+(added in v3.10.0) The same `LLMENV_TRACE_TIMING` var also enables
+recall/injection telemetry for `TurnStart`'s memory-recall dispatch
+(project-scoped recall, plus one tag- and bundle-scoped recall per active
+tag/bundle):
+
+```text
+[LLMENV_CONTEXT] recall_entries=4 recall_bytes=3896 injected_entries=4 injected_bytes=3896 advisory_stripped=2
+```
+
+- `recall_entries`/`recall_bytes` — how many of the dispatched recall
+  actions came back non-empty, and their total byte size, before dedup.
+- `injected_entries`/`injected_bytes` — how many of those actually ended up
+  in the injected context, and their total byte size, after dedup.
+- `advisory_stripped` — recall actions that came back non-empty but weren't
+  injected: either the whole response was advisory-only noise (e.g. "No
+  memories found."), or it exactly duplicated an already-kept action's text
+  (the same memory recalled under more than one active tag/bundle).
+
+Granularity is per recall *action* (one per project/tag/bundle scope), not
+per individual memory record inside a response — parsing ICM's
+recall-response text format to count individual records would couple this
+telemetry to a format owned by a separate system. Only emitted when the
+dispatched actions included at least one recall (`SessionStart`'s
+`icm_wake_up` and `SessionEnd`'s `icm_memory_store` never emit this line).
 
 ## Sync conflicts
 
