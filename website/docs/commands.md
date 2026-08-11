@@ -313,6 +313,8 @@ llmenv task ls [--format json] (--session <id> | --all) [--current-project]
 llmenv task show <id> | --current | --next
 llmenv task note <id> [text]
 llmenv task block <id> --on <other>
+llmenv task edit <id> [--title <t>] [--parent SLUG | --no-parent]
+  [--block-on <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note <index-or-timestamp>]
 llmenv task clear <id>... | --session <id>
 llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
 llmenv task session finish [<id>]
@@ -397,6 +399,18 @@ unambiguous prefix of one.
   on the **parent** rather than hand-wiring a `block` edge to each sibling —
   a `blocked_on` reference isn't satisfied until the target task *and every
   one of its descendants* are done.
+- `task edit <id> [--title <t>] [--parent SLUG | --no-parent] [--block-on
+  <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note
+  <index-or-timestamp>]` — mutate an existing task. (added in v3.10.0) Every
+  flag is optional and independent; an `edit` with none of them is a no-op
+  that still bumps the task's `updated_at`. `--parent`/`--no-parent` re-parent
+  or detach the task (same conflict as `task add`'s flags) and reject a change
+  that would make the task its own ancestor. `--block-on`/`--unblock`
+  (repeatable) add or remove `blocked_on` dependencies, idempotently — adding
+  an already-present id or removing an absent one is a no-op, not an error.
+  `--add-note` appends a note (reads from stdin if given as an empty string,
+  e.g. `--add-note ''`); `--delete-note` removes one by its 0-based index in
+  `task show`'s `notes` array, or by its exact `at` timestamp.
 - `task clear <id>...` / `task clear --session <id>` — delete task(s)
   outright, for a batch that's being deliberately abandoned rather than just
   detached from a session (that's what `session start --replace` does,
