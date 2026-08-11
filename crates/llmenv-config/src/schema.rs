@@ -457,8 +457,9 @@ impl Default for Cache {
 /// Cache-folder strictness dial (#246). One knob, three positions, ordered by
 /// how aggressively a folder is reused: `loose` ⊂ `normal` ⊂ `strict`. Default
 /// is [`Self::Normal`] — the common path, isolating by selection *shape* and
-/// binary minor version while still reusing a folder across content edits so a
-/// running agent's in-session state survives a re-render.
+/// binary major version while still reusing a folder across content edits and
+/// minor/patch upgrades, so a running agent's in-session state survives a
+/// re-render (#1263).
 ///
 /// The *shape* is a 12-hex digest over the active selection (`active_tags ∪
 /// directly_enabled_bundles`), so two different tag/bundle combinations never
@@ -470,9 +471,10 @@ pub enum HashingMode {
     /// the same per-shape folder. Fewest folders; relies on age-based gc to
     /// trim shapes that fall out of use.
     Loose,
-    /// Folder = `<adapter>/<version_mm>/<shape>` (`version_mm` = `major.minor`).
-    /// The default. Content edits re-render into the same folder; a minor
-    /// version bump or a selection change mints a new one.
+    /// Folder = `<adapter>/<version_major>/<shape>`. The default. Content
+    /// edits and minor/patch version bumps re-render into the same folder;
+    /// only a major version bump or a selection change mints a new one
+    /// (#1263).
     #[default]
     Normal,
     /// Folder = `<adapter>/<VERSION_TAG>-<content_hash>`. Any input change mints
