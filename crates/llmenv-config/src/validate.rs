@@ -165,6 +165,21 @@ pub enum ValidateError {
     #[error("skill '{0}' path contains traversal components (..): {1}")]
     SkillPathTraversal(String, String),
     #[error(
+        "output style '{0}' is not a valid style name: use only ASCII letters, digits, \
+         '.', '_', '-'"
+    )]
+    OutputStyleInvalidName(String),
+    #[error("output style '{0}' has an empty description")]
+    OutputStyleEmptyDescription(String),
+    #[error("output style '{0}' has empty content")]
+    OutputStyleEmptyContent(String),
+    #[error(
+        "duplicate output style name (case-insensitive): '{0}' — names must be unique \
+         regardless of case, since case-insensitive filesystems (macOS, Windows) would \
+         otherwise collide when writing output-styles/*.md"
+    )]
+    OutputStyleDuplicateName(String),
+    #[error(
         "{context}: permission rule tool='{tool}' value '{value}' has unbalanced \
          parentheses. Adapters that render neutral rules as 'Tool(value)' strings \
          (Claude Code, Crush) require value's own '('/')' to balance, or the engine's \
@@ -448,6 +463,7 @@ impl Config {
         self.validate_hooks()?;
         self.validate_lsp()?;
         self.validate_skills()?;
+        self.validate_output_styles()?;
         self.validate_model_providers()?;
         self.validate_default_models()?;
         self.validate_plugins()?;
@@ -769,6 +785,32 @@ impl Config {
                     "{} (not a valid skill name: use only ASCII letters, digits, '.', '_', '-')",
                     s.name
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    // #1130 (security-audit P2): mirrors validate_skills — catches an unsafe
+    // name, an empty description/content, or a duplicate at config-load time
+    // instead of letting it surface mid-materialize after other files were
+    // already written. Duplicate check is case-insensitive because output
+    // styles render to `output-styles/<name>.md`, and a case-insensitive
+    // filesystem (macOS, Windows) collapses two distinct-cased names onto the
+    // same file.
+    fn validate_output_styles(&self) -> Result<(), ValidateError> {
+        let mut seen_names = std::collections::HashSet::new();
+        for o in &self.output_styles {
+            if !llmenv_paths::is_valid_short_name(&o.name) {
+                return Err(ValidateError::OutputStyleInvalidName(o.name.clone()));
+            }
+            if o.description.is_empty() {
+                return Err(ValidateError::OutputStyleEmptyDescription(o.name.clone()));
+            }
+            if o.content.is_empty() {
+                return Err(ValidateError::OutputStyleEmptyContent(o.name.clone()));
+            }
+            if !seen_names.insert(o.name.to_lowercase()) {
+                return Err(ValidateError::OutputStyleDuplicateName(o.name.clone()));
             }
         }
         Ok(())
@@ -3532,6 +3574,93 @@ mod tests {
             path: "./skills/my-skill".into(),
             when: vec![],
         }]);
+        assert!(cfg.validate().is_ok());
+    }
+
+    // ===== #1130: output_styles config-time validation =====
+
+    fn config_with_output_styles(output_styles: Vec<crate::OutputStyle>) -> Config {
+        Config {
+            disabled_engines: vec![],
+            output_styles,
+            ..Default::default()
+        }
+    }
+
+    fn valid_output_style(name: &str) -> crate::OutputStyle {
+        crate::OutputStyle {
+            name: name.into(),
+            description: "Be terse.".into(),
+            content: "Answer in one sentence.".into(),
+            when: vec![],
+            keep_coding_instructions: false,
+            force_for_plugin: false,
+        }
+    }
+
+    #[test]
+    fn output_style_invalid_name_is_rejected() {
+        let cfg = config_with_output_styles(vec![crate::OutputStyle {
+            name: "../escape".into(),
+            ..valid_output_style("concise")
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::OutputStyleInvalidName(_))
+        ));
+    }
+
+    #[test]
+    fn output_style_empty_description_is_rejected() {
+        let cfg = config_with_output_styles(vec![crate::OutputStyle {
+            description: String::new(),
+            ..valid_output_style("concise")
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::OutputStyleEmptyDescription(_))
+        ));
+    }
+
+    #[test]
+    fn output_style_empty_content_is_rejected() {
+        let cfg = config_with_output_styles(vec![crate::OutputStyle {
+            content: String::new(),
+            ..valid_output_style("concise")
+        }]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::OutputStyleEmptyContent(_))
+        ));
+    }
+
+    #[test]
+    fn output_style_duplicate_name_is_rejected() {
+        let cfg = config_with_output_styles(vec![
+            valid_output_style("concise"),
+            valid_output_style("concise"),
+        ]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::OutputStyleDuplicateName(_))
+        ));
+    }
+
+    #[test]
+    fn output_style_duplicate_name_case_insensitive_is_rejected() {
+        let cfg = config_with_output_styles(vec![
+            valid_output_style("Concise"),
+            valid_output_style("concise"),
+        ]);
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::OutputStyleDuplicateName(_))
+        ));
+    }
+
+    #[test]
+    fn output_style_valid_entry_is_accepted() {
+        let cfg = config_with_output_styles(vec![valid_output_style("concise")]);
         assert!(cfg.validate().is_ok());
     }
 
