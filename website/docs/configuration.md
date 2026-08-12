@@ -292,6 +292,17 @@ capabilities:
   synced by `llmenv sync`; the *target engine* resolves the reference at its
   own runtime.
 - `disabled: true` excludes the provider from the resolved set for all engines.
+- **Per-model request options** (e.g. opencode's `reasoningEffort`, or a local
+  server's `enable_thinking`) have no dedicated `model_providers[].models[]`
+  field, but reach opencode through `native_model_providers.opencode` (#1007)
+  — its rendered `provider.<id>.models` is object-keyed by model id, so a
+  fragment can deep-merge onto an *existing* modeled model's options:
+  `native_model_providers: { opencode: { <provider-id>: { models: { <model-id>: { options: { reasoningEffort: high } } } } } }`.
+  Crush has no equivalent: its rendered `providers.<id>.models` is a JSON
+  array, so `native_model_providers.crush` can only *append* a model entry,
+  not patch an existing one's fields, and Crush's underlying schema
+  (`catwalk.Model`) has no generic options field to route extras through even
+  if it could.
 - `default_models` is a role-keyed map (`large`, `small`, or any role name the
   target engine recognizes) pointing at a `{ provider, model }` pair.
   `provider` may reference a `model_providers[].id` declared alongside it, or
