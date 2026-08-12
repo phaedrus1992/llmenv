@@ -207,6 +207,8 @@ capabilities:
     claude_code: { ... }
   native_model_providers:               # added in v3.7.0
     opencode: { ... }                    # deep-merged onto the provider block
+  native_default_models:                # added in v3.10.0
+    crush: { large: { reasoning_effort: high } }  # deep-merged onto the per-role model block
 ```
 
 - `permissions.default_mode` and `permissions.preset` are scalars (resolved
@@ -297,6 +299,13 @@ capabilities:
   validate against. opencode only has two default-model slots (`model` and
   `small_model`), so only the `large` and `small` roles have a destination
   there — any other role name is a no-op for that engine.
+- `native_default_models.crush` (added in v3.10.0) deep-merges onto the
+  rendered per-role `models` block for Crush's own per-role extras that
+  `default_models` has no field for (`reasoning_effort`, `think`,
+  `max_tokens`) — opencode has no equivalent slot, since its `model`/
+  `small_model` are bare `"provider/model"` strings with no room for extra
+  fields. Both `model_providers` and `default_models` may also be declared
+  inside a bundle's `bundle.yaml`, same as at the top level.
 
 ## `native:`
 

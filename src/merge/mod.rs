@@ -254,9 +254,17 @@ const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
     "native_plugins",
     "native_mcp",
     "native_model_providers",
+    "native_default_models",
     "native",
     "features",
     "host",
+    // Found during #1031: these two were missing despite Capabilities' own doc
+    // comments documenting bundle-level support ("contributed by this
+    // capability source (bundle or top-level)") — any bundle.yaml declaring
+    // either was hard-rejected as an unknown key, with no test ever
+    // exercising the documented claim.
+    "model_providers",
+    "default_models",
 ];
 
 /// Read an optional `bundle.yaml` capability fragment from a bundle directory.
@@ -971,6 +979,39 @@ mod tests {
         assert!(
             err.to_string().contains("typo_key"),
             "error must name the unknown key, got: {err}"
+        );
+    }
+
+    // #1031: `default_models`, `model_providers`, and `native_default_models`
+    // were missing from BUNDLE_YAML_KNOWN_KEYS despite Capabilities' own doc
+    // comments documenting bundle-level support for the first two — any
+    // bundle.yaml declaring them was hard-rejected as an unknown key.
+    #[test]
+    fn bundle_yaml_accepts_default_models_and_model_providers_and_native_default_models() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("model-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "model_providers:\n  - id: mtplx\n    base_url: http://localhost:8080/v1\n\
+             default_models:\n  large:\n    provider: mtplx\n    model: qwen3\n\
+             native_default_models:\n  crush:\n    large:\n      reasoning_effort: high\n",
+        )
+        .unwrap();
+
+        let bundle = BundleRef {
+            name: "model-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+        assert_eq!(manifest.capabilities.model_providers.len(), 1);
+        assert_eq!(manifest.capabilities.default_models["large"].model, "qwen3");
+        assert!(
+            manifest
+                .capabilities
+                .native_default_models
+                .contains_key("crush")
         );
     }
 
