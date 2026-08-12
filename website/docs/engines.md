@@ -150,7 +150,7 @@ plugins) concatenate and de-duplicate.
 
 (added in v3.0.0)
 
-[Crush](https://github.com/nicholasgasior/crush) is a second supported engine. It
+[Crush](https://github.com/charmbracelet/crush) is a second supported engine. It
 is **PATH-gated**: `export`, `hook`, and `regenerate` skip Crush silently if
 `crush` is not on `PATH`. When it is present, a separate `crush/` subtree is
 materialized inside the llmenv cache directory.
@@ -169,8 +169,8 @@ coexist in a single shell session without conflict.
 
 | Feature | Crush support | Notes |
 | --------- | -------------- | ------- |
-| Permissions (`allow`/`deny`) | Supported | Rendered to `allowed_tools` / `denied_tools` |
-| Permissions (`ask`) | **Lossy, fail-closed** | `ask` rules collapse to `denied_tools` — Crush has no interactive-ask concept |
+| Permissions (`allow`) | **Coarse — tool-level only** | Rendered to `allowed_tools`; Crush's matcher is exact-match against the bare tool name only, so `pattern`/`paths` scoping on a rule is dropped and the rule allows the *whole* tool instead (changed in v3.10.0 — previously rendered a `tool(pattern)`/`tool(path)` suffix Crush's matcher could never match, making the scoping silently inert) |
+| Permissions (`ask`/`deny`) | **Unsupported — silently no-op** | Crush's `PermissionsConfig` has no `denied_tools`/`default_mode` concept; `ask`/`deny` rules produce no permissions output at all (anything not in `allowed_tools` already requires interactive approval by default) |
 | Hooks — `PreToolUse` | Supported | `command`-kind handlers only |
 | Hooks — other events | **Hard error** | Crush supports only `PreToolUse`; any other event in config is an error |
 | Hooks — `mcp_tool` kind | **Hard error** | No Crush equivalent; use `command`-kind instead |

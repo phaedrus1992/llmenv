@@ -578,16 +578,37 @@ fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<Strin
     rules.iter().flat_map(render_permission_rule).collect()
 }
 
+/// Render a rule for Crush's `permissions.allowed_tools`.
+///
+/// #1306: source-verified against `charmbracelet/crush`'s
+/// `internal/permission/permission.go` (`Request()`) — the allowlist check is
+/// `slices.Contains(s.allowedTools, opts.ToolName)` or `slices.Contains(...,
+/// opts.ToolName + ":" + opts.Action)`, both exact string equality against a
+/// *fixed* per-tool-type action string (`"execute"` for bash, `"write"` for
+/// edit/write, `"read"` for view, etc. — never the actual command or file
+/// path). Crush has no concept of matching a command pattern or a file path
+/// at all, so a `tool(pattern)` or `tool(path)` entry can never match either
+/// comparison shape: it looks like a scoped allow rule once rendered, but is
+/// silently inert. The closest thing that actually works is the bare tool
+/// name, which allows *every* call to that tool rather than just the
+/// requested pattern/path — coarser than what was asked for, so this warns
+/// rather than rendering it silently.
 fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
     if let Some(pattern) = &rule.pattern {
-        return vec![format!("{}({})", rule.tool, pattern)];
-    }
-    if !rule.paths.is_empty() {
-        return rule
-            .paths
-            .iter()
-            .map(|p| format!("{}({})", rule.tool, p))
-            .collect();
+        tracing::warn!(
+            "crush: allowed_tools has no pattern matching; rule `{}` + pattern `{pattern}` \
+             will allow ALL `{}` calls, not just ones matching `{pattern}`",
+            rule.tool,
+            rule.tool
+        );
+    } else if !rule.paths.is_empty() {
+        tracing::warn!(
+            "crush: allowed_tools has no path matching; rule `{}` + paths {:?} \
+             will allow ALL `{}` calls, not just the listed paths",
+            rule.tool,
+            rule.paths,
+            rule.tool
+        );
     }
     vec![rule.tool.clone()]
 }
@@ -987,8 +1008,13 @@ mod tests {
         );
     }
 
+    /// #1306: Crush's `allowed_tools` matches only the bare tool name or
+    /// `tool:action` against a fixed per-tool-type action string — never a
+    /// command pattern. A `Bash(ls*)`-shaped entry can never match, so it
+    /// must render as the bare tool name instead (coarser, but the only
+    /// allow-rule shape Crush actually understands).
     #[test]
-    fn materialize_permission_with_pattern() {
+    fn materialize_permission_with_pattern_falls_back_to_bare_tool() {
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
         caps.permissions.allow.push(PermissionRule {
@@ -1002,7 +1028,8 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let allowed = doc["permissions"]["allowed_tools"].as_array().unwrap();
-        assert!(allowed.contains(&serde_json::json!("Bash(ls*)")));
+        assert!(allowed.contains(&serde_json::json!("Bash")));
+        assert!(!allowed.contains(&serde_json::json!("Bash(ls*)")));
     }
 
     // ── materialize: native passthrough ──────────────────────────────────────
@@ -1193,26 +1220,23 @@ mod tests {
     }
 
     #[test]
-    fn render_tool_with_pattern() {
+    fn render_tool_with_pattern_falls_back_to_bare_tool() {
         let rule = PermissionRule {
             tool: "Bash".into(),
             pattern: Some("ls*".into()),
             paths: vec![],
         };
-        assert_eq!(render_permission_rule(&rule), vec!["Bash(ls*)"]);
+        assert_eq!(render_permission_rule(&rule), vec!["Bash"]);
     }
 
     #[test]
-    fn render_tool_with_paths() {
+    fn render_tool_with_paths_falls_back_to_bare_tool() {
         let rule = PermissionRule {
             tool: "Read".into(),
             pattern: None,
             paths: vec!["src/".into(), "tests/".into()],
         };
-        assert_eq!(
-            render_permission_rule(&rule),
-            vec!["Read(src/)", "Read(tests/)"]
-        );
+        assert_eq!(render_permission_rule(&rule), vec!["Read"]);
     }
 
     // ── constants ────────────────────────────────────────────────────────────
@@ -1336,9 +1360,11 @@ mod tests {
         );
 
         // permissions: allow-only surface; ask rule produces no denied_tools key.
+        // #1306: pattern-scoped rules fall back to the bare tool name — Crush
+        // has no pattern matching to render them against.
         assert_eq!(
             doc["permissions"]["allowed_tools"],
-            serde_json::json!(["Bash(ls*)"])
+            serde_json::json!(["Bash"])
         );
         assert!(doc["permissions"].get("denied_tools").is_none());
     }
@@ -2342,22 +2368,21 @@ mod tests {
         // ── P2: render_permission_rule ────────────────────────────────────────
 
         #[test]
-        fn prop_render_permission_rule_pattern_wins_over_paths(
+        fn prop_render_permission_rule_always_bare_tool_regardless_of_pattern_or_paths(
             tool in "[A-Za-z]{1,15}",
-            pattern in "[a-z*]{1,15}",
+            pattern in prop::option::of("[a-z*]{1,15}"),
             paths in prop::collection::vec("[a-z/]{1,15}", 0..5),
         ) {
             let rule = crate::config::PermissionRule {
                 tool: tool.clone(),
-                pattern: Some(pattern.clone()),
+                pattern,
                 paths,
             };
-            // When `pattern` is Some, `paths` is ignored — output is exactly one
-            // entry built from tool+pattern, regardless of how many paths exist.
-            prop_assert_eq!(
-                render_permission_rule(&rule),
-                vec![format!("{tool}({pattern})")]
-            );
+            // #1306: Crush's allowed_tools has no pattern/path matching, so
+            // regardless of what pattern/paths are set, rendering always
+            // collapses to exactly the bare tool name — the only allow-rule
+            // shape Crush's matcher actually understands.
+            prop_assert_eq!(render_permission_rule(&rule), vec![tool]);
         }
 
         #[test]
