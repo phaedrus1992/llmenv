@@ -1396,6 +1396,22 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     dedup(&mut ask);
     dedup(&mut deny);
 
+    // #1322: the suppression above only resolves neutral-vs-*native*
+    // conflicts (a native deny/ask outranking a *different* neutral rule of
+    // the same rendered string). It never cross-checks the neutral buckets
+    // against each other, so a `PermissionRule` authored directly in both
+    // `permissions.allow` and `permissions.deny` (or `ask`/`deny`) — no
+    // native rule involved at all — lands in both. Same deny > ask > allow
+    // authority as above, applied as a final pass so every source that can
+    // populate these three buckets (neutral rules, native rules, MCP tiers)
+    // is covered uniformly, matching what
+    // `generate_settings_json_permission_buckets_never_overlap` asserts.
+    let deny_set: std::collections::BTreeSet<&str> = deny.iter().map(String::as_str).collect();
+    ask.retain(|s| !deny_set.contains(s.as_str()));
+    allow.retain(|s| !deny_set.contains(s.as_str()));
+    let ask_set: std::collections::BTreeSet<&str> = ask.iter().map(String::as_str).collect();
+    allow.retain(|s| !ask_set.contains(s.as_str()));
+
     let has_perms =
         !allow.is_empty() || !ask.is_empty() || !deny.is_empty() || perms.default_mode.is_some();
     if has_perms {
@@ -3306,6 +3322,37 @@ mod tests {
             CTX_READ_ONLY[0]
         );
         assert!(allow.contains(&ctx_read.as_str()));
+    }
+
+    #[test]
+    fn neutral_deny_suppresses_neutral_allow_for_same_rule() {
+        // #1322: a tool authored directly in both `permissions.allow` and
+        // `permissions.deny` (no native involvement at all) must resolve to
+        // exactly one bucket, same deny > ask > allow authority as the
+        // native-vs-neutral suppression above — found by
+        // generate_settings_json_permission_buckets_never_overlap's proptest.
+        let mut manifest = crate::merge::MergedManifest::default();
+        manifest.capabilities.permissions = crate::config::Permissions {
+            allow: vec![PermissionRule {
+                tool: "E".into(),
+                pattern: None,
+                paths: Vec::new(),
+            }],
+            deny: vec![PermissionRule {
+                tool: "E".into(),
+                pattern: None,
+                paths: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let deny = perm_action(&settings, "deny");
+        assert!(deny.contains(&"E"), "deny missing: {deny:?}");
+        assert!(
+            !allow.contains(&"E"),
+            "a rule denied and allowed at once must not also appear in allow: {allow:?}"
+        );
     }
 
     // ---- #972: native-wins suppression for tiered MCP tools ----
