@@ -245,6 +245,7 @@ const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
     "mcp",
     "lsp",
     "skills",
+    "output_styles",
     "env",
     "auto_memory_enabled",
     "effort_level",

@@ -1621,6 +1621,10 @@ fn materialize_from_manifest(
         .capabilities
         .lsp
         .retain(|l| tag_active(&l.when, tags));
+    manifest
+        .capabilities
+        .output_styles
+        .retain(|o| tag_active(&o.when, tags));
 
     // Dedup skills by name: two bundles contributing the same-named skill with
     // different source paths would collide in write_first_class_skills. First
@@ -1630,6 +1634,15 @@ fn materialize_from_manifest(
         .capabilities
         .skills
         .retain(|s| seen_skill_names.insert(s.name.clone()));
+
+    // Dedup output styles by name for the same reason skills are deduped —
+    // two bundles contributing the same-named style would collide on the
+    // materialized file/directory name (#1130).
+    let mut seen_style_names = std::collections::HashSet::new();
+    manifest
+        .capabilities
+        .output_styles
+        .retain(|o| seen_style_names.insert(o.name.clone()));
 
     // Store resolved throttle (top-level + bundle) for hook retrieval.
     if let Err(e) = crate::throttle::store_active_throttle(manifest.throttle.as_ref()) {
@@ -1991,6 +2004,10 @@ fn build_manifest(
         .capabilities
         .skills
         .extend(config.skills.iter().cloned());
+    manifest
+        .capabilities
+        .output_styles
+        .extend(config.output_styles.iter().cloned());
 
     // Combine top-level memory + bundle-contributed memory for resolution.
     let top_memory = config
