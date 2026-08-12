@@ -314,7 +314,24 @@ pub trait AgentAdapter {
 /// by the LLM CLI and don't receive the adapter identity through stdin.
 #[must_use]
 pub fn active_adapter() -> Box<dyn AgentAdapter> {
-    registered_adapters()
+    active_adapter_from(registered_adapters())
+}
+
+/// Pick the first adapter whose [`AgentAdapter::is_active`] signal fires,
+/// falling back to Claude Code when none do.
+///
+/// Split out from [`active_adapter`] so the dispatch order and fallback
+/// behavior are unit-testable with fake adapters instead of exercising real
+/// `is_active()` implementations, which read process-global env vars
+/// (`CLAUDE_CONFIG_DIR`, `CRUSH_GLOBAL_CONFIG`, `OPENCODE_CONFIG_DIR`) shared
+/// with other tests in the same binary — mutating them via `set_var`/
+/// `remove_var` is both `unsafe` under Rust 2024 (denied workspace-wide) and
+/// a cross-test race under `cargo test`'s parallel threads (#1305). Testing
+/// this selection algorithm against fakes sidesteps both problems; the real
+/// per-adapter env-var checks are exercised end-to-end by every hook-run
+/// invocation from an actual engine.
+fn active_adapter_from(adapters: Vec<Box<dyn AgentAdapter>>) -> Box<dyn AgentAdapter> {
+    adapters
         .into_iter()
         .find(|a| a.is_active())
         .unwrap_or_else(|| Box::new(claude_code::ClaudeCodeAdapter))
@@ -590,10 +607,74 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, binary_on_path, emit_hook_context, engine_id, known_engine_ids,
-        modeled_key_redirect, overlay_native_json, registered_adapters, remote_transport_type_str,
-        resolve_bundle_relative_paths, resolve_command_paths_against_files, strip_json_nulls,
+        AgentAdapter, active_adapter_from, binary_on_path, emit_hook_context, engine_id,
+        known_engine_ids, modeled_key_redirect, overlay_native_json, registered_adapters,
+        remote_transport_type_str, resolve_bundle_relative_paths,
+        resolve_command_paths_against_files, strip_json_nulls,
     };
+    use crate::merge::MergedManifest;
+
+    /// Minimal `AgentAdapter` stand-in for testing dispatch logic
+    /// (`active_adapter_from`) without depending on any real adapter's
+    /// `is_active()`, which reads process-global env vars.
+    struct FakeAdapter {
+        name: &'static str,
+        active: bool,
+    }
+
+    impl AgentAdapter for FakeAdapter {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn is_active(&self) -> bool {
+            self.active
+        }
+
+        fn binary_name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn supports_plugins(&self) -> bool {
+            false
+        }
+
+        fn supports_lsp(&self) -> bool {
+            false
+        }
+
+        fn supports_model_providers(&self) -> bool {
+            false
+        }
+
+        fn native_maps(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn supported_hook_events(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn env_vars(
+            &self,
+            _cache_dir: &Path,
+            _state_dir: &Path,
+        ) -> anyhow::Result<Vec<(String, String)>> {
+            Ok(Vec::new())
+        }
+
+        fn materialize(
+            &self,
+            _manifest: &MergedManifest,
+            _out: &Path,
+        ) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(Vec::new())
+        }
+
+        fn emit_hook_context(&self, _hook_event_name: &str, _text: &str) -> String {
+            String::new()
+        }
+    }
 
     /// #1008: the rejection message must never invent a `native_*` field. Keys
     /// with a real hatch name it; keys without one are sent to the neutral field.
@@ -961,6 +1042,53 @@ mod tests {
             resolved,
             Some("bash /cache/hooks/pre.sh /cache/hooks/post.sh".to_string())
         );
+    }
+
+    // #1305: active_adapter_from is the dispatch algorithm behind
+    // active_adapter(), split out so it's testable with fakes instead of
+    // mutating real adapters' env-var-backed is_active() signals.
+    #[test]
+    fn active_adapter_from_picks_first_active_in_order() {
+        let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+            Box::new(FakeAdapter {
+                name: "first",
+                active: false,
+            }),
+            Box::new(FakeAdapter {
+                name: "second",
+                active: true,
+            }),
+            Box::new(FakeAdapter {
+                name: "third",
+                active: true,
+            }),
+        ];
+        assert_eq!(
+            active_adapter_from(adapters).name(),
+            "second",
+            "must return the first active adapter, not just any active one"
+        );
+    }
+
+    #[test]
+    fn active_adapter_from_falls_back_to_claude_code_when_none_active() {
+        let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+            Box::new(FakeAdapter {
+                name: "first",
+                active: false,
+            }),
+            Box::new(FakeAdapter {
+                name: "second",
+                active: false,
+            }),
+        ];
+        assert_eq!(active_adapter_from(adapters).name(), "claude-code");
+    }
+
+    #[test]
+    fn active_adapter_from_handles_empty_registry() {
+        let adapters: Vec<Box<dyn AgentAdapter>> = Vec::new();
+        assert_eq!(active_adapter_from(adapters).name(), "claude-code");
     }
 
     // #793: resolve_bundle_relative_paths rewrites bundle-relative tokens in a
