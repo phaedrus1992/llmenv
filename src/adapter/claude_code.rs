@@ -437,11 +437,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // by that scan. The `outputStyle` settings key is set independently
         // inside generate_settings_json below, recomputed from the same
         // manifest rather than threaded through as extra state.
-        let (style_owned, _selected) = crate::adapter::output_styles::write_native_output_styles(
+        owned.extend(crate::adapter::output_styles::write_native_output_styles(
             out,
             &manifest.capabilities.output_styles,
-        )?;
-        owned.extend(style_owned);
+        )?);
 
         // Validate that skills are properly structured with SKILL.md frontmatter
         crate::adapter::skills::validate_skills(out)?;

@@ -58,15 +58,11 @@ pub(crate) fn write_output_style_as_skill(
 /// `materialize_from_manifest`) natively for Claude Code: each into
 /// `out/output-styles/<name>.md`.
 ///
-/// Also returns, when exactly one non-`force_for_plugin` style is present,
-/// that style's name — [`super::claude_code::generate_settings_json`] sets
-/// `outputStyle` to it. Zero or more-than-one selectable styles leaves the
-/// selector untouched rather than erroring: unlike `Memory`/`CodebaseMemory`
-/// (which resolve to one MCP registration slot with no valid multi-active
-/// representation), Claude Code holds multiple style *files* simultaneously
-/// without conflict — only the *selector* is single-valued, and an unset
-/// selector is a safe, meaningful state (Claude Code keeps whatever's
-/// already configured).
+/// The `outputStyle` settings.json selector is a separate concern, computed
+/// independently in `super::claude_code::generate_settings_json` from the
+/// same `manifest.capabilities.output_styles` — see that function's doc
+/// comment for why zero/multiple selectable styles leaves the selector
+/// unset rather than erroring.
 ///
 /// Returns the paths written, relative to `out`.
 ///
@@ -76,9 +72,9 @@ pub(crate) fn write_output_style_as_skill(
 pub(crate) fn write_native_output_styles(
     out: &Path,
     styles: &[OutputStyle],
-) -> anyhow::Result<(Vec<PathBuf>, Option<String>)> {
+) -> anyhow::Result<Vec<PathBuf>> {
     if styles.is_empty() {
-        return Ok((Vec::new(), None));
+        return Ok(Vec::new());
     }
 
     let styles_dir = out.join("output-styles");
@@ -114,16 +110,7 @@ pub(crate) fn write_native_output_styles(
         owned.push(rel);
     }
 
-    let selectable: Vec<&str> = styles
-        .iter()
-        .filter(|o| !o.force_for_plugin)
-        .map(|o| o.name.as_str())
-        .collect();
-    let selected = match selectable[..] {
-        [name] => Some(name.to_string()),
-        _ => None,
-    };
-    Ok((owned, selected))
+    Ok(owned)
 }
 
 #[cfg(test)]
@@ -175,11 +162,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut s = style("explanatory");
         s.keep_coding_instructions = true;
-        let (owned, selected) = write_native_output_styles(tmp.path(), &[s]).unwrap();
+        let owned = write_native_output_styles(tmp.path(), &[s]).unwrap();
         let content =
             std::fs::read_to_string(tmp.path().join("output-styles/explanatory.md")).unwrap();
         assert!(content.contains("keep-coding-instructions: true"));
-        assert_eq!(selected, Some("explanatory".to_string()));
         assert!(owned.contains(&std::path::PathBuf::from("output-styles/explanatory.md")));
     }
 
@@ -191,38 +177,26 @@ mod tests {
         assert!(!content.contains("keep-coding-instructions"));
     }
 
+    /// #1130 (overengineering-reviewer): the `outputStyle` selector decision
+    /// (one vs. multiple vs. zero selectable styles) lives entirely in
+    /// `claude_code::generate_settings_json` now — see
+    /// `output_style_selects_when_exactly_one_active` and its siblings there.
+    /// This function only ever writes files; `force_for_plugin` styles still
+    /// get one, same as any other.
     #[test]
-    fn write_native_output_styles_selects_the_one_non_plugin_style() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (_, selected) = write_native_output_styles(tmp.path(), &[style("only")]).unwrap();
-        assert_eq!(selected, Some("only".to_string()));
-    }
-
-    #[test]
-    fn write_native_output_styles_no_selection_when_multiple_selectable() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (_, selected) =
-            write_native_output_styles(tmp.path(), &[style("a"), style("b")]).unwrap();
-        assert_eq!(selected, None);
-    }
-
-    #[test]
-    fn write_native_output_styles_no_selection_when_zero_selectable() {
+    fn write_native_output_styles_writes_force_for_plugin_style_too() {
         let tmp = tempfile::tempdir().unwrap();
         let mut s = style("plugin-style");
         s.force_for_plugin = true;
-        let (owned, selected) = write_native_output_styles(tmp.path(), &[s]).unwrap();
-        assert_eq!(selected, None);
-        // Still written as a file even though it's not selected.
+        let owned = write_native_output_styles(tmp.path(), &[s]).unwrap();
         assert!(owned.contains(&std::path::PathBuf::from("output-styles/plugin-style.md")));
     }
 
     #[test]
     fn write_native_output_styles_empty_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
-        let (owned, selected) = write_native_output_styles(tmp.path(), &[]).unwrap();
+        let owned = write_native_output_styles(tmp.path(), &[]).unwrap();
         assert!(owned.is_empty());
-        assert_eq!(selected, None);
         assert!(!tmp.path().join("output-styles").exists());
     }
 
