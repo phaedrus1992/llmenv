@@ -3,6 +3,10 @@
 #
 # fmt on commit (fast); clippy on push (fast on incremental builds).
 # Tests and cargo-deny run in CI only (slow full rebuild).
+#
+# cargo-hawk (pre-push, #923) requires a one-time install matching the pinned
+# toolchain exactly (see rust-toolchain.toml):
+#   RUSTC_BOOTSTRAP=1 cargo install --locked cargo-hawk@0.1.12
 repos:
   - repo: local
     hooks:
@@ -27,6 +31,16 @@ repos:
       - id: changelog-sync
         name: changelog sync check
         entry: bash -c 'scripts/sync-changelog-doc.sh 2>/dev/null; git diff --exit-code website/docs/changelog.md'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: cargo-hawk
+        name: cargo hawk check (warn-only, #923)
+        # -W warnings (not -D): 330 pre-existing findings as of #923, not yet
+        # cleaned up. Exits 0 regardless of findings at this level — only -D
+        # findings or a genuine tool error fail the run. Ratchets to -D once
+        # that cleanup lands — see #1314.
+        entry: cargo hawk check -W warnings
         language: system
         pass_filenames: false
         stages: [pre-push]
