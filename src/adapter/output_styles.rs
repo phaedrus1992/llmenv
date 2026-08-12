@@ -48,9 +48,13 @@ pub(crate) fn write_output_style_as_skill(
 
     crate::paths::write_owner_only(&skill_dir.join("SKILL.md"), skill_md.as_bytes())?;
 
+    // #1130 (security-audit P2): only the file goes in the owned set. Ghost
+    // reconciliation removes stale owned paths with `remove_file`, which
+    // can't remove a directory — recording the bare dir here would leave an
+    // empty `skills/<name>/` behind after the style is removed, and that
+    // empty dir then hard-fails `validate_skills` on the next render.
     Ok(vec![
         PathBuf::from("skills").join(&style.name).join("SKILL.md"),
-        PathBuf::from("skills").join(&style.name),
     ])
 }
 
