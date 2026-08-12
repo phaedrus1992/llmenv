@@ -873,45 +873,49 @@ impl AgentAdapter for OpencodeAdapter {
             }
         }
 
-        // Parse a native string like "Bash(otool *)" or bare "Bash" back into
+        // Parse a native string like "bash(otool *)" or bare "bash" back into
         // (opencode_tool, pattern). A bare tool name wildcard-matches everything.
         // Anything else missing a balanced, non-empty `(pattern)` is a malformed
         // rule and must error rather than silently fall back to a wildcard —
-        // a typo like "Bash(" would otherwise wildcard-allow all Bash commands.
-        // `Ok(None)` means the tool name is syntactically valid but has no
-        // opencode equivalent — dropped with a warning, not a hard error,
-        // same as the structured-rule path.
-        fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<Option<(String, String)>> {
-            let (tool_str, pattern) = match (s.find('('), s.rfind(')')) {
+        // a typo like "bash(" would otherwise wildcard-allow all bash commands.
+        //
+        // #1326 (security-audit): unlike `rule_to_patterns`, this does NOT run
+        // the tool portion through `opencode_tool_name`. `native_permissions.
+        // opencode` is the escape hatch for authoring opencode's *own* native
+        // vocabulary directly — its own permission keys (`lsp`, `skill`,
+        // `question`, `external_directory`, `doom_loop`, or a bare `"*"`
+        // deny-all baseline) have no neutral equivalent at all, so routing
+        // them through the neutral-name allowlist silently dropped every
+        // native rule that wasn't one of the twelve mapped PascalCase names
+        // — including a plain lowercase `deny: ["bash(rm -rf *)"]`, turning a
+        // working deny into a prompt. Only lowercase for forgiving case, same
+        // as before this fix.
+        fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<(String, String)> {
+            match (s.find('('), s.rfind(')')) {
                 (None, None) => {
                     anyhow::ensure!(
                         !s.trim().is_empty(),
                         "native_permissions.opencode.{action}: empty rule string"
                     );
-                    (s, "*")
+                    Ok((s.to_ascii_lowercase(), "*".to_string()))
                 }
                 (Some(start), Some(end)) if start < end => {
-                    let tool_str = &s[..start];
+                    let tool = s[..start].to_ascii_lowercase();
                     let pattern = &s[start + 1..end];
                     anyhow::ensure!(
-                        !tool_str.is_empty(),
+                        !tool.is_empty(),
                         "native_permissions.opencode.{action}: rule {s:?} has no tool name before '('"
                     );
                     anyhow::ensure!(
                         !pattern.is_empty(),
                         "native_permissions.opencode.{action}: rule {s:?} has an empty pattern '()'"
                     );
-                    (tool_str, pattern)
+                    Ok((tool, pattern.to_string()))
                 }
                 _ => anyhow::bail!(
                     "native_permissions.opencode.{action}: rule {s:?} has unbalanced parentheses"
                 ),
-            };
-            let Some(tool) = opencode_tool_name(tool_str) else {
-                warn_unmapped_tool(tool_str);
-                return Ok(None);
-            };
-            Ok(Some((tool.to_string(), pattern.to_string())))
+            }
         }
 
         // Insert (tool, pattern) pairs into the per-tool map.
@@ -951,15 +955,11 @@ impl AgentAdapter for OpencodeAdapter {
                 action,
             );
             if let Some(n) = native {
-                let native_patterns: Vec<Option<(String, String)>> = n
+                let native_patterns: Vec<(String, String)> = n
                     .iter()
                     .map(|s| parse_native_rule(s, action))
                     .collect::<anyhow::Result<_>>()?;
-                insert_patterns(
-                    &mut permission_map,
-                    native_patterns.into_iter().flatten(),
-                    action,
-                );
+                insert_patterns(&mut permission_map, native_patterns.into_iter(), action);
             }
         }
 
@@ -2149,7 +2149,49 @@ mod tests {
         assert_eq!(bash["echo*"], serde_json::json!("allow"));
     }
 
-    /// #1326: source-verified against `charmbracelet`'s... no, opencode's own
+    /// #1326 (security-audit): `native_permissions.opencode` is the escape
+    /// hatch for authoring opencode's *own* native vocabulary — keys like
+    /// `lsp`/`skill`/`external_directory` and a bare `"*"` deny-all baseline
+    /// have no neutral (Claude Code) equivalent at all. An earlier version
+    /// of this fix incorrectly ran native tool strings through the same
+    /// restrictive neutral-name mapping `rule_to_patterns` uses, which
+    /// silently dropped every native rule outside the twelve mapped
+    /// PascalCase names — including a working `deny: ["*"]` baseline,
+    /// turning it into a permissive default. Native rules must only be
+    /// lowercased, never mapped.
+    #[test]
+    fn materialize_native_opencode_preserves_opencode_only_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec![],
+                ask: vec![],
+                deny: vec!["*".into(), "lsp".into()],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["permission"]["*"],
+            serde_json::json!("deny"),
+            "a bare `*` native deny-all rule must survive verbatim, not be dropped as an \
+             unmapped neutral tool: {doc}"
+        );
+        assert_eq!(
+            doc["permission"]["lsp"],
+            serde_json::json!("deny"),
+            "opencode-only keys like `lsp` (no neutral equivalent) must survive verbatim: {doc}"
+        );
+    }
+
+    /// #1326: source-verified against opencode's own
     /// `packages/core/src/v1/config/permission.ts` schema — the real
     /// permission keys are `read, edit, glob, grep, list, bash, task,
     /// todowrite, webfetch, websearch, lsp, skill`, not a simple lowercase of
@@ -3237,7 +3279,7 @@ mod tests {
         /// A single bare rule (no pattern, no paths) for an otherwise-unused
         /// tool renders as a plain action string, not a `{"*": action}` object.
         #[test]
-        fn bare_rule_renders_action_string(tool in arb_native_rule_tool()) {
+        fn bare_rule_renders_action_string(tool in arb_mapped_neutral_tool()) {
             let mut caps = crate::config::Capabilities::default();
             caps.permissions.allow.push(crate::config::PermissionRule {
                 tool: tool.clone(),
@@ -3254,7 +3296,7 @@ mod tests {
         /// (deny is inserted last — documented last-write-wins semantics).
         #[test]
         fn deny_overrides_allow_for_same_tool_pattern(
-            tool in arb_native_rule_tool(),
+            tool in arb_mapped_neutral_tool(),
             pattern in "[a-z]{2,8}",
         ) {
             let rule = |t: &str, p: &str| crate::config::PermissionRule {
@@ -3279,7 +3321,7 @@ mod tests {
         /// present.
         #[test]
         fn highest_tier_wins_regardless_of_source(
-            tool in arb_native_rule_tool(),
+            tool in arb_mapped_neutral_tool(),
             pattern in "[a-z]{2,8}",
             allow_present in any::<bool>(),
             allow_native in any::<bool>(),
@@ -3353,15 +3395,30 @@ mod tests {
 
     /// Strategy for a native permission rule string that never contains `(`
     /// or `*`, so it always takes the bare-tool wildcard path.
-    /// #1326: `opencode_tool_name` is now a partial function (only maps
-    /// confirmed-valid neutral names), so generators feeding it must draw
-    /// from that set rather than arbitrary strings — the tool identity is
-    /// incidental to what these proptests check (precedence/dedup logic),
-    /// but it must still map successfully for the JSON index in the
-    /// assertion to be meaningful.
+    /// `parse_native_rule` lowercases verbatim — no name mapping, #1326's
+    /// security-audit finding — so any non-empty, paren-free string works.
     fn arb_native_rule_tool() -> impl Strategy<Value = String> {
-        prop::sample::select(&["Bash", "Read", "Write", "Edit", "Glob", "Grep"][..])
-            .prop_map(String::from)
+        "[A-Za-z]{1,8}".prop_map(String::from)
+    }
+
+    /// Strategy for a *neutral* (structured `permissions:`) tool name that's
+    /// guaranteed to map successfully via `opencode_tool_name`, which is now
+    /// a partial function (#1326) covering only confirmed-valid Claude Code
+    /// tool names. The tool identity is incidental to what proptests using
+    /// this check (precedence/dedup logic on structured rules), but it must
+    /// still map successfully for the JSON index in the assertion to be
+    /// meaningful.
+    ///
+    /// Excludes `Write` deliberately: `highest_tier_wins_regardless_of_source`
+    /// pushes the same generated `tool` string through *both* the structured
+    /// path (mapped via `opencode_tool_name`, `Write` -> `edit`) and the
+    /// native path (`parse_native_rule`, lowercased verbatim, `Write` ->
+    /// `write`) for the same test case — those two paths must agree on the
+    /// final key for the "regardless of source" premise to hold, and `Write`
+    /// is precisely the one name where native and structured intentionally
+    /// diverge (#1326's security-audit finding).
+    fn arb_mapped_neutral_tool() -> impl Strategy<Value = String> {
+        prop::sample::select(&["Bash", "Read", "Edit", "Glob", "Grep"][..]).prop_map(String::from)
     }
 
     proptest! {
@@ -3505,7 +3562,7 @@ mod tests {
                 },
             );
             let val = permission_value(caps);
-            prop_assert_eq!(&val[opencode_tool_name(&tool).unwrap()], &serde_json::json!("allow"));
+            prop_assert_eq!(&val[tool.to_ascii_lowercase()], &serde_json::json!("allow"));
         }
 
         /// A native rule with a parenthesized pattern extracts that pattern
@@ -3525,7 +3582,7 @@ mod tests {
             );
             let val = permission_value(caps);
             prop_assert_eq!(
-                &val[opencode_tool_name(&tool).unwrap()][&pattern],
+                &val[tool.to_ascii_lowercase()][&pattern],
                 &serde_json::json!("allow")
             );
         }
