@@ -1407,6 +1407,12 @@ pub struct CodebaseMemory {
     /// project internally, the same way `list_projects` enumerates them).
     #[serde(default)]
     pub index_path: Option<String>,
+    /// Per-tier permission override for the codebase-memory-mcp MCP's tools
+    /// (#1323). Falls back to the default tier->action policy (read-only ->
+    /// allow, mutation -> allow, destructive -> ask) when unset — same
+    /// override shape as [`Memory::mcp_permissions`].
+    #[serde(default)]
+    pub mcp_permissions: Option<McpPermissions>,
 }
 
 fn default_throttle_cache_ttl() -> u64 {
@@ -2790,6 +2796,7 @@ index_path: /custom/index/path
                 codebase_memory: vec![CodebaseMemory {
                     when: vec![],
                     index_path: None,
+                    mcp_permissions: None,
                 }],
                 ..Default::default()
             }),

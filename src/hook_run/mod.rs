@@ -3280,6 +3280,7 @@ mod tests {
         let cm = crate::config::CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: None,
+            mcp_permissions: None,
         };
         let cmd = build_index_repository_command(
             std::path::Path::new("/repos/proj"),
@@ -3320,6 +3321,7 @@ mod tests {
         let cm = crate::config::CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
+            mcp_permissions: None,
         };
         let cmd = build_index_repository_command(
             std::path::Path::new("/repos/proj"),
@@ -3348,6 +3350,7 @@ mod tests {
         let cm = crate::config::CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: None,
+            mcp_permissions: None,
         };
         assert_eq!(
             codebase_memory_cache_dir(&cm, std::path::Path::new("/state")),
@@ -3360,6 +3363,7 @@ mod tests {
         let cm = crate::config::CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
+            mcp_permissions: None,
         };
         assert_eq!(
             codebase_memory_cache_dir(&cm, std::path::Path::new("/state")),
@@ -3382,6 +3386,7 @@ mod tests {
         let cm = crate::config::CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: None,
+            mcp_permissions: None,
         };
         trigger_codebase_memory_index(std::path::Path::new("/repos/proj"), &cm, state_dir.path());
 
@@ -3408,6 +3413,7 @@ mod tests {
         let cm = crate::config::CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: Some(index_dir.path().to_str().unwrap().to_string()),
+            mcp_permissions: None,
         };
 
         trigger_codebase_memory_index(std::path::Path::new("/repos/proj"), &cm, state_dir.path());
@@ -3487,6 +3493,7 @@ mod tests {
             let cm = crate::config::CodebaseMemory {
                 when: vec!["proj".to_string()],
                 index_path: None,
+                mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
             let cmd = build_index_repository_command(

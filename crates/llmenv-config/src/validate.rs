@@ -1153,7 +1153,11 @@ mod tests {
             prop::collection::vec(arb_string(), 1..3),
             prop::option::of(arb_string()),
         )
-            .prop_map(|(when, index_path)| CodebaseMemory { when, index_path })
+            .prop_map(|(when, index_path)| CodebaseMemory {
+                when,
+                index_path,
+                mcp_permissions: None,
+            })
     }
 
     proptest! {
@@ -1980,6 +1984,7 @@ mod tests {
         let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
             when: vec![],
             index_path: None,
+            mcp_permissions: None,
         }]);
         assert!(matches!(
             config.validate(),
@@ -1992,6 +1997,7 @@ mod tests {
         let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
             when: vec!["my-project".to_string()],
             index_path: None,
+            mcp_permissions: None,
         }]);
         assert!(config.validate().is_ok());
     }
