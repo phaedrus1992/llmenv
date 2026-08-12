@@ -149,19 +149,23 @@ const ICM_MCP_PREFIX: &str = "mcp__icm__";
 
 /// #1323: Built-in codebase-memory-mcp server tool tiers, rendered the same
 /// way as the ICM/context-mode tiers above. Source-verified against
-/// `codebase-memory-mcp`'s own `TOOL_ANNOTATIONS` table
-/// (`src/mcp/mcp.c`) — its `read_only`/`destructive` MCP protocol hints are
-/// conservative defaults (per the MCP spec, `destructiveHint` defaults to
-/// `true` whenever `readOnlyHint` is `false`, regardless of whether a tool
-/// actually destroys anything), so this tiering is by *actual* semantic
-/// risk rather than a literal copy of those two hint bits: every query/
-/// lookup tool (search, trace, snippet, schema, architecture, status,
-/// change-detection, project listing) is read-only here; `index_repository`
-/// (builds/updates the index), `manage_adr`, and `ingest_traces` are
-/// mutations the tool's own annotations already mark non-destructive;
-/// `delete_project` is the one operation that is genuinely destructive
-/// (irreversibly removes a project's index) and is the only tool asked
-/// for by default.
+/// `codebase-memory-mcp`'s own `TOOL_ANNOTATIONS` table (`src/mcp/mcp.c`),
+/// which is a deliberately discriminating table, not a blanket MCP-spec
+/// default: `index_repository` and `ingest_traces` are explicitly annotated
+/// `destructive=false`, while `manage_adr` is explicitly annotated
+/// `destructive=true, idempotent=false` — confirmed by its implementation,
+/// an unversioned UPSERT (`cbm_store_adr_store`) that replaces the entire
+/// ADR document with no history or backup, the one piece of human-authored
+/// (not re-derivable-by-reindexing) state in the store. `manage_adr` is
+/// therefore tiered `Destructive`, not `Mutation`, despite being a "write"
+/// in the same broad sense as the other two.
+///
+/// `delete_project` is also destructive (irreversibly removes a project's
+/// index), but the `ask` boundary here is known-incomplete:
+/// `index_repository`'s `name` override can silently replace a *different*
+/// project's index with no prompt (tracked in #1331, not fixed by re-tiering
+/// `index_repository` itself — that would defeat the auto-index-on-
+/// `SessionStart` use case this tiering exists for).
 const CBM_READ_ONLY: &[&str] = &[
     "search_graph",
     "query_graph",
@@ -176,9 +180,9 @@ const CBM_READ_ONLY: &[&str] = &[
     "detect_changes",
 ];
 
-const CBM_MUTATION: &[&str] = &["index_repository", "manage_adr", "ingest_traces"];
+const CBM_MUTATION: &[&str] = &["index_repository", "ingest_traces"];
 
-const CBM_DESTRUCTIVE: &[&str] = &["delete_project"];
+const CBM_DESTRUCTIVE: &[&str] = &["delete_project", "manage_adr"];
 
 /// Claude Code's MCP tool-name prefix for the codebase-memory-mcp server
 /// (`mcp__<server>__<tool>`, server name =
@@ -3277,6 +3281,94 @@ mod tests {
         assert!(
             deny.is_empty(),
             "no deny entries expected by default: {deny:?}"
+        );
+    }
+
+    /// #1323 (security-audit): `codebase_memory.mcp_permissions` must
+    /// actually reach the render — the docs claim parity with ICM's
+    /// override mechanism, and until `CodebaseMemory` carried the field
+    /// and `resolve_codebase_memory` forwarded it, `cbm.mcp_permissions`
+    /// was always `None` and the 14-tool grant was unconditionally
+    /// unoverridable.
+    #[test]
+    fn codebase_memory_mcp_permissions_override_reaches_render() {
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Stdio {
+                    command: "codebase-memory-mcp".into(),
+                    args: vec![],
+                    env: Default::default(),
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: Some(crate::config::McpPermissions {
+                    read_only: None,
+                    mutation: Some(crate::config::McpPermissionAction::Ask),
+                    destructive: None,
+                }),
+                wakeup_max_tokens: None,
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let ask = perm_action(&settings, "ask");
+
+        for tool in CBM_MUTATION {
+            let rule = format!("{CBM_MCP_PREFIX}{tool}");
+            assert!(
+                ask.contains(&rule.as_str()),
+                "{rule} should be overridden to ask: {ask:?}"
+            );
+            assert!(
+                !allow.contains(&rule.as_str()),
+                "{rule} must not also be in allow: {allow:?}"
+            );
+        }
+    }
+
+    /// Config round-trip: `codebase_memory.mcp_permissions` is a real,
+    /// deserializable field, not just a struct member nothing ever sets.
+    #[test]
+    fn codebase_memory_mcp_permissions_round_trips_through_yaml() {
+        let yaml = "when: [proj]\nmcp_permissions:\n  destructive: deny\n";
+        let cm: crate::config::CodebaseMemory = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cm.mcp_permissions,
+            Some(crate::config::McpPermissions {
+                read_only: None,
+                mutation: None,
+                destructive: Some(crate::config::McpPermissionAction::Deny),
+            })
+        );
+    }
+
+    /// #1323 (silent-failure-hunter): a tool omitted from all three CBM tier
+    /// lists gets no permission entry at all — `apply_mcp_tier_permissions`
+    /// simply skips anything not named in one of the three slices, so a
+    /// forgotten or duplicated entry is otherwise silent. Locks the total
+    /// count and per-tool uniqueness so a future edit that drops or
+    /// duplicates an entry fails loudly here instead. Doesn't catch
+    /// codebase-memory-mcp itself adding a new tool upstream — that still
+    /// needs a human to notice and tier it — but does catch drift within
+    /// this file.
+    #[test]
+    fn cbm_tiers_cover_every_known_tool_exactly_once() {
+        let mut seen = std::collections::HashSet::new();
+        for tool in CBM_READ_ONLY
+            .iter()
+            .chain(CBM_MUTATION)
+            .chain(CBM_DESTRUCTIVE)
+        {
+            assert!(seen.insert(*tool), "{tool} appears in more than one tier");
+        }
+        assert_eq!(
+            seen.len(),
+            15,
+            "expected all 15 codebase-memory-mcp tools tiered exactly once, got {}: {seen:?}",
+            seen.len()
         );
     }
 
