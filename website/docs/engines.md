@@ -178,6 +178,7 @@ coexist in a single shell session without conflict.
 | LSP servers | Supported | Rendered to `lsp.<name>` entries |
 | Skills (first-class) | Supported | Written via `options.skills_paths` |
 | Skills (plugin-projected) | Supported | Plugin `skills/` subdirs are projected into Crush's skill paths |
+| Output styles | **Fallback — generated skill** | Crush has no output-style concept; `output_styles` entries render as `skills/<name>/SKILL.md` instead, same `name`/`description`/`content` (added in v3.10.0, [#1130](https://github.com/phaedrus1992/llmenv/issues/1130)) |
 | Plugins / marketplace | **Hard error** | Crush has no plugin or marketplace concept; non-skill plugin content (custom `agents/`, `commands/`) produces an actionable error naming the plugin |
 | Custom agents | **Unsupported** | Crush hardcodes exactly two agent roles (coder/task); `agents/*.md` from plugins cannot be loaded |
 | Model providers (`model_providers`/`default_models`) | Supported | Rendered to `providers`/`models` using catwalk's field names; `api_type` passes through as `type` verbatim |
@@ -284,6 +285,7 @@ Claude Code adapter.
 | MCP servers | Supported | Local (`command`, `${HOME}`-expanded) and remote (`http`/`sse`) transports |
 | LSP servers | Supported | Rendered to `lsp.<name>` entries, with `initialization_options` |
 | Skills (first-class + plugin-projected) | Supported | Native `SKILL.md` format |
+| Output styles | **Fallback — generated skill** | opencode has no output-style concept; `output_styles` entries render as `skills/<name>/SKILL.md` instead, same `name`/`description`/`content` (added in v3.10.0, [#1130](https://github.com/phaedrus1992/llmenv/issues/1130)) |
 | Plugins / marketplace | Supported | Plugin commands, agents, MCP, skills, and hooks are translated |
 | Custom agents | Supported | Plugin `agent/*.md` are emitted with `mode: subagent` |
 | Model providers (`model_providers`/`default_models`) | Supported | Rendered to `provider.<id>` / `model` / `small_model`; `api_type` maps to the AI SDK `npm` package (e.g. `openai` → `@ai-sdk/openai-compatible`). `default_models` only has `large`/`small` slots — other role names are a no-op |
