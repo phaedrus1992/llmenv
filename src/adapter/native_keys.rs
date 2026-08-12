@@ -19,6 +19,7 @@ pub(crate) const NATIVE_HOOKS: &str = "native_hooks";
 pub(crate) const NATIVE_PLUGINS: &str = "native_plugins";
 pub(crate) const NATIVE_MCP: &str = "native_mcp";
 pub(crate) const NATIVE_MODEL_PROVIDERS: &str = "native_model_providers";
+pub(crate) const NATIVE_DEFAULT_MODELS: &str = "native_default_models";
 /// The catch-all `native:` block. Top-level `config.native` and the
 /// bundle-contributed `capabilities.native` both merge into the same rendered
 /// place, so adapters declare this one name for both.
@@ -84,6 +85,7 @@ fn neutral_redirect(map: &str) -> String {
         NATIVE_PLUGINS => "plugins",
         NATIVE_MCP => "mcp",
         NATIVE_MODEL_PROVIDERS => "model_providers",
+        NATIVE_DEFAULT_MODELS => "default_models",
         // The catch-all block has no neutral counterpart to redirect to.
         _ => {
             return "This engine has no such passthrough — drop the block or move it under an \
@@ -94,7 +96,7 @@ fn neutral_redirect(map: &str) -> String {
     format!("Declare it through `capabilities.{neutral}` instead.")
 }
 
-/// Returns every `native_*` key that no adapter will read, across all six
+/// Returns every `native_*` key that no adapter will read, across all seven
 /// per-engine maps plus both `native:` blocks.
 ///
 /// Takes the **merged** capabilities and top-level `native` block, not the raw
@@ -115,7 +117,7 @@ pub(crate) fn dead_native_engine_keys(
 
     // (diagnostic label, map name, keys). The label distinguishes the two
     // `native:` blocks, which share one map name because they render together.
-    let maps: [(&str, &'static str, Vec<&String>); 7] = [
+    let maps: [(&str, &'static str, Vec<&String>); 8] = [
         (
             NATIVE_PERMISSIONS,
             NATIVE_PERMISSIONS,
@@ -136,6 +138,11 @@ pub(crate) fn dead_native_engine_keys(
             NATIVE_MODEL_PROVIDERS,
             NATIVE_MODEL_PROVIDERS,
             caps.native_model_providers.keys().collect(),
+        ),
+        (
+            NATIVE_DEFAULT_MODELS,
+            NATIVE_DEFAULT_MODELS,
+            caps.native_default_models.keys().collect(),
         ),
         (
             "top-level native",
@@ -224,6 +231,7 @@ mod tests {
             native_plugins: yaml_keyed("claude_code"),
             native_mcp: yaml_keyed("opencode"),
             native_model_providers: yaml_keyed("crush"),
+            native_default_models: yaml_keyed("crush"),
             native: yaml_keyed("claude_code"),
             ..Capabilities::default()
         };
@@ -239,11 +247,12 @@ mod tests {
             native_plugins: yaml_keyed("opencde"),
             native_mcp: yaml_keyed("opencde"),
             native_model_providers: yaml_keyed("opencde"),
+            native_default_models: yaml_keyed("opencde"),
             native: yaml_keyed("opencde"),
             ..Capabilities::default()
         };
         let found = dead_native_engine_keys(&caps, &yaml_keyed("opencde"));
-        assert_eq!(found.len(), 7, "one per map: {found:?}");
+        assert_eq!(found.len(), 8, "one per map: {found:?}");
         assert!(
             found
                 .iter()
@@ -258,6 +267,7 @@ mod tests {
                 "native_plugins",
                 "native_mcp",
                 "native_model_providers",
+                "native_default_models",
                 "top-level native",
                 "capabilities.native",
             ]
@@ -407,21 +417,22 @@ mod tests {
 
     // ---- #1077: properties derived from the adapter registry ----
     //
-    // `dead_native_engine_keys` is permutation-heavy — 7 map positions × every
+    // `dead_native_engine_keys` is permutation-heavy — 8 map positions × every
     // registered adapter × 2 reasons. The example-based tests above pin down
     // specific pairings; these derive the expected answer from `native_maps()`
     // itself, so a newly registered adapter or a new `native_*` map is covered
     // without anyone writing a new test.
 
-    /// The seven (label, map) positions the function walks, in its own
+    /// The eight (label, map) positions the function walks, in its own
     /// declaration order. Labels are unique, so a reported label identifies its
     /// position — which is what the ordering property checks against.
-    const SLOTS: [(&str, &str); 7] = [
+    const SLOTS: [(&str, &str); 8] = [
         (NATIVE_PERMISSIONS, NATIVE_PERMISSIONS),
         (NATIVE_HOOKS, NATIVE_HOOKS),
         (NATIVE_PLUGINS, NATIVE_PLUGINS),
         (NATIVE_MCP, NATIVE_MCP),
         (NATIVE_MODEL_PROVIDERS, NATIVE_MODEL_PROVIDERS),
+        (NATIVE_DEFAULT_MODELS, NATIVE_DEFAULT_MODELS),
         ("top-level native", NATIVE),
         ("capabilities.native", NATIVE),
     ];
@@ -435,10 +446,10 @@ mod tests {
             .is_some_and(|a| a.native_maps().contains(&map))
     }
 
-    /// Populate the seven map positions with `keys[i]`, returning the
+    /// Populate the eight map positions with `keys[i]`, returning the
     /// capabilities and the separate top-level `native` block.
     fn caps_with_keys(
-        keys: &[BTreeSet<String>; 7],
+        keys: &[BTreeSet<String>; 8],
     ) -> (Capabilities, BTreeMap<String, serde_yaml::Value>) {
         let yaml_map = |ks: &BTreeSet<String>| -> BTreeMap<String, serde_yaml::Value> {
             ks.iter()
@@ -459,10 +470,11 @@ mod tests {
             native_plugins: yaml_map(&keys[2]),
             native_mcp: yaml_map(&keys[3]),
             native_model_providers: yaml_map(&keys[4]),
-            native: yaml_map(&keys[6]),
+            native_default_models: yaml_map(&keys[5]),
+            native: yaml_map(&keys[7]),
             ..Capabilities::default()
         };
-        (caps, yaml_map(&keys[5]))
+        (caps, yaml_map(&keys[6]))
     }
 
     /// A `native_*` key: usually a real engine id (so the live and `MapNotRead`
@@ -485,7 +497,7 @@ mod tests {
             slot in 0usize..SLOTS.len(),
         ) {
             let (_, map) = SLOTS[slot];
-            let mut keys: [BTreeSet<String>; 7] = Default::default();
+            let mut keys: [BTreeSet<String>; 8] = Default::default();
             keys[slot].insert(engine.clone());
             let (caps, top) = caps_with_keys(&keys);
             let found = dead_native_engine_keys(&caps, &top);
@@ -520,7 +532,7 @@ mod tests {
             slot in 0usize..SLOTS.len(),
         ) {
             let (label, map) = SLOTS[slot];
-            let mut keys: [BTreeSet<String>; 7] = Default::default();
+            let mut keys: [BTreeSet<String>; 8] = Default::default();
             keys[slot].insert(key.clone());
             let (caps, top) = caps_with_keys(&keys);
 
@@ -540,7 +552,7 @@ mod tests {
         /// declaration order with each map's keys sorted.
         #[test]
         fn output_is_bounded_deterministic_and_ordered(
-            keys in proptest::array::uniform7(
+            keys in proptest::array::uniform8(
                 proptest::collection::btree_set(arb_native_key(), 0..4),
             ),
         ) {
@@ -565,7 +577,7 @@ mod tests {
                 .collect();
             prop_assert!(
                 slots.iter().all(Option::is_some),
-                "every finding's label must be one of the seven positions: {found:?}"
+                "every finding's label must be one of the eight positions: {found:?}"
             );
 
             // Ordering is (map position, key) ascending: maps in declaration

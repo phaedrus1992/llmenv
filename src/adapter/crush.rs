@@ -54,6 +54,7 @@ impl AgentAdapter for CrushAdapter {
             nk::NATIVE_HOOKS,
             nk::NATIVE_MCP,
             nk::NATIVE_MODEL_PROVIDERS,
+            nk::NATIVE_DEFAULT_MODELS,
             nk::NATIVE,
         ]
     }
@@ -356,12 +357,19 @@ impl AgentAdapter for CrushAdapter {
             doc.insert("providers".into(), providers_value);
         }
 
-        // Default models (fix 1 pattern): omit "models" key if none.
-        if !manifest.capabilities.default_models.is_empty() {
-            let models_value = render_default_models(&manifest.capabilities.default_models);
-            if models_value.as_object().is_some_and(|o| !o.is_empty()) {
-                doc.insert("models".into(), models_value);
-            }
+        // Default models (fix 1 pattern): omit "models" key if none, after the
+        // native_default_models.crush overlay (#1031) — mirrors the providers
+        // block above, so a native-only per-role override (`reasoning_effort`,
+        // `think`, `max_tokens`) can populate "models" even with no modeled
+        // `default_models` entry for that role.
+        let mut models_value = render_default_models(&manifest.capabilities.default_models);
+        super::overlay_native_json(
+            &mut models_value,
+            manifest.capabilities.native_default_models.get("crush"),
+            "native_default_models.crush",
+        )?;
+        if models_value.as_object().is_some_and(|o| !o.is_empty()) {
+            doc.insert("models".into(), models_value);
         }
 
         // options.skills_paths: emit whenever any skills exist (first-class or plugin-projected).
@@ -389,7 +397,7 @@ impl AgentAdapter for CrushAdapter {
         // P1-3: reject modeled keys in the catch-all fragment before overlaying — these
         // keys have dedicated rendering paths and must not clobber the security output.
         // Use native_permissions.crush / native_hooks.crush / native_mcp.crush /
-        // native_model_providers.crush instead.
+        // native_model_providers.crush / native_default_models.crush instead.
         if let Some(native) = manifest.native.get("crush") {
             super::reject_modeled_native_keys(native, CRUSH_MODELED_KEYS, "crush")?;
         }
@@ -562,7 +570,8 @@ fn render_default_models(
 /// output (permissions, hooks) or the structured rendering (mcp, lsp, providers, models).
 ///
 /// Use the dedicated `native_permissions.crush` / `native_hooks.crush` / `native_mcp.crush` /
-/// `native_model_providers.crush` channels instead, which merge in the safe direction.
+/// `native_model_providers.crush` / `native_default_models.crush` channels instead, which
+/// merge in the safe direction.
 const CRUSH_MODELED_KEYS: &[&str] = &["permissions", "hooks", "mcp", "lsp", "providers", "models"];
 
 fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
@@ -2003,6 +2012,88 @@ mod tests {
             2,
             "crush's models is a list — merge_json concatenates instead of \
              patching by id; docs must not promise per-model override here"
+        );
+    }
+
+    // ── materialize: native_default_models.crush merged into models (#1031) ──
+
+    fn crush_doc_with_native_default_models(
+        mut caps: Capabilities,
+        yaml: &str,
+    ) -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        caps.native_default_models.insert(
+            "crush".into(),
+            serde_yaml::from_str(yaml).expect("test fragment must be valid YAML"),
+        );
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    fn caps_with_large_role() -> Capabilities {
+        Capabilities {
+            default_models: std::collections::BTreeMap::from([(
+                "large".to_string(),
+                llmenv_config::ModelRef {
+                    provider: "mtplx".into(),
+                    model: "qwen3".into(),
+                },
+            )]),
+            ..Capabilities::default()
+        }
+    }
+
+    #[test]
+    fn materialize_native_default_models_without_modeled_default_models() {
+        // No `default_models` at all: the fragment alone must still render a
+        // `models` block — otherwise the escape hatch is unusable on its own.
+        let doc = crush_doc_with_native_default_models(
+            Capabilities::default(),
+            "large:\n  provider: mtplx\n  model: qwen3\n",
+        );
+        assert_eq!(doc["models"]["large"]["model"], serde_json::json!("qwen3"));
+    }
+
+    #[test]
+    fn materialize_native_default_models_deep_merges_onto_rendered_models() {
+        let doc = crush_doc_with_native_default_models(
+            caps_with_large_role(),
+            "large:\n  reasoning_effort: high\n",
+        );
+        assert_eq!(
+            doc["models"]["large"]["reasoning_effort"],
+            serde_json::json!("high"),
+            "unmodeled per-role key must be injected"
+        );
+        assert_eq!(
+            doc["models"]["large"]["model"],
+            serde_json::json!("qwen3"),
+            "deep merge must preserve sibling keys rendered from default_models"
+        );
+    }
+
+    #[test]
+    fn materialize_native_default_models_overrides_on_collision() {
+        let doc = crush_doc_with_native_default_models(
+            caps_with_large_role(),
+            "large:\n  model: native-override\n",
+        );
+        assert_eq!(
+            doc["models"]["large"]["model"],
+            serde_json::json!("native-override"),
+            "the native fragment is the higher-precedence layer on collision"
+        );
+    }
+
+    #[test]
+    fn materialize_native_default_models_empty_mapping_omits_models_key() {
+        let doc = crush_doc_with_native_default_models(Capabilities::default(), "{}");
+        assert!(
+            doc.get("models").is_none(),
+            "an empty fragment must not emit an empty \"models\" object"
         );
     }
 
