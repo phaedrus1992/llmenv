@@ -1395,18 +1395,64 @@ skip them (#661).
 skills:
   - name: my-skill
     when: [me]
-    source: "./path/to/skill/dir"    # local path or marketplace-relative
+    path: "./path/to/skill/dir"    # local path or marketplace-relative
 ```
 
-| Field    | Required | Notes                                                                         |
-|----------|----------|-------------------------------------------------------------------------------|
-| `name`   | yes      | Registration name; deduplicated first-bundle-wins                             |
-| `when`   | no       | Activation tags (empty = always active)                                       |
-| `source` | yes      | Path to skill directory — absolute, `~/`-relative, or bundle-content-relative |
+| Field  | Required | Notes                                                                         |
+|--------|----------|-------------------------------------------------------------------------------|
+| `name` | yes      | Registration name; deduplicated first-bundle-wins                             |
+| `when` | no       | Activation tags (empty = always active)                                       |
+| `path` | yes      | Path to skill directory — absolute, `~/`-relative, or bundle-content-relative |
 
 Skills declared here are merged with per-bundle skills from `bundle.yaml`; the
 union is what gets wired up for the active scope. Name collisions are resolved
 by declaration order (first wins).
+
+## `output_styles:`
+
+(added in v3.10.0)
+
+Output styles change *how* Claude Code responds (role, tone, format) by
+editing the system prompt — not what it knows, unlike `CLAUDE.md`/rules
+content. Declared at the top level or per-bundle, selected onto scopes by tag
+intersection — same model as `skills:`/`lsp:`.
+
+```yaml
+output_styles:
+  - name: concise
+    description: Terse, no preamble
+    content: |
+      Answer in as few words as possible. No explanations unless asked.
+    when: [me]
+```
+
+| Field                      | Required | Notes                                                                                                                                                             |
+|----------------------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`                     | yes      | Registration name; deduplicated first-bundle-wins                                                                                                                 |
+| `description`              | yes      | One-line description                                                                                                                                              |
+| `content`                  | yes      | Markdown body appended to the system prompt (Claude Code) or the skill's body (fallback adapters)                                                                 |
+| `when`                     | no       | Activation tags (empty = always active)                                                                                                                           |
+| `keep_coding_instructions` | no       | Keep Claude Code's built-in coding instructions alongside this style. Default `false` — see the warning below. No effect on the fallback path                     |
+| `force_for_plugin`         | no       | Claude Code plugin styles only — auto-activate whenever the plugin is enabled. `llmenv doctor` flags it set outside a plugin bundle, since it has no effect there |
+
+With the default `keep_coding_instructions: false`, Claude Code's built-in
+coding instructions — including its git-safety guidance (don't commit unless
+asked, don't force-push, don't touch git config) — are replaced entirely by
+`content`, not merged with it. Set `keep_coding_instructions: true` to keep
+those guardrails active alongside the style.
+
+Claude Code renders each tag-active entry to `output-styles/<name>.md` with
+the corresponding YAML frontmatter, and sets `outputStyle` in `settings.json`
+to the *one* non-`force_for_plugin` style, when exactly one is active. Zero or
+more than one leaves the selector untouched — unlike `memory`/
+`codebase_memory` (which resolve to a single MCP registration slot), holding
+multiple style **files** simultaneously is not a conflict; only the selector
+is single-valued.
+
+Every other engine (Crush, opencode) has no native output-style concept, so
+the same `name`/`description`/`content` renders as a generated skill instead
+(`skills/<name>/SKILL.md`) — automatic, no config-author-side fallback logic.
+`keep_coding_instructions`/`force_for_plugin` have no effect on this path.
 
 ## Project markers
 

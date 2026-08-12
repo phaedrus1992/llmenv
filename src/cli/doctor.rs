@@ -1016,6 +1016,29 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
+    // #1130 (silent-failure-hunter): `force_for_plugin` is only honored by
+    // Claude Code for output styles shipped inside a plugin's own
+    // `output-styles/` directory — set elsewhere it has no effect. llmenv
+    // does not build the synthetic-plugin-promotion machinery that would
+    // make it work outside a plugin context (unlike the LSP feature's
+    // `LSP_PLUGIN_NAME` trick), so this is a global check (any plugin active
+    // in this scope), not a per-bundle correlation. Reads from the merged
+    // `doctor_manifest`, not raw `config.capabilities` — bundle-contributed
+    // output styles (the common case) never appear on `Config` directly, so
+    // checking the unmerged config would silently skip them.
+    if let Some((manifest, _)) = &doctor_manifest {
+        for style in &manifest.capabilities.output_styles {
+            if style.force_for_plugin && manifest.capabilities.plugins.is_empty() {
+                eprintln!(
+                    "{warn} Output style '{}' sets force-for-plugin but no plugin is active \
+                     in this scope: it has no effect outside a plugin's own output-styles/ \
+                     directory",
+                    style.name
+                );
+            }
+        }
+    }
+
     run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled, native_claude_env);
 
     run_doctor_tool_availability(use_color, &config);

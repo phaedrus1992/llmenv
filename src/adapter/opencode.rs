@@ -481,6 +481,10 @@ impl AgentAdapter for OpencodeAdapter {
         true
     }
 
+    fn supports_output_styles(&self) -> bool {
+        false
+    }
+
     /// Every map this adapter reads. `native_hooks` and `native_plugins` are
     /// absent even though `supports_plugins()` is true and
     /// `supported_hook_events()` is non-empty: hooks render from the neutral
@@ -553,6 +557,14 @@ impl AgentAdapter for OpencodeAdapter {
         owned.extend(crate::adapter::llmenv_skill::materialize_llmenv_skill(
             out, &features,
         )?);
+
+        // #1130: opencode has no native output-style concept — render each
+        // declared output style as a generated skill instead.
+        for style in &manifest.capabilities.output_styles {
+            owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
+                out, style,
+            )?);
+        }
 
         // 4. Plugin content translation (commands, agents, MCP, skills, hooks).
         let mut plugin_mcp_entries: std::collections::BTreeMap<String, serde_json::Value> =
@@ -2090,6 +2102,32 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(doc.get("lsp").is_none());
+    }
+
+    /// #1130: opencode has no native output-style concept, so a declared
+    /// style falls back to a generated skill.
+    #[test]
+    fn materialize_output_style_falls_back_to_generated_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.output_styles.push(crate::config::OutputStyle {
+            name: "concise".into(),
+            description: "A test style".into(),
+            content: "Be terse.".into(),
+            when: Vec::new(),
+            keep_coding_instructions: false,
+            force_for_plugin: false,
+        });
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        let owned = OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let skill_md = tmp.path().join("skills/concise/SKILL.md");
+        assert!(skill_md.exists());
+        assert!(owned.contains(&PathBuf::from("skills/concise/SKILL.md")));
+        let content = std::fs::read_to_string(skill_md).unwrap();
+        assert!(content.contains("Be terse."));
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let mut mcp = Vec::new();
     let mut lsp = Vec::new();
     let mut skills = Vec::new();
+    let mut output_styles = Vec::new();
     let mut model_providers = Vec::new();
     let mut allow = Vec::new();
     let mut ask = Vec::new();
@@ -63,6 +64,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         mcp.extend(caps.mcp.iter().cloned());
         lsp.extend(caps.lsp.iter().cloned());
         skills.extend(caps.skills.iter().cloned());
+        output_styles.extend(caps.output_styles.iter().cloned());
         model_providers.extend(caps.model_providers.iter().cloned());
         allow.extend(caps.permissions.allow.iter().cloned());
         ask.extend(caps.permissions.ask.iter().cloned());
@@ -93,6 +95,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     dedup(&mut mcp);
     dedup(&mut lsp);
     dedup(&mut skills);
+    dedup(&mut output_styles);
     dedup(&mut model_providers);
     dedup(&mut allow);
     dedup(&mut ask);
@@ -191,6 +194,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         mcp,
         lsp,
         skills,
+        output_styles,
         env,
         auto_memory_enabled,
         effort_level,
@@ -999,6 +1003,33 @@ mod tests {
             out.lsp.len(),
             1,
             "identical lsp entries must be deduped to one"
+        );
+    }
+
+    #[test]
+    fn output_style_entries_concatenate_and_dedup() {
+        use crate::config::OutputStyle;
+        let style = |name: &str| OutputStyle {
+            name: name.into(),
+            description: "d".into(),
+            content: "c".into(),
+            ..Default::default()
+        };
+        let caps_a = Capabilities {
+            output_styles: vec![style("concise")],
+            ..Default::default()
+        };
+        let caps_b = Capabilities {
+            output_styles: vec![style("concise"), style("verbose")],
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 0, caps_a), contributor("b", 1, caps_b)])
+            .unwrap();
+        assert_eq!(
+            out.output_styles.len(),
+            2,
+            "identical entries dedup, distinct entries survive: {:?}",
+            out.output_styles
         );
     }
 
