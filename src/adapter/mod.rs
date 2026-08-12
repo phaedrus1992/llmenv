@@ -3,6 +3,7 @@ pub mod crush;
 pub(crate) mod llmenv_skill;
 pub(crate) mod native_keys;
 pub mod opencode;
+pub(crate) mod output_styles;
 pub(crate) mod skills;
 
 use std::path::{Path, PathBuf};
@@ -221,6 +222,13 @@ pub trait AgentAdapter {
     /// default-model selection. Claude Code does not (Anthropic-only, no
     /// provider switching).
     fn supports_model_providers(&self) -> bool;
+
+    /// Whether this adapter has a native output-style concept — a file
+    /// appended to the system prompt to change tone/role/format, selected
+    /// via a single settings key (#1130). Only Claude Code does. Adapters
+    /// that don't render the same declared content as a generated skill
+    /// instead (`adapter::output_styles::write_output_style_as_skill`).
+    fn supports_output_styles(&self) -> bool;
 
     /// The `native_*` config maps this adapter actually reads, named by their
     /// config field (see the `NATIVE_*` constants in [`native_keys`]).
@@ -644,6 +652,10 @@ mod tests {
         }
 
         fn supports_model_providers(&self) -> bool {
+            false
+        }
+
+        fn supports_output_styles(&self) -> bool {
             false
         }
 
