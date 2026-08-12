@@ -1,0 +1,11 @@
+# hawk (cargo-hawk) production entry points (#923).
+#
+# The `llmenv` binary is the sole shipped product; `crates/llmenv-config`,
+# `crates/llmenv-git`, `crates/llmenv-paths`, and `crates/llmenv-util` are
+# internal support crates with no callers outside this workspace, so hawk's
+# reachability analysis starting from the binary already covers their real
+# usage — they don't need their own [[production]] entries.
+[[production]]
+package = "llmenv"
+bin = "llmenv"
+reason = "shipped application binary"
