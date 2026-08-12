@@ -147,6 +147,44 @@ const CTX_DESTRUCTIVE: &[&str] = &["ctx_purge", "ctx_upgrade"];
 /// (`mcp__<server>__<tool>`, server name = [`MEMORY_MCP_NAME`]).
 const ICM_MCP_PREFIX: &str = "mcp__icm__";
 
+/// #1323: Built-in codebase-memory-mcp server tool tiers, rendered the same
+/// way as the ICM/context-mode tiers above. Source-verified against
+/// `codebase-memory-mcp`'s own `TOOL_ANNOTATIONS` table
+/// (`src/mcp/mcp.c`) — its `read_only`/`destructive` MCP protocol hints are
+/// conservative defaults (per the MCP spec, `destructiveHint` defaults to
+/// `true` whenever `readOnlyHint` is `false`, regardless of whether a tool
+/// actually destroys anything), so this tiering is by *actual* semantic
+/// risk rather than a literal copy of those two hint bits: every query/
+/// lookup tool (search, trace, snippet, schema, architecture, status,
+/// change-detection, project listing) is read-only here; `index_repository`
+/// (builds/updates the index), `manage_adr`, and `ingest_traces` are
+/// mutations the tool's own annotations already mark non-destructive;
+/// `delete_project` is the one operation that is genuinely destructive
+/// (irreversibly removes a project's index) and is the only tool asked
+/// for by default.
+const CBM_READ_ONLY: &[&str] = &[
+    "search_graph",
+    "query_graph",
+    "trace_path",
+    "get_code_snippet",
+    "get_graph_schema",
+    "get_architecture",
+    "search_code",
+    "list_projects",
+    "index_status",
+    "check_index_coverage",
+    "detect_changes",
+];
+
+const CBM_MUTATION: &[&str] = &["index_repository", "manage_adr", "ingest_traces"];
+
+const CBM_DESTRUCTIVE: &[&str] = &["delete_project"];
+
+/// Claude Code's MCP tool-name prefix for the codebase-memory-mcp server
+/// (`mcp__<server>__<tool>`, server name =
+/// [`crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME`]).
+const CBM_MCP_PREFIX: &str = "mcp__codebase-memory-mcp__";
+
 /// Adapter for Claude Code: writes `CLAUDE.md` (from `agents_md`) and copies
 /// all merged files into `out`. Sets `CLAUDE_CONFIG_DIR` so Claude Code uses
 /// `out` as its config root.
@@ -1392,6 +1430,24 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         );
     }
 
+    if let Some(cbm) = manifest
+        .mcps
+        .iter()
+        .find(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
+    {
+        apply_mcp_tier_permissions(
+            &mut buckets,
+            CBM_MCP_PREFIX,
+            [
+                (CBM_READ_ONLY, McpTier::ReadOnly),
+                (CBM_MUTATION, McpTier::Mutation),
+                (CBM_DESTRUCTIVE, McpTier::Destructive),
+            ],
+            cbm.mcp_permissions.as_ref(),
+            &native_cover,
+        );
+    }
+
     dedup(&mut allow);
     dedup(&mut ask);
     dedup(&mut deny);
@@ -2149,9 +2205,10 @@ fn apply_mcp_tier_permissions(
 mod tests {
     use super::super::AgentAdapter;
     use super::{
-        CLAUDE_JSON_FILE, CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND,
-        CONFIG_GUARD_COMMAND, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter,
-        HOOK_RUN_COMMAND, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS,
+        CBM_DESTRUCTIVE, CBM_MCP_PREFIX, CBM_MUTATION, CBM_READ_ONLY, CLAUDE_JSON_FILE,
+        CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND,
+        CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter, HOOK_RUN_COMMAND,
+        ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS,
         MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path, dedup_hooks_doc,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
@@ -3167,6 +3224,51 @@ mod tests {
         }
         for tool in ICM_DESTRUCTIVE {
             let rule = format!("mcp__icm__{tool}");
+            assert!(
+                ask.contains(&rule.as_str()),
+                "{rule} missing from ask: {ask:?}"
+            );
+        }
+        assert!(
+            deny.is_empty(),
+            "no deny entries expected by default: {deny:?}"
+        );
+    }
+
+    #[test]
+    fn codebase_memory_active_default_policy_no_wildcard_conflict() {
+        // #1323: same tiered-policy pattern as ICM — read-only tools allow,
+        // the one destructive tool (delete_project) asks.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Stdio {
+                    command: "codebase-memory-mcp".into(),
+                    args: vec![],
+                    env: Default::default(),
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                wakeup_max_tokens: None,
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        let allow = perm_action(&settings, "allow");
+        let ask = perm_action(&settings, "ask");
+        let deny = perm_action(&settings, "deny");
+
+        for tool in CBM_READ_ONLY.iter().chain(CBM_MUTATION) {
+            let rule = format!("{CBM_MCP_PREFIX}{tool}");
+            assert!(
+                allow.contains(&rule.as_str()),
+                "{rule} missing from allow: {allow:?}"
+            );
+        }
+        for tool in CBM_DESTRUCTIVE {
+            let rule = format!("{CBM_MCP_PREFIX}{tool}");
             assert!(
                 ask.contains(&rule.as_str()),
                 "{rule} missing from ask: {ask:?}"
