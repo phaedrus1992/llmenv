@@ -842,27 +842,54 @@ impl AgentAdapter for OpencodeAdapter {
             std::collections::BTreeMap<String, String>,
         > = std::collections::BTreeMap::new();
 
-        // Convert a PermissionRule into (tool_lowercase, pattern) pairs.
+        // Warn once, at the point a neutral tool name fails to map, that the
+        // rule is dropped rather than rendering an unverified key.
+        fn warn_unmapped_tool(tool: &str) {
+            tracing::warn!(
+                "opencode: no permission key for neutral tool `{tool}` — rule dropped, it can \
+                 never take effect for opencode. Remove it, or author a native rule directly \
+                 via `native_permissions.opencode`."
+            );
+        }
+
+        // Convert a PermissionRule into (opencode_tool, pattern) pairs.
         // Rules with a pattern use it; rules with paths use each path as a pattern;
         // bare rules (no pattern, no paths) wildcard-match everything for the tool.
+        // Empty when the tool has no opencode equivalent (see opencode_tool_name).
         fn rule_to_patterns(rule: &crate::config::PermissionRule) -> Vec<(String, String)> {
+            let Some(tool) = opencode_tool_name(&rule.tool) else {
+                warn_unmapped_tool(&rule.tool);
+                return Vec::new();
+            };
             if let Some(pat) = &rule.pattern {
-                vec![(rule.tool.to_ascii_lowercase(), pat.clone())]
+                vec![(tool.to_string(), pat.clone())]
             } else if !rule.paths.is_empty() {
                 rule.paths
                     .iter()
-                    .map(|p| (rule.tool.to_ascii_lowercase(), p.clone()))
+                    .map(|p| (tool.to_string(), p.clone()))
                     .collect()
             } else {
-                vec![(rule.tool.to_ascii_lowercase(), "*".to_string())]
+                vec![(tool.to_string(), "*".to_string())]
             }
         }
 
-        // Parse a native string like "Bash(otool *)" or bare "Bash" back into
-        // (tool_lowercase, pattern). A bare tool name wildcard-matches everything.
+        // Parse a native string like "bash(otool *)" or bare "bash" back into
+        // (opencode_tool, pattern). A bare tool name wildcard-matches everything.
         // Anything else missing a balanced, non-empty `(pattern)` is a malformed
         // rule and must error rather than silently fall back to a wildcard —
-        // a typo like "Bash(" would otherwise wildcard-allow all Bash commands.
+        // a typo like "bash(" would otherwise wildcard-allow all bash commands.
+        //
+        // #1326 (security-audit): unlike `rule_to_patterns`, this does NOT run
+        // the tool portion through `opencode_tool_name`. `native_permissions.
+        // opencode` is the escape hatch for authoring opencode's *own* native
+        // vocabulary directly — its own permission keys (`lsp`, `skill`,
+        // `question`, `external_directory`, `doom_loop`, or a bare `"*"`
+        // deny-all baseline) have no neutral equivalent at all, so routing
+        // them through the neutral-name allowlist silently dropped every
+        // native rule that wasn't one of the twelve mapped PascalCase names
+        // — including a plain lowercase `deny: ["bash(rm -rf *)"]`, turning a
+        // working deny into a prompt. Only lowercase for forgiving case, same
+        // as before this fix.
         fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<(String, String)> {
             match (s.find('('), s.rfind(')')) {
                 (None, None) => {
@@ -1109,6 +1136,43 @@ impl AgentAdapter for OpencodeAdapter {
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
         super::emit_hook_context(hook_event_name, text)
     }
+}
+
+/// Map a neutral permission-rule tool name (Claude Code's vocabulary —
+/// `Bash`, `Read`, `Write`, ...) to opencode's own permission config key.
+///
+/// #1326: source-verified against opencode's
+/// `packages/core/src/v1/config/permission.ts` schema — the real keys are
+/// `read, edit, glob, grep, list, bash, task, todowrite, webfetch,
+/// websearch, lsp, skill`, not a simple lowercase of the neutral name.
+/// `write`/`patch` are explicitly normalized to `edit`
+/// (`v1/config/migrate.ts`'s `normalizeAction`) — there is no separate
+/// opencode `write` or `multiedit` key — and the list-tool key is `list`,
+/// not `ls`.
+///
+/// Returns `None` for a neutral name with no confirmed opencode equivalent
+/// (e.g. `NotebookEdit`) rather than guessing at a lowercase pass-through —
+/// the design doc's own policy is "best-effort tool-name mapping; unknown
+/// names dropped with warning"
+/// (`docs/superpowers/specs/2026-07-10-opencode-adapter-design.md`), and
+/// silently emitting an unverified name would repeat exactly the mistake
+/// this fix corrects for `Write`/`MultiEdit`/`LS`. Every neutral tool name
+/// documented as valid in `capabilities.permissions` is covered here.
+fn opencode_tool_name(neutral: &str) -> Option<&'static str> {
+    Some(match neutral {
+        "Bash" => "bash",
+        "Read" => "read",
+        "Write" | "MultiEdit" => "edit",
+        "Edit" => "edit",
+        "Glob" => "glob",
+        "Grep" => "grep",
+        "LS" => "list",
+        "WebFetch" => "webfetch",
+        "WebSearch" => "websearch",
+        "TodoWrite" => "todowrite",
+        "Task" => "task",
+        _ => return None,
+    })
 }
 
 /// Build the JS source for `plugin/llmenv.js` — the hook bridge shim.
@@ -2083,6 +2147,115 @@ mod tests {
         // New format: doc["permission"]["bash"]["echo*"] = "allow"
         let bash = &doc["permission"]["bash"];
         assert_eq!(bash["echo*"], serde_json::json!("allow"));
+    }
+
+    /// #1326 (security-audit): `native_permissions.opencode` is the escape
+    /// hatch for authoring opencode's *own* native vocabulary — keys like
+    /// `lsp`/`skill`/`external_directory` and a bare `"*"` deny-all baseline
+    /// have no neutral (Claude Code) equivalent at all. An earlier version
+    /// of this fix incorrectly ran native tool strings through the same
+    /// restrictive neutral-name mapping `rule_to_patterns` uses, which
+    /// silently dropped every native rule outside the twelve mapped
+    /// PascalCase names — including a working `deny: ["*"]` baseline,
+    /// turning it into a permissive default. Native rules must only be
+    /// lowercased, never mapped.
+    #[test]
+    fn materialize_native_opencode_preserves_opencode_only_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec![],
+                ask: vec![],
+                deny: vec!["*".into(), "lsp".into()],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["permission"]["*"],
+            serde_json::json!("deny"),
+            "a bare `*` native deny-all rule must survive verbatim, not be dropped as an \
+             unmapped neutral tool: {doc}"
+        );
+        assert_eq!(
+            doc["permission"]["lsp"],
+            serde_json::json!("deny"),
+            "opencode-only keys like `lsp` (no neutral equivalent) must survive verbatim: {doc}"
+        );
+    }
+
+    /// #1326: source-verified against opencode's own
+    /// `packages/core/src/v1/config/permission.ts` schema — the real
+    /// permission keys are `read, edit, glob, grep, list, bash, task,
+    /// todowrite, webfetch, websearch, lsp, skill`, not a simple lowercase of
+    /// Claude Code's tool names. `write`/`patch` are explicitly normalized to
+    /// `edit` (`migrate.ts`'s `normalizeAction`) — opencode has no separate
+    /// `write`/`multiedit` key — and the list-tool key is `list`, not `ls`.
+    #[test]
+    fn materialize_permissions_maps_write_multiedit_ls_to_real_opencode_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        for tool in ["Write", "MultiEdit", "LS"] {
+            caps.permissions.allow.push(crate::config::PermissionRule {
+                tool: tool.into(),
+                pattern: None,
+                paths: vec![],
+            });
+        }
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["permission"]["edit"],
+            serde_json::json!("allow"),
+            "Write and MultiEdit must both map to opencode's `edit` key, got: {doc}"
+        );
+        assert_eq!(
+            doc["permission"]["list"],
+            serde_json::json!("allow"),
+            "LS must map to opencode's `list` key, got: {doc}"
+        );
+        assert!(doc["permission"].get("write").is_none());
+        assert!(doc["permission"].get("multiedit").is_none());
+        assert!(doc["permission"].get("ls").is_none());
+    }
+
+    /// #1326: a neutral tool with no confirmed opencode equivalent (e.g.
+    /// `NotebookEdit`) is dropped, not silently rendered as an unverified
+    /// lowercase guess — matches the design doc's "unknown names dropped
+    /// with warning" policy and the Crush adapter's equivalent handling.
+    #[test]
+    fn materialize_permissions_unmapped_tool_is_dropped_not_guessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.permissions.allow.push(crate::config::PermissionRule {
+            tool: "NotebookEdit".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("permission").is_none(),
+            "an unmapped tool must be dropped, not fail materialize or render a guessed \
+             key: {doc}"
+        );
     }
 
     #[test]
@@ -3106,7 +3279,7 @@ mod tests {
         /// A single bare rule (no pattern, no paths) for an otherwise-unused
         /// tool renders as a plain action string, not a `{"*": action}` object.
         #[test]
-        fn bare_rule_renders_action_string(tool in "[A-Za-z]{1,8}") {
+        fn bare_rule_renders_action_string(tool in arb_mapped_neutral_tool()) {
             let mut caps = crate::config::Capabilities::default();
             caps.permissions.allow.push(crate::config::PermissionRule {
                 tool: tool.clone(),
@@ -3114,7 +3287,7 @@ mod tests {
                 paths: vec![],
             });
             prop_assert_eq!(
-                &permission_value(caps)[tool.to_ascii_lowercase()],
+                &permission_value(caps)[opencode_tool_name(&tool).unwrap()],
                 &serde_json::json!("allow")
             );
         }
@@ -3123,7 +3296,7 @@ mod tests {
         /// (deny is inserted last — documented last-write-wins semantics).
         #[test]
         fn deny_overrides_allow_for_same_tool_pattern(
-            tool in "[A-Za-z]{1,8}",
+            tool in arb_mapped_neutral_tool(),
             pattern in "[a-z]{2,8}",
         ) {
             let rule = |t: &str, p: &str| crate::config::PermissionRule {
@@ -3135,7 +3308,7 @@ mod tests {
             caps.permissions.allow.push(rule(&tool, &pattern));
             caps.permissions.deny.push(rule(&tool, &pattern));
             prop_assert_eq!(
-                &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
+                &permission_value(caps)[opencode_tool_name(&tool).unwrap()][&pattern],
                 &serde_json::json!("deny")
             );
         }
@@ -3148,7 +3321,7 @@ mod tests {
         /// present.
         #[test]
         fn highest_tier_wins_regardless_of_source(
-            tool in "[A-Za-z]{1,8}",
+            tool in arb_mapped_neutral_tool(),
             pattern in "[a-z]{2,8}",
             allow_present in any::<bool>(),
             allow_native in any::<bool>(),
@@ -3190,7 +3363,7 @@ mod tests {
                 "allow"
             };
             prop_assert_eq!(
-                &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
+                &permission_value(caps)[opencode_tool_name(&tool).unwrap()][&pattern],
                 &serde_json::json!(expected)
             );
         }
@@ -3222,8 +3395,30 @@ mod tests {
 
     /// Strategy for a native permission rule string that never contains `(`
     /// or `*`, so it always takes the bare-tool wildcard path.
+    /// `parse_native_rule` lowercases verbatim — no name mapping, #1326's
+    /// security-audit finding — so any non-empty, paren-free string works.
     fn arb_native_rule_tool() -> impl Strategy<Value = String> {
         "[A-Za-z]{1,8}".prop_map(String::from)
+    }
+
+    /// Strategy for a *neutral* (structured `permissions:`) tool name that's
+    /// guaranteed to map successfully via `opencode_tool_name`, which is now
+    /// a partial function (#1326) covering only confirmed-valid Claude Code
+    /// tool names. The tool identity is incidental to what proptests using
+    /// this check (precedence/dedup logic on structured rules), but it must
+    /// still map successfully for the JSON index in the assertion to be
+    /// meaningful.
+    ///
+    /// Excludes `Write` deliberately: `highest_tier_wins_regardless_of_source`
+    /// pushes the same generated `tool` string through *both* the structured
+    /// path (mapped via `opencode_tool_name`, `Write` -> `edit`) and the
+    /// native path (`parse_native_rule`, lowercased verbatim, `Write` ->
+    /// `write`) for the same test case — those two paths must agree on the
+    /// final key for the "regardless of source" premise to hold, and `Write`
+    /// is precisely the one name where native and structured intentionally
+    /// diverge (#1326's security-audit finding).
+    fn arb_mapped_neutral_tool() -> impl Strategy<Value = String> {
+        prop::sample::select(&["Bash", "Read", "Edit", "Glob", "Grep"][..]).prop_map(String::from)
     }
 
     proptest! {
@@ -3371,7 +3566,7 @@ mod tests {
         }
 
         /// A native rule with a parenthesized pattern extracts that pattern
-        /// verbatim and lowercases only the tool portion.
+        /// verbatim and maps only the tool portion (#1326).
         #[test]
         fn native_rule_with_parens_extracts_pattern(
             tool in arb_native_rule_tool(),
