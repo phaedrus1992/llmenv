@@ -139,6 +139,11 @@ pub struct Config {
     /// have a skills directory concept; adapters without one silently skip these.
     #[serde(default)]
     pub skills: Vec<SkillSource>,
+    /// Output styles declared at the top level, selected by tag intersection
+    /// (same model as `mcp`/`lsp`/`skills`, #1130). Claude Code renders these
+    /// natively; other engines fall back to a generated skill.
+    #[serde(default)]
+    pub output_styles: Vec<OutputStyle>,
     /// Feature toggles and experimental configuration.
     #[serde(default)]
     pub features: Option<Features>,
@@ -511,6 +516,10 @@ pub struct Capabilities {
     /// `supports_skills() == false` silently skip these entries.
     #[serde(default)]
     pub skills: Vec<SkillSource>,
+    /// Output styles contributed by this capability source (#1130). A list —
+    /// concatenates across contributors, same precedence model as `skills`.
+    #[serde(default)]
+    pub output_styles: Vec<OutputStyle>,
     /// Environment variables declared inside a bundle. Merged into the agent's env.
     /// A map — later contributors override earlier ones (same precedence model as
     /// the top-level config merging).
@@ -1505,6 +1514,53 @@ pub struct SkillSource {
     pub when: Vec<String>,
 }
 
+/// A declared output style: markdown content appended to Claude Code's system
+/// prompt to change tone/role/format, independent of CLAUDE.md-style project
+/// knowledge (#1130). Selected onto a scope when any `when` tag intersects the
+/// active scope tags (same model as `SkillSource`/`LspServer`).
+///
+/// Engines without a native output-style concept
+/// (`AgentAdapter::supports_output_styles() == false`) render the same
+/// `name`/`description`/`content` as a generated skill instead
+/// (`skills/<name>/SKILL.md`) — automatic per engine, no config-author-side
+/// fallback logic.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct OutputStyle {
+    /// Registration name — becomes the file stem (`<name>.md`) for Claude
+    /// Code and the skill directory name (`skills/<name>/`) for the
+    /// generated-skill fallback. Must pass `llmenv_paths::is_valid_short_name`
+    /// (reused as a filename/directory name on both rendering paths).
+    pub name: String,
+    /// One-line description. Shown in Claude Code's `/config` picker
+    /// natively, and becomes the generated skill's required `description`
+    /// frontmatter field on the fallback path.
+    pub description: String,
+    /// Markdown body appended to the system prompt (Claude Code) or used as
+    /// the generated skill's body (fallback adapters). Inline content, not a
+    /// file path — unlike `SkillSource.path`, there is no existing on-disk
+    /// directory to copy or bundle-relative path to re-anchor.
+    pub content: String,
+    /// Tags that activate this style, intersected with active scope tags.
+    /// An empty list means the entry is always active when selected.
+    #[serde(default)]
+    pub when: Vec<String>,
+    /// Keep Claude Code's built-in software-engineering system-prompt
+    /// instructions alongside this style's content. Defaults `false`,
+    /// matching Claude Code's own frontmatter default. No effect on the
+    /// generated-skill fallback (skills don't replace the system prompt).
+    #[serde(default)]
+    pub keep_coding_instructions: bool,
+    /// Plugin output styles only (Claude Code semantics): the style should
+    /// auto-activate whenever its plugin is enabled. llmenv does not build
+    /// the synthetic-plugin-promotion machinery this would require (unlike
+    /// the LSP feature's `skills/llmenv-lsp/.claude-plugin/plugin.json`
+    /// trick), so this flag is inert in llmenv's own rendering — set
+    /// outside a plugin bundle, `llmenv doctor` flags it as having no
+    /// effect.
+    #[serde(default)]
+    pub force_for_plugin: bool,
+}
+
 /// Engines that report `supports_lsp() == false` silently ignore these entries —
 /// declaring an LSP server in a shared bundle is legitimate; it is simply a
 /// no-op for engines that have no LSP concept.
@@ -1836,6 +1892,40 @@ index_path: /custom/index/path
     fn features_codebase_memory_defaults_to_empty() {
         let features: Features = serde_yaml::from_str("{}").unwrap();
         assert!(features.codebase_memory.is_empty());
+    }
+
+    #[test]
+    fn output_style_round_trips_through_yaml() {
+        let yaml = r#"
+name: concise
+description: Terse, no preamble
+content: Answer in as few words as possible.
+when: [me]
+keep_coding_instructions: true
+force_for_plugin: true
+"#;
+        let style: OutputStyle = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(style.name, "concise");
+        assert_eq!(style.description, "Terse, no preamble");
+        assert_eq!(style.content, "Answer in as few words as possible.");
+        assert_eq!(style.when, vec!["me".to_string()]);
+        assert!(style.keep_coding_instructions);
+        assert!(style.force_for_plugin);
+    }
+
+    #[test]
+    fn output_style_optional_fields_default() {
+        let yaml = "name: plain\ndescription: A style\ncontent: Be plain.\n";
+        let style: OutputStyle = serde_yaml::from_str(yaml).unwrap();
+        assert!(style.when.is_empty());
+        assert!(!style.keep_coding_instructions);
+        assert!(!style.force_for_plugin);
+    }
+
+    #[test]
+    fn capabilities_output_styles_defaults_to_empty() {
+        let caps: Capabilities = serde_yaml::from_str("{}").unwrap();
+        assert!(caps.output_styles.is_empty());
     }
 
     #[test]
