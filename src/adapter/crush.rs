@@ -266,7 +266,7 @@ impl AgentAdapter for CrushAdapter {
         let perms = &manifest.capabilities.permissions;
         let native_perms = manifest.capabilities.native_permissions.get("crush");
 
-        let mut allowed_tools = render_rules_to_strings(&perms.allow);
+        let mut allowed_tools = render_rules_to_strings(&perms.allow)?;
         if let Some(n) = native_perms {
             allowed_tools.extend(n.allow.iter().cloned());
         }
@@ -574,8 +574,47 @@ fn render_default_models(
 /// merge in the safe direction.
 const CRUSH_MODELED_KEYS: &[&str] = &["permissions", "hooks", "mcp", "lsp", "providers", "models"];
 
-fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
-    rules.iter().flat_map(render_permission_rule).collect()
+fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> anyhow::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for rule in rules {
+        out.extend(render_permission_rule(rule)?);
+    }
+    Ok(out)
+}
+
+/// Map a neutral permission-rule tool name (Claude Code's vocabulary —
+/// `Bash`, `Read`, `WebFetch`, ...) to Crush's own tool identifier.
+///
+/// #1321: source-verified against `charmbracelet/crush`'s `allToolNames()`
+/// (`internal/config/config.go`) — Crush's names are lowercase and not
+/// always a simple case change (`Read` -> `view`, `WebFetch` -> `fetch`, not
+/// `webfetch`). `allToolNames()` also lists `agentic_fetch`/`web_search` as
+/// separate, more specialized fetch/search tools with no direct Claude Code
+/// equivalent — `WebFetch` maps to the base `fetch` tool, not those.
+///
+/// Returns an error for a neutral name with no Crush equivalent (`Task`,
+/// `NotebookEdit`, ...) rather than silently rendering a name Crush ignores
+/// — same "loud over silent" principle #1306 established for pattern/path
+/// scoping: a rule that can never take effect must fail loudly, not
+/// materialize as if it worked.
+fn crush_tool_name(neutral: &str) -> anyhow::Result<&'static str> {
+    Ok(match neutral {
+        "Bash" => "bash",
+        "Read" => "view",
+        "Write" => "write",
+        "Edit" => "edit",
+        "MultiEdit" => "multiedit",
+        "Glob" => "glob",
+        "Grep" => "grep",
+        "LS" => "ls",
+        "WebFetch" => "fetch",
+        "TodoWrite" => "todos",
+        other => anyhow::bail!(
+            "crush: no equivalent tool for neutral permission rule `{other}` — Crush has no \
+             matching tool, so this rule can never take effect. Remove it, or author a \
+             Crush-native rule directly via `native_permissions.crush`."
+        ),
+    })
 }
 
 /// Render a rule for Crush's `permissions.allowed_tools`.
@@ -603,16 +642,11 @@ fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<Strin
 /// downgrade on a permission-relevant path needs `error!` to actually surface
 /// (see #1139, the same trap already fixed at six other call sites).
 ///
-/// Separately — and this is *not* fixed here — the tool identifiers
-/// themselves don't line up: llmenv's neutral vocabulary is Claude Code's
-/// PascalCase (`Bash`, `Read`, `WebFetch`), rendered verbatim, while Crush
-/// matches lowercase snake_case names that aren't always a simple case
-/// change (`Read` is `view`, `WebFetch` is `web_fetch`). No translation layer
-/// exists, so today an *unscoped* allow rule (no pattern, no paths) is
-/// materialized but still doesn't match anything in real Crush. That's
-/// tracked separately (needs a full name-mapping table, a bigger decision
-/// than this fix) rather than folded in here.
-fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
+/// #1321: an unscoped rule's tool name is also translated to Crush's own
+/// identifier via [`crush_tool_name`] — llmenv's neutral vocabulary is Claude
+/// Code's PascalCase (`Bash`, `Read`, `WebFetch`), which never matched
+/// Crush's lowercase names before this mapping existed.
+fn render_permission_rule(rule: &crate::config::PermissionRule) -> anyhow::Result<Vec<String>> {
     if let Some(pattern) = &rule.pattern {
         tracing::error!(
             "crush: allowed_tools has no pattern matching; rule `{}` + pattern `{pattern}` \
@@ -621,7 +655,7 @@ fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
             rule.tool,
             rule.tool
         );
-        return Vec::new();
+        return Ok(Vec::new());
     }
     if !rule.paths.is_empty() {
         tracing::error!(
@@ -632,16 +666,16 @@ fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
             rule.paths,
             rule.tool
         );
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    vec![rule.tool.clone()]
+    Ok(vec![crush_tool_name(&rule.tool)?.to_string()])
 }
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
     use super::{
-        CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter, SUPPORTED_HOOK_EVENTS,
+        CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter, SUPPORTED_HOOK_EVENTS, crush_tool_name,
         render_permission_rule,
     };
     use crate::adapter::AgentAdapter;
@@ -999,7 +1033,71 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let allowed = doc["permissions"]["allowed_tools"].as_array().unwrap();
-        assert!(allowed.contains(&serde_json::json!("Bash")));
+        // #1321: the neutral name is translated to Crush's own tool identifier.
+        assert!(allowed.contains(&serde_json::json!("bash")));
+        assert!(!allowed.contains(&serde_json::json!("Bash")));
+    }
+
+    /// #1321: source-verified against `charmbracelet/crush`'s
+    /// `allToolNames()` (`internal/config/config.go`) — Crush's tool names
+    /// are lowercase and not always a simple case change of the neutral
+    /// (Claude Code) name.
+    #[test]
+    fn materialize_maps_every_documented_neutral_tool_to_its_crush_name() {
+        for (neutral, crush) in [
+            ("Bash", "bash"),
+            ("Read", "view"),
+            ("Write", "write"),
+            ("Edit", "edit"),
+            ("MultiEdit", "multiedit"),
+            ("Glob", "glob"),
+            ("Grep", "grep"),
+            ("LS", "ls"),
+            ("WebFetch", "fetch"),
+            ("TodoWrite", "todos"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut caps = Capabilities::default();
+            caps.permissions.allow.push(PermissionRule {
+                tool: neutral.into(),
+                pattern: None,
+                paths: vec![],
+            });
+            CrushAdapter
+                .materialize(&manifest_with_caps(caps), tmp.path())
+                .map_err(|e| format!("{neutral} should map to a Crush tool: {e}"))
+                .unwrap();
+            let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let allowed = doc["permissions"]["allowed_tools"].as_array().unwrap();
+            assert!(
+                allowed.contains(&serde_json::json!(crush)),
+                "{neutral} should render as {crush}, got {allowed:?}"
+            );
+        }
+    }
+
+    /// #1321: a neutral tool with no Crush equivalent (e.g. `Task`, which
+    /// depends on Claude Code's sub-agent model) must hard-error at
+    /// materialize time rather than silently rendering a name Crush ignores
+    /// — the same "loud over silent" principle #1306 already established
+    /// for pattern/path scoping.
+    #[test]
+    fn materialize_unmapped_neutral_tool_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.permissions.allow.push(PermissionRule {
+            tool: "Task".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        let err = CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Task"),
+            "error should name the unmapped tool: {err}"
+        );
     }
 
     #[test]
@@ -1244,7 +1342,7 @@ mod tests {
             pattern: None,
             paths: vec![],
         };
-        assert_eq!(render_permission_rule(&rule), vec!["Bash"]);
+        assert_eq!(render_permission_rule(&rule).unwrap(), vec!["bash"]);
     }
 
     #[test]
@@ -1254,7 +1352,7 @@ mod tests {
             pattern: Some("ls*".into()),
             paths: vec![],
         };
-        assert_eq!(render_permission_rule(&rule), Vec::<String>::new());
+        assert_eq!(render_permission_rule(&rule).unwrap(), Vec::<String>::new());
     }
 
     #[test]
@@ -1264,7 +1362,17 @@ mod tests {
             pattern: None,
             paths: vec!["src/".into(), "tests/".into()],
         };
-        assert_eq!(render_permission_rule(&rule), Vec::<String>::new());
+        assert_eq!(render_permission_rule(&rule).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn render_unmapped_tool_errors() {
+        let rule = PermissionRule {
+            tool: "Task".into(),
+            pattern: None,
+            paths: vec![],
+        };
+        assert!(render_permission_rule(&rule).is_err());
     }
 
     // ── constants ────────────────────────────────────────────────────────────
@@ -2393,19 +2501,32 @@ mod tests {
         // ── P2: render_permission_rule ────────────────────────────────────────
 
         #[test]
-        fn prop_render_permission_rule_scoped_is_dropped_unscoped_is_bare_tool(
-            tool in "[A-Za-z]{1,15}",
+        fn prop_render_permission_rule_scoped_is_dropped_unscoped_is_mapped(
+            tool in prop::sample::select(&["Bash", "Read", "Write", "Edit", "Glob", "Grep"][..]),
             pattern in prop::option::of("[a-z*]{1,15}"),
             paths in prop::collection::vec("[a-z/]{1,15}", 0..5),
         ) {
             let scoped = pattern.is_some() || !paths.is_empty();
-            let rule = crate::config::PermissionRule { tool: tool.clone(), pattern, paths };
+            let rule = crate::config::PermissionRule {
+                tool: tool.to_string(),
+                pattern,
+                paths,
+            };
             // #1306: Crush's allowed_tools has no pattern/path matching. A
             // scoped rule can never be expressed, so it's dropped (fail-closed
             // — the tool still prompts) rather than widened to a bare-tool
-            // grant. An unscoped rule renders exactly the bare tool name.
-            let expected = if scoped { Vec::new() } else { vec![tool] };
-            prop_assert_eq!(render_permission_rule(&rule), expected);
+            // grant. #1321: an unscoped rule renders the mapped Crush tool
+            // name, not the neutral one verbatim. `tool` is restricted to
+            // names known to map successfully — the mapping's own
+            // success/failure per name is covered by
+            // `materialize_maps_every_documented_neutral_tool_to_its_crush_name`
+            // and `render_unmapped_tool_errors`.
+            let expected = if scoped {
+                Vec::new()
+            } else {
+                vec![crush_tool_name(tool).unwrap().to_string()]
+            };
+            prop_assert_eq!(render_permission_rule(&rule).unwrap(), expected);
         }
 
         #[test]
