@@ -576,6 +576,18 @@ current as files change — llmenv doesn't re-implement reindex scheduling.
 whenever this feature is configured, and flags entries whose tags no scope
 emits.
 
+(added in v3.10.0) Claude Code renders a tiered allow/ask policy for
+`mcp__codebase-memory-mcp__*`, mirroring the ICM memory MCP's tiering —
+read-only/query tools (`search_code`, `search_graph`, `trace_path`,
+`get_architecture`, `index_status`, `list_projects`, ...) and non-destructive
+mutations (`index_repository`, `manage_adr`, `ingest_traces`) are pre-approved
+by default; `delete_project` (the one genuinely destructive tool — it
+irreversibly removes a project's index) asks. Previously every
+codebase-memory-mcp tool call prompted individually. A `SKILL.md` reference
+(`skills/llmenv/references/codebase-memory.md`) is materialized whenever this
+feature is enabled, teaching the agent when to reach for codebase-memory-mcp
+instead of a plain `grep`/`find` sweep.
+
 ### `features.throttle:`
 
 (added in v2.3.0)
