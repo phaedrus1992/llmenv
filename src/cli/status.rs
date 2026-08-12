@@ -99,6 +99,11 @@ fn run_scope_ls(use_color: bool) -> anyhow::Result<()> {
     for s in &config.scope.user {
         push(&mut rows, "user", &s.id, &s.tags, &active_ids, &consumed);
     }
+    // #845: content scopes were omitted here entirely — `llmenv status scopes`
+    // never listed a configured content scope, active or not.
+    for s in &config.scope.content {
+        push(&mut rows, "content", &s.id, &s.tags, &active_ids, &consumed);
+    }
     for scope in &active.scopes {
         if scope.kind == "project" {
             push(

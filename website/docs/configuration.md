@@ -151,12 +151,23 @@ Each scope has an `id` (used in diagnostics and `LLMENV_ACTIVE_SCOPES`), a
 ### Precedence
 
 When scopes of different kinds set conflicting scalar capability values, the
-order least-to-most specific is **network → host → user → project**. List-shaped
+order least-to-most specific is **network → host → user → content → project**
+(`content` joined this ranking in v3.10.0 — see below). List-shaped
 values concatenate and de-duplicate instead of overriding. Two contributors at
 the **same** precedence disagreeing on a scalar's value is a hard error naming
 both — there's no rank to break the tie, so llmenv fails loudly rather than
 silently picking one (added in v3.8.0 for every scalar; `default_mode` always
 had this).
+
+`content` ranks just below `project`: it's an environment signal derived from
+file patterns incidentally present under the current directory (like
+network/host/user), not authored intent — but more specific than a bare
+user-level match, since it's derived from the actual project's file layout. An
+explicit `.llmenv.yaml` (`project`) still outranks it: deliberately authored
+project config beats an incidental glob match (#845; before v3.10.0, a bundle
+firing only via a `content` scope always landed at the lowest rank,
+unconditionally losing every scalar conflict regardless of how specific its
+match was).
 
 ## `capabilities:`
 
