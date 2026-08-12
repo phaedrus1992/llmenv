@@ -5,9 +5,9 @@
 # Tests and cargo-deny run in CI only (slow full rebuild).
 #
 # cargo-hawk (pre-push, #923) requires a one-time install matching the pinned
-# toolchain exactly (see rust-toolchain.toml), with the rustc-dev/
+# toolchain exactly (see rust-toolchain.toml), with the rust-src/rustc-dev/
 # llvm-tools-preview components hawk's own build needs:
-#   rustup component add rustc-dev llvm-tools-preview
+#   rustup component add rust-src rustc-dev llvm-tools-preview
 #   RUSTC_BOOTSTRAP=1 cargo install --locked cargo-hawk@0.1.12
 # Or install a prebuilt release instead (no components/RUSTC_BOOTSTRAP
 # needed) — see https://github.com/astral-sh/hawk#installation.
