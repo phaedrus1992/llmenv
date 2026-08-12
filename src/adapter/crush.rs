@@ -45,6 +45,10 @@ impl AgentAdapter for CrushAdapter {
         true
     }
 
+    fn supports_output_styles(&self) -> bool {
+        false
+    }
+
     /// Every map this adapter reads — `native_plugins` is absent because Crush
     /// has no Claude-style plugin concept.
     fn native_maps(&self) -> &'static [&'static str] {
@@ -173,6 +177,14 @@ impl AgentAdapter for CrushAdapter {
         let llmenv_skill_paths =
             crate::adapter::llmenv_skill::materialize_llmenv_skill(out, &features)?;
         owned.extend(llmenv_skill_paths.iter().cloned());
+
+        // #1130: Crush has no native output-style concept — render each
+        // declared output style as a generated skill instead.
+        for style in &manifest.capabilities.output_styles {
+            owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
+                out, style,
+            )?);
+        }
 
         // P1-1: validate skills (frontmatter + hardcoded-path scan), same gate as ClaudeCodeAdapter
         crate::adapter::skills::validate_skills(out)?;
@@ -729,6 +741,32 @@ mod tests {
             capabilities: caps,
             ..Default::default()
         }
+    }
+
+    /// #1130: Crush has no native output-style concept, so a declared style
+    /// falls back to a generated skill.
+    #[test]
+    fn materialize_output_style_falls_back_to_generated_skill() {
+        let out = tempfile::tempdir().unwrap();
+        let caps = Capabilities {
+            output_styles: vec![crate::config::OutputStyle {
+                name: "concise".into(),
+                description: "A test style".into(),
+                content: "Be terse.".into(),
+                when: Vec::new(),
+                keep_coding_instructions: false,
+                force_for_plugin: false,
+            }],
+            ..Default::default()
+        };
+        let owned = CrushAdapter
+            .materialize(&manifest_with_caps(caps), out.path())
+            .unwrap();
+        let skill_md = out.path().join("skills/concise/SKILL.md");
+        assert!(skill_md.exists());
+        assert!(owned.contains(&PathBuf::from("skills/concise/SKILL.md")));
+        let content = std::fs::read_to_string(skill_md).unwrap();
+        assert!(content.contains("Be terse."));
     }
 
     #[test]

@@ -76,7 +76,7 @@ pub(crate) fn reject_hardcoded_config_path(content: &str, label: &str) -> anyhow
 /// inside a YAML double-quoted scalar, so they're hex-escaped (`\uXXXX`)
 /// rather than passed through literally. Unicode noncharacters (see
 /// [`is_yaml_noncharacter`]) get the same treatment.
-fn quote_yaml_scalar(value: &str) -> String {
+pub(crate) fn quote_yaml_scalar(value: &str) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::with_capacity(value.len() + 2);
