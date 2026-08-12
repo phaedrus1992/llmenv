@@ -344,6 +344,29 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
                     };
                     let source = if let Some(s) = raw.as_str() {
                         s.to_string()
+                    } else if raw.get("source").and_then(|v| v.as_str()) == Some("npm") {
+                        // #1014: an npm-source object ({"source": "npm", "package": ...,
+                        // "version": ...}) has no URL to clone — Claude Code's own
+                        // `/plugin install` resolves it directly from the npm registry.
+                        // Encode it as a source string `is_external_plugin_source`
+                        // recognizes as non-external (nothing for llmenv to clone),
+                        // matching the "./" -prefix sentinel this field already uses
+                        // for local-path sources.
+                        match raw.get("package").and_then(|v| v.as_str()) {
+                            Some(pkg) => match raw.get("version").and_then(|v| v.as_str()) {
+                                Some(version) => format!("npm:{pkg}@{version}"),
+                                None => format!("npm:{pkg}"),
+                            },
+                            None => {
+                                tracing::warn!(
+                                    "marketplace entry '{}': npm-source object has no string \
+                                     'package' field (source = {:?}) — skipping entry",
+                                    name,
+                                    raw
+                                );
+                                return None;
+                            }
+                        }
                     } else {
                         match raw.get("url").and_then(|v| v.as_str()) {
                             Some(u) => u.to_string(),
@@ -367,12 +390,15 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
 }
 
 /// True if a plugin source is an external git URL (not a relative path within
-/// the marketplace clone). External sources require a separate clone; relative
-/// paths are served directly from the marketplace directory.
+/// the marketplace clone, and not an npm package). External sources require a
+/// separate clone; relative paths are served directly from the marketplace
+/// directory; npm sources (#1014) resolve through the target engine's own
+/// npm-install mechanism — llmenv has nothing to clone for either.
 #[must_use]
 pub fn is_external_plugin_source(source: &str) -> bool {
     !source.starts_with("./")
         && !source.starts_with("../")
+        && !source.starts_with("npm:")
         && source != "."
         && source != "./"
         && source != ".."
@@ -1178,6 +1204,43 @@ mod tests {
         assert_eq!(plugins[2].name, "external-obj");
         assert_eq!(plugins[2].source, "https://github.com/example/obj.git");
         assert!(is_external_plugin_source(&plugins[2].source));
+    }
+
+    #[test]
+    fn read_marketplace_plugins_parses_npm_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(".claude-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest = r#"{"plugins": [
+            {"name": "claude-magic-compact", "source": {"source": "npm", "package": "claude-magic-compact", "version": "1.3.1"}},
+            {"name": "no-version", "source": {"source": "npm", "package": "some-pkg"}}
+        ]}"#;
+        std::fs::write(plugin_dir.join("marketplace.json"), manifest).unwrap();
+        let plugins = read_marketplace_plugins(tmp.path()).unwrap();
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0].name, "claude-magic-compact");
+        assert_eq!(plugins[0].source, "npm:claude-magic-compact@1.3.1");
+        assert!(
+            !is_external_plugin_source(&plugins[0].source),
+            "npm sources have nothing for llmenv to clone"
+        );
+        assert_eq!(plugins[1].source, "npm:some-pkg");
+        assert!(!is_external_plugin_source(&plugins[1].source));
+    }
+
+    #[test]
+    fn read_marketplace_plugins_skips_npm_source_without_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(".claude-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest = r#"{"plugins": [
+            {"name": "good", "source": "./plugins/good"},
+            {"name": "bad-npm", "source": {"source": "npm", "version": "1.0.0"}}
+        ]}"#;
+        std::fs::write(plugin_dir.join("marketplace.json"), manifest).unwrap();
+        let plugins = read_marketplace_plugins(tmp.path()).unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "good");
     }
 
     #[test]
