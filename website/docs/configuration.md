@@ -1424,8 +1424,6 @@ output_styles:
     content: |
       Answer in as few words as possible. No explanations unless asked.
     when: [me]
-    keep_coding_instructions: false
-    force_for_plugin: false
 ```
 
 | Field                      | Required | Notes                                                                                                                                                             |
@@ -1434,8 +1432,14 @@ output_styles:
 | `description`              | yes      | One-line description                                                                                                                                              |
 | `content`                  | yes      | Markdown body appended to the system prompt (Claude Code) or the skill's body (fallback adapters)                                                                 |
 | `when`                     | no       | Activation tags (empty = always active)                                                                                                                           |
-| `keep_coding_instructions` | no       | Keep Claude Code's built-in coding instructions alongside this style. Default `false`. No effect on the fallback                                                  |
+| `keep_coding_instructions` | no       | Keep Claude Code's built-in coding instructions alongside this style. Default `false` — see the warning below. No effect on the fallback path                     |
 | `force_for_plugin`         | no       | Claude Code plugin styles only — auto-activate whenever the plugin is enabled. `llmenv doctor` flags it set outside a plugin bundle, since it has no effect there |
+
+With the default `keep_coding_instructions: false`, Claude Code's built-in
+coding instructions — including its git-safety guidance (don't commit unless
+asked, don't force-push, don't touch git config) — are replaced entirely by
+`content`, not merged with it. Set `keep_coding_instructions: true` to keep
+those guardrails active alongside the style.
 
 Claude Code renders each tag-active entry to `output-styles/<name>.md` with
 the corresponding YAML frontmatter, and sets `outputStyle` in `settings.json`
