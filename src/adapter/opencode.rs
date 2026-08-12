@@ -842,24 +842,24 @@ impl AgentAdapter for OpencodeAdapter {
             std::collections::BTreeMap<String, String>,
         > = std::collections::BTreeMap::new();
 
-        // Convert a PermissionRule into (tool_lowercase, pattern) pairs.
+        // Convert a PermissionRule into (opencode_tool, pattern) pairs.
         // Rules with a pattern use it; rules with paths use each path as a pattern;
         // bare rules (no pattern, no paths) wildcard-match everything for the tool.
         fn rule_to_patterns(rule: &crate::config::PermissionRule) -> Vec<(String, String)> {
             if let Some(pat) = &rule.pattern {
-                vec![(rule.tool.to_ascii_lowercase(), pat.clone())]
+                vec![(opencode_tool_name(&rule.tool), pat.clone())]
             } else if !rule.paths.is_empty() {
                 rule.paths
                     .iter()
-                    .map(|p| (rule.tool.to_ascii_lowercase(), p.clone()))
+                    .map(|p| (opencode_tool_name(&rule.tool), p.clone()))
                     .collect()
             } else {
-                vec![(rule.tool.to_ascii_lowercase(), "*".to_string())]
+                vec![(opencode_tool_name(&rule.tool), "*".to_string())]
             }
         }
 
         // Parse a native string like "Bash(otool *)" or bare "Bash" back into
-        // (tool_lowercase, pattern). A bare tool name wildcard-matches everything.
+        // (opencode_tool, pattern). A bare tool name wildcard-matches everything.
         // Anything else missing a balanced, non-empty `(pattern)` is a malformed
         // rule and must error rather than silently fall back to a wildcard —
         // a typo like "Bash(" would otherwise wildcard-allow all Bash commands.
@@ -870,10 +870,10 @@ impl AgentAdapter for OpencodeAdapter {
                         !s.trim().is_empty(),
                         "native_permissions.opencode.{action}: empty rule string"
                     );
-                    Ok((s.to_ascii_lowercase(), "*".to_string()))
+                    Ok((opencode_tool_name(s), "*".to_string()))
                 }
                 (Some(start), Some(end)) if start < end => {
-                    let tool = s[..start].to_ascii_lowercase();
+                    let tool = opencode_tool_name(&s[..start]);
                     let pattern = &s[start + 1..end];
                     anyhow::ensure!(
                         !tool.is_empty(),
@@ -1108,6 +1108,33 @@ impl AgentAdapter for OpencodeAdapter {
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
         super::emit_hook_context(hook_event_name, text)
+    }
+}
+
+/// Map a neutral permission-rule tool name (Claude Code's vocabulary —
+/// `Bash`, `Read`, `Write`, ...) to opencode's own permission config key.
+///
+/// #1326: source-verified against opencode's
+/// `packages/core/src/v1/config/permission.ts` schema — the real keys are
+/// `read, edit, glob, grep, list, bash, task, todowrite, webfetch,
+/// websearch, lsp, skill`, not a simple lowercase of the neutral name.
+/// `write`/`patch` are explicitly normalized to `edit`
+/// (`v1/config/migrate.ts`'s `normalizeAction`) — there is no separate
+/// opencode `write` or `multiedit` key — and the list-tool key is `list`,
+/// not `ls`.
+///
+/// Falls back to a lowercased pass-through for a name with no explicit
+/// mapping, matching the design doc's "best-effort tool-name mapping" policy
+/// (`docs/superpowers/specs/2026-07-10-opencode-adapter-design.md`) rather
+/// than dropping it — opencode's own schema also accepts an open-ended
+/// `Record<string, Rule>` for keys it doesn't explicitly type, so an
+/// unrecognized lowercase name is at worst a no-op key opencode ignores, not
+/// a wrong one like `write`/`ls` were.
+fn opencode_tool_name(neutral: &str) -> String {
+    match neutral {
+        "Write" | "MultiEdit" => "edit".to_string(),
+        "LS" => "list".to_string(),
+        other => other.to_ascii_lowercase(),
     }
 }
 
@@ -2083,6 +2110,46 @@ mod tests {
         // New format: doc["permission"]["bash"]["echo*"] = "allow"
         let bash = &doc["permission"]["bash"];
         assert_eq!(bash["echo*"], serde_json::json!("allow"));
+    }
+
+    /// #1326: source-verified against `charmbracelet`'s... no, opencode's own
+    /// `packages/core/src/v1/config/permission.ts` schema — the real
+    /// permission keys are `read, edit, glob, grep, list, bash, task,
+    /// todowrite, webfetch, websearch, lsp, skill`, not a simple lowercase of
+    /// Claude Code's tool names. `write`/`patch` are explicitly normalized to
+    /// `edit` (`migrate.ts`'s `normalizeAction`) — opencode has no separate
+    /// `write`/`multiedit` key — and the list-tool key is `list`, not `ls`.
+    #[test]
+    fn materialize_permissions_maps_write_multiedit_ls_to_real_opencode_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        for tool in ["Write", "MultiEdit", "LS"] {
+            caps.permissions.allow.push(crate::config::PermissionRule {
+                tool: tool.into(),
+                pattern: None,
+                paths: vec![],
+            });
+        }
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            doc["permission"]["edit"],
+            serde_json::json!("allow"),
+            "Write and MultiEdit must both map to opencode's `edit` key, got: {doc}"
+        );
+        assert_eq!(
+            doc["permission"]["list"],
+            serde_json::json!("allow"),
+            "LS must map to opencode's `list` key, got: {doc}"
+        );
+        assert!(doc["permission"].get("write").is_none());
+        assert!(doc["permission"].get("multiedit").is_none());
+        assert!(doc["permission"].get("ls").is_none());
     }
 
     #[test]
@@ -3114,7 +3181,7 @@ mod tests {
                 paths: vec![],
             });
             prop_assert_eq!(
-                &permission_value(caps)[tool.to_ascii_lowercase()],
+                &permission_value(caps)[opencode_tool_name(&tool)],
                 &serde_json::json!("allow")
             );
         }
@@ -3135,7 +3202,7 @@ mod tests {
             caps.permissions.allow.push(rule(&tool, &pattern));
             caps.permissions.deny.push(rule(&tool, &pattern));
             prop_assert_eq!(
-                &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
+                &permission_value(caps)[opencode_tool_name(&tool)][&pattern],
                 &serde_json::json!("deny")
             );
         }
@@ -3190,7 +3257,7 @@ mod tests {
                 "allow"
             };
             prop_assert_eq!(
-                &permission_value(caps)[tool.to_ascii_lowercase()][&pattern],
+                &permission_value(caps)[opencode_tool_name(&tool)][&pattern],
                 &serde_json::json!(expected)
             );
         }
@@ -3367,11 +3434,11 @@ mod tests {
                 },
             );
             let val = permission_value(caps);
-            prop_assert_eq!(&val[tool.to_ascii_lowercase()], &serde_json::json!("allow"));
+            prop_assert_eq!(&val[opencode_tool_name(&tool)], &serde_json::json!("allow"));
         }
 
         /// A native rule with a parenthesized pattern extracts that pattern
-        /// verbatim and lowercases only the tool portion.
+        /// verbatim and maps only the tool portion (#1326).
         #[test]
         fn native_rule_with_parens_extracts_pattern(
             tool in arb_native_rule_tool(),
@@ -3387,7 +3454,7 @@ mod tests {
             );
             let val = permission_value(caps);
             prop_assert_eq!(
-                &val[tool.to_ascii_lowercase()][&pattern],
+                &val[opencode_tool_name(&tool)][&pattern],
                 &serde_json::json!("allow")
             );
         }
