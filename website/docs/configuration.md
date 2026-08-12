@@ -548,6 +548,7 @@ output.
 | ------- | ---------- | ------- |
 | `when` | yes | Activation tags; an entry with none is rejected at validate time |
 | `index_path` | no | Override the index storage directory; defaults to `<state_dir>/codebase-memory` |
+| `mcp_permissions` | no | (added in v3.10.0) Per-tier permission override for codebase-memory-mcp's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 
 (added in v3.8.0) The default index storage directory (`<state_dir>/codebase-
 memory`) is created owner-only (`0o700`). An explicit `index_path` override
@@ -580,13 +581,36 @@ emits.
 `mcp__codebase-memory-mcp__*`, mirroring the ICM memory MCP's tiering —
 read-only/query tools (`search_code`, `search_graph`, `trace_path`,
 `get_architecture`, `index_status`, `list_projects`, ...) and non-destructive
-mutations (`index_repository`, `manage_adr`, `ingest_traces`) are pre-approved
-by default; `delete_project` (the one genuinely destructive tool — it
-irreversibly removes a project's index) asks. Previously every
-codebase-memory-mcp tool call prompted individually. A `SKILL.md` reference
+mutations (`index_repository`, `ingest_traces`) are pre-approved by default;
+`delete_project` and `manage_adr` (both genuinely destructive — the former
+irreversibly removes a project's index, the latter is an unversioned
+overwrite of the project's ADR document with no history) ask. Previously
+every codebase-memory-mcp tool call prompted individually. Override the
+default per tier with `codebase_memory[].mcp_permissions` (same shape as
+`features.memory[].mcp_permissions`; see that section for the field
+reference). A `SKILL.md` reference
 (`skills/llmenv/references/codebase-memory.md`) is materialized whenever this
 feature is enabled, teaching the agent when to reach for codebase-memory-mcp
 instead of a plain `grep`/`find` sweep.
+
+Two caveats worth knowing before relying on the pre-approved tools:
+
+- **The pre-approved read tools are cross-project, not workspace-scoped.**
+  `search_code`/`get_code_snippet` take a free-form `project` parameter and
+  read straight off disk rooted at whichever indexed project that names —
+  not just the one active in the current session. With the default shared
+  `CBM_CACHE_DIR`, an agent working in project A can read source out of any
+  other project you've ever indexed, without a prompt. Set a per-project
+  `index_path` if you need to contain that (the tradeoff: codebase-memory-mcp
+  then can't cross-reference other projects for you).
+- **`delete_project`'s prompt is not a complete backstop.** `index_repository`
+  (pre-approved) accepts a `name` override with no check that the name is
+  already bound to a different project's root — a call naming an existing,
+  unrelated project silently replaces that project's index. Tracked
+  upstream/here as [#1331](https://github.com/phaedrus1992/llmenv/issues/1331).
+  An index is re-buildable (re-indexing the correct repo recovers it), so this
+  is a nuisance rather than data loss, but it is not gated by the `ask` tier
+  the way `delete_project` itself is.
 
 ### `features.throttle:`
 
@@ -743,11 +767,12 @@ features:
 
 (added in v3.6.1)
 
-Every feature-enabled MCP (`features.context_mode` and each `features.memory`
-entry) exposes its tools in three risk tiers — read-only, mutation, and
-destructive — and llmenv renders one coherent `allow`/`ask`/`deny` policy for
-them, never a wildcard grant that a more specific rule can silently shadow.
-The default policy:
+Every feature-enabled MCP (`features.context_mode`, each `features.memory`
+entry, and — added in v3.10.0 — each `features.codebase_memory` entry)
+exposes its tools in three risk tiers — read-only, mutation, and destructive —
+and llmenv renders one coherent `allow`/`ask`/`deny` policy for them, never a
+wildcard grant that a more specific rule can silently shadow. The default
+policy:
 
 | Tier          | Action  |
 |---------------|---------|
@@ -774,6 +799,11 @@ features:
       when: [home]
       mcp_permissions:
         destructive: deny
+
+  codebase_memory:
+    - when: [my-project]
+      mcp_permissions:
+        mutation: ask   # e.g. to keep index_repository prompting too
 ```
 
 An unrecognized value (anything other than `allow`/`ask`/`deny`) is a config
