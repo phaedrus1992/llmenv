@@ -238,6 +238,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         false
     }
 
+    fn supports_output_styles(&self) -> bool {
+        true
+    }
+
     /// Every map this adapter reads — `native_model_providers` is absent
     /// because Claude Code has no provider block to merge into.
     fn native_maps(&self) -> &'static [&'static str] {
@@ -426,6 +430,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if let Some(lsp_owned) = write_lsp_plugin(out, &manifest.capabilities.lsp)? {
             owned.push(lsp_owned);
         }
+
+        // #1130: output styles render natively for Claude Code. Written before
+        // validate_skills purely for consistency with the other capability
+        // writes above — output-styles/ is a sibling of skills/, not covered
+        // by that scan. The `outputStyle` settings key is set independently
+        // inside generate_settings_json below, recomputed from the same
+        // manifest rather than threaded through as extra state.
+        let (style_owned, _selected) = crate::adapter::output_styles::write_native_output_styles(
+            out,
+            &manifest.capabilities.output_styles,
+        )?;
+        owned.extend(style_owned);
 
         // Validate that skills are properly structured with SKILL.md frontmatter
         crate::adapter::skills::validate_skills(out)?;
@@ -1506,6 +1522,21 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         settings.insert("advisorSize".into(), json!(advisor_size));
     }
 
+    // #1130: select an output style when exactly one non-`force_for_plugin`
+    // entry is tag-active. See `output_styles::write_native_output_styles`
+    // for why zero/multiple selectable styles leaves this key unset rather
+    // than erroring.
+    let selectable_styles: Vec<&str> = manifest
+        .capabilities
+        .output_styles
+        .iter()
+        .filter(|o| !o.force_for_plugin)
+        .map(|o| o.name.as_str())
+        .collect();
+    if let [name] = selectable_styles[..] {
+        settings.insert("outputStyle".into(), json!(name));
+    }
+
     // Plugins (#59): declare marketplaces + enabled plugins into settings.json.
     // llmenv owns the marketplace clone in its cache, so each marketplace points
     // Claude at that checkout via a `directory` source (no re-fetch). Plugins are
@@ -1602,13 +1633,14 @@ fn read_hooks_sidecar(path: &Path) -> Option<serde_json::Value> {
 /// dropped from config must actually disappear, and `permissions` must never be
 /// weakened by a stale union. The one shared key, `hooks`, is handled specially
 /// (see [`reconcile_settings`]) so a plugin's self-registered hook survives.
-pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 9] = [
+pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 10] = [
     "permissions",
     "enabledPlugins",
     "extraKnownMarketplaces",
     "autoMemoryEnabled",
     "effortLevel",
     "advisorSize",
+    "outputStyle",
     "hooks",
     // Security: never allow these to be seeded from ~/.claude/settings.json —
     // they bypass all tool-call confirmations across every environment.
@@ -3345,6 +3377,85 @@ mod tests {
         );
     }
 
+    fn output_style(name: &str) -> crate::config::OutputStyle {
+        crate::config::OutputStyle {
+            name: name.to_string(),
+            description: "A test style".to_string(),
+            content: "Be terse.".to_string(),
+            when: Vec::new(),
+            keep_coding_instructions: false,
+            force_for_plugin: false,
+        }
+    }
+
+    #[test]
+    fn output_style_selects_when_exactly_one_active() {
+        let manifest = crate::merge::MergedManifest {
+            capabilities: crate::config::Capabilities {
+                output_styles: vec![output_style("concise")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        assert_eq!(settings["outputStyle"], serde_json::json!("concise"));
+    }
+
+    #[test]
+    fn output_style_no_selection_when_multiple_active() {
+        let manifest = crate::merge::MergedManifest {
+            capabilities: crate::config::Capabilities {
+                output_styles: vec![output_style("a"), output_style("b")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        assert!(settings.get("outputStyle").is_none());
+    }
+
+    #[test]
+    fn output_style_no_selection_when_force_for_plugin() {
+        let mut style = output_style("plugin-style");
+        style.force_for_plugin = true;
+        let manifest = crate::merge::MergedManifest {
+            capabilities: crate::config::Capabilities {
+                output_styles: vec![style],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        assert!(settings.get("outputStyle").is_none());
+    }
+
+    #[test]
+    fn output_style_absent_when_none_declared() {
+        let settings = render_settings_for_test(&crate::merge::MergedManifest::default());
+        assert!(settings.get("outputStyle").is_none());
+    }
+
+    #[test]
+    fn materialize_writes_native_output_style_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = crate::merge::MergedManifest {
+            capabilities: crate::config::Capabilities {
+                output_styles: vec![output_style("concise")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let owned = ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+        assert!(tmp.path().join("output-styles/concise.md").exists());
+        assert!(owned.contains(&PathBuf::from("output-styles/concise.md")));
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["outputStyle"], serde_json::json!("concise"));
+    }
+
     /// #1323 (silent-failure-hunter): a tool omitted from all three CBM tier
     /// lists gets no permission entry at all — `apply_mcp_tier_permissions`
     /// simply skips anything not named in one of the three slices, so a
@@ -4273,8 +4384,12 @@ mod tests {
     /// `hooks` are excluded on purpose — `reject_modeled_keys_in_catch_all`
     /// refuses those, so generating one would make the render error out instead
     /// of exercising the overlay.
-    const OVERRIDABLE_SETTINGS_KEYS: [&str; 3] =
-        ["autoMemoryEnabled", "effortLevel", "advisorSize"];
+    const OVERRIDABLE_SETTINGS_KEYS: [&str; 4] = [
+        "autoMemoryEnabled",
+        "effortLevel",
+        "advisorSize",
+        "outputStyle",
+    ];
 
     /// Arbitrary `native.claude_code` catch-all fragment. Keys are drawn from
     /// both fresh names (the insert path) and the keys the renderer actually
