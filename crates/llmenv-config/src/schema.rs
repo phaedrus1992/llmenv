@@ -1928,6 +1928,23 @@ force_for_plugin: true
         assert!(caps.output_styles.is_empty());
     }
 
+    proptest! {
+        #[test]
+        fn prop_output_style_yaml_roundtrip(
+            name in "[a-zA-Z0-9_.-]{1,20}",
+            description in "[a-zA-Z0-9 ,.!]{0,60}",
+            content in "(?s)[a-zA-Z0-9 \n,.!]{0,120}",
+            when in proptest::collection::vec("[a-z][a-z0-9_-]{0,10}", 0..3),
+            keep_coding_instructions in proptest::bool::ANY,
+            force_for_plugin in proptest::bool::ANY,
+        ) {
+            let original = OutputStyle { name, description, content, when, keep_coding_instructions, force_for_plugin };
+            let yaml = serde_yaml::to_string(&original).expect("serialize");
+            let back: OutputStyle = serde_yaml::from_str(&yaml).expect("deserialize");
+            prop_assert_eq!(original, back);
+        }
+    }
+
     #[test]
     fn memory_default_agrees_with_parsed_absent_listen_host() {
         // #1044: Memory's Default impl is manual, not derived, specifically
