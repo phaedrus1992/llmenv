@@ -256,20 +256,36 @@ impl AgentAdapter for CrushAdapter {
         // Permissions: Crush's PermissionsConfig (internal/config/config.go) has
         // exactly one field, `allowed_tools` — an allow-list of tools that skip
         // the interactive approval prompt. There is no `denied_tools` or
-        // `default_mode` concept: any tool not in the allow-list already
-        // requires prompt approval by default (deny-by-default), so `ask` and
-        // `deny` rules need no explicit rendering — omitting a tool from
-        // `allowed_tools` already produces the fail-closed behavior. Rendering
-        // extra keys here previously did nothing (Crush's plain
+        // `default_mode` concept, so `ask`/`deny` rules render no key of their
+        // own — omitting a tool from `allowed_tools` is already fail-closed.
+        // Rendering extra keys here previously did nothing (Crush's plain
         // `json.Unmarshal` silently drops unknown fields), so this was already
         // a no-op, not a security regression — just dead output (#554).
         let perms = &manifest.capabilities.permissions;
         let native_perms = manifest.capabilities.native_permissions.get("crush");
 
-        let mut allowed_tools = render_rules_to_strings(&perms.allow)?;
+        let mut allowed_tools = render_rules_to_strings(&perms.allow);
         if let Some(n) = native_perms {
             allowed_tools.extend(n.allow.iter().cloned());
         }
+
+        // #1325 (security-audit on #1321): that "ask/deny needs no rendering"
+        // reasoning only held while `allow` was inert too — before #1321's
+        // tool-name mapping, an unscoped allow rendered a PascalCase string
+        // that never matched a real Crush tool, so the deny-by-default
+        // fallback covered every case by accident. Now that `allow` lands as
+        // a real, matching grant, a tool also named in `deny`/`ask` must be
+        // withheld here — Crush has no `denied_tools` of its own to enforce
+        // it. Unmapped deny/ask tools are skipped, not hard-errored: there's
+        // no Crush grant to withhold in the first place.
+        let withheld: std::collections::BTreeSet<&str> = perms
+            .deny
+            .iter()
+            .chain(&perms.ask)
+            .filter_map(|rule| crush_tool_name(&rule.tool))
+            .collect();
+        allowed_tools.retain(|t| !withheld.contains(t.as_str()));
+
         dedup(&mut allowed_tools);
 
         if !allowed_tools.is_empty() {
@@ -574,12 +590,8 @@ fn render_default_models(
 /// merge in the safe direction.
 const CRUSH_MODELED_KEYS: &[&str] = &["permissions", "hooks", "mcp", "lsp", "providers", "models"];
 
-fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> anyhow::Result<Vec<String>> {
-    let mut out = Vec::new();
-    for rule in rules {
-        out.extend(render_permission_rule(rule)?);
-    }
-    Ok(out)
+fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
+    rules.iter().flat_map(render_permission_rule).collect()
 }
 
 /// Map a neutral permission-rule tool name (Claude Code's vocabulary —
@@ -592,13 +604,24 @@ fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> anyhow::R
 /// separate, more specialized fetch/search tools with no direct Claude Code
 /// equivalent — `WebFetch` maps to the base `fetch` tool, not those.
 ///
-/// Returns an error for a neutral name with no Crush equivalent (`Task`,
-/// `NotebookEdit`, ...) rather than silently rendering a name Crush ignores
-/// — same "loud over silent" principle #1306 established for pattern/path
-/// scoping: a rule that can never take effect must fail loudly, not
-/// materialize as if it worked.
-fn crush_tool_name(neutral: &str) -> anyhow::Result<&'static str> {
-    Ok(match neutral {
+/// `Edit`/`MultiEdit` map to Crush's `edit`/`multiedit`, but those Crush
+/// tools create missing files and parent directories on an empty
+/// `old_string` (`internal/agent/tools/edit.go`'s `createNewFile`) — Claude
+/// Code's `Edit` errors on a nonexistent path instead, requiring `Write` to
+/// create one. Allowing `Edit` for Crush therefore also allows file
+/// creation, which the neutral name alone doesn't imply; see the Crush
+/// capability map in `engines.md` for the documented caveat.
+///
+/// Returns `None` for a neutral name with no Crush equivalent (`Task`,
+/// `NotebookEdit`, ...). The neutral permission list is shared across every
+/// engine, so a rule naming a Claude-Code-only tool is a normal, valid
+/// config, not a user error specific to Crush — hard-erroring the entire
+/// Crush materialize over one such rule would be a worse outcome than
+/// [`render_permission_rule`]'s existing drop-and-log handling for
+/// pattern/path scoping, so unmapped tools get the same treatment instead
+/// of a harder failure mode.
+fn crush_tool_name(neutral: &str) -> Option<&'static str> {
+    Some(match neutral {
         "Bash" => "bash",
         "Read" => "view",
         "Write" => "write",
@@ -609,11 +632,7 @@ fn crush_tool_name(neutral: &str) -> anyhow::Result<&'static str> {
         "LS" => "ls",
         "WebFetch" => "fetch",
         "TodoWrite" => "todos",
-        other => anyhow::bail!(
-            "crush: no equivalent tool for neutral permission rule `{other}` — Crush has no \
-             matching tool, so this rule can never take effect. Remove it, or author a \
-             Crush-native rule directly via `native_permissions.crush`."
-        ),
+        _ => return None,
     })
 }
 
@@ -645,8 +664,10 @@ fn crush_tool_name(neutral: &str) -> anyhow::Result<&'static str> {
 /// #1321: an unscoped rule's tool name is also translated to Crush's own
 /// identifier via [`crush_tool_name`] — llmenv's neutral vocabulary is Claude
 /// Code's PascalCase (`Bash`, `Read`, `WebFetch`), which never matched
-/// Crush's lowercase names before this mapping existed.
-fn render_permission_rule(rule: &crate::config::PermissionRule) -> anyhow::Result<Vec<String>> {
+/// Crush's lowercase names before this mapping existed. A neutral tool with
+/// no Crush equivalent gets the same drop-and-log treatment as scoping —
+/// see [`crush_tool_name`] for why this isn't a hard error.
+fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
     if let Some(pattern) = &rule.pattern {
         tracing::error!(
             "crush: allowed_tools has no pattern matching; rule `{}` + pattern `{pattern}` \
@@ -655,7 +676,7 @@ fn render_permission_rule(rule: &crate::config::PermissionRule) -> anyhow::Resul
             rule.tool,
             rule.tool
         );
-        return Ok(Vec::new());
+        return Vec::new();
     }
     if !rule.paths.is_empty() {
         tracing::error!(
@@ -666,9 +687,20 @@ fn render_permission_rule(rule: &crate::config::PermissionRule) -> anyhow::Resul
             rule.paths,
             rule.tool
         );
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    Ok(vec![crush_tool_name(&rule.tool)?.to_string()])
+    match crush_tool_name(&rule.tool) {
+        Some(name) => vec![name.to_string()],
+        None => {
+            tracing::error!(
+                "crush: no equivalent tool for neutral permission rule `{}` — Crush has no \
+                 matching tool, so this rule is dropped and can never take effect. Remove it, \
+                 or author a Crush-native rule directly via `native_permissions.crush`.",
+                rule.tool
+            );
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1018,6 +1050,38 @@ mod tests {
 
     // ── materialize: permissions ──────────────────────────────────────────────
 
+    /// #1325 (security-audit on #1321): once an unscoped allow rule became a
+    /// real, matching Crush grant, an explicit deny/ask for the same tool
+    /// must withhold it — Crush has no `denied_tools` of its own, so this
+    /// neutral-side cross-check is the only thing standing in for one. Before
+    /// #1321's tool-name mapping, `allow` never matched anything for real
+    /// Crush, so this exact conflict was harmless by accident; #1321 made it
+    /// live.
+    #[test]
+    fn materialize_deny_withholds_a_conflicting_allow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.permissions.allow.push(PermissionRule {
+            tool: "Bash".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        caps.permissions.deny.push(PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("rm -rf *".into()),
+            paths: vec![],
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("permissions").is_none(),
+            "a denied tool must never appear in allowed_tools, even if also allowed: {doc}"
+        );
+    }
+
     #[test]
     fn materialize_allow_rule_becomes_allowed_tools() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1077,13 +1141,14 @@ mod tests {
         }
     }
 
-    /// #1321: a neutral tool with no Crush equivalent (e.g. `Task`, which
-    /// depends on Claude Code's sub-agent model) must hard-error at
-    /// materialize time rather than silently rendering a name Crush ignores
-    /// — the same "loud over silent" principle #1306 already established
+    /// #1325 (security-audit on #1321): a neutral tool with no Crush
+    /// equivalent (e.g. `Task`) is dropped, not hard-errored — the neutral
+    /// permission list is shared across every engine, so a rule naming a
+    /// Claude-Code-only tool is a normal, valid config that must not break
+    /// Crush materialize wholesale. Same drop-and-log treatment #1306 uses
     /// for pattern/path scoping.
     #[test]
-    fn materialize_unmapped_neutral_tool_errors() {
+    fn materialize_unmapped_neutral_tool_is_dropped_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
         caps.permissions.allow.push(PermissionRule {
@@ -1091,12 +1156,15 @@ mod tests {
             pattern: None,
             paths: vec![],
         });
-        let err = CrushAdapter
+        CrushAdapter
             .materialize(&manifest_with_caps(caps), tmp.path())
-            .unwrap_err();
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(
-            err.to_string().contains("Task"),
-            "error should name the unmapped tool: {err}"
+            doc.get("permissions").is_none(),
+            "an unmapped tool must be dropped, not fail materialize or render a bogus \
+             entry: {doc}"
         );
     }
 
@@ -1342,7 +1410,7 @@ mod tests {
             pattern: None,
             paths: vec![],
         };
-        assert_eq!(render_permission_rule(&rule).unwrap(), vec!["bash"]);
+        assert_eq!(render_permission_rule(&rule), vec!["bash"]);
     }
 
     #[test]
@@ -1352,7 +1420,7 @@ mod tests {
             pattern: Some("ls*".into()),
             paths: vec![],
         };
-        assert_eq!(render_permission_rule(&rule).unwrap(), Vec::<String>::new());
+        assert_eq!(render_permission_rule(&rule), Vec::<String>::new());
     }
 
     #[test]
@@ -1362,17 +1430,17 @@ mod tests {
             pattern: None,
             paths: vec!["src/".into(), "tests/".into()],
         };
-        assert_eq!(render_permission_rule(&rule).unwrap(), Vec::<String>::new());
+        assert_eq!(render_permission_rule(&rule), Vec::<String>::new());
     }
 
     #[test]
-    fn render_unmapped_tool_errors() {
+    fn render_unmapped_tool_is_dropped() {
         let rule = PermissionRule {
             tool: "Task".into(),
             pattern: None,
             paths: vec![],
         };
-        assert!(render_permission_rule(&rule).is_err());
+        assert_eq!(render_permission_rule(&rule), Vec::<String>::new());
     }
 
     // ── constants ────────────────────────────────────────────────────────────
@@ -2520,13 +2588,13 @@ mod tests {
             // names known to map successfully — the mapping's own
             // success/failure per name is covered by
             // `materialize_maps_every_documented_neutral_tool_to_its_crush_name`
-            // and `render_unmapped_tool_errors`.
+            // and `render_unmapped_tool_is_dropped`.
             let expected = if scoped {
                 Vec::new()
             } else {
                 vec![crush_tool_name(tool).unwrap().to_string()]
             };
-            prop_assert_eq!(render_permission_rule(&rule).unwrap(), expected);
+            prop_assert_eq!(render_permission_rule(&rule), expected);
         }
 
         #[test]
@@ -2537,6 +2605,60 @@ mod tests {
         ) {
             let rule = crate::config::PermissionRule { tool, pattern, paths };
             let _ = render_permission_rule(&rule);
+        }
+
+        // #1325 (property-test-gap-finder on #1321's deny/ask cross-check):
+        // arbitrary allow/deny/ask combinations must never let a denied or
+        // asked tool survive into allowed_tools — mirrors
+        // generate_settings_json_permission_buckets_never_overlap's coverage
+        // of the equivalent claude_code.rs invariant.
+        #[test]
+        fn prop_crush_allowed_tools_never_contains_a_denied_or_asked_tool(
+            allow_tools in prop::collection::vec(
+                prop::sample::select(&["Bash", "Read", "Write", "Edit", "Glob", "Grep"][..]),
+                0..4,
+            ),
+            deny_tools in prop::collection::vec(
+                prop::sample::select(&["Bash", "Read", "Write", "Edit", "Glob", "Grep"][..]),
+                0..4,
+            ),
+            ask_tools in prop::collection::vec(
+                prop::sample::select(&["Bash", "Read", "Write", "Edit", "Glob", "Grep"][..]),
+                0..4,
+            ),
+        ) {
+            let bare = |tool: &str| PermissionRule {
+                tool: tool.to_string(),
+                pattern: None,
+                paths: Vec::new(),
+            };
+            let mut caps = Capabilities::default();
+            caps.permissions.allow = allow_tools.iter().map(|t| bare(t)).collect();
+            caps.permissions.deny = deny_tools.iter().map(|t| bare(t)).collect();
+            caps.permissions.ask = ask_tools.iter().map(|t| bare(t)).collect();
+
+            let tmp = tempfile::tempdir().unwrap();
+            CrushAdapter
+                .materialize(&manifest_with_caps(caps), tmp.path())
+                .unwrap();
+            let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let allowed: std::collections::BTreeSet<&str> = doc["permissions"]["allowed_tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .collect();
+            let withheld: std::collections::BTreeSet<&str> = deny_tools
+                .iter()
+                .chain(&ask_tools)
+                .filter_map(|t| crush_tool_name(t))
+                .collect();
+            prop_assert!(
+                allowed.is_disjoint(&withheld),
+                "allowed_tools must never contain a denied/asked tool: allowed={allowed:?} \
+                 withheld={withheld:?}"
+            );
         }
 
         // ── P2: overlay_native_json (shared) ──────────────────────────────────
