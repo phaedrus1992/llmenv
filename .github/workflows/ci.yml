@@ -9,6 +9,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'deny.toml'
+      - 'hawk.toml'
       - '.github/workflows/ci.yml'
 permissions:
   contents: read
@@ -74,3 +75,34 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
         with:
           command: check
+  hawk:
+    runs-on: ubuntu-latest
+    # rust-toolchain.toml pins channel = "stable" for the rest of the repo;
+    # rustup resolves that toolchain file for every cargo/rustc invocation in
+    # this checkout regardless of `rustup default` (set by the toolchain step
+    # below), so without this override every step here silently builds/runs
+    # against stable -- which never gets the rustc-dev/rust-src/llvm-tools
+    # components -- and hawk fails with E0463 on every rustc_private crate
+    # (#923).
+    env:
+      RUSTUP_TOOLCHAIN: "1.97"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: 1.97
+          components: rust-src, rustc-dev, llvm-tools-preview
+      # Hawk uses rustc_private and must build against the exact toolchain
+      # above (with rust-src/rustc-dev/llvm-tools-preview, per its install docs);
+      # RUSTC_BOOTSTRAP=1 is required because `cargo install` ignores this
+      # repo's cargo config (#923).
+      - uses: taiki-e/cache-cargo-install-action@9ee83daaa7b96a6fab930949ecf1122bba04a389  # v3.0.8
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        with:
+          tool: cargo-hawk@0.1.12
+      # -W (not -D): 330 pre-existing findings as of #923, not yet cleaned up.
+      # Report-only until that cleanup lands — see #1314.
+      - run: cargo hawk check -W warnings
