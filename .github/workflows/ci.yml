@@ -77,6 +77,15 @@ jobs:
           command: check
   hawk:
     runs-on: ubuntu-latest
+    # rust-toolchain.toml pins channel = "stable" for the rest of the repo;
+    # rustup resolves that toolchain file for every cargo/rustc invocation in
+    # this checkout regardless of `rustup default` (set by the toolchain step
+    # below), so without this override every step here silently builds/runs
+    # against stable -- which never gets the rustc-dev/rust-src/llvm-tools
+    # components -- and hawk fails with E0463 on every rustc_private crate
+    # (#923).
+    env:
+      RUSTUP_TOOLCHAIN: "1.97"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
