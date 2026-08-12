@@ -1651,8 +1651,10 @@ fn materialize_from_manifest(
     // order-dependent, since each adapter writes styles and skills in a
     // different sequence. Reject at materialize time instead of letting it
     // resolve silently per engine. Doesn't cover plugin-projected skill
-    // names (resolved independently, per adapter, from on-disk plugin
-    // content not available here) — tracked as #1333.
+    // names — those are resolved independently, per adapter, from on-disk
+    // plugin content not available here; see #1333's
+    // `output_styles::reject_plugin_skill_collisions`, called from each
+    // fallback adapter's `materialize` instead.
     let reserved_skill_names: std::collections::HashSet<&str> = [
         "llmenv",
         crate::adapter::claude_code::LSP_PLUGIN_NAME,

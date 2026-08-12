@@ -179,7 +179,15 @@ impl AgentAdapter for CrushAdapter {
         owned.extend(llmenv_skill_paths.iter().cloned());
 
         // #1130: Crush has no native output-style concept — render each
-        // declared output style as a generated skill instead.
+        // declared output style as a generated skill instead. #1333: check
+        // for a plugin-projected skill name collision first — plugin skills
+        // were already written above, so an unrejected collision here would
+        // silently overwrite them.
+        crate::adapter::output_styles::reject_plugin_skill_collisions(
+            &manifest.capabilities.output_styles,
+            &manifest.plugins,
+            &manifest.marketplaces,
+        )?;
         for style in &manifest.capabilities.output_styles {
             owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
                 out, style,
@@ -2061,6 +2069,49 @@ mod tests {
             tmp.path().join("skills/foo/SKILL.md").exists(),
             "plugin skill must be projected into out/skills/foo/"
         );
+    }
+
+    #[test]
+    fn materialize_output_style_colliding_with_plugin_skill_is_rejected() {
+        // #1333: an output style named after a skill a plugin projects must
+        // be rejected, not silently overwrite the plugin's SKILL.md.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("skills/foo")).unwrap();
+        std::fs::write(
+            plugin_dir.path().join("skills/foo/SKILL.md"),
+            "---\nname: foo\ndescription: A foo skill.\n---\n# Foo\n",
+        )
+        .unwrap();
+
+        let mut manifest = empty_manifest();
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "my-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            });
+        manifest
+            .capabilities
+            .output_styles
+            .push(crate::config::OutputStyle {
+                name: "foo".into(),
+                description: "A conflicting style".into(),
+                content: "Be terse.".into(),
+                when: Vec::new(),
+                keep_coding_instructions: false,
+                force_for_plugin: false,
+            });
+        let err = CrushAdapter.materialize(&manifest, tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("foo"));
+        // materialize bails before writing the output style, so the plugin's
+        // own SKILL.md (written earlier in the same materialize call) must
+        // survive untouched.
+        let content = std::fs::read_to_string(tmp.path().join("skills/foo/SKILL.md")).unwrap();
+        assert!(content.contains("A foo skill"));
     }
 
     #[test]

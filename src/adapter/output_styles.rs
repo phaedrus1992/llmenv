@@ -8,6 +8,51 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::OutputStyle;
+use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
+
+/// Rejects an output style name that collides with a skill name a plugin
+/// would project via its own `skills/` directory (#1333). The
+/// `materialize_from_manifest` collision check in `cli/mod.rs` only sees
+/// `capabilities.skills` and reserved built-in names — plugin-projected
+/// names are resolved from on-disk plugin content that isn't available at
+/// that point, so this must run per-adapter, right before the
+/// generated-skill fallback (`write_output_style_as_skill`) writes anything.
+///
+/// No-op when `styles` or `plugins` is empty.
+///
+/// # Errors
+/// Returns an error naming the colliding style, or propagates a plugin
+/// resolution/I/O failure from resolving a plugin's skill directory.
+pub(crate) fn reject_plugin_skill_collisions(
+    styles: &[OutputStyle],
+    plugins: &[ResolvedPlugin],
+    marketplaces: &[ResolvedMarketplace],
+) -> anyhow::Result<()> {
+    if styles.is_empty() || plugins.is_empty() {
+        return Ok(());
+    }
+    let mut plugin_skill_names: std::collections::HashMap<String, &str> =
+        std::collections::HashMap::new();
+    for plugin in plugins {
+        let payload = super::resolve_plugin_payload(plugin, marketplaces)?;
+        for name in super::skills::plugin_skill_names(&payload)? {
+            plugin_skill_names.entry(name).or_insert(&plugin.plugin);
+        }
+    }
+    for style in styles {
+        if let Some(plugin_name) = plugin_skill_names.get(&style.name) {
+            anyhow::bail!(
+                "output style '{}' collides with a skill projected from plugin '{}'; \
+                 rename the style to avoid silently overwriting or being shadowed by \
+                 that skill on adapters with no native output-style concept (Crush, \
+                 opencode)",
+                style.name,
+                plugin_name,
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Render one `OutputStyle` as a generated skill for adapters with
 /// `supports_output_styles() == false`. Reuses the same YAML-scalar
