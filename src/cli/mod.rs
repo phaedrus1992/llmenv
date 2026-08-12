@@ -1652,7 +1652,7 @@ fn materialize_from_manifest(
     // different sequence. Reject at materialize time instead of letting it
     // resolve silently per engine. Doesn't cover plugin-projected skill
     // names (resolved independently, per adapter, from on-disk plugin
-    // content not available here) — that's a narrower, follow-up gap.
+    // content not available here) — tracked as #1333.
     let reserved_skill_names: std::collections::HashSet<&str> = [
         "llmenv",
         crate::adapter::claude_code::LSP_PLUGIN_NAME,
