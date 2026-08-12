@@ -4170,6 +4170,40 @@ mod tests {
         fn generate_settings_json_is_deterministic(manifest in arb_merged_manifest()) {
             prop_assert_eq!(write_settings_bytes(&manifest), write_settings_bytes(&manifest));
         }
+
+        // #947 regression guard: no rendered permission string appears in more
+        // than one of allow/ask/deny at once. Claude Code resolves deny > ask >
+        // allow, so a string present in two buckets is always a silent
+        // self-shadow — one of the two entries can never fire. `render_action`'s
+        // suppression logic (#946/#972) exists specifically to prevent this;
+        // this test locks the invariant in so a future change to that logic
+        // can't quietly reintroduce it.
+        #[test]
+        fn generate_settings_json_permission_buckets_never_overlap(manifest in arb_merged_manifest()) {
+            let settings = render_settings_for_test(&manifest);
+            let bucket = |name: &str| -> std::collections::BTreeSet<String> {
+                settings["permissions"][name]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_owned)
+                    .collect()
+            };
+            let (allow, ask, deny) = (bucket("allow"), bucket("ask"), bucket("deny"));
+            prop_assert!(
+                allow.is_disjoint(&ask),
+                "allow/ask overlap: {:?}", allow.intersection(&ask).collect::<Vec<_>>()
+            );
+            prop_assert!(
+                allow.is_disjoint(&deny),
+                "allow/deny overlap: {:?}", allow.intersection(&deny).collect::<Vec<_>>()
+            );
+            prop_assert!(
+                ask.is_disjoint(&deny),
+                "ask/deny overlap: {:?}", ask.intersection(&deny).collect::<Vec<_>>()
+            );
+        }
     }
 
     // ---- merge_mcp_into_claude_json (#244): mcpServers into .claude.json ----
