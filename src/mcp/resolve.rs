@@ -301,7 +301,7 @@ pub fn resolve_codebase_memory(
         headers: BTreeMap::new(),
         timeout: None,
         disabled_tools: vec![],
-        mcp_permissions: None,
+        mcp_permissions: cm.mcp_permissions.clone(),
         wakeup_max_tokens: None,
     }
 }
@@ -656,6 +656,7 @@ mod tests {
         let cm = CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: None,
+            mcp_permissions: None,
         };
         let resolved = resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state"));
         assert_eq!(resolved.name, CODEBASE_MEMORY_MCP_NAME);
@@ -683,6 +684,7 @@ mod tests {
         let cm = CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
+            mcp_permissions: None,
         };
         let resolved = resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state"));
         match resolved.kind {
@@ -701,6 +703,7 @@ mod tests {
         let entries = vec![CodebaseMemory {
             when: vec!["other-tag".to_string()],
             index_path: None,
+            mcp_permissions: None,
         }];
         let resolved = resolve_codebase_memory_entries(
             &entries,
@@ -722,10 +725,12 @@ mod tests {
             CodebaseMemory {
                 when: vec!["proj-a".to_string()],
                 index_path: None,
+                mcp_permissions: None,
             },
             CodebaseMemory {
                 when: vec!["proj-b".to_string()],
                 index_path: None,
+                mcp_permissions: None,
             },
         ];
         let err = resolve_codebase_memory_entries(
@@ -784,7 +789,7 @@ mod tests {
             fn resolve_codebase_memory_allowed_root_always_matches_project_root(
                 path_str in arb_path_component()
             ) {
-                let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None };
+                let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
                 let project_root = std::path::PathBuf::from(&path_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, Path::new("/state"));
                 match resolved.kind {
@@ -805,6 +810,7 @@ mod tests {
                 let cm = CodebaseMemory {
                     when: vec!["proj".to_string()],
                     index_path: Some(index_path.clone()),
+                    mcp_permissions: None,
                 };
                 let resolved = resolve_codebase_memory(
                     &cm,
@@ -831,6 +837,7 @@ mod tests {
                     when
                 },
                 index_path: None,
+                mcp_permissions: None,
             })
         }
 

@@ -583,6 +583,7 @@ mod tests {
                 codebase_memory: vec![crate::config::CodebaseMemory {
                     when: vec!["proj".to_string()],
                     index_path: None,
+                    mcp_permissions: None,
                 }],
                 ..Default::default()
             }),

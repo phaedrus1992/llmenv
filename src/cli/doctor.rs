@@ -1407,6 +1407,7 @@ mod tests {
                 codebase_memory: vec![crate::config::CodebaseMemory {
                     when: vec!["proj".to_string()],
                     index_path: None,
+                    mcp_permissions: None,
                 }],
                 ..Default::default()
             }),
@@ -1425,6 +1426,7 @@ mod tests {
                 codebase_memory: vec![crate::config::CodebaseMemory {
                     when: vec!["never-emitted".to_string()],
                     index_path: None,
+                    mcp_permissions: None,
                 }],
                 ..Default::default()
             }),
@@ -1443,6 +1445,7 @@ mod tests {
                 codebase_memory: vec![crate::config::CodebaseMemory {
                     when: vec!["bundle-tag".to_string()],
                     index_path: None,
+                    mcp_permissions: None,
                 }],
                 ..Default::default()
             }),
