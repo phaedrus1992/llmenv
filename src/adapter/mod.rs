@@ -764,6 +764,7 @@ mod tests {
                         nk::NATIVE_HOOKS,
                         nk::NATIVE_MCP,
                         nk::NATIVE_MODEL_PROVIDERS,
+                        nk::NATIVE_DEFAULT_MODELS,
                         nk::NATIVE,
                     ]
                 ),

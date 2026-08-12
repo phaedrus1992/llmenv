@@ -557,6 +557,15 @@ pub struct Capabilities {
     /// has no field for can still be set. Opaque to llmenv.
     #[serde(default)]
     pub native_model_providers: std::collections::BTreeMap<String, serde_yaml::Value>,
+    /// Per-engine native default-model-selection fragments, keyed by engine
+    /// name. The engine-only override for `default_models` — deep-merged onto
+    /// the rendered per-role model block (crush's `models`; opencode has no
+    /// modeled slot for engine-specific extras since `model`/`small_model` are
+    /// bare strings) so per-role options `ModelRef` has no field for (crush's
+    /// `reasoning_effort`, `think`, `max_tokens`) can still be set (#1031).
+    /// Opaque to llmenv.
+    #[serde(default)]
+    pub native_default_models: std::collections::BTreeMap<String, serde_yaml::Value>,
     /// Per-engine opaque passthrough values merged verbatim into the engine's
     /// native config by adapters. Identical shape to the top-level `native:`
     /// block in `config.yaml`; bundle contributions deep-merge with it.
@@ -607,6 +616,7 @@ impl Capabilities {
             && self.native_plugins.is_empty()
             && self.native_mcp.is_empty()
             && self.native_model_providers.is_empty()
+            && self.native_default_models.is_empty()
             && self.native.is_empty()
             && self.features.as_ref().is_none_or(Features::is_empty)
             && self.host.is_empty()
