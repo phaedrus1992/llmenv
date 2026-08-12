@@ -578,16 +578,61 @@ fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<Strin
     rules.iter().flat_map(render_permission_rule).collect()
 }
 
+/// Render a rule for Crush's `permissions.allowed_tools`.
+///
+/// #1306: source-verified against `charmbracelet/crush`'s
+/// `internal/permission/permission.go` (`Request()`) — the allowlist check is
+/// `slices.Contains(s.allowedTools, opts.ToolName)` or `slices.Contains(...,
+/// opts.ToolName + ":" + opts.Action)`, both exact string equality against a
+/// *fixed* per-tool-type action string (`"execute"` for bash, `"write"` for
+/// edit/write, `"read"` for view, etc. — never the actual command or file
+/// path). Crush has no concept of matching a command pattern or a file path
+/// at all, so a `tool(pattern)` or `tool(path)` entry can never match either
+/// comparison shape: it looks like a scoped allow rule once rendered, but is
+/// silently inert.
+///
+/// A pattern/path-scoped rule is therefore dropped entirely rather than
+/// widened to the bare tool name. Rendering the bare name would grant *every*
+/// call to that tool — broader than what was asked for — for a security
+/// control (this list is what skips Crush's interactive approval prompt).
+/// Trading a narrow, unenforceable scope for a broad, enforced one is the
+/// wrong direction for an allowlist: dropping the rule keeps Crush's
+/// deny-by-default posture (the tool still prompts) instead of silently
+/// over-granting. `tracing::error!`, not `warn!` — this codebase's default
+/// `EnvFilter` (`src/main.rs`) drops `warn!` when `RUST_LOG` is unset, so a
+/// downgrade on a permission-relevant path needs `error!` to actually surface
+/// (see #1139, the same trap already fixed at six other call sites).
+///
+/// Separately — and this is *not* fixed here — the tool identifiers
+/// themselves don't line up: llmenv's neutral vocabulary is Claude Code's
+/// PascalCase (`Bash`, `Read`, `WebFetch`), rendered verbatim, while Crush
+/// matches lowercase snake_case names that aren't always a simple case
+/// change (`Read` is `view`, `WebFetch` is `web_fetch`). No translation layer
+/// exists, so today an *unscoped* allow rule (no pattern, no paths) is
+/// materialized but still doesn't match anything in real Crush. That's
+/// tracked separately (needs a full name-mapping table, a bigger decision
+/// than this fix) rather than folded in here.
 fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
     if let Some(pattern) = &rule.pattern {
-        return vec![format!("{}({})", rule.tool, pattern)];
+        tracing::error!(
+            "crush: allowed_tools has no pattern matching; rule `{}` + pattern `{pattern}` \
+             cannot be expressed for Crush and is dropped rather than widened to allow \
+             ALL `{}` calls — this tool will still prompt for approval",
+            rule.tool,
+            rule.tool
+        );
+        return Vec::new();
     }
     if !rule.paths.is_empty() {
-        return rule
-            .paths
-            .iter()
-            .map(|p| format!("{}({})", rule.tool, p))
-            .collect();
+        tracing::error!(
+            "crush: allowed_tools has no path matching; rule `{}` + paths {:?} cannot be \
+             expressed for Crush and is dropped rather than widened to allow ALL `{}` \
+             calls — this tool will still prompt for approval",
+            rule.tool,
+            rule.paths,
+            rule.tool
+        );
+        return Vec::new();
     }
     vec![rule.tool.clone()]
 }
@@ -987,8 +1032,15 @@ mod tests {
         );
     }
 
+    /// #1306: Crush's `allowed_tools` matches only the bare tool name or
+    /// `tool:action` against a fixed per-tool-type action string — never a
+    /// command pattern. A `Bash(ls*)`-shaped entry can never match, so it is
+    /// dropped rather than widened to a bare-tool grant: substituting a
+    /// broader allow for a narrower one is the wrong direction for a
+    /// security control, and dropping the rule keeps Crush's deny-by-default
+    /// posture (the tool still prompts) instead of silently over-granting.
     #[test]
-    fn materialize_permission_with_pattern() {
+    fn materialize_permission_with_pattern_is_dropped_not_widened() {
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
         caps.permissions.allow.push(PermissionRule {
@@ -1001,8 +1053,11 @@ mod tests {
             .unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let allowed = doc["permissions"]["allowed_tools"].as_array().unwrap();
-        assert!(allowed.contains(&serde_json::json!("Bash(ls*)")));
+        assert!(
+            doc.get("permissions").is_none(),
+            "a pattern-scoped rule that can't be expressed for Crush must produce no \
+             permissions output, not a widened bare-tool grant: {doc}"
+        );
     }
 
     // ── materialize: native passthrough ──────────────────────────────────────
@@ -1193,26 +1248,23 @@ mod tests {
     }
 
     #[test]
-    fn render_tool_with_pattern() {
+    fn render_tool_with_pattern_is_dropped() {
         let rule = PermissionRule {
             tool: "Bash".into(),
             pattern: Some("ls*".into()),
             paths: vec![],
         };
-        assert_eq!(render_permission_rule(&rule), vec!["Bash(ls*)"]);
+        assert_eq!(render_permission_rule(&rule), Vec::<String>::new());
     }
 
     #[test]
-    fn render_tool_with_paths() {
+    fn render_tool_with_paths_is_dropped() {
         let rule = PermissionRule {
             tool: "Read".into(),
             pattern: None,
             paths: vec!["src/".into(), "tests/".into()],
         };
-        assert_eq!(
-            render_permission_rule(&rule),
-            vec!["Read(src/)", "Read(tests/)"]
-        );
+        assert_eq!(render_permission_rule(&rule), Vec::<String>::new());
     }
 
     // ── constants ────────────────────────────────────────────────────────────
@@ -1335,12 +1387,11 @@ mod tests {
                 .is_none()
         );
 
-        // permissions: allow-only surface; ask rule produces no denied_tools key.
-        assert_eq!(
-            doc["permissions"]["allowed_tools"],
-            serde_json::json!(["Bash(ls*)"])
-        );
-        assert!(doc["permissions"].get("denied_tools").is_none());
+        // permissions: #1306 — the only allow rule is pattern-scoped, which Crush
+        // can't express, so it's dropped rather than widened to a bare-tool
+        // grant; the ask rule produces no output either — net result, no
+        // permissions key at all.
+        assert!(doc.get("permissions").is_none());
     }
 
     // ── materialize: LSP (fix 1) ──────────────────────────────────────────────
@@ -2342,22 +2393,19 @@ mod tests {
         // ── P2: render_permission_rule ────────────────────────────────────────
 
         #[test]
-        fn prop_render_permission_rule_pattern_wins_over_paths(
+        fn prop_render_permission_rule_scoped_is_dropped_unscoped_is_bare_tool(
             tool in "[A-Za-z]{1,15}",
-            pattern in "[a-z*]{1,15}",
+            pattern in prop::option::of("[a-z*]{1,15}"),
             paths in prop::collection::vec("[a-z/]{1,15}", 0..5),
         ) {
-            let rule = crate::config::PermissionRule {
-                tool: tool.clone(),
-                pattern: Some(pattern.clone()),
-                paths,
-            };
-            // When `pattern` is Some, `paths` is ignored — output is exactly one
-            // entry built from tool+pattern, regardless of how many paths exist.
-            prop_assert_eq!(
-                render_permission_rule(&rule),
-                vec![format!("{tool}({pattern})")]
-            );
+            let scoped = pattern.is_some() || !paths.is_empty();
+            let rule = crate::config::PermissionRule { tool: tool.clone(), pattern, paths };
+            // #1306: Crush's allowed_tools has no pattern/path matching. A
+            // scoped rule can never be expressed, so it's dropped (fail-closed
+            // — the tool still prompts) rather than widened to a bare-tool
+            // grant. An unscoped rule renders exactly the bare tool name.
+            let expected = if scoped { Vec::new() } else { vec![tool] };
+            prop_assert_eq!(render_permission_rule(&rule), expected);
         }
 
         #[test]

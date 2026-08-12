@@ -26,8 +26,10 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 `LLMENV_ICM_CONTEXT`) and the adapter's pointer var (`CLAUDE_CONFIG_DIR`).
 
 - `--tag TAG` filters to bundles carrying that tag.
-- `--scope ID` is accepted but scope filtering is not yet implemented (prints a
-  warning and exports all matching tags).
+- `--scope ID` narrows the export to that scope's tags (plus OS/extra tags)
+  when the scope is active in the current environment. If the requested scope
+  isn't active, a warning is printed and all matching tags are exported
+  instead.
 - `--explain` annotates each exported variable with a `# source:` comment line
   showing whether it comes from the adapter (with the firing bundle names) or
   from llmenv introspection.
