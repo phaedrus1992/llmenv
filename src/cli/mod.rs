@@ -1644,6 +1644,35 @@ fn materialize_from_manifest(
         .output_styles
         .retain(|o| seen_style_names.insert(o.name.clone()));
 
+    // #1130 (security-audit): a style name colliding with a first-class
+    // skill or a reserved built-in skill name would otherwise silently
+    // overwrite (Crush) or be silently dropped by (opencode) that skill on
+    // the generated-skill fallback path — engine-divergent and
+    // order-dependent, since each adapter writes styles and skills in a
+    // different sequence. Reject at materialize time instead of letting it
+    // resolve silently per engine. Doesn't cover plugin-projected skill
+    // names (resolved independently, per adapter, from on-disk plugin
+    // content not available here) — that's a narrower, follow-up gap.
+    let reserved_skill_names: std::collections::HashSet<&str> = [
+        "llmenv",
+        crate::adapter::claude_code::LSP_PLUGIN_NAME,
+        "diagnose",
+    ]
+    .into_iter()
+    .collect();
+    for style in &manifest.capabilities.output_styles {
+        if reserved_skill_names.contains(style.name.as_str())
+            || seen_skill_names.contains(&style.name)
+        {
+            anyhow::bail!(
+                "output style '{}' collides with an existing skill name; rename the style \
+                 to avoid silently overwriting or being shadowed by that skill on adapters \
+                 with no native output-style concept (Crush, opencode)",
+                style.name
+            );
+        }
+    }
+
     // Store resolved throttle (top-level + bundle) for hook retrieval.
     if let Err(e) = crate::throttle::store_active_throttle(manifest.throttle.as_ref()) {
         tracing::debug!("failed to store throttle state (non-fatal): {e}");
@@ -5247,6 +5276,86 @@ mod tests {
         assert_ne!(
             claude_path, crush_path,
             "each adapter must materialize into its own cache subtree"
+        );
+    }
+
+    /// #1130 (security-audit): a style name colliding with a first-class
+    /// skill must be rejected at materialize time, not resolved silently
+    /// and engine-divergently (overwritten on Crush, dropped on opencode).
+    #[test]
+    fn output_style_colliding_with_skill_name_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+        config.skills = vec![crate::config::SkillSource {
+            name: "concise".to_string(),
+            path: "/tmp/test".to_string(),
+            ..crate::config::SkillSource::default()
+        }];
+        config.output_styles = vec![crate::config::OutputStyle {
+            name: "concise".to_string(),
+            description: "d".into(),
+            content: "c".into(),
+            ..crate::config::OutputStyle::default()
+        }];
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let err = build_and_materialize(&claude, ctx, false).unwrap_err();
+        assert!(
+            err.to_string().contains("concise"),
+            "error should name the colliding style: {err}"
+        );
+    }
+
+    /// #1130: a style named after llmenv's own built-in skill must be
+    /// rejected too, not just user-declared first-class skills.
+    #[test]
+    fn output_style_colliding_with_reserved_skill_name_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+        config.output_styles = vec![crate::config::OutputStyle {
+            name: "llmenv".to_string(),
+            description: "d".into(),
+            content: "c".into(),
+            ..crate::config::OutputStyle::default()
+        }];
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let err = build_and_materialize(&claude, ctx, false).unwrap_err();
+        assert!(
+            err.to_string().contains("llmenv"),
+            "error should name the reserved collision: {err}"
         );
     }
 
