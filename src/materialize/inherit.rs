@@ -105,13 +105,29 @@ pub fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Resu
     for name in COPIED_FILES {
         let src = state_dir.join(name);
         let dst = config_dir.join(name);
-        if dst.exists() || !src.is_file() {
+        if dst.exists() || !is_real_file(&src) {
             continue;
         }
         std::fs::copy(&src, &dst)
             .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
     Ok(())
+}
+
+/// True when `path` is a regular file (`symlink_metadata`, not `is_file()`
+/// — #1341: `is_file()` follows a symlink, so a symlinked entry under
+/// `state_dir`/`config_dir` would otherwise be read/copied through
+/// silently). Skips (warns) rather than errors: a stray symlink here
+/// shouldn't block a whole `materialize`/inherit pass over one file.
+fn is_real_file(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            tracing::warn!(path = %path.display(), "inherit: skipping symlinked file");
+            false
+        }
+        Ok(meta) => meta.is_file(),
+        Err(_) => false,
+    }
 }
 
 /// Copy a folder's single-file state back into the durable store when the store
@@ -127,7 +143,7 @@ pub fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Resu
     for name in COPIED_FILES {
         let src = config_dir.join(name);
         let dst = state_dir.join(name);
-        if dst.exists() || !src.is_file() {
+        if dst.exists() || !is_real_file(&src) {
             continue;
         }
         std::fs::copy(&src, &dst)
@@ -510,6 +526,24 @@ mod tests {
         let state = tmp.path().join("state");
         let cfg = tmp.path().join("TAG-hash");
         std::fs::create_dir_all(&cfg).unwrap();
+
+        inherit_copied_files(&state, &cfg).unwrap();
+        assert!(!cfg.join(HISTORY_FILE).exists());
+    }
+
+    /// #1341: a symlinked `history.jsonl` in the state dir must be skipped,
+    /// not followed — `is_file()` alone would read through it.
+    #[cfg(unix)]
+    #[test]
+    fn history_symlink_in_state_dir_is_not_followed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("TAG-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&cfg).unwrap();
+        let elsewhere = tmp.path().join("elsewhere.jsonl");
+        write(&elsewhere, "secret");
+        std::os::unix::fs::symlink(&elsewhere, state.join(HISTORY_FILE)).unwrap();
 
         inherit_copied_files(&state, &cfg).unwrap();
         assert!(!cfg.join(HISTORY_FILE).exists());
