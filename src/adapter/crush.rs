@@ -20,6 +20,19 @@ const CRUSH_JSON_FILE: &str = "crush.json";
 /// Crush only supports PreToolUse hooks today.
 const SUPPORTED_HOOK_EVENTS: &[&str] = &["PreToolUse"];
 
+/// Plugin subdirectories Crush has no equivalent for — a plugin containing
+/// any of these is skipped entirely (#543 follow-up). Shared between the
+/// plugin-projection loop and the output-style collision check (#1333) so
+/// the two can't drift: the collision check must never count skills from a
+/// plugin the projection loop actually skips.
+const UNSUPPORTED_PLUGIN_DIRS: &[&str] = &["agents", "commands", "hooks"];
+
+fn plugin_is_compatible(payload: &Path) -> bool {
+    !UNSUPPORTED_PLUGIN_DIRS
+        .iter()
+        .any(|dir| payload.join(dir).is_dir())
+}
+
 impl AgentAdapter for CrushAdapter {
     fn name(&self) -> &'static str {
         "crush"
@@ -151,19 +164,21 @@ impl AgentAdapter for CrushAdapter {
         owned.extend(skill_paths.iter().cloned());
 
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
-        'plugin: for plugin in &manifest.plugins {
+        for plugin in &manifest.plugins {
             let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
-            for bad_dir in &["agents", "commands", "hooks"] {
-                if payload.join(bad_dir).is_dir() {
-                    eprintln!(
-                        "warning: plugin '{}' contains unsupported Crush content: '{}/' \
-                         directory — skipping this plugin. Crush has no equivalent for \
-                         plugin agents, commands, or hooks. Scope this bundle away from \
-                         Crush with `when:` or remove the content to silence this warning.",
-                        plugin.plugin, bad_dir
-                    );
-                    continue 'plugin;
-                }
+            if !plugin_is_compatible(&payload) {
+                let bad_dir = UNSUPPORTED_PLUGIN_DIRS
+                    .iter()
+                    .find(|dir| payload.join(dir).is_dir())
+                    .unwrap_or(&"<unknown>");
+                eprintln!(
+                    "warning: plugin '{}' contains unsupported Crush content: '{}/' \
+                     directory — skipping this plugin. Crush has no equivalent for \
+                     plugin agents, commands, or hooks. Scope this bundle away from \
+                     Crush with `when:` or remove the content to silence this warning.",
+                    plugin.plugin, bad_dir
+                );
+                continue;
             }
             let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
             plugin_skill_paths.extend(paths);
@@ -182,11 +197,14 @@ impl AgentAdapter for CrushAdapter {
         // declared output style as a generated skill instead. #1333: check
         // for a plugin-projected skill name collision first — plugin skills
         // were already written above, so an unrejected collision here would
-        // silently overwrite them.
+        // silently overwrite them. Reuses plugin_is_compatible so a plugin
+        // the loop above skipped (agents/commands/hooks) is never counted as
+        // a collision source — its skills are never actually projected.
         crate::adapter::output_styles::reject_plugin_skill_collisions(
             &manifest.capabilities.output_styles,
             &manifest.plugins,
             &manifest.marketplaces,
+            plugin_is_compatible,
         )?;
         for style in &manifest.capabilities.output_styles {
             owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
@@ -2112,6 +2130,54 @@ mod tests {
         // survive untouched.
         let content = std::fs::read_to_string(tmp.path().join("skills/foo/SKILL.md")).unwrap();
         assert!(content.contains("A foo skill"));
+    }
+
+    #[test]
+    fn materialize_output_style_name_matching_a_skipped_plugin_skill_is_not_rejected() {
+        // #1333 review fix: a plugin containing both a skills/foo/ dir and an
+        // agents/ dir (unsupported by Crush) is skipped entirely by the
+        // projection loop above — its "foo" skill is never written. An
+        // output style also named "foo" must not be rejected as a collision
+        // with a skill that will never actually exist on disk.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("skills/foo")).unwrap();
+        std::fs::write(
+            plugin_dir.path().join("skills/foo/SKILL.md"),
+            "---\nname: foo\ndescription: A foo skill.\n---\n# Foo\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("agents")).unwrap();
+
+        let mut manifest = empty_manifest();
+        manifest
+            .plugins
+            .push(crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "local".into(),
+                plugin: "my-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            });
+        manifest
+            .capabilities
+            .output_styles
+            .push(crate::config::OutputStyle {
+                name: "foo".into(),
+                description: "A style, not a collision".into(),
+                content: "Be terse.".into(),
+                when: Vec::new(),
+                keep_coding_instructions: false,
+                force_for_plugin: false,
+            });
+        CrushAdapter
+            .materialize(&manifest, tmp.path())
+            .expect("style name matching a skipped plugin's skill must not be rejected");
+        let content = std::fs::read_to_string(tmp.path().join("skills/foo/SKILL.md")).unwrap();
+        assert!(
+            content.contains("Be terse."),
+            "the style, not the never-projected plugin skill, must have been written"
+        );
     }
 
     #[test]

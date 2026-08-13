@@ -562,11 +562,14 @@ impl AgentAdapter for OpencodeAdapter {
         // declared output style as a generated skill instead. #1333: check
         // for a plugin-projected skill name collision first — plugin skills
         // are projected below, after this loop, so an unrejected collision
-        // here would be silently overwritten instead.
+        // here would be silently overwritten instead. Unlike Crush, opencode
+        // never skips a whole plugin over unsupported content (it translates
+        // commands/agents itself), so every plugin is compatible here.
         crate::adapter::output_styles::reject_plugin_skill_collisions(
             &manifest.capabilities.output_styles,
             &manifest.plugins,
             &manifest.marketplaces,
+            |_payload| true,
         )?;
         for style in &manifest.capabilities.output_styles {
             owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
