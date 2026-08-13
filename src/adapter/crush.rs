@@ -164,11 +164,12 @@ impl AgentAdapter for CrushAdapter {
         owned.extend(skill_paths.iter().cloned());
 
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
-        // (skill_name, plugin_name) pairs actually projected below — used as
-        // the collision check's input further down, instead of a second,
-        // separate directory walk (#1335: two independent walks of the same
-        // plugin payload could observe different states between them).
-        let mut projected_plugin_skill_names: Vec<(String, String)> = Vec::new();
+        // Skills actually projected below — used as the collision check's
+        // input further down, instead of a second, separate directory walk
+        // (#1335: two independent walks of the same plugin payload could
+        // observe different states between them).
+        let mut projected_plugin_skills: Vec<crate::adapter::output_styles::ProjectedPluginSkill> =
+            Vec::new();
         for plugin in &manifest.plugins {
             let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
             if !plugin_is_compatible(&payload) {
@@ -187,8 +188,12 @@ impl AgentAdapter for CrushAdapter {
             }
             let (paths, names) = crate::adapter::skills::project_plugin_skills(&payload, out)?;
             plugin_skill_paths.extend(paths);
-            projected_plugin_skill_names
-                .extend(names.into_iter().map(|name| (name, plugin.plugin.clone())));
+            projected_plugin_skills.extend(names.into_iter().map(|skill_name| {
+                crate::adapter::output_styles::ProjectedPluginSkill {
+                    skill_name,
+                    plugin_name: plugin.plugin.clone(),
+                }
+            }));
         }
         owned.extend(plugin_skill_paths.iter().cloned());
 
@@ -208,7 +213,7 @@ impl AgentAdapter for CrushAdapter {
         // collision here would silently overwrite them.
         crate::adapter::output_styles::reject_plugin_skill_collisions(
             &manifest.capabilities.output_styles,
-            &projected_plugin_skill_names,
+            &projected_plugin_skills,
         )?;
         for style in &manifest.capabilities.output_styles {
             owned.extend(crate::adapter::output_styles::write_output_style_as_skill(

@@ -9,6 +9,18 @@ use std::path::{Path, PathBuf};
 
 use crate::config::OutputStyle;
 
+/// One skill a plugin projects, paired with the plugin that projects it.
+/// Named (rather than a positional `(String, String)` tuple, per
+/// [`reject_plugin_skill_collisions`]'s #1335 security-audit) so a caller
+/// can't accidentally transpose the skill name and the plugin name — that
+/// transposition would compare output-style names against *plugin* names,
+/// silently turning the #1130/#1333 collision control into a no-op with no
+/// type error and no failing test.
+pub(crate) struct ProjectedPluginSkill {
+    pub(crate) skill_name: String,
+    pub(crate) plugin_name: String,
+}
+
 /// Rejects an output style name that collides with a skill name a plugin
 /// projects via its own `skills/` directory (#1333). The
 /// `materialize_from_manifest` collision check in `cli/mod.rs` only sees
@@ -17,33 +29,37 @@ use crate::config::OutputStyle;
 /// that point, so this must run per-adapter, right before the
 /// generated-skill fallback (`write_output_style_as_skill`) writes anything.
 ///
-/// `plugin_skill_names` must be the exact set of `(skill_name, plugin_name)`
-/// pairs the caller's own plugin projection actually wrote (or is about to
-/// write) — the caller is responsible for resolving/discovering plugin
-/// skills itself and passing the result here, rather than this function
-/// re-walking plugin directories independently (#1335: two separate walks
-/// of the same directory can observe different states — a TOCTOU gap. A
-/// single shared walk, reused for both the check and the write, closes it).
+/// `plugin_skills` must be the exact set the caller's own plugin projection
+/// actually wrote (or is about to write) — the caller is responsible for
+/// resolving/discovering plugin skills itself and passing the result here,
+/// rather than this function re-walking plugin directories independently
+/// (#1335: two separate walks of the same directory can observe different
+/// states — a TOCTOU gap. A single shared walk, reused for both the check
+/// and the write, closes it).
 ///
-/// No-op when `styles` or `plugin_skill_names` is empty. Pure — does no I/O.
+/// No-op when `styles` or `plugin_skills` is empty. Pure — does no I/O.
 ///
 /// # Errors
 /// Returns an error naming the colliding style and the plugin it collides
 /// with.
 pub(crate) fn reject_plugin_skill_collisions(
     styles: &[OutputStyle],
-    plugin_skill_names: &[(String, String)],
+    plugin_skills: &[ProjectedPluginSkill],
 ) -> anyhow::Result<()> {
-    if styles.is_empty() || plugin_skill_names.is_empty() {
+    if styles.is_empty() || plugin_skills.is_empty() {
         return Ok(());
     }
     // Keyed lowercase (#1333 security-audit): both render to a single
     // `skills/<name>/` directory entry, which collides on a case-insensitive
     // filesystem (macOS, Windows) even when the two names differ in case.
-    let lower: std::collections::HashMap<String, &str> = plugin_skill_names
-        .iter()
-        .map(|(name, plugin)| (name.to_lowercase(), plugin.as_str()))
-        .collect();
+    // First plugin to claim a name owns the diagnostic (`or_insert`, not a
+    // `collect()` that would let the last one silently win instead).
+    let mut lower: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for skill in plugin_skills {
+        lower
+            .entry(skill.skill_name.to_lowercase())
+            .or_insert(skill.plugin_name.as_str());
+    }
     for style in styles {
         if let Some(plugin_name) = lower.get(&style.name.to_lowercase()) {
             anyhow::bail!(
@@ -171,7 +187,8 @@ pub(crate) fn write_native_output_styles(
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::{
-        reject_plugin_skill_collisions, write_native_output_styles, write_output_style_as_skill,
+        ProjectedPluginSkill, reject_plugin_skill_collisions, write_native_output_styles,
+        write_output_style_as_skill,
     };
     use crate::config::OutputStyle;
 
@@ -186,24 +203,38 @@ mod tests {
         }
     }
 
+    fn projected(skill_name: &str, plugin_name: &str) -> ProjectedPluginSkill {
+        ProjectedPluginSkill {
+            skill_name: skill_name.to_string(),
+            plugin_name: plugin_name.to_string(),
+        }
+    }
+
     #[test]
     fn reject_plugin_skill_collisions_catches_case_insensitive_match() {
-        let err = reject_plugin_skill_collisions(
-            &[style("Foo")],
-            &[("foo".to_string(), "my-plugin".to_string())],
-        )
-        .unwrap_err();
+        let err = reject_plugin_skill_collisions(&[style("Foo")], &[projected("foo", "my-plugin")])
+            .unwrap_err();
         assert!(err.to_string().contains("Foo"));
         assert!(err.to_string().contains("my-plugin"));
     }
 
     #[test]
-    fn reject_plugin_skill_collisions_no_collision_is_ok() {
-        reject_plugin_skill_collisions(
-            &[style("bar")],
-            &[("foo".to_string(), "my-plugin".to_string())],
+    fn reject_plugin_skill_collisions_first_plugin_wins_attribution() {
+        // security-audit (#1335): the diagnostic must name the first plugin
+        // to claim a name, not whichever the internal map happens to visit
+        // last.
+        let err = reject_plugin_skill_collisions(
+            &[style("foo")],
+            &[projected("foo", "plugin-a"), projected("foo", "plugin-b")],
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(err.to_string().contains("plugin-a"));
+        assert!(!err.to_string().contains("plugin-b"));
+    }
+
+    #[test]
+    fn reject_plugin_skill_collisions_no_collision_is_ok() {
+        reject_plugin_skill_collisions(&[style("bar")], &[projected("foo", "my-plugin")]).unwrap();
     }
 
     #[test]

@@ -565,28 +565,39 @@ impl AgentAdapter for OpencodeAdapter {
         // both for the collision check below and for the actual skill
         // write in the plugin loop (step 4d) — a second, separate directory
         // walk there could observe a different result (TOCTOU).
-        let plugin_payloads: Vec<(PathBuf, Vec<crate::config::SkillSource>)> = manifest
+        // The plugin reference travels with its payload/skills in the same
+        // tuple (rather than a `Vec` zipped positionally against
+        // `manifest.plugins` afterwards) so the pairing can't silently drift
+        // if this construction ever grows a `filter`/skip step later
+        // (security-audit, #1335) — Crush already has exactly such a skip.
+        let plugin_payloads: Vec<(
+            &crate::plugins::resolve::ResolvedPlugin,
+            PathBuf,
+            Vec<crate::config::SkillSource>,
+        )> = manifest
             .plugins
             .iter()
             .map(|plugin| {
                 let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
                 let skills = crate::adapter::skills::discover_plugin_skills(&payload)?;
-                anyhow::Ok((payload, skills))
+                anyhow::Ok((plugin, payload, skills))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let projected_plugin_skill_names: Vec<(String, String)> = manifest
-            .plugins
-            .iter()
-            .zip(&plugin_payloads)
-            .flat_map(|(plugin, (_, skills))| {
-                skills
-                    .iter()
-                    .map(move |s| (s.name.clone(), plugin.plugin.clone()))
-            })
-            .collect();
+        let projected_plugin_skills: Vec<crate::adapter::output_styles::ProjectedPluginSkill> =
+            plugin_payloads
+                .iter()
+                .flat_map(|(plugin, _, skills)| {
+                    skills.iter().map(move |s| {
+                        crate::adapter::output_styles::ProjectedPluginSkill {
+                            skill_name: s.name.clone(),
+                            plugin_name: plugin.plugin.clone(),
+                        }
+                    })
+                })
+                .collect();
         crate::adapter::output_styles::reject_plugin_skill_collisions(
             &manifest.capabilities.output_styles,
-            &projected_plugin_skill_names,
+            &projected_plugin_skills,
         )?;
         for style in &manifest.capabilities.output_styles {
             owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
@@ -608,7 +619,7 @@ impl AgentAdapter for OpencodeAdapter {
         // Hoisted: command/ dir needed by plugin and bundle sections below.
         std::fs::create_dir_all(out.join("command"))?;
 
-        for (plugin, (payload, plugin_skills)) in manifest.plugins.iter().zip(&plugin_payloads) {
+        for (plugin, payload, plugin_skills) in &plugin_payloads {
             // Does this plugin provide native opencode support (e.g. a
             // TypeScript plugin registered via "plugin" key in opencode.json)?
             // Known: context-mode ships a native opencode plugin.

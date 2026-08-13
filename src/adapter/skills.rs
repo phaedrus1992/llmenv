@@ -254,6 +254,11 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
 /// is created on first use. An empty `skills` slice is a no-op (no directory
 /// created, empty vec returned).
 ///
+/// Each `SkillSource.path` is re-resolved here (`is_dir()`, then the copy) —
+/// a caller that discovered `skills` earlier (e.g. `discover_plugin_skills`,
+/// #1335) and only pins the *name*, not the path's on-disk content, leaves a
+/// narrow window between discovery and this copy. Tracked as #1337.
+///
 /// # Errors
 /// - Unsafe (path-traversal) skill name.
 /// - Source path is not a directory.
