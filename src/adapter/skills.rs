@@ -266,20 +266,29 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
 /// found inside the tree rather than hard-erroring (this function's error
 /// is reserved for a top-level path a config author declared directly).
 ///
-/// **This does not close the underlying race.** `symlink_metadata` here and
-/// `copy_dir_owner_only`'s `read_dir` a few lines below are still two
-/// independent syscalls on the same path — a symlink swapped in *after*
-/// this check and *before* the copy is followed exactly as it would have
-/// been without this check. Closing that fully needs fd-relative I/O
-/// (`openat`), which this function doesn't do; see #1341 for the tracked
-/// follow-up covering that gap plus related ones found during #1337's own
-/// review (a destination-side symlink check, and other `is_dir`/`is_file`
-/// check-then-use call sites in the materialize path with the same shape).
+/// **This does not fully prevent the underlying race, only detect it.**
+/// `symlink_metadata` here and `copy_dir_owner_only`'s `read_dir` a few
+/// lines below are still two independent syscalls on the same path — a
+/// symlink swapped in *after* this check and *before* the copy starts is
+/// followed exactly as it would have been without this check. On Unix,
+/// after the copy this function re-`symlink_metadata`s `src` and compares
+/// filesystem identity (dev, inode) against what was checked; a mismatch
+/// (including the path having *become* a symlink) means the copy may have
+/// read through content nothing here ever validated, so the copy is
+/// discarded and the call fails. This narrows the exploitable window to
+/// "swap happens and stays swapped for the whole copy duration without
+/// getting caught," rather than eliminating it — full prevention needs
+/// fd-relative I/O (`openat`), tracked as #1341 alongside related gaps
+/// found during #1337's review (a destination-side symlink check, and
+/// other `is_dir`/`is_file` check-then-use call sites in the materialize
+/// path with the same shape).
 ///
 /// # Errors
 /// - Unsafe (path-traversal) skill name.
 /// - Source path is a symlink, is not a directory, or a stat on it fails
 ///   (not found, permission denied, ...).
+/// - Source path's filesystem identity changed during the copy (detected
+///   swap, Unix only).
 /// - I/O error during directory copy.
 pub(crate) fn write_first_class_skills(
     out: &Path,
@@ -299,7 +308,7 @@ pub(crate) fn write_first_class_skills(
             anyhow::bail!("unsafe skill name '{}': not a valid skill name", skill.name);
         }
         let src = Path::new(&skill.path);
-        match std::fs::symlink_metadata(src) {
+        let src_meta = match std::fs::symlink_metadata(src) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 anyhow::bail!(
                     "skill '{}': path '{}' is a symlink — a skill source directory must be \
@@ -309,7 +318,7 @@ pub(crate) fn write_first_class_skills(
                     skill.path
                 );
             }
-            Ok(meta) if meta.is_dir() => {}
+            Ok(meta) if meta.is_dir() => meta,
             Ok(_) => {
                 anyhow::bail!(
                     "skill '{}': path '{}' is not a directory",
@@ -324,9 +333,42 @@ pub(crate) fn write_first_class_skills(
                     skill.path
                 );
             }
-        }
+        };
         let dest = skills_dir.join(&skill.name);
         let written = super::claude_code::copy_dir_owner_only(src, &dest)?;
+        // #1341: detect-don't-prevent for the race the check above can't
+        // close on its own — `symlink_metadata` here and `read_dir` inside
+        // `copy_dir_owner_only` are still two syscalls, so a symlink swapped
+        // in between them is followed. Re-stat `src` and compare filesystem
+        // identity (dev, inode) to what was checked; a mismatch means the
+        // copy may have read through content that was never checked, so
+        // discard it and fail closed rather than trust it silently. Not
+        // unit-tested: reproducing the actual race needs a second thread
+        // swapping `src` at the exact moment `copy_dir_owner_only` reads
+        // it, which is inherently timing-dependent and would make the test
+        // itself flaky — the happy-path tests above exercise the
+        // non-identity-changed branch instead.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let identity_changed = match std::fs::symlink_metadata(src) {
+                Ok(post) => {
+                    post.file_type().is_symlink()
+                        || post.dev() != src_meta.dev()
+                        || post.ino() != src_meta.ino()
+                }
+                Err(_) => true,
+            };
+            if identity_changed {
+                let _ = std::fs::remove_dir_all(&dest);
+                anyhow::bail!(
+                    "skill '{}': source path '{}' changed identity during the copy \
+                     (possible symlink-swap race) — discarded the copy",
+                    skill.name,
+                    skill.path
+                );
+            }
+        }
         // Track relative paths (relative to `out`) in the owned set.
         // strip_prefix is infallible here: copy_dir_owner_only writes under
         // `dest` which is `out/skills/<name>`, so every returned path starts
