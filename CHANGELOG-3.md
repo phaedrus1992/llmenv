@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
-- A skill source directory (first-class `skills:` entry, or one projected from a plugin's own `skills/` directory) that is a symlink is now rejected instead of followed. Closes half of a narrow window between discovering a skill's path and copying its content, where a symlink swapped in during that window could redirect the copy to an unintended directory; needs a concurrent local write into a config-author-controlled path, not a privilege boundary. (#1337)
+- A skill source directory (first-class `skills:` entry, or one projected from a plugin's own `skills/` directory) that is *already* a symlink at the time llmenv checks it is now rejected instead of followed. A symlink swapped in after that check and before the copy is a separate, still-open race — closing it needs `openat`-style filesystem-descriptor-relative I/O, tracked in #1341 alongside related gaps found during this fix's review. Needs a concurrent local write into a config-author-controlled path, not a privilege boundary. (#1337)
 
 ## [3.9.0] - 2026-08-10
 
