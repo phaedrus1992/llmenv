@@ -266,22 +266,25 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
 /// found inside the tree rather than hard-erroring (this function's error
 /// is reserved for a top-level path a config author declared directly).
 ///
-/// **This does not fully prevent the underlying race, only detect it.**
-/// `symlink_metadata` here and `copy_dir_owner_only`'s `read_dir` a few
-/// lines below are still two independent syscalls on the same path — a
-/// symlink swapped in *after* this check and *before* the copy starts is
-/// followed exactly as it would have been without this check. On Unix,
-/// after the copy this function re-`symlink_metadata`s `src` and compares
-/// filesystem identity (dev, inode) against what was checked; a mismatch
-/// (including the path having *become* a symlink) means the copy may have
-/// read through content nothing here ever validated, so the copy is
-/// discarded and the call fails. This narrows the exploitable window to
-/// "swap happens and stays swapped for the whole copy duration without
-/// getting caught," rather than eliminating it — full prevention needs
-/// fd-relative I/O (`openat`), tracked as #1341 alongside related gaps
-/// found during #1337's review (a destination-side symlink check, and
-/// other `is_dir`/`is_file` check-then-use call sites in the materialize
-/// path with the same shape).
+/// **This does not fully prevent the underlying race, only detect a naive
+/// version of it — and only for the top-level `src` path, not for entries
+/// `copy_dir_owner_only` recurses into.** `symlink_metadata` here and
+/// `copy_dir_owner_only`'s `read_dir` a few lines below are still two
+/// independent syscalls on the same path — a symlink swapped in *after*
+/// this check and *before* the copy starts is followed exactly as it would
+/// have been without this check. On Unix, after the copy this function
+/// re-`symlink_metadata`s `src` and compares filesystem identity (dev,
+/// inode) against what was checked. This catches a swap that is *still in
+/// place* when the copy finishes; an attacker who can observe copy
+/// completion can restore the original directory (same dev/inode) before
+/// the post-stat runs, and the poisoned copy is kept undetected — the
+/// mechanism is a tripwire for the unobserved/careless case, not a
+/// guarantee. Nested entries inside `src` have the identical two-syscall
+/// shape with no re-check at all. Closing this properly (top-level and
+/// nested) needs fd-relative I/O (`openat`) across every tree walk in the
+/// codebase, which is deliberately out of scope here — tracked in #1066
+/// (filed independently, before this fix, as a cross-cutting refactor
+/// project) rather than folded into a one-function patch.
 ///
 /// # Errors
 /// - Unsafe (path-traversal) skill name.
@@ -360,15 +363,35 @@ pub(crate) fn write_first_class_skills(
                 Err(_) => true,
             };
             if identity_changed {
-                let _ = std::fs::remove_dir_all(&dest);
-                anyhow::bail!(
-                    "skill '{}': source path '{}' changed identity during the copy \
-                     (possible symlink-swap race) — discarded the copy",
-                    skill.name,
-                    skill.path
-                );
+                // #1341 security-audit: don't claim the copy was discarded
+                // when the removal itself might have failed — an operator
+                // told "discarded" while attacker-redirected content
+                // lingers at `dest` (loaded into the agent's prompt on the
+                // next render) would be worse than the original race.
+                match std::fs::remove_dir_all(&dest) {
+                    Ok(()) => anyhow::bail!(
+                        "skill '{}': source path '{}' changed identity during the copy \
+                         (possible symlink-swap race) — discarded the copy",
+                        skill.name,
+                        skill.path
+                    ),
+                    Err(e) => anyhow::bail!(
+                        "skill '{}': source path '{}' changed identity during the copy \
+                         (possible symlink-swap race), AND removing the resulting copy at \
+                         '{}' failed ({e}) — remove it manually",
+                        skill.name,
+                        skill.path,
+                        dest.display()
+                    ),
+                }
             }
         }
+        // #1341: `src_meta` (captured above for the Unix-only re-check) is
+        // read only inside `cfg(unix)` — silence the resulting
+        // unused-variable warning on a hypothetical non-Unix build rather
+        // than let a future Windows target hit `-D warnings`.
+        #[cfg(not(unix))]
+        let _ = &src_meta;
         // Track relative paths (relative to `out`) in the owned set.
         // strip_prefix is infallible here: copy_dir_owner_only writes under
         // `dest` which is `out/skills/<name>`, so every returned path starts

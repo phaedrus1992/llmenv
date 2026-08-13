@@ -819,18 +819,36 @@ fn read_claude_json(path: &Path) -> anyhow::Result<serde_json::Value> {
 /// `scan_skill_files_for_hardcoded_paths`). Returns the list of relative paths
 /// written (relative to `dest_dir`), for inclusion in the `owned` set.
 pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    copy_dir_owner_only_inner(src, dest, true)
+}
+
+fn copy_dir_owner_only_inner(
+    src: &Path,
+    dest: &Path,
+    is_root: bool,
+) -> anyhow::Result<Vec<PathBuf>> {
     // #1341: a symlink already at `dest` (planted, or left behind by a prior
     // run) is never legitimate — llmenv owns everything under the
     // materialized output tree. Reject before create_dir_owner_only, which
     // would otherwise follow it (chmod-ing and writing through the target).
-    if let Ok(meta) = std::fs::symlink_metadata(dest)
-        && meta.file_type().is_symlink()
-    {
-        anyhow::bail!(
-            "destination path '{}' is a symlink — a path llmenv owns and writes through \
-             must never be a symlink",
-            dest.display()
-        );
+    // A stat error other than "not found" fails closed (propagated) rather
+    // than being treated as "nothing there, proceed" — the checked path
+    // being currently unreadable is not the same as it being absent
+    // (security-audit, #1341).
+    match std::fs::symlink_metadata(dest) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            anyhow::bail!(
+                "destination path '{}' is a symlink — a path llmenv owns and writes through \
+                 must never be a symlink",
+                dest.display()
+            );
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("checking destination path '{}'", dest.display()));
+        }
     }
     let mut written: Vec<PathBuf> = Vec::new();
     create_dir_owner_only(dest)?;
@@ -840,12 +858,19 @@ pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec
         let file_name = entry.file_name();
         let meta = std::fs::symlink_metadata(&src_path)?;
         if meta.file_type().is_symlink() {
-            // #1341: a symlinked SKILL.md is silently dropped by the skip
-            // below, producing a skill directory that only fails validation
-            // later with a misleading "missing SKILL.md" — the file *is*
-            // there in the source, it just never got copied. Fail loud
-            // here instead, where the real cause is still in scope.
-            if file_name == "SKILL.md" {
+            // #1341: a symlinked SKILL.md at the *skill's own root* is
+            // silently dropped by the skip below, producing a skill
+            // directory that only fails validation later with a misleading
+            // "missing SKILL.md" — the file *is* there in the source, it
+            // just never got copied. Fail loud here instead, where the real
+            // cause is still in scope. Root-only and case-insensitive
+            // (security-audit, #1341): a nested `SKILL.md` (a vendored
+            // sub-skill, an example file) isn't the manifest
+            // `validate_skills` checks, and macOS's default
+            // case-insensitive filesystem would otherwise let `skill.md`
+            // take the silent-skip branch and still satisfy
+            // `skill_md.exists()`.
+            if is_root && file_name.eq_ignore_ascii_case("SKILL.md") {
                 anyhow::bail!(
                     "'{}' is a symlink — a skill's SKILL.md must be a real file, not a \
                      symlink",
@@ -863,9 +888,21 @@ pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec
         }
         let dest_path = dest.join(&file_name);
         if meta.is_dir() {
-            let sub_written = copy_dir_owner_only(&src_path, &dest_path)?;
+            let sub_written = copy_dir_owner_only_inner(&src_path, &dest_path, false)?;
             written.extend(sub_written);
         } else if meta.is_file() {
+            // #1341: a symlink already at `dest_path` is never legitimate —
+            // `write_owner_only` opens with `create(true).truncate(true)`,
+            // which follows a symlink and overwrites its target.
+            if let Ok(dest_meta) = std::fs::symlink_metadata(&dest_path)
+                && dest_meta.file_type().is_symlink()
+            {
+                anyhow::bail!(
+                    "destination path '{}' is a symlink — a path llmenv owns and writes \
+                     through must never be a symlink",
+                    dest_path.display()
+                );
+            }
             let content = std::fs::read(&src_path)?;
             crate::paths::write_owner_only(&dest_path, &content)?;
             written.push(dest_path);
@@ -5442,6 +5479,104 @@ mod tests {
         .unwrap();
         assert!(out_tmp.path().join("skills/my-skill/SKILL.md").exists());
         assert!(!out_tmp.path().join("skills/my-skill/reference.md").exists());
+    }
+
+    // #1341 security-audit: a nested SKILL.md (not the skill's own root
+    // manifest — a vendored sub-skill, an example file) is skipped like any
+    // other symlink, not fatal for the whole render.
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_owner_only_nested_symlinked_skill_md_is_not_fatal() {
+        let src_tmp = tempfile::tempdir().unwrap();
+        let out_tmp = tempfile::tempdir().unwrap();
+        let skill_src = src_tmp.path().join("my-skill");
+        std::fs::create_dir_all(skill_src.join("examples")).unwrap();
+        std::fs::write(skill_src.join("SKILL.md"), VALID_FRONTMATTER).unwrap();
+        let real_md = src_tmp.path().join("real-example-SKILL.md");
+        std::fs::write(&real_md, "example").unwrap();
+        std::os::unix::fs::symlink(&real_md, skill_src.join("examples/SKILL.md")).unwrap();
+
+        let skill = crate::config::SkillSource {
+            name: "my-skill".into(),
+            path: skill_src.to_str().unwrap().into(),
+            when: Vec::new(),
+        };
+        crate::adapter::skills::write_first_class_skills(
+            out_tmp.path(),
+            std::slice::from_ref(&skill),
+        )
+        .unwrap();
+        assert!(out_tmp.path().join("skills/my-skill/SKILL.md").exists());
+        assert!(
+            !out_tmp
+                .path()
+                .join("skills/my-skill/examples/SKILL.md")
+                .exists()
+        );
+    }
+
+    // #1341 security-audit: case-insensitive match closes the gap a
+    // case-insensitive filesystem (macOS default) would otherwise leave —
+    // `skill.md` must be caught the same as `SKILL.md`.
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_owner_only_rejects_symlinked_skill_md_case_insensitive() {
+        let src_tmp = tempfile::tempdir().unwrap();
+        let out_tmp = tempfile::tempdir().unwrap();
+        let skill_src = src_tmp.path().join("my-skill");
+        std::fs::create_dir_all(&skill_src).unwrap();
+        let real_md = src_tmp.path().join("real-skill.md");
+        std::fs::write(&real_md, VALID_FRONTMATTER).unwrap();
+        std::os::unix::fs::symlink(&real_md, skill_src.join("skill.md")).unwrap();
+
+        let skill = crate::config::SkillSource {
+            name: "my-skill".into(),
+            path: skill_src.to_str().unwrap().into(),
+            when: Vec::new(),
+        };
+        let err = crate::adapter::skills::write_first_class_skills(
+            out_tmp.path(),
+            std::slice::from_ref(&skill),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "got: {err}");
+    }
+
+    // #1341 security-audit: write_owner_only follows a symlink at its
+    // destination and overwrites the target; a symlink planted at a
+    // destination *file* path (not just a directory) must be rejected too.
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_owner_only_rejects_symlinked_destination_file() {
+        let src_tmp = tempfile::tempdir().unwrap();
+        let out_tmp = tempfile::tempdir().unwrap();
+        let skill_src = src_tmp.path().join("my-skill");
+        std::fs::create_dir_all(&skill_src).unwrap();
+        std::fs::write(skill_src.join("SKILL.md"), VALID_FRONTMATTER).unwrap();
+
+        let victim = tempfile::tempdir().unwrap();
+        let victim_file = victim.path().join("victim.txt");
+        std::fs::write(&victim_file, "do not overwrite me").unwrap();
+        let dest_skill_dir = out_tmp.path().join("skills/my-skill");
+        std::fs::create_dir_all(&dest_skill_dir).unwrap();
+        std::os::unix::fs::symlink(&victim_file, dest_skill_dir.join("SKILL.md")).unwrap();
+
+        let skill = crate::config::SkillSource {
+            name: "my-skill".into(),
+            path: skill_src.to_str().unwrap().into(),
+            when: Vec::new(),
+        };
+        let err = crate::adapter::skills::write_first_class_skills(
+            out_tmp.path(),
+            std::slice::from_ref(&skill),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "got: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&victim_file).unwrap(),
+            "do not overwrite me",
+            "victim file must not be overwritten through the symlink"
+        );
     }
 
     #[test]

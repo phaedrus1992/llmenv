@@ -105,7 +105,7 @@ pub fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Resu
     for name in COPIED_FILES {
         let src = state_dir.join(name);
         let dst = config_dir.join(name);
-        if dst.exists() || !is_real_file(&src) {
+        if dest_already_present(&dst) || !is_real_file(&src) {
             continue;
         }
         std::fs::copy(&src, &dst)
@@ -118,7 +118,11 @@ pub fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Resu
 /// — #1341: `is_file()` follows a symlink, so a symlinked entry under
 /// `state_dir`/`config_dir` would otherwise be read/copied through
 /// silently). Skips (warns) rather than errors: a stray symlink here
-/// shouldn't block a whole `materialize`/inherit pass over one file.
+/// shouldn't block a whole `materialize`/inherit pass over one file. A
+/// missing source is the documented, common no-op case (nothing cached
+/// yet) and stays silent; any other stat failure (permission denied, ...)
+/// is warned rather than folded into the same "absent" outcome
+/// (security-audit, #1341).
 fn is_real_file(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -126,6 +130,31 @@ fn is_real_file(path: &Path) -> bool {
             false
         }
         Ok(meta) => meta.is_file(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "inherit: could not stat file, skipping");
+            false
+        }
+    }
+}
+
+/// True when something already exists at `path`, including a dangling
+/// symlink (`symlink_metadata`, not `exists()` — #1341 security-audit:
+/// `exists()` follows a symlink and reports `false` for a dangling one,
+/// which would fall through to `std::fs::copy` opening
+/// `O_CREAT|O_TRUNC` through the link and writing the copied content at
+/// the link's target instead of replacing the link itself).
+fn dest_already_present(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                tracing::warn!(
+                    path = %path.display(),
+                    "inherit: skipping copy — destination is a symlink"
+                );
+            }
+            true
+        }
         Err(_) => false,
     }
 }
@@ -143,7 +172,7 @@ pub fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Resu
     for name in COPIED_FILES {
         let src = config_dir.join(name);
         let dst = state_dir.join(name);
-        if dst.exists() || !is_real_file(&src) {
+        if dest_already_present(&dst) || !is_real_file(&src) {
             continue;
         }
         std::fs::copy(&src, &dst)
@@ -547,6 +576,29 @@ mod tests {
 
         inherit_copied_files(&state, &cfg).unwrap();
         assert!(!cfg.join(HISTORY_FILE).exists());
+    }
+
+    /// #1341: a dangling symlink at the destination reports `exists() ==
+    /// false`, which would otherwise fall through to `std::fs::copy`
+    /// writing the copied content at the symlink's target instead of
+    /// replacing the link. Must be treated as "already present, skip".
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_at_destination_is_not_written_through() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("TAG-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&cfg).unwrap();
+        write(&state.join(HISTORY_FILE), "cached");
+        let victim = tmp.path().join("does-not-exist-yet.jsonl");
+        std::os::unix::fs::symlink(&victim, cfg.join(HISTORY_FILE)).unwrap();
+
+        inherit_copied_files(&state, &cfg).unwrap();
+        assert!(
+            !victim.exists(),
+            "must not create the dangling symlink's target"
+        );
     }
 
     /// The stranding bug: `projects/` trees live at BOTH `<root>/<shape>/` (loose,
