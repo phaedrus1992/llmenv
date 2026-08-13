@@ -1452,7 +1452,11 @@ is single-valued.
 Every other engine (Crush, opencode) has no native output-style concept, so
 the same `name`/`description`/`content` renders as a generated skill instead
 (`skills/<name>/SKILL.md`) — automatic, no config-author-side fallback logic.
-`keep_coding_instructions`/`force_for_plugin` have no effect on this path.
+`keep_coding_instructions`/`force_for_plugin` have no effect on this path. A
+style `name` that collides with a first-class skill, a reserved built-in
+skill name, or a skill projected from an installed plugin is rejected at
+materialize time, instead of silently overwriting or being shadowed by that
+skill.
 
 ## Project markers
 

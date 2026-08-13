@@ -1651,23 +1651,34 @@ fn materialize_from_manifest(
     // order-dependent, since each adapter writes styles and skills in a
     // different sequence. Reject at materialize time instead of letting it
     // resolve silently per engine. Doesn't cover plugin-projected skill
-    // names (resolved independently, per adapter, from on-disk plugin
-    // content not available here) — tracked as #1333.
-    let reserved_skill_names: std::collections::HashSet<&str> = [
+    // names — those are resolved independently, per adapter, from on-disk
+    // plugin content not available here; see #1333's
+    // `output_styles::reject_plugin_skill_collisions`, called from each
+    // fallback adapter's `materialize` instead.
+    //
+    // Compared case-insensitively (#1333 security-audit): both render to a
+    // single directory entry under `skills/<name>/`, which collides on a
+    // case-insensitive filesystem (macOS, Windows) even when the two names
+    // differ in case.
+    let reserved_skill_names: std::collections::HashSet<String> = [
         "llmenv",
         crate::adapter::claude_code::LSP_PLUGIN_NAME,
         "diagnose",
     ]
     .into_iter()
+    .map(str::to_lowercase)
     .collect();
+    let seen_skill_names_lower: std::collections::HashSet<String> =
+        seen_skill_names.iter().map(|s| s.to_lowercase()).collect();
     for style in &manifest.capabilities.output_styles {
-        if reserved_skill_names.contains(style.name.as_str())
-            || seen_skill_names.contains(&style.name)
+        let style_name_lower = style.name.to_lowercase();
+        if reserved_skill_names.contains(&style_name_lower)
+            || seen_skill_names_lower.contains(&style_name_lower)
         {
             anyhow::bail!(
-                "output style '{}' collides with an existing skill name; rename the style \
-                 to avoid silently overwriting or being shadowed by that skill on adapters \
-                 with no native output-style concept (Crush, opencode)",
+                "output style '{}' collides with an existing skill name (case-insensitive); \
+                 rename the style to avoid silently overwriting or being shadowed by that \
+                 skill on adapters with no native output-style concept (Crush, opencode)",
                 style.name
             );
         }
@@ -5356,6 +5367,51 @@ mod tests {
         assert!(
             err.to_string().contains("llmenv"),
             "error should name the reserved collision: {err}"
+        );
+    }
+
+    /// #1333 (security-audit): the collision check must compare
+    /// case-insensitively — a skill "Concise" and a style "concise" both
+    /// render to a single `skills/<name>/` entry, which collides on a
+    /// case-insensitive filesystem (macOS, Windows) even though the two
+    /// names differ in case.
+    #[test]
+    fn output_style_colliding_with_skill_name_case_insensitively_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let bundle_dir = config_dir.join("bundles").join("t");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("AGENTS.md"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.cache.cache_dir = tmp.path().join("cache").to_string_lossy().into_owned();
+        config.skills = vec![crate::config::SkillSource {
+            name: "Concise".to_string(),
+            path: "/tmp/test".to_string(),
+            ..crate::config::SkillSource::default()
+        }];
+        config.output_styles = vec![crate::config::OutputStyle {
+            name: "concise".to_string(),
+            description: "d".into(),
+            content: "c".into(),
+            ..crate::config::OutputStyle::default()
+        }];
+
+        let active = active(vec![active_scope("user", &["tagx"], &[], &[])]);
+        let firing_bundle = bundle("t", &["tagx"]);
+        let firing: Vec<&Bundle> = vec![&firing_bundle];
+        let ctx = MaterializeContext {
+            config: &config,
+            config_dir: &config_dir,
+            active: &active,
+            firing: &firing,
+        };
+
+        let claude = ClaudeCodeAdapter;
+        let err = build_and_materialize(&claude, ctx, false).unwrap_err();
+        assert!(
+            err.to_string().contains("concise"),
+            "error should name the colliding style: {err}"
         );
     }
 

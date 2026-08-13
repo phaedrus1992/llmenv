@@ -559,7 +559,18 @@ impl AgentAdapter for OpencodeAdapter {
         )?);
 
         // #1130: opencode has no native output-style concept — render each
-        // declared output style as a generated skill instead.
+        // declared output style as a generated skill instead. #1333: check
+        // for a plugin-projected skill name collision first — plugin skills
+        // are projected below, after this loop, so an unrejected collision
+        // here would be silently overwritten instead. Unlike Crush, opencode
+        // never skips a whole plugin over unsupported content (it translates
+        // commands/agents itself), so every plugin is compatible here.
+        crate::adapter::output_styles::reject_plugin_skill_collisions(
+            &manifest.capabilities.output_styles,
+            &manifest.plugins,
+            &manifest.marketplaces,
+            |_payload| true,
+        )?;
         for style in &manifest.capabilities.output_styles {
             owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
                 out, style,
@@ -1648,6 +1659,59 @@ mod tests {
         assert!(
             out.path().join("skills/my-plugin-skill/SKILL.md").exists(),
             "plugin-projected skill must exist"
+        );
+    }
+
+    #[test]
+    fn materialize_output_style_colliding_with_plugin_skill_is_rejected() {
+        // #1333: an output style named after a skill a plugin projects must
+        // be rejected before either is written — opencode writes output
+        // styles *before* plugin skill projection, so an unrejected
+        // collision would silently drop the style once the plugin skill
+        // landed on top of it.
+        let out = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin_dir.path().join("skills/my-plugin-skill")).unwrap();
+        std::fs::write(
+            plugin_dir.path().join("skills/my-plugin-skill/SKILL.md"),
+            VALID_FRONTMATTER,
+        )
+        .unwrap();
+
+        let mut manifest = MergedManifest {
+            plugins: vec![crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "test".into(),
+                plugin: "my-plugin".into(),
+                collection: String::new(),
+                install_path: Some(plugin_dir.path().to_str().unwrap().into()),
+                git_commit_sha: None,
+            }],
+            marketplaces: vec![crate::plugins::resolve::ResolvedMarketplace {
+                name: "test".into(),
+                source: String::new(),
+                install_location: None,
+                head: None,
+            }],
+            ..Default::default()
+        };
+        manifest
+            .capabilities
+            .output_styles
+            .push(crate::config::OutputStyle {
+                name: "my-plugin-skill".into(),
+                description: "A conflicting style".into(),
+                content: "Be terse.".into(),
+                when: Vec::new(),
+                keep_coding_instructions: false,
+                force_for_plugin: false,
+            });
+        let err = OpencodeAdapter
+            .materialize(&manifest, out.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("my-plugin-skill"));
+        assert!(
+            !out.path().join("skills/my-plugin-skill/SKILL.md").exists(),
+            "materialize must bail before writing either the style or the plugin skill"
         );
     }
 
