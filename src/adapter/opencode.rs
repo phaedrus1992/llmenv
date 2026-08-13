@@ -558,18 +558,35 @@ impl AgentAdapter for OpencodeAdapter {
             out, &features,
         )?);
 
-        // #1130: opencode has no native output-style concept — render each
-        // declared output style as a generated skill instead. #1333: check
-        // for a plugin-projected skill name collision first — plugin skills
-        // are projected below, after this loop, so an unrejected collision
-        // here would be silently overwritten instead. Unlike Crush, opencode
-        // never skips a whole plugin over unsupported content (it translates
-        // commands/agents itself), so every plugin is compatible here.
+        // #1130/#1333/#1335: opencode has no native output-style concept —
+        // render each declared output style as a generated skill instead.
+        // Resolve every plugin's payload dir and discover its skills *once*
+        // here (before writing anything), then reuse this same discovery
+        // both for the collision check below and for the actual skill
+        // write in the plugin loop (step 4d) — a second, separate directory
+        // walk there could observe a different result (TOCTOU).
+        let plugin_payloads: Vec<(PathBuf, Vec<crate::config::SkillSource>)> = manifest
+            .plugins
+            .iter()
+            .map(|plugin| {
+                let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
+                let skills = crate::adapter::skills::discover_plugin_skills(&payload)?;
+                anyhow::Ok((payload, skills))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let projected_plugin_skill_names: Vec<(String, String)> = manifest
+            .plugins
+            .iter()
+            .zip(&plugin_payloads)
+            .flat_map(|(plugin, (_, skills))| {
+                skills
+                    .iter()
+                    .map(move |s| (s.name.clone(), plugin.plugin.clone()))
+            })
+            .collect();
         crate::adapter::output_styles::reject_plugin_skill_collisions(
             &manifest.capabilities.output_styles,
-            &manifest.plugins,
-            &manifest.marketplaces,
-            |_payload| true,
+            &projected_plugin_skill_names,
         )?;
         for style in &manifest.capabilities.output_styles {
             owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
@@ -591,9 +608,7 @@ impl AgentAdapter for OpencodeAdapter {
         // Hoisted: command/ dir needed by plugin and bundle sections below.
         std::fs::create_dir_all(out.join("command"))?;
 
-        for plugin in &manifest.plugins {
-            let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
-
+        for (plugin, (payload, plugin_skills)) in manifest.plugins.iter().zip(&plugin_payloads) {
             // Does this plugin provide native opencode support (e.g. a
             // TypeScript plugin registered via "plugin" key in opencode.json)?
             // Known: context-mode ships a native opencode plugin.
@@ -667,7 +682,9 @@ impl AgentAdapter for OpencodeAdapter {
             }
 
             // 4d. Plugin-projected skills (skills dir inside a plugin payload).
-            let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
+            // Reuses the `plugin_skills` discovered above (same walk the
+            // collision check used) instead of a second directory read.
+            let paths = crate::adapter::skills::write_first_class_skills(out, plugin_skills)?;
             plugin_skill_paths.extend(paths);
 
             // 4e. Plugin hooks from hooks/ dir — translate to top-level hooks.
@@ -678,7 +695,7 @@ impl AgentAdapter for OpencodeAdapter {
                     let hooks_path = hooks_dir.join(manifest_name);
                     // #915: parse_plugin_hooks returns Ok(empty) for a missing
                     // manifest; a real read/parse error still warns + breaks.
-                    let mut parsed = match parse_plugin_hooks(&hooks_path, &payload, &plugin.plugin)
+                    let mut parsed = match parse_plugin_hooks(&hooks_path, payload, &plugin.plugin)
                     {
                         Ok(Some(parsed)) => parsed,
                         // Manifest of this name is absent — try the next candidate.

@@ -317,22 +317,34 @@ pub(crate) fn write_first_class_skills(
 /// still materialise skills bundled inside a plugin directory without fully
 /// loading the plugin.
 ///
-/// Returns the paths written (relative to `out`). Returns an empty vec when
-/// `plugin_dir/skills/` does not exist.
+/// Returns the paths written (relative to `out`) and the skill names
+/// projected — the latter lets a caller (e.g. the output-style collision
+/// check, #1333/#1335) learn exactly what was written without a second,
+/// separate directory walk that could see a different result (TOCTOU).
+/// Returns two empty vecs when `plugin_dir/skills/` does not exist.
 ///
 /// # Errors
 /// Propagates any I/O error from [`write_first_class_skills`].
-pub(crate) fn project_plugin_skills(plugin_dir: &Path, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
+pub(crate) fn project_plugin_skills(
+    plugin_dir: &Path,
+    out: &Path,
+) -> anyhow::Result<(Vec<PathBuf>, Vec<String>)> {
     let skills = discover_plugin_skills(plugin_dir)?;
-    write_first_class_skills(out, &skills)
+    let names = skills.iter().map(|s| s.name.clone()).collect();
+    let paths = write_first_class_skills(out, &skills)?;
+    Ok((paths, names))
 }
 
 /// Walks `plugin_dir/skills/` and returns each subdirectory as a
 /// `SkillSource`, without writing anything. Shared by [`project_plugin_skills`]
-/// (which then writes them) and [`plugin_skill_names`] (#1333, which only
-/// needs the names — e.g. to check for a collision before anything is
-/// written). Returns an empty vec when `plugin_dir/skills/` does not exist.
-fn discover_plugin_skills(plugin_dir: &Path) -> anyhow::Result<Vec<crate::config::SkillSource>> {
+/// (which then writes them) and callers that need to discover a plugin's
+/// skills before deciding whether to write them at all (opencode's
+/// output-style collision check, #1333/#1335, must know the names before
+/// its plugin-projection loop runs). Returns an empty vec when
+/// `plugin_dir/skills/` does not exist.
+pub(crate) fn discover_plugin_skills(
+    plugin_dir: &Path,
+) -> anyhow::Result<Vec<crate::config::SkillSource>> {
     let skills_src = plugin_dir.join("skills");
     if !skills_src.is_dir() {
         return Ok(Vec::new());
@@ -361,19 +373,6 @@ fn discover_plugin_skills(plugin_dir: &Path) -> anyhow::Result<Vec<crate::config
         });
     }
     Ok(skills)
-}
-
-/// The skill names `project_plugin_skills(plugin_dir, ..)` would project,
-/// without writing anything (#1333).
-///
-/// # Errors
-/// Propagates any I/O error, or an unsafe plugin skill directory name, from
-/// [`discover_plugin_skills`].
-pub(crate) fn plugin_skill_names(plugin_dir: &Path) -> anyhow::Result<Vec<String>> {
-    Ok(discover_plugin_skills(plugin_dir)?
-        .into_iter()
-        .map(|s| s.name)
-        .collect())
 }
 
 /// Small string→string map for arbitrary environment/header fuzzing, shared
