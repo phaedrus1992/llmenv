@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.10.0] - 2026-08-13
+
+The task tracker grows up: `task add` now chains onto the last task in the session by default instead of creating an orphan (`--no-parent` opts out; #929), `task edit` mutates a task in place instead of delete-and-recreate (#930), and `task session summary` rolls a session's tasks and notes into one artifact (#931).
+
+Most of this release is engine-rendering correctness fixes, concentrated in Crush and opencode: several `permissions.allow`/`deny`/`ask` rules were silently mapping to keys those engines don't have and so had no effect, Claude Code's own allow/deny conflicts now resolve deny-wins, `content` scopes now participate in precedence, and a `null` in any `native.<engine>` block now deletes the key on every write path instead of just some. New capabilities landed alongside the fixes: `output_styles` for Claude Code, a tiered permission policy for `codebase-memory-mcp` tools, and `native_default_models` for Crush's per-role model extras.
+
+Security-wise, several more symlink gaps in skill-source copying and state-directory inheritance are closed — a symlinked skill source, output path, or `SKILL.md` is now rejected instead of followed (#1337, #1341).
+
+Finally, `llmenv export`/the shell-hook flow is deprecated in favor of `llmenv launch <engine>`, landing in v4.0.0 — `export` keeps working until then (#1056).
+
 ### Added
 
 - Opt-in cache hit/miss telemetry for the content-hash materialize cache, the merge-signature cache, the read-once dedup cache, and the plugin marketplace cache — one `[LLMENV_CACHE] <name> <hit|miss> <duration>ms` stderr line per cache lookup, gated behind the same `LLMENV_TRACE_TIMING` var that already gates hook-run's per-phase timing markers. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-cache-hitmiss-rates) (#1260)
@@ -809,7 +819,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.9.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...HEAD
+[3.10.0]: https://github.com/phaedrus1992/llmenv/compare/v3.9.0...v3.10.0
 [3.9.0]: https://github.com/phaedrus1992/llmenv/compare/v3.8.0...v3.9.0
 [3.8.0]: https://github.com/phaedrus1992/llmenv/compare/v3.7.0...v3.8.0
 [3.7.0]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...v3.7.0
