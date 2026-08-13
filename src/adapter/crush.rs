@@ -164,6 +164,12 @@ impl AgentAdapter for CrushAdapter {
         owned.extend(skill_paths.iter().cloned());
 
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
+        // Skills actually projected below — used as the collision check's
+        // input further down, instead of a second, separate directory walk
+        // (#1335: two independent walks of the same plugin payload could
+        // observe different states between them).
+        let mut projected_plugin_skills: Vec<crate::adapter::output_styles::ProjectedPluginSkill> =
+            Vec::new();
         for plugin in &manifest.plugins {
             let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
             if !plugin_is_compatible(&payload) {
@@ -180,8 +186,14 @@ impl AgentAdapter for CrushAdapter {
                 );
                 continue;
             }
-            let paths = crate::adapter::skills::project_plugin_skills(&payload, out)?;
+            let (paths, names) = crate::adapter::skills::project_plugin_skills(&payload, out)?;
             plugin_skill_paths.extend(paths);
+            projected_plugin_skills.extend(names.into_iter().map(|skill_name| {
+                crate::adapter::output_styles::ProjectedPluginSkill {
+                    skill_name,
+                    plugin_name: plugin.plugin.clone(),
+                }
+            }));
         }
         owned.extend(plugin_skill_paths.iter().cloned());
 
@@ -194,17 +206,14 @@ impl AgentAdapter for CrushAdapter {
         owned.extend(llmenv_skill_paths.iter().cloned());
 
         // #1130: Crush has no native output-style concept — render each
-        // declared output style as a generated skill instead. #1333: check
-        // for a plugin-projected skill name collision first — plugin skills
-        // were already written above, so an unrejected collision here would
-        // silently overwrite them. Reuses plugin_is_compatible so a plugin
-        // the loop above skipped (agents/commands/hooks) is never counted as
-        // a collision source — its skills are never actually projected.
+        // declared output style as a generated skill instead. #1333/#1335:
+        // check for a plugin-projected skill name collision first, against
+        // the exact names the loop above already wrote (not a fresh walk) —
+        // plugin skills were already written above, so an unrejected
+        // collision here would silently overwrite them.
         crate::adapter::output_styles::reject_plugin_skill_collisions(
             &manifest.capabilities.output_styles,
-            &manifest.plugins,
-            &manifest.marketplaces,
-            plugin_is_compatible,
+            &projected_plugin_skills,
         )?;
         for style in &manifest.capabilities.output_styles {
             owned.extend(crate::adapter::output_styles::write_output_style_as_skill(

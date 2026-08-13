@@ -5418,7 +5418,7 @@ mod tests {
         std::fs::create_dir_all(&skill_src).unwrap();
         std::fs::write(skill_src.join("SKILL.md"), VALID_FRONTMATTER).unwrap();
 
-        let owned =
+        let (owned, names) =
             crate::adapter::skills::project_plugin_skills(plugin_tmp.path(), out_tmp.path())
                 .unwrap();
 
@@ -5433,6 +5433,7 @@ mod tests {
             owned.iter().any(|p| p.ends_with("skills/my-plugin-skill")),
             "owned missing skills dir"
         );
+        assert_eq!(names, vec!["my-plugin-skill".to_string()]);
     }
 
     #[test]
@@ -5440,10 +5441,11 @@ mod tests {
         let plugin_tmp = tempfile::tempdir().unwrap();
         let out_tmp = tempfile::tempdir().unwrap();
         // No skills/ subdir in the plugin.
-        let owned =
+        let (owned, names) =
             crate::adapter::skills::project_plugin_skills(plugin_tmp.path(), out_tmp.path())
                 .unwrap();
         assert!(owned.is_empty());
+        assert!(names.is_empty());
     }
 
     fn external_plugin(marketplace: &str, plugin: &str, install_path: &str) -> ResolvedPlugin {
