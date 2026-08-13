@@ -941,22 +941,41 @@ impl AgentAdapter for OpencodeAdapter {
         // — including a plain lowercase `deny: ["bash(rm -rf *)"]`, turning a
         // working deny into a prompt. Only lowercase for forgiving case, same
         // as before this fix.
+        // A permission key with whitespace in it can never match a tool name,
+        // so it would render as a rule that silently does nothing (#1328).
+        fn reject_spaced_tool(tool: &str, rule: &str, action: &str) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                !tool.contains(char::is_whitespace),
+                "native_permissions.opencode.{action}: rule {rule:?} has whitespace inside its \
+                 tool name ({tool:?}) — opencode would never match it against a tool, so the \
+                 rule could not take effect. Write the tool name without spaces."
+            );
+            Ok(())
+        }
+
         fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<(String, String)> {
             match (s.find('('), s.rfind(')')) {
                 (None, None) => {
+                    let tool = s.trim().to_ascii_lowercase();
                     anyhow::ensure!(
-                        !s.trim().is_empty(),
+                        !tool.is_empty(),
                         "native_permissions.opencode.{action}: empty rule string"
                     );
-                    Ok((s.to_ascii_lowercase(), "*".to_string()))
+                    reject_spaced_tool(&tool, s, action)?;
+                    Ok((tool, "*".to_string()))
                 }
                 (Some(start), Some(end)) if start < end => {
-                    let tool = s[..start].to_ascii_lowercase();
+                    // #1328: an untrimmed name renders a key like `"webfetch "`,
+                    // which opencode's rest-record accepts but never matches
+                    // against the real tool — a permanently inert rule that also
+                    // slips past the action-only check.
+                    let tool = s[..start].trim().to_ascii_lowercase();
                     let pattern = &s[start + 1..end];
                     anyhow::ensure!(
                         !tool.is_empty(),
                         "native_permissions.opencode.{action}: rule {s:?} has no tool name before '('"
                     );
+                    reject_spaced_tool(&tool, s, action)?;
                     anyhow::ensure!(
                         !pattern.is_empty(),
                         "native_permissions.opencode.{action}: rule {s:?} has an empty pattern '()'"
@@ -1210,11 +1229,34 @@ impl AgentAdapter for OpencodeAdapter {
 /// silently emitting an unverified name would repeat exactly the mistake
 /// this fix corrects for `Write`/`MultiEdit`/`LS`. Every neutral tool name
 /// documented as valid in `capabilities.permissions` is covered here.
+fn opencode_tool_name(neutral: &str) -> Option<&'static str> {
+    Some(match neutral {
+        "Bash" => "bash",
+        "Read" => "read",
+        "Write" | "MultiEdit" => "edit",
+        "Edit" => "edit",
+        "Glob" => "glob",
+        "Grep" => "grep",
+        "LS" => "list",
+        "WebFetch" => "webfetch",
+        "WebSearch" => "websearch",
+        "TodoWrite" => "todowrite",
+        "Task" => "task",
+        _ => return None,
+    })
+}
+
 /// opencode permission keys typed as a bare `"ask"`/`"allow"`/`"deny"` string
-/// rather than the `Action | {pattern: action}` union every other key accepts
-/// (`packages/core/src/v1/config/permission.ts`). Rendering a pattern map for
-/// one of these fails opencode's schema decode, and its loader then discards
-/// the *entire* config file with no diagnostic (#1328).
+/// rather than the `Action | {pattern: action}` union every other key accepts.
+/// Rendering a pattern map for one of these fails opencode's schema decode, and
+/// its loader then discards the *entire* config file with no diagnostic (#1328).
+///
+/// Verified against `packages/core/src/v1/config/permission.ts` at opencode
+/// `ab7cbc808f61e062af20d9a9a838ae93ed8f940d` — these are exactly the keys
+/// declared `Schema.optional(Action)`. Listing a key that is no longer
+/// action-only only costs a spurious error; *missing* one brings back the
+/// silent whole-config discard, so re-check this list against that file when
+/// bumping the supported opencode version.
 const ACTION_ONLY_PERMISSION_KEYS: &[&str] = &[
     "doom_loop",
     "question",
@@ -1246,26 +1288,115 @@ fn check_permission_patterns(
              pattern/paths so the rule covers the whole tool."
         );
     }
+    check_pattern_ordering(tool, patterns)
+}
 
-    // opencode resolves overlapping patterns with `findLast` — the last key in
-    // the rendered JSON wins — and llmenv emits the map in sorted key order.
-    // When a broader pattern sorts *after* the narrower one it swallows, the
-    // narrower rule silently stops applying (e.g. "rm -rf*" sorts after
-    // "rm -rf /", so an explicit deny would be overridden by a broad allow).
-    for (i, (narrow, narrow_action)) in patterns.iter().enumerate() {
-        for (broad, broad_action) in patterns.iter().skip(i + 1) {
-            if broad_action == narrow_action || !pattern_subsumes(broad, narrow) {
+/// Reject a pattern pair whose rendered order inverts the user's intent.
+///
+/// opencode resolves every pattern that matches a resource with `findLast` —
+/// the last key in the rendered JSON wins — and llmenv emits each tool's map in
+/// sorted key order. So for any two patterns that can match the same input, the
+/// later-sorting one governs the whole overlap. That is only what the user
+/// meant when the later pattern is the *narrower* of the two; otherwise the
+/// earlier rule silently stops applying to inputs it was written to cover.
+///
+/// Only pairs with differing actions matter — when both say `deny`, whichever
+/// wins gives the same answer.
+fn check_pattern_ordering(tool: &str, patterns: &BTreeMap<String, String>) -> anyhow::Result<()> {
+    for (i, (earlier, earlier_action)) in patterns.iter().enumerate() {
+        for (later, later_action) in patterns.iter().skip(i + 1) {
+            if later_action == earlier_action
+                || !patterns_overlap(earlier, later)
+                || pattern_subsumes(earlier, later)
+            {
                 continue;
             }
             anyhow::bail!(
-                "opencode: permission `{tool}` pattern {broad:?} ({broad_action}) is broader \
-                 than {narrow:?} ({narrow_action}) but sorts after it, and opencode applies \
-                 the last matching rule — {narrow:?} would never take effect. Narrow \
-                 {broad:?} so the two no longer overlap, or give them the same action."
+                "opencode: permission `{tool}` patterns {earlier:?} ({earlier_action}) and \
+                 {later:?} ({later_action}) both match some inputs, and {later:?} sorts last \
+                 so opencode applies it to every input they share — {earlier:?} would not \
+                 take effect there. Rewrite {later:?} so it only covers inputs {earlier:?} \
+                 does not, or give the two the same action."
             );
         }
     }
     Ok(())
+}
+
+/// True when some input matches both patterns.
+///
+/// Decides `L(a) ∩ L(b) ≠ ∅` exactly for opencode's `*`/`?` globs: `*` stands
+/// for any run of characters and `?` for exactly one, so two patterns share an
+/// input when their symbols can be aligned. A pattern ending in `" *"` also
+/// matches its bare prefix, so each side is tested in both spellings.
+fn patterns_overlap(a: &str, b: &str) -> bool {
+    fn spellings(pattern: &str) -> Vec<String> {
+        let pattern = pattern.replace('\\', "/");
+        match pattern.strip_suffix(" *") {
+            Some(prefix) => vec![prefix.to_string(), pattern.clone()],
+            None => vec![pattern],
+        }
+    }
+    let (a, b) = (spellings(a), spellings(b));
+    a.iter().any(|x| b.iter().any(|y| globs_intersect(x, y)))
+}
+
+/// `L(a) ∩ L(b) ≠ ∅` for two anchored `*`/`?` globs, by dynamic programming
+/// over suffix pairs.
+fn globs_intersect(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    // reachable[i][j] — some string is generated by both `a[i..]` and `b[j..]`.
+    let rest_all_stars = |p: &[char]| p.iter().all(|c| *c == '*');
+    let mut reachable = vec![vec![false; b.len() + 1]; a.len() + 1];
+    for i in (0..=a.len()).rev() {
+        for j in (0..=b.len()).rev() {
+            reachable[i][j] = match (a.get(i), b.get(j)) {
+                (None, None) => true,
+                // One side is exhausted: the other must be able to match "".
+                (None, Some(_)) => rest_all_stars(&b[j..]),
+                (Some(_), None) => rest_all_stars(&a[i..]),
+                // A `*` either matches nothing here, or absorbs one more
+                // character that the other side also has to produce.
+                (Some('*'), _) => reachable[i + 1][j] || reachable[i][j + 1],
+                (_, Some('*')) => reachable[i][j + 1] || reachable[i + 1][j],
+                // Otherwise both sides consume exactly one character, which
+                // must be compatible.
+                (Some(x), Some(y)) => (*x == '?' || *y == '?' || x == y) && reachable[i + 1][j + 1],
+            };
+        }
+    }
+    reachable[0][0]
+}
+
+/// True when `broad` appears to match everything `narrow` matches.
+///
+/// Substitutes a sentinel run for each of `narrow`'s `*` so it can be tested as
+/// a concrete string. One length is not enough: a run of `?` in `broad` can
+/// stand in for a short run, and a `*` in `narrow` also stands for *no*
+/// characters at all, which a `broad` like `"*?"` cannot match. So `broad` has
+/// to match every probe length — zero, one, and past `broad`'s own `?` count.
+///
+/// This is a witness test, not a containment proof. It is used only to *exempt*
+/// a pattern pair from the ordering check, so a false negative just costs a
+/// spurious error while the rendered config stays correct — whereas a false
+/// positive would silently skip a real inversion, which is what the probe
+/// lengths guard against.
+fn pattern_subsumes(broad: &str, narrow: &str) -> bool {
+    // U+0001 can't appear in a shell command or URL, so no literal character in
+    // `broad` can match it.
+    const SENTINEL: char = '\u{1}';
+    let widest = broad.chars().filter(|c| *c == '?').count() + 1;
+    [0, 1, widest].iter().all(|run| {
+        let mut witness = String::new();
+        for c in narrow.chars() {
+            match c {
+                '*' => witness.extend(std::iter::repeat_n(SENTINEL, *run)),
+                '?' => witness.push(SENTINEL),
+                other => witness.push(other),
+            }
+        }
+        wildcard_matches(broad, &witness)
+    })
 }
 
 /// Match `input` against an opencode permission pattern.
@@ -1315,46 +1446,7 @@ fn glob_matches(pattern: &str, input: &[char]) -> bool {
             },
         }
     }
-    pat.get(p..)
-        .is_some_and(|rest| rest.iter().all(|c| *c == '*'))
-}
-
-/// True when every input `narrow` matches is also matched by `broad`.
-///
-/// Substitutes a sentinel for `narrow`'s own wildcards so it can be tested as
-/// a concrete string. A wildcard can only ever stand for *more* inputs than
-/// the sentinel, so this never reports a subsumption that doesn't hold; at
-/// worst it misses one, which leaves the config renderable.
-fn pattern_subsumes(broad: &str, narrow: &str) -> bool {
-    // U+0001 cannot appear in a shell command or URL pattern, so it can't be
-    // matched by a literal character in `broad`.
-    const SENTINEL: char = '\u{1}';
-    let witness: String = narrow
-        .chars()
-        .flat_map(|c| match c {
-            '*' => vec![SENTINEL, SENTINEL],
-            '?' => vec![SENTINEL],
-            other => vec![other],
-        })
-        .collect();
-    wildcard_matches(broad, &witness)
-}
-
-fn opencode_tool_name(neutral: &str) -> Option<&'static str> {
-    Some(match neutral {
-        "Bash" => "bash",
-        "Read" => "read",
-        "Write" | "MultiEdit" => "edit",
-        "Edit" => "edit",
-        "Glob" => "glob",
-        "Grep" => "grep",
-        "LS" => "list",
-        "WebFetch" => "webfetch",
-        "WebSearch" => "websearch",
-        "TodoWrite" => "todowrite",
-        "Task" => "task",
-        _ => return None,
-    })
+    pat.iter().skip(p).all(|c| *c == '*')
 }
 
 /// Build the JS source for `plugin/llmenv.js` — the hook bridge shim.
@@ -2744,6 +2836,113 @@ mod tests {
         }
     }
 
+    /// The idiomatic way to write "deny this flag anywhere" is a leading-`*`
+    /// pattern, which sorts before an alphanumeric allow it only partially
+    /// overlaps. Neither pattern contains the other, so a containment-only
+    /// check misses it while opencode still resolves the shared inputs to the
+    /// later-sorting allow.
+    #[test]
+    fn materialize_partially_overlapping_patterns_are_rejected() {
+        for (allow, deny) in [
+            ("git *", "* --force*"),
+            ("bash *", "* sudo *"),
+            ("src/*", "*/secrets/*"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut caps = crate::config::Capabilities::default();
+            caps.permissions.allow.push(crate::config::PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some(allow.into()),
+                paths: vec![],
+            });
+            caps.permissions.deny.push(crate::config::PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some(deny.into()),
+                paths: vec![],
+            });
+            let manifest = MergedManifest {
+                capabilities: caps,
+                ..Default::default()
+            };
+            let err = OpencodeAdapter
+                .materialize(&manifest, tmp.path())
+                .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(allow) && msg.contains(deny),
+                "error must name both overlapping patterns: {msg}"
+            );
+        }
+    }
+
+    /// A native rule whose tool name carries stray whitespace would render a
+    /// key opencode can never match — an inert rule, so it has to fail.
+    #[test]
+    fn materialize_native_rule_with_spaced_tool_name_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec![],
+                ask: vec![],
+                deny: vec!["web fetch(https://example.com/*)".into()],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("whitespace"));
+    }
+
+    /// A native rule padded with spaces around the tool name is trimmed rather
+    /// than rendered as a dead key.
+    #[test]
+    fn materialize_native_rule_tool_name_is_trimmed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec![],
+                ask: vec![],
+                deny: vec![" lsp (foo)".into()],
+            },
+        );
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["permission"]["lsp"]["foo"], serde_json::json!("deny"));
+    }
+
+    #[test]
+    fn patterns_overlap_matches_shared_inputs() {
+        // Disjoint prefixes never share an input.
+        assert!(!patterns_overlap("otool *", "rm *"));
+        assert!(!patterns_overlap("git push*", "git pull*"));
+        // Partial overlap: neither contains the other, but both match
+        // "git push --force".
+        assert!(patterns_overlap("git *", "* --force*"));
+        assert!(patterns_overlap("a*", "*b"));
+        // Containment is a special case of overlap.
+        assert!(patterns_overlap("*", "anything"));
+        assert!(patterns_overlap("git *", "git push*"));
+        // The trailing " *" spelling also matches the bare prefix.
+        assert!(patterns_overlap("git *", "git"));
+        assert!(!patterns_overlap("git *", "gitk"));
+        // `?` spans exactly one character.
+        assert!(patterns_overlap("a?c", "abc"));
+        assert!(!patterns_overlap("a?c", "abbc"));
+    }
+
     #[test]
     fn wildcard_matches_mirrors_opencode_semantics() {
         // `*` spans anything, including separators.
@@ -2800,12 +2999,85 @@ mod tests {
             prop_assert!(pattern_subsumes("*", &pattern));
         }
 
-        /// Subsumption is exactly "broad matches narrow's witness", so a
-        /// wildcard-free narrow pattern must be matched by any broader one.
+        /// Overlap is symmetric, and a pattern always overlaps itself.
         #[test]
-        fn subsuming_pattern_matches_literal_narrow(literal in "[a-z /-]{1,12}") {
-            prop_assume!(pattern_subsumes("*", &literal));
-            prop_assert!(wildcard_matches("*", &literal));
+        fn overlap_is_symmetric_and_reflexive(a in "[ab */?]{0,6}", b in "[ab */?]{0,6}") {
+            prop_assert_eq!(patterns_overlap(&a, &b), patterns_overlap(&b, &a));
+            prop_assert!(patterns_overlap(&a, &a));
+        }
+
+        /// Adversarial star runs must not panic or hang.
+        #[test]
+        fn glob_matches_terminates_on_star_runs(
+            pattern in "[*?ab]{0,16}",
+            input in "[ab]{0,16}",
+        ) {
+            let chars: Vec<char> = input.chars().collect();
+            let _ = glob_matches(&pattern, &chars);
+        }
+    }
+
+    /// Every string over `alphabet` up to `max_len`, shortest first.
+    fn all_strings(alphabet: &[char], max_len: usize) -> Vec<String> {
+        let mut out = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for base in &frontier {
+                for c in alphabet {
+                    let mut s = base.clone();
+                    s.push(*c);
+                    next.push(s);
+                }
+            }
+            out.extend(next.iter().cloned());
+            frontier = next;
+        }
+        out
+    }
+
+    /// The invariant the ordering check's exemption rests on: when `broad` is
+    /// treated as covering `narrow`, everything matching `narrow` must really
+    /// match `broad`. A violation would silently exempt a pair that does invert
+    /// — so this is checked exhaustively rather than sampled.
+    #[test]
+    fn subsumption_never_exempts_a_pattern_it_does_not_cover() {
+        let patterns = all_strings(&['a', 'b', '*', '?'], 3);
+        let inputs = all_strings(&['a', 'b'], 4);
+        for broad in &patterns {
+            for narrow in &patterns {
+                if !pattern_subsumes(broad, narrow) {
+                    continue;
+                }
+                for input in &inputs {
+                    assert!(
+                        !wildcard_matches(narrow, input) || wildcard_matches(broad, input),
+                        "{broad:?} was treated as covering {narrow:?}, but {input:?} \
+                         matches only {narrow:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A concrete shared input is proof of overlap, so the DP must never call
+    /// such a pair disjoint — a false "disjoint" skips the ordering check.
+    #[test]
+    fn shared_input_is_never_reported_disjoint() {
+        let patterns = all_strings(&['a', 'b', '*', '?'], 3);
+        let inputs = all_strings(&['a', 'b'], 4);
+        for a in &patterns {
+            for b in &patterns {
+                if patterns_overlap(a, b) {
+                    continue;
+                }
+                for input in &inputs {
+                    assert!(
+                        !(wildcard_matches(a, input) && wildcard_matches(b, input)),
+                        "{input:?} matches both {a:?} and {b:?} but they were reported disjoint"
+                    );
+                }
+            }
         }
     }
 

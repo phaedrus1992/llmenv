@@ -316,23 +316,28 @@ capabilities:
 
 Drop the `pattern`/`paths` so the rule covers the tool as a whole.
 
-**A broader pattern that sorts after the narrower one it swallows.** opencode
-applies the *last* matching rule in config key order, and llmenv emits each
-tool's pattern map sorted by pattern. When sorting puts the broader pattern
-last, it overrides the narrower rule:
+**Two overlapping patterns where the later-sorting one isn't the narrower.**
+opencode applies the *last* matching rule in config key order, and llmenv emits
+each tool's pattern map sorted by pattern. So for any two patterns that can
+match the same input, whichever sorts last governs every input they share.
+That's only what you meant if the last one is the more specific of the two:
 
 ```yaml
 capabilities:
   permissions:
     allow:
-      - { tool: Bash, pattern: "git push*" }        # sorts after, and covers…
+      - { tool: Bash, pattern: "git *" }        # sorts after "* --force*"…
     deny:
-      - { tool: Bash, pattern: "git push origin" }  # …this, so the deny never applied
+      - { tool: Bash, pattern: "* --force*" }   # …so this never applied to "git push --force"
 ```
 
-Narrow the broader pattern so the two no longer overlap, or give them the same
-action. The common shape — a wildcard baseline plus a narrower override — is
-unaffected, because `*` already sorts before the patterns it covers:
+Writing a deny as a leading-`*` pattern to mean "anywhere in the command" is
+the case that bites: `*` sorts before letters, so the deny lands first and the
+allow wins on everything they share. Rewrite the later pattern so it only
+covers inputs the earlier one doesn't, or give the two the same action.
+
+The common shape — a wildcard baseline plus a narrower override — is
+unaffected, because a pattern that fully contains another is exempt:
 
 ```yaml
 capabilities:
@@ -340,8 +345,14 @@ capabilities:
     allow:
       - { tool: Bash }                       # renders as "*"
     deny:
-      - { tool: Bash, pattern: "git push*" } # sorts last, so it still wins
+      - { tool: Bash, pattern: "git push*" } # narrower, sorts last, still wins
 ```
+
+Both checks compare patterns within a single tool's map. opencode also
+wildcard-matches the permission *key* itself, so a native rule whose key is a
+wildcard (`*(…)`) can overlap another tool's rules in a way llmenv does not yet
+check — tracked in
+[#1344](https://github.com/phaedrus1992/llmenv/issues/1344).
 
 ### The `native.opencode` escape hatch
 
