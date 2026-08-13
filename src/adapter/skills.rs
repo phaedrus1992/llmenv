@@ -254,14 +254,32 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
 /// is created on first use. An empty `skills` slice is a no-op (no directory
 /// created, empty vec returned).
 ///
-/// Each `SkillSource.path` is re-resolved here (`is_dir()`, then the copy) —
-/// a caller that discovered `skills` earlier (e.g. `discover_plugin_skills`,
-/// #1335) and only pins the *name*, not the path's on-disk content, leaves a
-/// narrow window between discovery and this copy. Tracked as #1337.
+/// Each `SkillSource.path` is re-resolved here (`symlink_metadata`, then the
+/// copy) — a caller that discovered `skills` earlier (e.g.
+/// `discover_plugin_skills`, #1335) and only pins the *name*, not the
+/// path's on-disk content, leaves a narrow window between discovery and
+/// this copy. `symlink_metadata` (rather than `is_dir()`, which follows
+/// symlinks) rejects a source path that *is already* a symlink at check
+/// time (#1337) — the same policy `discover_plugin_skills` now applies at
+/// discovery, and the same intent as `copy_dir_owner_only`'s existing
+/// per-entry check, though that one *skips and continues* on a symlink
+/// found inside the tree rather than hard-erroring (this function's error
+/// is reserved for a top-level path a config author declared directly).
+///
+/// **This does not close the underlying race.** `symlink_metadata` here and
+/// `copy_dir_owner_only`'s `read_dir` a few lines below are still two
+/// independent syscalls on the same path — a symlink swapped in *after*
+/// this check and *before* the copy is followed exactly as it would have
+/// been without this check. Closing that fully needs fd-relative I/O
+/// (`openat`), which this function doesn't do; see #1341 for the tracked
+/// follow-up covering that gap plus related ones found during #1337's own
+/// review (a destination-side symlink check, and other `is_dir`/`is_file`
+/// check-then-use call sites in the materialize path with the same shape).
 ///
 /// # Errors
 /// - Unsafe (path-traversal) skill name.
-/// - Source path is not a directory.
+/// - Source path is a symlink, is not a directory, or a stat on it fails
+///   (not found, permission denied, ...).
 /// - I/O error during directory copy.
 pub(crate) fn write_first_class_skills(
     out: &Path,
@@ -281,12 +299,31 @@ pub(crate) fn write_first_class_skills(
             anyhow::bail!("unsafe skill name '{}': not a valid skill name", skill.name);
         }
         let src = Path::new(&skill.path);
-        if !src.is_dir() {
-            anyhow::bail!(
-                "skill '{}': path '{}' is not a directory",
-                skill.name,
-                skill.path
-            );
+        match std::fs::symlink_metadata(src) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "skill '{}': path '{}' is a symlink — a skill source directory must be \
+                     a real directory, not a symlink, since a symlink swapped in after this \
+                     path was discovered could redirect the copy to an unintended location",
+                    skill.name,
+                    skill.path
+                );
+            }
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                anyhow::bail!(
+                    "skill '{}': path '{}' is not a directory",
+                    skill.name,
+                    skill.path
+                );
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "skill '{}': cannot read path '{}': {e}",
+                    skill.name,
+                    skill.path
+                );
+            }
         }
         let dest = skills_dir.join(&skill.name);
         let written = super::claude_code::copy_dir_owner_only(src, &dest)?;
@@ -347,18 +384,37 @@ pub(crate) fn project_plugin_skills(
 /// output-style collision check, #1333/#1335, must know the names before
 /// its plugin-projection loop runs). Returns an empty vec when
 /// `plugin_dir/skills/` does not exist.
+///
+/// A symlinked entry is skipped (logged, not an error) rather than
+/// discovered — #1337 security-audit: `write_first_class_skills` hard-bails
+/// on a symlinked skill source, and discovery including one anyway would
+/// turn one plugin's symlinked skill (a legitimate layout for
+/// dotfile-managed/monorepo-shared skills) into a hard failure of the
+/// *entire* adapter render. This mirrors `copy_dir_owner_only`'s existing
+/// skip-and-continue policy for a symlink found inside a skill's tree,
+/// reserving the config-author-facing hard error for a path declared
+/// directly in `skills:`.
 pub(crate) fn discover_plugin_skills(
     plugin_dir: &Path,
 ) -> anyhow::Result<Vec<crate::config::SkillSource>> {
     let skills_src = plugin_dir.join("skills");
-    if !skills_src.is_dir() {
-        return Ok(Vec::new());
+    match std::fs::symlink_metadata(&skills_src) {
+        Ok(meta) if meta.is_dir() => {}
+        _ => return Ok(Vec::new()),
     }
     let mut skills: Vec<crate::config::SkillSource> = Vec::new();
     for entry in std::fs::read_dir(&skills_src)? {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_dir() {
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() {
+            tracing::warn!(
+                path = %path.display(),
+                "discover_plugin_skills: skipping symlinked skill directory"
+            );
+            continue;
+        }
+        if !meta.is_dir() {
             continue;
         }
         let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
@@ -618,6 +674,137 @@ mod tests {
         // Missing skills dir → nothing to validate.
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_skills(tmp.path()).is_ok());
+    }
+
+    // #1337: a skill source path that is a symlink must be rejected, not
+    // followed — closes half the residual TOCTOU window #1335 left between
+    // discovering a skill's path and copying its content.
+    #[cfg(unix)]
+    #[test]
+    fn write_first_class_skills_rejects_symlinked_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(real_dir.join("SKILL.md"), "content").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let err = write_first_class_skills(
+            out.path(),
+            &[crate::config::SkillSource {
+                name: "my-skill".into(),
+                path: link.to_string_lossy().into_owned(),
+                when: Vec::new(),
+            }],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "error was: {err}");
+        assert!(!out.path().join("skills/my-skill").exists());
+    }
+
+    #[test]
+    fn write_first_class_skills_rejects_missing_source() {
+        // #1337 security-audit: a stat failure (missing path, permission
+        // denied, ...) must not be misreported as "is not a directory" — it
+        // gets its own message carrying the underlying io::Error.
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let err = write_first_class_skills(
+            out.path(),
+            &[crate::config::SkillSource {
+                name: "my-skill".into(),
+                path: tmp
+                    .path()
+                    .join("does-not-exist")
+                    .to_string_lossy()
+                    .into_owned(),
+                when: Vec::new(),
+            }],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot read path"),
+            "error was: {err}"
+        );
+    }
+
+    #[test]
+    fn write_first_class_skills_rejects_file_source() {
+        // A path that exists but is a file (not a stat failure, not a
+        // symlink) still gets the "is not a directory" message.
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("not-a-dir");
+        std::fs::write(&file_path, "content").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let err = write_first_class_skills(
+            out.path(),
+            &[crate::config::SkillSource {
+                name: "my-skill".into(),
+                path: file_path.to_string_lossy().into_owned(),
+                when: Vec::new(),
+            }],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not a directory"),
+            "error was: {err}"
+        );
+    }
+
+    #[test]
+    fn write_first_class_skills_accepts_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "content").unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        write_first_class_skills(
+            out.path(),
+            &[crate::config::SkillSource {
+                name: "my-skill".into(),
+                path: src.to_string_lossy().into_owned(),
+                when: Vec::new(),
+            }],
+        )
+        .unwrap();
+        assert!(out.path().join("skills/my-skill/SKILL.md").exists());
+    }
+
+    // #1337 security-audit regression: discover_plugin_skills must skip a
+    // symlinked skill directory rather than including it, since
+    // write_first_class_skills now hard-bails on exactly that input —
+    // including it would turn one plugin's symlinked skill into a hard
+    // failure of the whole adapter render.
+    #[cfg(unix)]
+    #[test]
+    fn discover_plugin_skills_skips_symlinked_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugin");
+        let real_skill = tmp.path().join("real-skill");
+        std::fs::create_dir_all(plugin_dir.join("skills/real")).unwrap();
+        std::fs::write(plugin_dir.join("skills/real/SKILL.md"), "content").unwrap();
+        std::fs::create_dir_all(&real_skill).unwrap();
+        std::os::unix::fs::symlink(&real_skill, plugin_dir.join("skills/symlinked")).unwrap();
+
+        let skills = discover_plugin_skills(&plugin_dir).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["real"], "symlinked entry must be skipped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_plugin_skills_symlinked_skills_dir_yields_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugin");
+        let real_skills_dir = tmp.path().join("real-skills");
+        std::fs::create_dir_all(real_skills_dir.join("foo")).unwrap();
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::os::unix::fs::symlink(&real_skills_dir, plugin_dir.join("skills")).unwrap();
+
+        let skills = discover_plugin_skills(&plugin_dir).unwrap();
+        assert!(skills.is_empty());
     }
 
     // #1196: this module used to carry its own create_dir_owner_only, which
