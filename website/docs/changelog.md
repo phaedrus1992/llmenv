@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.10.0] - 2026-08-13
+
 ### Added
 
 - Opt-in cache hit/miss telemetry for the content-hash materialize cache, the merge-signature cache, the read-once dedup cache, and the plugin marketplace cache — one `[LLMENV_CACHE] <name> <hit|miss> <duration>ms` stderr line per cache lookup, gated behind the same `LLMENV_TRACE_TIMING` var that already gates hook-run's per-phase timing markers. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-cache-hitmiss-rates) (#1260)

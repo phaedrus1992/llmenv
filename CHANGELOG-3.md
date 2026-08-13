@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.10.0] - 2026-08-13
+
 ### Added
 
 - Opt-in cache hit/miss telemetry for the content-hash materialize cache, the merge-signature cache, the read-once dedup cache, and the plugin marketplace cache — one `[LLMENV_CACHE] <name> <hit|miss> <duration>ms` stderr line per cache lookup, gated behind the same `LLMENV_TRACE_TIMING` var that already gates hook-run's per-phase timing markers. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#profiling-cache-hitmiss-rates) (#1260)
@@ -809,7 +811,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.9.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...HEAD
+[3.10.0]: https://github.com/phaedrus1992/llmenv/compare/v3.9.0...v3.10.0
 [3.9.0]: https://github.com/phaedrus1992/llmenv/compare/v3.8.0...v3.9.0
 [3.8.0]: https://github.com/phaedrus1992/llmenv/compare/v3.7.0...v3.8.0
 [3.7.0]: https://github.com/phaedrus1992/llmenv/compare/v3.6.1...v3.7.0
