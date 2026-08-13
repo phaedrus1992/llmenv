@@ -8,57 +8,60 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::OutputStyle;
-use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
+
+/// One skill a plugin projects, paired with the plugin that projects it.
+/// Named (rather than a positional `(String, String)` tuple, per
+/// [`reject_plugin_skill_collisions`]'s #1335 security-audit) so a caller
+/// can't accidentally transpose the skill name and the plugin name — that
+/// transposition would compare output-style names against *plugin* names,
+/// silently turning the #1130/#1333 collision control into a no-op with no
+/// type error and no failing test.
+pub(crate) struct ProjectedPluginSkill {
+    pub(crate) skill_name: String,
+    pub(crate) plugin_name: String,
+}
 
 /// Rejects an output style name that collides with a skill name a plugin
-/// would project via its own `skills/` directory (#1333). The
+/// projects via its own `skills/` directory (#1333). The
 /// `materialize_from_manifest` collision check in `cli/mod.rs` only sees
 /// `capabilities.skills` and reserved built-in names — plugin-projected
 /// names are resolved from on-disk plugin content that isn't available at
 /// that point, so this must run per-adapter, right before the
 /// generated-skill fallback (`write_output_style_as_skill`) writes anything.
 ///
-/// `is_compatible` must be the *same* predicate the caller's own plugin
-/// projection loop uses to decide whether to skip a plugin entirely (e.g.
-/// Crush skips a plugin with an `agents/`/`commands/`/`hooks/` directory it
-/// can't express). Passing a different or looser predicate here than the
-/// caller's projection loop uses would count skills from a plugin that is
-/// never actually projected, hard-failing `materialize` over a collision
-/// that can't happen. Pass `|_| true` for an adapter with no such filter
-/// (opencode).
+/// `plugin_skills` must be the exact set the caller's own plugin projection
+/// actually wrote (or is about to write) — the caller is responsible for
+/// resolving/discovering plugin skills itself and passing the result here,
+/// rather than this function re-walking plugin directories independently
+/// (#1335: two separate walks of the same directory can observe different
+/// states — a TOCTOU gap. A single shared walk, reused for both the check
+/// and the write, closes it).
 ///
-/// No-op when `styles` or `plugins` is empty.
+/// No-op when `styles` or `plugin_skills` is empty. Pure — does no I/O.
 ///
 /// # Errors
-/// Returns an error naming the colliding style, or propagates a plugin
-/// resolution/I/O failure from resolving a plugin's skill directory.
+/// Returns an error naming the colliding style and the plugin it collides
+/// with.
 pub(crate) fn reject_plugin_skill_collisions(
     styles: &[OutputStyle],
-    plugins: &[ResolvedPlugin],
-    marketplaces: &[ResolvedMarketplace],
-    is_compatible: impl Fn(&Path) -> bool,
+    plugin_skills: &[ProjectedPluginSkill],
 ) -> anyhow::Result<()> {
-    if styles.is_empty() || plugins.is_empty() {
+    if styles.is_empty() || plugin_skills.is_empty() {
         return Ok(());
     }
     // Keyed lowercase (#1333 security-audit): both render to a single
     // `skills/<name>/` directory entry, which collides on a case-insensitive
     // filesystem (macOS, Windows) even when the two names differ in case.
-    let mut plugin_skill_names: std::collections::HashMap<String, &str> =
-        std::collections::HashMap::new();
-    for plugin in plugins {
-        let payload = super::resolve_plugin_payload(plugin, marketplaces)?;
-        if !is_compatible(&payload) {
-            continue;
-        }
-        for name in super::skills::plugin_skill_names(&payload)? {
-            plugin_skill_names
-                .entry(name.to_lowercase())
-                .or_insert(&plugin.plugin);
-        }
+    // First plugin to claim a name owns the diagnostic (`or_insert`, not a
+    // `collect()` that would let the last one silently win instead).
+    let mut lower: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for skill in plugin_skills {
+        lower
+            .entry(skill.skill_name.to_lowercase())
+            .or_insert(skill.plugin_name.as_str());
     }
     for style in styles {
-        if let Some(plugin_name) = plugin_skill_names.get(&style.name.to_lowercase()) {
+        if let Some(plugin_name) = lower.get(&style.name.to_lowercase()) {
             anyhow::bail!(
                 "output style '{}' collides (case-insensitive) with a skill projected from \
                  plugin '{}'; rename the style to avoid silently overwriting or being \
@@ -184,10 +187,10 @@ pub(crate) fn write_native_output_styles(
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::{
-        reject_plugin_skill_collisions, write_native_output_styles, write_output_style_as_skill,
+        ProjectedPluginSkill, reject_plugin_skill_collisions, write_native_output_styles,
+        write_output_style_as_skill,
     };
     use crate::config::OutputStyle;
-    use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
 
     fn style(name: &str) -> OutputStyle {
         OutputStyle {
@@ -200,68 +203,43 @@ mod tests {
         }
     }
 
-    fn plugin_with_skill(
-        skill_name: &str,
-    ) -> (tempfile::TempDir, ResolvedPlugin, Vec<ResolvedMarketplace>) {
-        let plugin_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(plugin_dir.path().join("skills").join(skill_name)).unwrap();
-        std::fs::write(
-            plugin_dir
-                .path()
-                .join("skills")
-                .join(skill_name)
-                .join("SKILL.md"),
-            format!("---\nname: {skill_name}\ndescription: A plugin skill.\n---\n# {skill_name}\n"),
-        )
-        .unwrap();
-        let plugin = ResolvedPlugin {
-            marketplace: "local".into(),
-            plugin: "my-plugin".into(),
-            collection: String::new(),
-            install_path: Some(plugin_dir.path().to_string_lossy().into_owned()),
-            git_commit_sha: None,
-        };
-        (plugin_dir, plugin, Vec::new())
+    fn projected(skill_name: &str, plugin_name: &str) -> ProjectedPluginSkill {
+        ProjectedPluginSkill {
+            skill_name: skill_name.to_string(),
+            plugin_name: plugin_name.to_string(),
+        }
     }
 
     #[test]
     fn reject_plugin_skill_collisions_catches_case_insensitive_match() {
-        let (_dir, plugin, marketplaces) = plugin_with_skill("foo");
-        let err = reject_plugin_skill_collisions(
-            &[style("Foo")],
-            std::slice::from_ref(&plugin),
-            &marketplaces,
-            |_| true,
-        )
-        .unwrap_err();
+        let err = reject_plugin_skill_collisions(&[style("Foo")], &[projected("foo", "my-plugin")])
+            .unwrap_err();
         assert!(err.to_string().contains("Foo"));
         assert!(err.to_string().contains("my-plugin"));
     }
 
     #[test]
-    fn reject_plugin_skill_collisions_skips_incompatible_plugin() {
-        let (_dir, plugin, marketplaces) = plugin_with_skill("foo");
-        // is_compatible always false: the caller's projection loop would
-        // never write this plugin's skills, so no collision is possible.
-        reject_plugin_skill_collisions(
+    fn reject_plugin_skill_collisions_first_plugin_wins_attribution() {
+        // security-audit (#1335): the diagnostic must name the first plugin
+        // to claim a name, not whichever the internal map happens to visit
+        // last.
+        let err = reject_plugin_skill_collisions(
             &[style("foo")],
-            std::slice::from_ref(&plugin),
-            &marketplaces,
-            |_| false,
+            &[projected("foo", "plugin-a"), projected("foo", "plugin-b")],
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(err.to_string().contains("plugin-a"));
+        assert!(!err.to_string().contains("plugin-b"));
     }
 
     #[test]
     fn reject_plugin_skill_collisions_no_collision_is_ok() {
-        let (_dir, plugin, marketplaces) = plugin_with_skill("foo");
-        reject_plugin_skill_collisions(
-            &[style("bar")],
-            std::slice::from_ref(&plugin),
-            &marketplaces,
-            |_| true,
-        )
-        .unwrap();
+        reject_plugin_skill_collisions(&[style("bar")], &[projected("foo", "my-plugin")]).unwrap();
+    }
+
+    #[test]
+    fn reject_plugin_skill_collisions_empty_names_is_ok() {
+        reject_plugin_skill_collisions(&[style("foo")], &[]).unwrap();
     }
 
     #[test]
