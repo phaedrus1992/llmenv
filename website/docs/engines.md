@@ -278,7 +278,7 @@ Claude Code adapter.
 
 | Feature | opencode support | Notes |
 | --------- | ---------------- | ------- |
-| Permissions (`allow`/`ask`/`deny`) | Supported for the documented neutral tool vocabulary | Rendered as per-tool `pattern → action` maps; a bare tool emits a plain action string. `ask` is native (no fail-closed collapse). The neutral tool name is mapped to opencode's own permission key, source-verified against opencode's `permission.ts` schema (`bash`, `read`, `glob`, `grep`, `webfetch`, `websearch`, `todowrite`, `task` are a straight lowercase; `Write`/`MultiEdit` both map to `edit`, `LS` maps to `list` — opencode has no separate `write`/`multiedit`/`ls` key). A neutral tool with no confirmed opencode equivalent is dropped with a logged warning rather than guessing at a key (fixed in v3.10.0, [#1326](https://github.com/phaedrus1992/llmenv/issues/1326)). This mapping applies only to `capabilities.permissions`; `native_permissions.opencode` strings are opencode's own vocabulary already (`lsp`, `skill`, a bare `*` deny-all, ...) and are lowercased verbatim, never mapped. Because `Write` and `MultiEdit` collapse onto the same `edit` key as `Edit`, rules for any of the three now interact with each other under one shared key — allowing `Write` and denying `Edit` (or vice versa) resolves against the combined `edit` pattern map, not two independent tools. A known gap in the pattern/action rendering for Action-only opencode keys (`todowrite`, `webfetch`, `websearch`, `question`, `doom_loop`) and in cross-tool ordering guarantees is tracked in [#1328](https://github.com/phaedrus1992/llmenv/issues/1328) |
+| Permissions (`allow`/`ask`/`deny`) | Supported for the documented neutral tool vocabulary | Rendered as per-tool `pattern → action` maps; a bare tool emits a plain action string. `ask` is native (no fail-closed collapse). The neutral tool name is mapped to opencode's own permission key, source-verified against opencode's `permission.ts` schema (`bash`, `read`, `glob`, `grep`, `webfetch`, `websearch`, `todowrite`, `task` are a straight lowercase; `Write`/`MultiEdit` both map to `edit`, `LS` maps to `list` — opencode has no separate `write`/`multiedit`/`ls` key). A neutral tool with no confirmed opencode equivalent is dropped with a logged warning rather than guessing at a key (fixed in v3.10.0, [#1326](https://github.com/phaedrus1992/llmenv/issues/1326)). This mapping applies only to `capabilities.permissions`; `native_permissions.opencode` strings are opencode's own vocabulary already (`lsp`, `skill`, a bare `*` deny-all, ...) and are lowercased verbatim, never mapped. Because `Write` and `MultiEdit` collapse onto the same `edit` key as `Edit`, rules for any of the three now interact with each other under one shared key — allowing `Write` and denying `Edit` (or vice versa) resolves against the combined `edit` pattern map, not two independent tools. Two rule shapes opencode cannot represent are rejected at regeneration time rather than rendered (fixed in v3.11.0, [#1328](https://github.com/phaedrus1992/llmenv/issues/1328)) — see [Permission rules opencode cannot represent](#permission-rules-opencode-cannot-represent) |
 | Hooks — `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` | Supported | Bridged through the generated `plugin/llmenv.js` shim |
 | Hooks — other events | **Warned, skipped** | Unsupported events are dropped with an actionable warning rather than a hard error |
 | Hooks — `mcp_tool` kind | **Warned, skipped** | No opencode equivalent; use a `command`-kind handler |
@@ -289,6 +289,59 @@ Claude Code adapter.
 | Plugins / marketplace | Supported | Plugin commands, agents, MCP, skills, and hooks are translated |
 | Custom agents | Supported | Plugin `agent/*.md` are emitted with `mode: subagent` |
 | Model providers (`model_providers`/`default_models`) | Supported | Rendered to `provider.<id>` / `model` / `small_model`; `api_type` maps to the AI SDK `npm` package (e.g. `openai` → `@ai-sdk/openai-compatible`). `default_models` only has `large`/`small` slots — other role names are a no-op |
+
+### Permission rules opencode cannot represent
+
+(added in v3.11.0)
+
+Two permission shapes have no faithful rendering in `opencode.json`. Both used
+to be emitted anyway and then silently misbehave, so `llmenv regenerate` now
+fails with an error naming the offending rules instead.
+
+**Scoped rules on an action-only key.** opencode types `todowrite`,
+`question`, `webfetch`, `websearch`, and `doom_loop` as a bare
+`"allow"`/`"ask"`/`"deny"` string — unlike `bash`, `read`, `edit`, and the
+rest, they take no `pattern → action` map. opencode discards the *entire*
+config file when any single key fails to decode, and reports nothing, so one
+scoped rule here used to void every MCP server, LSP entry, and permission rule
+in the file:
+
+```yaml
+capabilities:
+  permissions:
+    allow:
+      - { tool: WebFetch, pattern: "https://example.com/*" }   # rejected
+      - { tool: WebFetch }                                     # fine — covers the whole tool
+```
+
+Drop the `pattern`/`paths` so the rule covers the tool as a whole.
+
+**A broader pattern that sorts after the narrower one it swallows.** opencode
+applies the *last* matching rule in config key order, and llmenv emits each
+tool's pattern map sorted by pattern. When sorting puts the broader pattern
+last, it overrides the narrower rule:
+
+```yaml
+capabilities:
+  permissions:
+    allow:
+      - { tool: Bash, pattern: "git push*" }        # sorts after, and covers…
+    deny:
+      - { tool: Bash, pattern: "git push origin" }  # …this, so the deny never applied
+```
+
+Narrow the broader pattern so the two no longer overlap, or give them the same
+action. The common shape — a wildcard baseline plus a narrower override — is
+unaffected, because `*` already sorts before the patterns it covers:
+
+```yaml
+capabilities:
+  permissions:
+    allow:
+      - { tool: Bash }                       # renders as "*"
+    deny:
+      - { tool: Bash, pattern: "git push*" } # sorts last, so it still wins
+```
 
 ### The `native.opencode` escape hatch
 

@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- A pattern- or path-scoped permission rule targeting one of opencode's action-only keys (`TodoWrite`, `WebFetch`, `WebSearch`, and the native-only `question`/`doom_loop`) now fails `llmenv regenerate` with an error naming the rule, instead of rendering a value opencode's schema rejects. opencode discards the *entire* config file when any one key fails to decode and reports nothing, so a single scoped `WebFetch` rule silently voided every MCP server, LSP entry, and permission rule in the generated `opencode.json`. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#1328)
+- Two overlapping permission patterns for the same opencode tool now fail regeneration when the broader one sorts after the narrower one it swallows, instead of quietly reversing the rule. opencode applies the last matching rule in config key order and llmenv emits the pattern map sorted, so a specific `deny` paired with a broader `allow` could resolve to `allow` — the deny never took effect. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#1328)
+
 ## [3.10.0] - 2026-08-13
 
 The task tracker grows up: `task add` now chains onto the last task in the session by default instead of creating an orphan (`--no-parent` opts out; #929), `task edit` mutates a task in place instead of delete-and-recreate (#930), and `task session summary` rolls a session's tasks and notes into one artifact (#931).
