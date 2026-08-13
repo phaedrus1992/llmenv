@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A tool listed in both `permissions.allow` and `permissions.deny` (or `ask` and `deny`) for Claude Code no longer lands in both permission buckets of the generated `settings.json`. Deny now wins outright for a directly conflicting rule, matching Claude Code's own deny > ask > allow resolution order — previously an existing property test's "buckets never overlap" invariant could be violated for this specific case (a plain rule, no native override involved), which meant one of the two conflicting entries could silently never fire. (#1322)
 - A `permissions.allow`/`ask`/`deny` rule for `Write`, `MultiEdit`, or `LS` now maps to opencode's real permission keys (`edit`, `edit`, and `list` respectively) instead of `write`/`multiedit`/`ls`, which don't exist in opencode's schema — source-verified against opencode's own `permission.ts` config schema. Those three rules previously rendered a key opencode's permission check would never match, so they had no effect. A tool name with no confirmed opencode equivalent (e.g. `NotebookEdit`) is now dropped with a logged warning instead of guessing at a lowercase key — same principle as the Crush fixes above. (#1326)
 
+### Security
+
+- A skill source directory (first-class `skills:` entry, or one projected from a plugin's own `skills/` directory) that is a symlink is now rejected instead of followed. Closes half of a narrow window between discovering a skill's path and copying its content, where a symlink swapped in during that window could redirect the copy to an unintended directory; needs a concurrent local write into a config-author-controlled path, not a privilege boundary. (#1337)
+
 ## [3.9.0] - 2026-08-10
 
 All bug fixes, no new features. The inherited-session-state work from 3.8.0
