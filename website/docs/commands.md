@@ -16,6 +16,11 @@ repository instead of writing a template. No-op if a config already exists.
 
 ## `export`
 
+Deprecated (as of v3.10.0): superseded by `llmenv launch <engine>`
+([#1056](https://github.com/phaedrus1992/llmenv/issues/1056)), a supervised,
+ambient replacement landing in v4.0.0. `export`/the shell-hook flow keeps
+working through v4.0.0 — this is advance notice, not a removal.
+
 ```text
 llmenv export [--scope ID] [--tag TAG] [--explain] [--compress]
 ```
