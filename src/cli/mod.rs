@@ -1508,10 +1508,20 @@ fn run_regenerate() -> anyhow::Result<()> {
     // user is told everything worked while one engine keeps its stale config.
     // (`llmenv export` deliberately does not do this; see `run_export`.)
     if !failed_adapters.is_empty() {
+        // Some engines may still have been regenerated, and those need a reload
+        // just as much as on a clean run — say so before failing.
+        if materialized_any {
+            eprintln!("\n  Restart your shell session or source the config to load changes.");
+        }
         anyhow::bail!(
             "adapter regeneration failed for: {}. See the warnings above — each of those \
-             engines kept its previous config. Any other adapter was regenerated normally.",
-            failed_adapters.join(", ")
+             engines kept its previous config.{}",
+            failed_adapters.join(", "),
+            if materialized_any {
+                " Every other adapter was regenerated normally."
+            } else {
+                ""
+            }
         );
     }
     if materialized_any {
@@ -4724,12 +4734,17 @@ fn run_prune(
             verb,
             plugin_removed.len(),
         );
-        if !plugin_failed.is_empty() {
-            eprintln!(
-                "  {} plugin cache entry(ies) could not be removed",
-                plugin_failed.len()
-            );
-        }
+    }
+
+    // #1346: same contract as `regenerate` — a prune that could not remove
+    // everything it was asked to is not a success, even though the per-entry
+    // failures were printed above. Returning `Ok(())` here meant a scripted
+    // `llmenv prune` saw exit 0 and moved on with the cache still occupied.
+    if plugin_cache && !plugin_failed.is_empty() {
+        anyhow::bail!(
+            "{} plugin cache entry(ies) could not be removed — see the failures above",
+            plugin_failed.len()
+        );
     }
 
     Ok(())

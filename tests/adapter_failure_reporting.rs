@@ -114,6 +114,8 @@ fn skill_rule_is_not_reported_as_unmappable() {
     let (dir, path) = setup("permissions:\n  deny:\n    - { tool: Skill }\n");
     llmenv(&dir, &path, "regenerate")
         .assert()
+        .success()
+        .stderr(predicate::str::contains("Regenerated opencode"))
         .stderr(predicate::str::contains("no permission key for neutral tool 'Skill'").not());
 }
 
@@ -129,7 +131,12 @@ fn regenerate_fails_and_names_the_adapter_that_failed() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("adapter regeneration failed for"))
-        .stderr(predicate::str::contains("opencode"));
+        .stderr(predicate::str::contains("opencode"))
+        // The whole reason the loop doesn't abort: every other engine is still
+        // regenerated. Without this a future early-return would satisfy the
+        // assertions above while breaking the documented contract.
+        .stderr(predicate::str::contains("Regenerated claude-code"))
+        .stderr(predicate::str::contains("Restart your shell session"));
 }
 
 /// #1346: `export` runs on every prompt through the shell hook, so the same
@@ -143,6 +150,9 @@ fn export_still_succeeds_but_names_the_failed_adapter() {
     llmenv(&dir, &path, "export")
         .assert()
         .success()
+        // The surviving adapter's vars are still exported — that is why this
+        // path stays exit 0.
+        .stdout(predicate::str::contains("export "))
         .stderr(predicate::str::contains(
             "exported environment is missing output from",
         ))
@@ -157,5 +167,9 @@ fn a_renderable_config_reports_no_failure() {
     llmenv(&dir, &path, "regenerate")
         .assert()
         .success()
+        // Both engines really rendered — otherwise this control test could pass
+        // simply because neither adapter ran.
+        .stderr(predicate::str::contains("Regenerated claude-code"))
+        .stderr(predicate::str::contains("Regenerated opencode"))
         .stderr(predicate::str::contains("adapter regeneration failed").not());
 }

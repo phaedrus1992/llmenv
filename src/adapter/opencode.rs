@@ -1341,23 +1341,49 @@ fn check_rule_ordering(
                 continue;
             }
             anyhow::bail!(
-                "opencode: permission rules {} ({early_action}) and {} ({late_action}) both \
-                 match some tool and input, and {} sorts last so opencode applies it \
-                 wherever they overlap — {} would not take effect there. Rewrite {} so it \
-                 only covers what {} does not, or give the two the same action.",
-                render_rule(early_tool, early_pat),
-                render_rule(late_tool, late_pat),
-                render_rule(late_tool, late_pat),
-                render_rule(early_tool, early_pat),
-                render_rule(late_tool, late_pat),
-                render_rule(early_tool, early_pat),
+                "opencode: permission rules {early} ({early_action}) and {late} ({late_action}) \
+                 both match some tool and input, and {late} sorts last so opencode applies it \
+                 wherever they overlap — {early} would not take effect there. {remedy}",
+                early = render_rule(early_tool, early_pat),
+                late = render_rule(late_tool, late_pat),
+                remedy = ordering_remedy(early_tool, early_pat, late_tool, late_pat),
             );
         }
     }
     Ok(())
 }
 
-/// A rule as the user would author it under `native_permissions.opencode`.
+/// How to rewrite an inverted pair so opencode resolves it as intended.
+///
+/// When the two rules sit on *different* permission keys the earlier one is
+/// almost always a wildcard key, and there is no way to narrow the later rule
+/// out of its way — opencode has no exclusion syntax and llmenv sorts the keys,
+/// so the user cannot reorder around it either. The fix that does work is to
+/// restate the earlier rule on the later rule's key, where it sorts after the
+/// broad pattern and wins.
+fn ordering_remedy(early_tool: &str, early_pat: &str, late_tool: &str, late_pat: &str) -> String {
+    if early_tool == late_tool {
+        return format!(
+            "Rewrite {late} so it only covers what {early} does not, or give the two the \
+             same action.",
+            late = render_rule(late_tool, late_pat),
+            early = render_rule(early_tool, early_pat),
+        );
+    }
+    format!(
+        "Move {early} onto the `{late_tool}` key so it sorts after {late} — e.g. \
+         `native_permissions.opencode` rule {moved} — or give the two the same action.",
+        early = render_rule(early_tool, early_pat),
+        late = render_rule(late_tool, late_pat),
+        moved = render_rule(late_tool, early_pat),
+    )
+}
+
+/// A rule in opencode's own `tool(pattern)` syntax.
+///
+/// That is the authoring syntax for `native_permissions.opencode`; a rule that
+/// came from `capabilities.permissions` is shown the same way, since this is
+/// how it lands in the generated config.
 fn render_rule(tool: &str, pattern: &str) -> String {
     if pattern == "*" {
         format!("`{tool}`")
@@ -2998,6 +3024,12 @@ mod tests {
             msg.contains("git push --force*") && msg.contains("bash"),
             "error must name the wildcard rule and the key it shadows: {msg}"
         );
+        // Narrowing the allow is not expressible in opencode, so the remedy has
+        // to be the one that works: restate the deny on the concrete key.
+        assert!(
+            msg.contains("`bash(git push --force*)`"),
+            "error must suggest moving the rule onto the shadowed key: {msg}"
+        );
     }
 
     /// The documented deny-all baseline — a bare native `*` plus a narrower
@@ -3169,6 +3201,67 @@ mod tests {
         ) {
             let chars: Vec<char> = input.chars().collect();
             let _ = glob_matches(&pattern, &chars);
+        }
+    }
+
+    /// Resolve a probe the way opencode does: flatten every key in rendered
+    /// order, keep the rules whose key matches the tool and whose pattern
+    /// matches the resource, and take the last one (`findLast`).
+    fn opencode_resolution<'a>(
+        map: &'a BTreeMap<String, BTreeMap<String, String>>,
+        tool: &str,
+        resource: &str,
+    ) -> Vec<(&'a str, &'a str, &'a str)> {
+        map.iter()
+            .flat_map(|(key, patterns)| {
+                patterns
+                    .iter()
+                    .map(move |(p, a)| (key.as_str(), p.as_str(), a.as_str()))
+            })
+            .filter(|(key, pattern, _)| {
+                wildcard_matches(key, tool) && wildcard_matches(pattern, resource)
+            })
+            .collect()
+    }
+
+    proptest! {
+        /// End-to-end oracle for the ordering check. For any permission map the
+        /// check *accepts*, replay opencode's own resolution over a probe: the
+        /// rule that wins must either agree with every other rule that matched,
+        /// or be narrower than it in both key and pattern. Anything else is an
+        /// inversion the check should have rejected.
+        #[test]
+        fn accepted_maps_never_let_a_broader_rule_win(
+            rules in proptest::collection::vec(
+                (
+                    "(\\*|bash|read|b\\*)",
+                    "(\\*|a\\*|ab|\\*b|a\\?|b)",
+                    "(allow|deny)",
+                ),
+                1..5,
+            ),
+            tool in "(bash|read)",
+            resource in "[ab]{0,3}",
+        ) {
+            let mut map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+            for (key, pattern, action) in rules {
+                map.entry(key).or_default().insert(pattern, action);
+            }
+            prop_assume!(check_rule_ordering(&map).is_ok());
+
+            let matched = opencode_resolution(&map, &tool, &resource);
+            let Some(winner) = matched.last() else { return Ok(()) };
+            for other in &matched {
+                if other.2 == winner.2 {
+                    continue;
+                }
+                prop_assert!(
+                    pattern_subsumes(other.0, winner.0) && pattern_subsumes(other.1, winner.1),
+                    "opencode would resolve ({tool:?}, {resource:?}) to {winner:?}, which is \
+                     not narrower than the also-matching {other:?} — the check accepted an \
+                     inverted map"
+                );
+            }
         }
     }
 

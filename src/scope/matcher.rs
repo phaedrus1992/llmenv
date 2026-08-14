@@ -212,19 +212,23 @@ const MAX_TAGS_PER_SOURCE: usize = 64;
 /// charset rule and the same downstream `hook_run::validate_bundle` failure
 /// mode as tags.
 pub(crate) fn sanitize_tags(raw: Vec<String>, source: &str) -> Vec<String> {
+    // #1345: these report a tag the *user* wrote never taking effect, so they
+    // have to be `eprintln!`. The default `EnvFilter` is `ERROR`, so a
+    // `tracing::warn!` here reached neither stderr nor the log file — the tag
+    // silently did nothing and no bundle gated on it ever fired.
     let mut valid = Vec::with_capacity(raw.len());
     for tag in raw {
         if !is_valid_tag_charset(&tag) {
-            tracing::warn!("{source}: dropping tag {tag:?} (only alphanumeric, -, _ allowed)");
+            eprintln!("warning: {source}: dropping tag {tag:?} (only alphanumeric, -, _ allowed)");
         } else if tag.len() > MAX_TAG_LEN {
-            tracing::warn!("{source}: dropping tag {tag:?} (exceeds {MAX_TAG_LEN}-byte limit)");
+            eprintln!("warning: {source}: dropping tag {tag:?} (exceeds {MAX_TAG_LEN}-byte limit)");
         } else {
             valid.push(tag);
         }
     }
     if valid.len() > MAX_TAGS_PER_SOURCE {
-        tracing::warn!(
-            "{source}: {} tags exceeds cap of {MAX_TAGS_PER_SOURCE}; keeping the first {MAX_TAGS_PER_SOURCE}",
+        eprintln!(
+            "warning: {source}: {} tags exceeds cap of {MAX_TAGS_PER_SOURCE}; keeping the first {MAX_TAGS_PER_SOURCE}",
             valid.len()
         );
         valid.truncate(MAX_TAGS_PER_SOURCE);

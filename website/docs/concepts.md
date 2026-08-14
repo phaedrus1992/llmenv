@@ -202,9 +202,9 @@ Discovery rules:
 Tag validation and caps (added in v3.7.0): every tag, from any source
 (`.llmenv.yaml`'s `tags:`, `config.yaml`'s network/host/user/content scopes,
 or `$LLMENV_EXTRA_TAGS`), must be non-empty alphanumeric plus `-`/`_`, and at
-most 64 bytes — an invalid or oversized tag is dropped with a
-`tracing::warn!` rather than silently disabling memory recall for the rest of
-the session. Each individual source is also capped at 64 tags. Since v3.10.0,
+most 64 bytes — an invalid or oversized tag is dropped with a visible
+`warning:` line (visible by default since v3.11.0) rather than silently
+disabling memory recall for the rest of the session. Each individual source is also capped at 64 tags. Since v3.10.0,
 the *union* across every source combined is separately capped at 64 tags too
 — several active scopes plus a large `.llmenv.yaml` plus
 `$LLMENV_EXTRA_TAGS` can each stay within their own limit while still adding

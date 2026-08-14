@@ -307,7 +307,9 @@ Inspect ICM memory state for the active scope.
 llmenv prune [--all] [--older-than DUR] [--dry-run]
 ```
 
-Clean stale cache folders.
+Clean stale cache folders. Exits non-zero if any plugin cache entry could not
+be removed (added in v3.11.0) — the per-entry failures are printed above the
+summary.
 
 - (no flags) — remove folders from previous binary versions and orphaned `*.tmp`
   staging dirs.

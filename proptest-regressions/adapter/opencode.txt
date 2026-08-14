@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc c1843104d4893c766ab336e95f0269946568f3941d84dc678ee29485b43cbe94 # shrinks to tool = "Write", pattern = "aa", allow_present = false, allow_native = false, ask_present = false, ask_native = false, deny_present = true, deny_native = true
+cc 36384cbea5c1fd839e242ddc85df5d53277f2bb5cc8887c8f1bb8fa58892338e # shrinks to rules = [("bash", "*", "allow"), ("*", "*b", "deny")], tool = "bash", resource = "b"
