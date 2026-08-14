@@ -51,6 +51,25 @@ Regenerate the materialized config without emitting shell `export` lines. Use
 after editing `config.yaml` or bundle files when the current shell already has
 the right env vars.
 
+### When one engine can't be rendered
+
+(added in v3.11.0)
+
+Each installed engine is regenerated independently, so a config that one engine
+rejects doesn't stop the others — that engine simply keeps its previous config.
+
+`regenerate` **exits non-zero** whenever any adapter failed, naming them, even
+though the rest succeeded. Before v3.11.0 it exited 0 as long as one adapter
+worked, so a rejected permission rule scrolled past as a warning above a `✓`
+line and looked like success
+([#1346](https://github.com/phaedrus1992/llmenv/issues/1346)).
+
+`export` is the exception: it runs on every prompt through the shell hook, so a
+partial failure there stays exit 0 — failing would break your prompt for as
+long as the config is bad, and the vars the other engines produced are still
+correct. It prints one summary line naming the engines whose output is missing,
+and `llmenv regenerate` will show the full error.
+
 ## `hook`
 
 ```text
@@ -288,7 +307,9 @@ Inspect ICM memory state for the active scope.
 llmenv prune [--all] [--older-than DUR] [--dry-run]
 ```
 
-Clean stale cache folders.
+Clean stale cache folders. Exits non-zero if any plugin cache entry could not
+be removed (added in v3.11.0) — the per-entry failures are printed above the
+summary.
 
 - (no flags) — remove folders from previous binary versions and orphaned `*.tmp`
   staging dirs.

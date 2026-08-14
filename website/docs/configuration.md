@@ -1503,8 +1503,9 @@ missing host key.
 Each tag (and each `enable_bundles`/`disable_bundles` entry) must be
 alphanumeric plus `-`/`_` and no longer than 64 bytes; entries outside that
 charset or length, and any beyond the first 64 from a given source, are
-dropped (logged via `tracing::warn!`, visible with `RUST_LOG=warn`) rather
-than breaking the session. The same rule applies to `$LLMENV_EXTRA_TAGS`
+dropped with a `warning:` line naming the tag rather than breaking the session
+(the warning became visible by default in v3.11.0; before that it went to a
+log level nothing displayed). The same rule applies to `$LLMENV_EXTRA_TAGS`
 below and to tags declared on `config.yaml`'s network/host/user/content
 scopes.
 

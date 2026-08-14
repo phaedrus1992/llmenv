@@ -1159,7 +1159,7 @@ fn run_export(
         "warning:",
     );
 
-    let mut any_adapter_failed = false;
+    let mut failed_adapters: Vec<&str> = Vec::new();
     let mut any_adapter_eligible = false;
     for adapter in installed_adapters(&config) {
         any_adapter_eligible = true;
@@ -1228,7 +1228,7 @@ fn run_export(
             // breaking the PATH-gating promise that unrelated setups see zero
             // change.
             Err(e) => {
-                any_adapter_failed = true;
+                failed_adapters.push(adapter.name());
                 eprintln!(
                     "warning: {} adapter materialization failed (skipping): {e:#}",
                     adapter.name()
@@ -1252,8 +1252,22 @@ fn run_export(
     // that loudly instead of exiting 0 with an empty environment — an `eval
     // "$(llmenv export)"` wrapper only reacts to a non-zero exit, and silently
     // sourcing nothing looks identical to "no bundles fire" (#543).
-    if vars.is_empty() && any_adapter_failed {
+    if vars.is_empty() && !failed_adapters.is_empty() {
         anyhow::bail!("all adapter materializations failed — no env vars to export");
+    }
+
+    // #1346: unlike `llmenv regenerate`, a *partial* failure here stays exit 0.
+    // This path runs on every prompt through the shell hook, so failing the
+    // command would break the prompt for as long as the config is bad, and the
+    // env vars the other adapters produced are still correct and worth
+    // exporting. Name the failures in one summary line instead, so the reason
+    // is still legible after the per-adapter warnings scroll past.
+    if !failed_adapters.is_empty() {
+        eprintln!(
+            "warning: exported environment is missing output from: {}. Run `llmenv \
+             regenerate` to see the full error.",
+            failed_adapters.join(", ")
+        );
     }
 
     // Introspection env: comma-separated, deterministic order. Scopes get
@@ -1435,7 +1449,7 @@ fn run_regenerate() -> anyhow::Result<()> {
     );
 
     let mut materialized_any = false;
-    let mut any_adapter_failed = false;
+    let mut failed_adapters: Vec<&str> = Vec::new();
     for adapter in installed_adapters(&config) {
         let result = match &shared_manifest {
             Some((m, cache_root)) => {
@@ -1475,7 +1489,7 @@ fn run_regenerate() -> anyhow::Result<()> {
             // Non-fatal (#543): same rationale as run_export — one adapter's
             // failure must not prevent other adapters from regenerating.
             Err(e) => {
-                any_adapter_failed = true;
+                failed_adapters.push(adapter.name());
                 eprintln!(
                     "warning: {} adapter regeneration failed (skipping): {e:#}",
                     adapter.name()
@@ -1487,10 +1501,31 @@ fn run_regenerate() -> anyhow::Result<()> {
     // Mirror run_export's degenerate-case handling (#543): don't print the
     // same "nothing to do" message for "everything failed" as for "legitimately
     // no bundle content" — the two need different exit codes and wording.
+    //
+    // #1346: a partial failure is still a failure. Regeneration is an explicit,
+    // one-shot command, so it exits non-zero whenever any adapter failed —
+    // otherwise the per-adapter warning scrolls past above a `✓` line and the
+    // user is told everything worked while one engine keeps its stale config.
+    // (`llmenv export` deliberately does not do this; see `run_export`.)
+    if !failed_adapters.is_empty() {
+        // Some engines may still have been regenerated, and those need a reload
+        // just as much as on a clean run — say so before failing.
+        if materialized_any {
+            eprintln!("\n  Restart your shell session or source the config to load changes.");
+        }
+        anyhow::bail!(
+            "adapter regeneration failed for: {}. See the warnings above — each of those \
+             engines kept its previous config.{}",
+            failed_adapters.join(", "),
+            if materialized_any {
+                " Every other adapter was regenerated normally."
+            } else {
+                ""
+            }
+        );
+    }
     if materialized_any {
         eprintln!("\n  Restart your shell session or source the config to load changes.");
-    } else if any_adapter_failed {
-        anyhow::bail!("all adapter regenerations failed — see warnings above");
     } else {
         eprintln!("✓ No bundle content to materialize");
     }
@@ -4699,12 +4734,17 @@ fn run_prune(
             verb,
             plugin_removed.len(),
         );
-        if !plugin_failed.is_empty() {
-            eprintln!(
-                "  {} plugin cache entry(ies) could not be removed",
-                plugin_failed.len()
-            );
-        }
+    }
+
+    // #1346: same contract as `regenerate` — a prune that could not remove
+    // everything it was asked to is not a success, even though the per-entry
+    // failures were printed above. Returning `Ok(())` here meant a scripted
+    // `llmenv prune` saw exit 0 and moved on with the cache still occupied.
+    if plugin_cache && !plugin_failed.is_empty() {
+        anyhow::bail!(
+            "{} plugin cache entry(ies) could not be removed — see the failures above",
+            plugin_failed.len()
+        );
     }
 
     Ok(())
