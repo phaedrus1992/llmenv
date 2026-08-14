@@ -224,6 +224,38 @@ registers it with the server's own background auto-watch (`auto_watch`,
 upstream default `true`), which re-indexes on git changes automatically —
 llmenv doesn't implement its own reindex scheduling on top of that.
 
+### The `index_repository` name guard
+
+(added in v3.11.0)
+
+`index_repository` takes an optional `name` that overrides the project key
+its index is stored under. codebase-memory-mcp doesn't check whether that key
+already belongs to a different repository, and a full reindex deletes and
+recreates the index file — so one call can replace an unrelated project's
+index with the current repo's data
+([upstream #1578](https://github.com/DeusData/codebase-memory-mcp/issues/1578)).
+`CBM_ALLOWED_ROOT` doesn't prevent this: it bounds the tree that gets *read*,
+not the key that gets *written*, and the default `CBM_CACHE_DIR` is one
+directory shared by every project you've indexed.
+
+When codebase-memory-mcp is active, llmenv registers a `PreToolUse` hook that
+**denies any `index_repository` call carrying a `name`**, explaining why in
+the deny reason. Calls without `name` — including llmenv's own
+`SessionStart` auto-index — are unaffected, so the tool stays auto-allowed
+and no per-session prompt appears.
+
+This covers Claude Code and opencode, both of which receive the MCP server.
+Claude Code matches the hook to that one tool; opencode's plugin API has no
+per-tool matcher, so the hook runs on every tool call there and filters by
+name itself — which is why it is registered only when the MCP is wired.
+
+If you genuinely need a custom project key, run `codebase-memory-mcp` yourself
+so overwriting an existing index is a deliberate choice:
+
+```bash
+codebase-memory-mcp cli index_repository '{"repo_path": "/path/to/repo", "name": "custom-key"}'
+```
+
 `codebase_memory` and `memory` (ICM) are fully independent: both can be
 active at once, and llmenv does not coordinate between them.
 

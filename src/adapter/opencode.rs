@@ -244,7 +244,7 @@ export default {
   async "tool.execute.before"(input, output) {
     const ctx = await runHooks("PreToolUse", {
       tool_name: input.tool,
-      tool_input: JSON.stringify(input.output?.args || {}),
+      tool_input: output?.args || {},
     });
     if (ctx === "__LLMENV_BLOCK__") {
       throw new Error("Blocked by llmenv hook");
@@ -253,7 +253,8 @@ export default {
   async "tool.execute.after"(input, output) {
     runHooks("PostToolUse", {
       tool_name: input.tool,
-      tool_input: JSON.stringify(input.args || {}),
+      tool_input: input.args || {},
+      tool_response: output?.output ?? null,
     });
   },
 };
@@ -1158,7 +1159,11 @@ impl AgentAdapter for OpencodeAdapter {
             .collect();
         all_hooks.extend(plugin_hooks);
 
-        let shim_js = generate_shim_js(&all_hooks)?;
+        let guard_index_repository = manifest
+            .mcps
+            .iter()
+            .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME);
+        let shim_js = generate_shim_js(&all_hooks, guard_index_repository)?;
         let plugin_dir = out.join("plugin");
         std::fs::create_dir_all(&plugin_dir)?;
         crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), shim_js.as_bytes())?;
@@ -1523,7 +1528,17 @@ fn glob_matches(pattern: &str, input: &[char]) -> bool {
 /// Each user-defined hook is mapped to its opencode event and bundled with
 /// the three auto-hooks (`check-stale`, `config-context`, `config-guard`)
 /// that always run on `SessionStart` / `PreToolUse`.
-fn generate_shim_js(hooks: &[crate::config::Hook]) -> anyhow::Result<String> {
+///
+/// `guard_index_repository` adds a fourth (#1331): opencode receives the same
+/// `manifest.mcps` Claude Code does, so a codebase-memory-mcp `index_repository`
+/// call can overwrite another project's index here too. opencode's plugin API
+/// has no per-tool matcher, so unlike Claude Code's anchored matcher this hook
+/// runs on every tool call and filters by name itself — hence only registering
+/// it when that MCP is actually wired.
+fn generate_shim_js(
+    hooks: &[crate::config::Hook],
+    guard_index_repository: bool,
+) -> anyhow::Result<String> {
     let mut by_event: std::collections::BTreeMap<&str, Vec<serde_json::Value>> =
         std::collections::BTreeMap::new();
     for hook in hooks {
@@ -1575,6 +1590,15 @@ fn generate_shim_js(hooks: &[crate::config::Hook]) -> anyhow::Result<String> {
             "command": "llmenv config-guard --engine opencode",
             "timeout": 5000,
         }));
+    if guard_index_repository {
+        by_event
+            .entry("PreToolUse")
+            .or_default()
+            .push(serde_json::json!({
+                "command": "llmenv hook-run pre_tool_use --engine opencode",
+                "timeout": 5000,
+            }));
+    }
 
     let table: Vec<serde_json::Value> = by_event
         .into_iter()
@@ -4165,6 +4189,46 @@ mod tests {
         assert_eq!(doc["theme"], serde_json::json!("dark"));
     }
 
+    // #1331: opencode gets the same `manifest.mcps` Claude Code does, so the
+    // same `index_repository` clobber is reachable here. Its plugin API has no
+    // per-tool matcher, so the hook is only registered when that MCP is wired.
+    #[test]
+    fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
+        let with = generate_shim_js(&[], true).unwrap();
+        let without = generate_shim_js(&[], false).unwrap();
+        assert!(
+            with.contains("llmenv hook-run pre_tool_use --engine opencode"),
+            "guard hook missing when codebase-memory-mcp is wired"
+        );
+        assert!(
+            !without.contains("hook-run pre_tool_use"),
+            "no MCP is wired, so every tool call would pay for a hook that \
+             can never fire"
+        );
+    }
+
+    // opencode passes a tool call's arguments in the *second* parameter of
+    // `tool.execute.before` and the *first* of `tool.execute.after` (verified
+    // against opencode's `packages/plugin/src/index.ts`). Reading
+    // `input.output.args` yielded `{}` on every PreToolUse call, which would
+    // silently defeat any guard that inspects arguments.
+    #[test]
+    fn shim_reads_tool_arguments_from_the_parameter_that_carries_them() {
+        let js = generate_shim_js(&[], true).unwrap();
+        assert!(
+            !js.contains("input.output?.args"),
+            "before-hook args come from the second parameter, not input.output"
+        );
+        assert!(
+            js.contains("tool_input: output?.args || {}"),
+            "before-hook must read output.args"
+        );
+        assert!(
+            js.contains("tool_input: input.args || {}"),
+            "after-hook must read input.args"
+        );
+    }
+
     #[test]
     fn generate_shim_js_hook_with_no_command_defaults_empty() {
         let hooks = vec![crate::config::Hook {
@@ -4177,7 +4241,7 @@ mod tests {
             },
             bundle_origin: None,
         }];
-        let js = generate_shim_js(&hooks).unwrap();
+        let js = generate_shim_js(&hooks, false).unwrap();
         assert!(js.contains("\"command\":\"\""));
     }
 
@@ -4195,7 +4259,7 @@ mod tests {
         }];
         // "echo hello" has no '/' token, so resolve_bundle_relative_paths
         // returns None and generate_shim_js must fall back to the raw command.
-        let js = generate_shim_js(&hooks).unwrap();
+        let js = generate_shim_js(&hooks, false).unwrap();
         assert!(js.contains("echo hello"));
     }
 
@@ -4572,7 +4636,7 @@ mod tests {
         fn generate_shim_js_hook_table_is_valid_json(
             hooks in proptest::collection::vec(arb_hook(), 0..5)
         ) {
-            let js = generate_shim_js(&hooks).unwrap();
+            let js = generate_shim_js(&hooks, false).unwrap();
             let marker = "const HOOK_TABLE = ";
             let start = js.find(marker).unwrap() + marker.len();
             let end = js[start..]
@@ -4589,8 +4653,8 @@ mod tests {
         fn generate_shim_js_is_deterministic(
             hooks in proptest::collection::vec(arb_hook(), 0..5)
         ) {
-            let a = generate_shim_js(&hooks).unwrap();
-            let b = generate_shim_js(&hooks).unwrap();
+            let a = generate_shim_js(&hooks, false).unwrap();
+            let b = generate_shim_js(&hooks, false).unwrap();
             prop_assert_eq!(a, b);
         }
 
