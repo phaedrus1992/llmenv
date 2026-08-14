@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `llmenv doctor` now lists which lifecycle hooks (`session_start`, `session_end`, `turn_start`, `stop`) are wired for Claude Code in the active scope, and what would enable any that aren't. There was previously no way to confirm hook wiring from inside llmenv short of reading the generated `settings.json` by hand. `turn_start`'s gate is read straight from the generator; the rest are held in step by a test that renders `settings.json` for each combination and fails if the report disagrees. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#741)
 
+### Security
+
+- llmenv now denies `index_repository` calls that carry a `name` when codebase-memory-mcp is active. The name overrides the project key the index is written under, and codebase-memory-mcp doesn't check whether that key already belongs to another repository — one call could replace an unrelated project's index with the current repo's data, with no prompt, since the tool is auto-allowed so the `SessionStart` auto-index doesn't need approval. Calls without `name`, llmenv's own included, are unaffected. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#the-index_repository-name-guard) (#1331)
+
+- A blocked tool call now tells Claude why. The deny llmenv writes on `PreToolUse` used the field name `deniedReason`, which Claude Code doesn't read — the call was blocked but no reason reached the model, so it had nothing to go on but a retry. The field is now `permissionDecisionReason`. Affects every llmenv deny: read-once, the task-tracker redirect, and the new `index_repository` guard (#1331)
+
+- opencode's hook bridge now passes a tool call's actual arguments. `tool.execute.before` was reading them from the wrong parameter, so `tool_input` was an empty object on every PreToolUse call, and `tool.execute.after` sent them as a JSON string rather than an object and dropped the tool result entirely. Any opencode hook that inspects tool arguments was seeing nothing (#1331)
+
 ### Changed
 
 - Claude Code's session start now runs one `llmenv` process instead of two. The drift check was registered as its own `SessionStart` hook alongside `hook-run session_start`, so both fired and each re-parsed the config; the check now runs inside `hook-run session_start`. Behaviour is unchanged — the same restart hint appears on drift — and `llmenv check-stale` remains available to run directly. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-claude-code-adapter-emits) (#741)

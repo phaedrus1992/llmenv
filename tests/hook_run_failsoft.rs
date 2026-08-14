@@ -406,7 +406,10 @@ fn pre_tool_use_read_twice_deny_mode() {
         Some("PreToolUse"),
         "should have hookEventName=PreToolUse"
     );
-    let reason = deny["deniedReason"].as_str().unwrap_or("");
+    // `permissionDecisionReason` is the field Claude Code reads and shows to
+    // the model on a deny. This asserted `deniedReason` — a name the engine
+    // ignores — so the reason never reached Claude and the test agreed.
+    let reason = deny["permissionDecisionReason"].as_str().unwrap_or("");
     assert!(
         reason.contains("already read"),
         "deny reason should mention re-read; got: {reason}"
