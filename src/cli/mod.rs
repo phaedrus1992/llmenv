@@ -710,7 +710,14 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::HookRun { event, engine }) => {
             tracing::debug!(engine, "hook-run invoked by engine");
             warn_if_unknown_engine(&engine);
-            crate::hook_run::run(&event, &engine)?;
+            if crate::hook_run::run(&event, &engine)? == crate::hook_run::HookExit::Block {
+                // Exit 2 is what makes a `PreToolUse` deny actually stop the
+                // tool call — on Claude Code and, since its plugin shim reads
+                // nothing else, on opencode. Exiting here rather than
+                // returning an error keeps the deny reason (already on stderr
+                // and stdout) from being wrapped in an `llmenv: ...` prefix.
+                std::process::exit(2);
+            }
         }
         Some(Command::SessionLogRecord) => {
             use std::io::Read;

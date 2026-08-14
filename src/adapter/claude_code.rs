@@ -198,11 +198,12 @@ const ICM_MCP_PREFIX: &str = "mcp__icm__";
 /// in the same broad sense as the other two.
 ///
 /// `delete_project` is also destructive (irreversibly removes a project's
-/// index), but the `ask` boundary here is known-incomplete:
-/// `index_repository`'s `name` override can silently replace a *different*
-/// project's index with no prompt (tracked in #1331, not fixed by re-tiering
-/// `index_repository` itself — that would defeat the auto-index-on-
-/// `SessionStart` use case this tiering exists for).
+/// index). The `ask` boundary alone doesn't cover everything destructive
+/// here: `index_repository`'s `name` override can replace a *different*
+/// project's index, and re-tiering `index_repository` to `ask` would defeat
+/// the auto-index-on-`SessionStart` use case this tiering exists for. That
+/// case is handled a layer down instead, by the `PreToolUse` deny in
+/// [`crate::hook_run::cbm_index_guard`] (#1331).
 const CBM_READ_ONLY: &[&str] = &[
     "search_graph",
     "query_graph",
@@ -1286,6 +1287,24 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             "matcher": "^Read$",
             "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
         }));
+
+    // #1331: block `index_repository`'s project-name override, which can
+    // overwrite an unrelated project's index (see `hook_run::cbm_index_guard`).
+    // Registered only when codebase-memory-mcp is actually wired — unlike
+    // read_once above, whose tool exists in every session regardless of config.
+    if manifest
+        .mcps
+        .iter()
+        .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
+    {
+        hooks_by_event
+            .entry("PreToolUse".to_string())
+            .or_default()
+            .push(json!({
+                "matcher": format!("^{}$", crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL),
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
+            }));
+    }
 
     // #985: redirect Claude Code's built-in task tools to the `llmenv task`
     // tracker so tasks actually land there instead of Claude's ephemeral state.
@@ -3123,6 +3142,65 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Every `matcher` registered for a native hook event, in order.
+    fn hook_matchers_for(settings: &serde_json::Value, event: &str) -> Vec<String> {
+        settings["hooks"][event]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|e| e["matcher"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn cbm_manifest() -> crate::merge::MergedManifest {
+        crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Stdio {
+                    command: "codebase-memory-mcp".into(),
+                    args: vec![],
+                    env: Default::default(),
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                wakeup_max_tokens: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    // #1331: the guard is only reachable if Claude Code actually routes the
+    // tool call to it, so the matcher is as load-bearing as the deny itself.
+    #[test]
+    fn index_repository_guard_is_registered_when_codebase_memory_is_wired() {
+        let settings = render_settings_for_test(&cbm_manifest());
+        let expected = format!(
+            "^{}$",
+            crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL
+        );
+        assert!(
+            hook_matchers_for(&settings, "PreToolUse").contains(&expected),
+            "expected {expected} among {:?}",
+            hook_matchers_for(&settings, "PreToolUse")
+        );
+    }
+
+    #[test]
+    fn index_repository_guard_is_absent_without_codebase_memory() {
+        let settings = render_settings_for_test(&crate::merge::MergedManifest::default());
+        assert!(
+            !hook_matchers_for(&settings, "PreToolUse")
+                .iter()
+                .any(|m| m.contains("index_repository")),
+            "no codebase-memory MCP is wired, so its tool can never be called"
+        );
     }
 
     #[test]

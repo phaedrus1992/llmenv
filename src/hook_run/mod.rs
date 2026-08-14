@@ -7,6 +7,7 @@
 //! path and must never block it.
 
 pub(crate) mod action;
+pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
@@ -344,6 +345,20 @@ fn append_read_once_result(out: &mut String, text: &str) {
     out.push_str(text);
 }
 
+/// Whether `engine`'s hook bridge decides a tool call was blocked from the
+/// process exit code rather than the JSON envelope on stdout.
+///
+/// opencode's generated plugin shim checks `code === 2` and ignores stdout for
+/// the block decision, so a deny that exits 0 there is silently allowed.
+/// Claude Code honours the envelope itself, and exit 2 would only duplicate a
+/// decision it has already made.
+///
+/// `engine` is [`crate::adapter::AgentAdapter::name`]'s hyphenated cache-dir
+/// form, the same value `should_check_stale` takes — see the warning there.
+fn blocks_by_exit_code(engine: &str) -> bool {
+    engine == "opencode"
+}
+
 /// Whether this `hook-run` invocation should also check for config drift (#741).
 ///
 /// Claude Code only: the comparison baseline is the booted `CLAUDE_CONFIG_DIR`'s
@@ -358,9 +373,23 @@ fn should_check_stale(event: HookEvent, engine: &str) -> bool {
     event == HookEvent::SessionStart && engine == "claude-code"
 }
 
+/// Whether the caller should exit 0 or signal a blocked tool call.
+///
+/// Exit code 2 is what both supported engines read as "don't run this tool":
+/// Claude Code documents it as equivalent to a `deny` decision, and opencode's
+/// generated plugin shim treats it as the only block signal (`code === 2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookExit {
+    /// Nothing to block; exit 0.
+    Success,
+    /// A `PreToolUse` deny was emitted; exit 2.
+    Block,
+}
+
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
-/// `Ok(())` even when the backend is unreachable.
-pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
+/// `Ok(HookExit::Success)` even when the backend is unreachable — only an
+/// explicit deny asks the caller for a non-zero exit.
+pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     use std::io::Read;
 
     let mut stdin_buf = String::new();
@@ -384,7 +413,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
         Ok(e) => e,
         Err(e) => {
             eprintln!("llmenv: {e}");
-            return Ok(());
+            return Ok(HookExit::Success);
         }
     };
     let null_payload = serde_json::Value::Null;
@@ -427,13 +456,27 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
-                        "deniedReason": reason,
+                        // Claude Code's field is `permissionDecisionReason`;
+                        // it was `deniedReason` here, which the engine doesn't
+                        // read — the call was blocked but the model was never
+                        // told why, so it had no way to do anything but retry.
+                        "permissionDecisionReason": reason,
                     }
                 });
                 if let Err(e) = writeln!(std::io::stdout(), "{envelope}")
                     && e.kind() != std::io::ErrorKind::BrokenPipe
                 {
                     eprintln!("llmenv: failed to write hook output: {e}");
+                }
+                if blocks_by_exit_code(adapter.name()) {
+                    // opencode's shim reads nothing but the exit code, so the
+                    // envelope above is inert there and the reason has to go
+                    // to stderr to reach anyone. Claude Code is left on exit 0
+                    // deliberately: it already blocks on the envelope alone,
+                    // and exiting 2 there would change a working path for no
+                    // gain.
+                    eprintln!("{reason}");
+                    return Ok(HookExit::Block);
                 }
             } else {
                 let out = adapter.emit_hook_context(hook_event_name, &text);
@@ -449,7 +492,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
             eprintln!("llmenv: memory {event} skipped: {e}");
         }
     }
-    Ok(())
+    Ok(HookExit::Success)
 }
 
 /// Resolve config, find the memory URL, run the event's actions, and return the
@@ -548,6 +591,51 @@ pub(crate) fn load_cached_config(path: &std::path::Path) -> anyhow::Result<crate
 /// putting `repeat_detect`'s text first would still keep the prefix at 0 in
 /// practice (nothing precedes it), but ordering primary-first documents the
 /// invariant explicitly rather than relying on that coincidence.
+/// The whole `PreToolUse` decision, including the parts that need no state
+/// dir. `state_dir` is threaded in as the `Result` the caller got so a
+/// failure to resolve it stays a *degradation* rather than an abort — the
+/// pre-#1089 behaviour, kept because propagating it would also drop the
+/// task-tracker redirect and any session logging below (#231/#864).
+///
+/// #1331's guard is resolved first and alone. It reads only the call's
+/// arguments, so a state-dir failure must not be able to disable a deny whose
+/// job is stopping one project's index from overwriting another's. And a deny
+/// only counts when `__DENY__:` leads the string (see
+/// `append_read_once_result`), so folding it in beside `repeat_detect` — which
+/// matches any tool, `index_repository` included — would let an advisory
+/// prepend itself and silently downgrade the deny to an allow.
+fn resolve_pre_tool_decision(
+    stdin_payload: &serde_json::Value,
+    claude_session_id: Option<&str>,
+    config: &crate::config::Config,
+    task_tracker_enabled: bool,
+    state_dir: anyhow::Result<std::path::PathBuf>,
+) -> Option<String> {
+    let clobber_deny = crate::hook_run::cbm_index_guard::handle_pre_tool_use(stdin_payload);
+    if !clobber_deny.is_empty() {
+        return Some(clobber_deny);
+    }
+    match state_dir {
+        Ok(state_dir) => resolve_pre_tool_text(
+            stdin_payload,
+            claude_session_id,
+            config,
+            task_tracker_enabled,
+            &state_dir,
+        ),
+        Err(e) => {
+            error!(
+                error = %e,
+                "failed to resolve state_dir; read_once/repeat_detect skipped for this call \
+                 and the task-tool redirect degraded to a deny"
+            );
+            task_tracker_enabled
+                .then(|| crate::hook_run::task_tools::deny_tracker_unavailable(stdin_payload, &e))
+                .flatten()
+        }
+    }
+}
+
 fn resolve_pre_tool_text(
     stdin_payload: &serde_json::Value,
     claude_session_id: Option<&str>,
@@ -739,34 +827,16 @@ fn run_inner(
     // session logging for every PreToolUse event (the #231/#864
     // early-return-drops-logging bug class).
     let pre_tool_text = if event == HookEvent::PreToolUse {
-        // A `state_dir()` failure must degrade the same way it did before
-        // #1089 (each of read_once/repeat_detect resolved it independently
-        // and skipped itself on error) rather than propagate via `?` and
-        // abort the whole PreToolUse decision — that would silently drop
-        // the task-tracker redirect too, and any session logging below,
-        // reintroducing the #231/#864 early-return-drops-logging bug class
-        // for a failure mode neither of those issues anticipated.
-        let text = match crate::paths::state_dir() {
-            Ok(state_dir) => resolve_pre_tool_text(
-                stdin_payload,
-                claude_session_id,
-                &config,
-                task_tracker_enabled,
-                &state_dir,
-            ),
-            Err(e) => {
-                error!(
-                    error = %e,
-                    "failed to resolve state_dir; read_once/repeat_detect skipped for this call \
-                     and the task-tool redirect degraded to a deny"
-                );
-                task_tracker_enabled
-                    .then(|| {
-                        crate::hook_run::task_tools::deny_tracker_unavailable(stdin_payload, &e)
-                    })
-                    .flatten()
-            }
-        };
+        // `state_dir()` is passed in rather than resolved there so its failure
+        // stays a degradation instead of an abort — see the doc comment on
+        // `resolve_pre_tool_decision` for why that matters and what it costs.
+        let text = resolve_pre_tool_decision(
+            stdin_payload,
+            claude_session_id,
+            &config,
+            task_tracker_enabled,
+            crate::paths::state_dir(),
+        );
         match text {
             Some(t) => {
                 // Derived from the same `event_to_log_kind` mapping
@@ -2315,6 +2385,20 @@ mod tests {
         assert_eq!(triggered, vec!["claude-code/session_start".to_string()]);
     }
 
+    // #1331: opencode's shim blocks on `code === 2` alone, so a deny that
+    // exits 0 there is silently allowed. Claude Code stays on exit 0 — it
+    // honours the envelope, and this keeps a working path unchanged.
+    #[test]
+    fn only_opencode_needs_the_exit_code_block_signal() {
+        let mut by_exit_code = Vec::new();
+        for adapter in crate::adapter::registered_adapters() {
+            if blocks_by_exit_code(adapter.name()) {
+                by_exit_code.push(adapter.name().to_string());
+            }
+        }
+        assert_eq!(by_exit_code, vec!["opencode".to_string()]);
+    }
+
     #[test]
     fn drift_check_gate_rejects_the_underscored_engine_id() {
         // `engine_id` is what `--engine` and config keys use; `name` is what
@@ -3199,6 +3283,84 @@ mod tests {
             !matches!(url, MemoryEndpoint::Active { .. }),
             "a bundle disabled via `disable_bundles` must not contribute its \
              memory/host entries to memory_url resolution, got {url:?}"
+        );
+    }
+
+    fn index_repository_clobber_payload() -> serde_json::Value {
+        serde_json::json!({
+            "tool_name": crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL,
+            "tool_input": { "repo_path": "/repo", "name": "some-other-project" },
+        })
+    }
+
+    // #1331: `repeat_detect` matches every tool, so it can produce advisory
+    // text for this exact call. If the two were joined, the advisory would
+    // land ahead of `__DENY__:` and `run()`'s prefix check would miss it —
+    // the deny would silently become an allow.
+    #[test]
+    fn index_repository_clobber_deny_is_not_diluted_by_repeat_detect() {
+        let state_dir = tempfile::tempdir().expect("test");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: true,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let payload = index_repository_clobber_payload();
+        // Twice, so repeat_detect has a prior call to match against.
+        for _ in 0..2 {
+            let text = resolve_pre_tool_decision(
+                &payload,
+                Some("clobber"),
+                &config,
+                false,
+                Ok(state_dir.path().to_path_buf()),
+            );
+            let text = text.expect("the guard must decide this call");
+            assert!(
+                text.starts_with("__DENY__:"),
+                "the deny must lead the string, got {text:?}"
+            );
+        }
+    }
+
+    // The guard reads only the call's arguments, so losing the state dir must
+    // not be able to turn a clobbering call into an allowed one.
+    #[test]
+    fn index_repository_clobber_deny_survives_a_state_dir_failure() {
+        let text = resolve_pre_tool_decision(
+            &index_repository_clobber_payload(),
+            Some("clobber"),
+            &crate::config::Config::default(),
+            true,
+            Err(anyhow::anyhow!("no state dir")),
+        );
+        assert!(
+            text.is_some_and(|t| t.starts_with("__DENY__:")),
+            "a state-dir failure must not disable the clobber guard"
+        );
+    }
+
+    #[test]
+    fn index_repository_without_a_name_still_reaches_the_normal_pipeline() {
+        let state_dir = tempfile::tempdir().expect("test");
+        let text = resolve_pre_tool_decision(
+            &serde_json::json!({
+                "tool_name": crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL,
+                "tool_input": { "repo_path": "/repo" },
+            }),
+            Some("plain"),
+            &crate::config::Config::default(),
+            false,
+            Ok(state_dir.path().to_path_buf()),
+        );
+        assert!(
+            !text.is_some_and(|t| t.starts_with("__DENY__:")),
+            "llmenv's own auto-index shape must not be denied"
         );
     }
 
