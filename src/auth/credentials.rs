@@ -64,7 +64,7 @@ impl Backend {
     /// The backend Claude Code uses on this platform.
     #[cfg(not(target_os = "macos"))]
     #[must_use]
-    pub const fn detect() -> Self {
+    pub(crate) const fn detect() -> Self {
         Self::File
     }
 }
@@ -395,7 +395,7 @@ pub(crate) fn forget(config_dir: &Path) -> anyhow::Result<bool> {
 /// # Errors
 /// Never fails on this platform.
 #[cfg(not(target_os = "macos"))]
-pub fn forget(_config_dir: &Path) -> anyhow::Result<bool> {
+pub(crate) fn forget(_config_dir: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
 
