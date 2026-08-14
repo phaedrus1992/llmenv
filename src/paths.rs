@@ -6,4 +6,4 @@ pub use llmenv_paths::{
 
 /// File name used for SessionEnd dedup across hook run and memory CLI.
 /// Shared between `hook_run` and `memory` modules — must not drift.
-pub const HOOK_STORE_CHUNK: &str = "hook_store_chunk";
+pub(crate) const HOOK_STORE_CHUNK: &str = "hook_store_chunk";

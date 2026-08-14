@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+- The `llmenv` crate's library surface is substantially narrower: ~300 items that were `pub` only because nothing had checked are now `pub(crate)` or private. The crate is published so the binary can be installed from crates.io, and its module tree exists to serve `main.rs` and the tests — it has never been a supported API, and the crate docs now say so explicitly. The four `llmenv-*` support crates are unaffected: they are real published libraries and their public API is excluded from this narrowing. (#1314)
+
 ### Fixed
 
 - A pattern- or path-scoped permission rule targeting one of opencode's action-only keys (`TodoWrite`, `WebFetch`, `WebSearch`, and the native-only `question`/`doom_loop`) now fails the opencode render with an error naming the rule, instead of writing a value opencode's schema rejects. opencode discards the *entire* config file when any one key fails to decode and reports nothing, so a single scoped `WebFetch` rule silently voided every MCP server, LSP entry, and permission rule in the generated `opencode.json`. As with any adapter failure, other engines still regenerate and the previous `opencode.json` is left in place. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#1328)

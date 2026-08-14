@@ -21,26 +21,50 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct RuleFile {
     /// Owning bundle name — used for provenance comments and diagnostics.
-    pub bundle: String,
+    pub(crate) bundle: String,
     /// Path relative to the bundle root (e.g. `rules/rust.md`). Preserves
     /// subdirectory structure under `rules/`.
-    pub rel: PathBuf,
+    pub(crate) rel: PathBuf,
     /// Raw frontmatter text between the `---` fences, exclusive. `None`
     /// when the file has no frontmatter block.
-    pub frontmatter: Option<String>,
+    ///
+    /// Not read today: the module docs above define `frontmatter`/`body` as the
+    /// split every AGENTS.md-only adapter consumes, but the two adapters that
+    /// exist both inline rule bodies themselves (see
+    /// `adapter::claude_code`'s note on `concat_with_rules`). Kept rather than
+    /// deleted because dropping it would silently retire that documented
+    /// contract, which is a design decision and not a lint cleanup (#1314).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "documented AGENTS.md adapter contract, not yet consumed"
+        )
+    )]
+    pub(crate) frontmatter: Option<String>,
     /// File body with the frontmatter block removed. The leading newline
     /// after the closing `---` fence is also stripped so the body starts
     /// at meaningful content.
-    pub body: String,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "documented AGENTS.md adapter contract, not yet consumed"
+        )
+    )]
+    pub(crate) body: String,
     /// Raw file contents — frontmatter + body — for adapters that want to
     /// pass the file through verbatim.
-    pub raw: String,
+    pub(crate) raw: String,
 }
 
 /// Walk `<bundle_root>/rules/` and return all `.md` files. Non-`.md` files
 /// are ignored; symlinks are skipped (consistent with [`super::merge`]).
 /// Missing `rules/` directory yields an empty Vec.
-pub fn collect_from_bundle(bundle_root: &Path, bundle_name: &str) -> anyhow::Result<Vec<RuleFile>> {
+pub(crate) fn collect_from_bundle(
+    bundle_root: &Path,
+    bundle_name: &str,
+) -> anyhow::Result<Vec<RuleFile>> {
     let dir = bundle_root.join("rules");
     let mut out = Vec::new();
     // #918: walk() tolerates a missing `rules/` (NotFound → empty) but

@@ -1,0 +1,46 @@
+--- src/hook_run/mod.rs
++++ replace bundle_recall_queries -> anyhow::Result<Vec<BundleRecallQuery>> with Ok(vec![Default::default()])
+@@ -94,42 +94,17 @@
+ /// Build the cross-project bundle recall queries for a set of active bundles.
+ /// One query per bundle, in input order. Bundle names are validated first; an
+ /// invalid name aborts the whole set so a malformed bundle can't inject recall
+ /// metacharacters.
+ ///
+ /// # Errors
+ /// Returns an error if any bundle name fails [`validate_bundle`].
+ pub fn bundle_recall_queries(bundles: &[String]) -> anyhow::Result<Vec<BundleRecallQuery>> {
+-    if bundles.is_empty() {
+-        debug!("no bundles configured for recall");
+-        return Ok(Vec::new());
+-    }
+-    debug!(
+-        bundle_count = bundles.len(),
+-        "building bundle recall queries"
+-    );
+-    bundles
+-        .iter()
+-        .map(|bundle| {
+-            validate_bundle(bundle).map_err(|e| {
+-                warn!(
+-                    bundle = %bundle,
+-                    error = %e,
+-                    "bundle name validation failed"
+-                );
+-                e
+-            })?;
+-            debug!(bundle = %bundle, "bundle recall query created");
+-            Ok(BundleRecallQuery {
+-                bundle: bundle.clone(),
+-                keyword: action::bundle_keyword(bundle),
+-            })
+-        })
+-        .collect()
++    Ok(vec![Default::default()]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Per-call network timeout. Lifecycle hooks run on startup and every prompt, so
+ /// a slow/dead remote ICM must not stall the agent. 2s balances real round-trips
+ /// against not hanging the prompt.
+ const HOOK_TIMEOUT: Duration = Duration::from_secs(2);
+ 
+ /// An engine-neutral lifecycle event. Adapters translate these to native hook

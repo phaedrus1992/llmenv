@@ -346,7 +346,7 @@ fn append_read_once_result(out: &mut String, text: &str) {
 
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
 /// `Ok(())` even when the backend is unreachable.
-pub fn run(event: &str, engine: &str) -> anyhow::Result<()> {
+pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     use std::io::Read;
 
     let mut stdin_buf = String::new();
@@ -454,7 +454,7 @@ pub fn set_preloaded_config(config: crate::config::Config) {
 /// fresh process, so there is nothing to reset outside `cargo test`'s shared
 /// binary.
 #[cfg(test)]
-pub(crate) fn reset_preloaded_config_for_test() {
+fn reset_preloaded_config_for_test() {
     *PRELOADED_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
@@ -1543,7 +1543,7 @@ impl MemoryEndpoint {
     /// The active entry's configured wake-up token budget (#1216). `None`
     /// for every non-[`MemoryEndpoint::Active`] variant, and for `Active`
     /// itself when `features.memory[].wakeup_max_tokens` is unset.
-    pub(crate) fn wakeup_max_tokens(&self) -> Option<u32> {
+    fn wakeup_max_tokens(&self) -> Option<u32> {
         match self {
             Self::Active {
                 wakeup_max_tokens, ..
@@ -1555,7 +1555,7 @@ impl MemoryEndpoint {
     /// Consume into `(url, wakeup_max_tokens)`, erroring exactly as
     /// [`Self::into_url`] — `into_url` itself keeps its existing signature
     /// since it has several other callers that don't need the token budget.
-    pub(crate) fn into_url_and_wakeup_max_tokens(self) -> anyhow::Result<(String, Option<u32>)> {
+    fn into_url_and_wakeup_max_tokens(self) -> anyhow::Result<(String, Option<u32>)> {
         let wakeup_max_tokens = self.wakeup_max_tokens();
         Ok((self.into_url()?, wakeup_max_tokens))
     }
@@ -1792,7 +1792,7 @@ fn annotate_resolve_error(
 ///
 /// `pub(crate)`: also called by `cli::doctor`, whose orphaned-memory check must
 /// see the same suppressed declarations this diagnostic does.
-pub(crate) fn suppressed_bundle_capabilities(
+fn suppressed_bundle_capabilities(
     config: &crate::config::Config,
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,

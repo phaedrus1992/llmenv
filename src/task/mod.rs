@@ -11,7 +11,7 @@
 //! ponytail: per-task locking (rather than whole-store) if write throughput
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
-pub mod project;
+pub(crate) mod project;
 pub mod session;
 
 use std::collections::{HashMap, HashSet};
@@ -42,7 +42,7 @@ impl TaskState {
     /// rendering shared by `cli::style::task_state_label` and any
     /// user-facing message composed here in `task/mod.rs`.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
             Self::Wip => "wip",
@@ -56,23 +56,23 @@ impl TaskState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskNote {
     /// RFC3339 timestamp.
-    pub at: String,
-    pub text: String,
+    pub(crate) at: String,
+    pub(crate) text: String,
 }
 
 /// A single tracked task, persisted as one JSON file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Task {
-    pub slug: String,
-    pub title: String,
+    pub(crate) slug: String,
+    pub(crate) title: String,
     #[serde(default)]
-    pub state: TaskState,
+    pub(crate) state: TaskState,
     #[serde(default)]
-    pub parent: Option<String>,
+    parent: Option<String>,
     #[serde(default)]
-    pub blocked_on: Vec<String>,
+    pub(crate) blocked_on: Vec<String>,
     #[serde(default)]
-    pub notes: Vec<TaskNote>,
+    notes: Vec<TaskNote>,
     /// Id of the session active when this task was created (`None` for a
     /// task added outside any session, or created before sessions existed —
     /// `#[serde(default)]` keeps old task files loadable). Set once at
@@ -80,15 +80,15 @@ pub struct Task {
     /// reflects when it was started, not whatever session happens to be
     /// active later.
     #[serde(default)]
-    pub session: Option<String>,
+    pub(crate) session: Option<String>,
     /// RFC3339 timestamp.
-    pub created_at: String,
+    pub(crate) created_at: String,
     /// RFC3339 timestamp.
-    pub updated_at: String,
+    updated_at: String,
 }
 
 /// The task-store subdirectory under llmenv's state dir.
-pub fn tasks_dir(state_dir: &Path) -> PathBuf {
+pub(crate) fn tasks_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("tasks")
 }
 
@@ -132,7 +132,7 @@ fn now_rfc3339() -> String {
 /// non-alphanumeric runs collapsed to a single `-`, leading/trailing `-`
 /// trimmed. Pure function — collision uniquification happens separately in
 /// [`unique_slug`], which needs the store directory.
-pub fn slugify(title: &str) -> String {
+pub(crate) fn slugify(title: &str) -> String {
     let words: Vec<&str> = title.split_whitespace().take(6).collect();
     let joined = words.join(" ");
     let mut slug = String::with_capacity(joined.len());
@@ -171,7 +171,7 @@ fn unique_slug(dir: &Path, base_slug: &str) -> String {
 /// Write a task to disk atomically. Callers that mutate an existing task
 /// (rather than just persisting one already exclusively held under
 /// [`with_store_lock`]) are expected to call this from within that lock.
-pub fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
+pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
     let dir = tasks_dir(state_dir);
     crate::paths::create_dir_owner_only(&dir)?;
     let json = serde_json::to_string_pretty(task)?;
@@ -180,7 +180,7 @@ pub fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
 }
 
 /// Load a single task by its exact slug.
-pub fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
+pub(crate) fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
     let content = std::fs::read_to_string(task_path(state_dir, slug))?;
     Ok(serde_json::from_str(&content)?)
 }
@@ -190,7 +190,7 @@ pub fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
 /// that must distinguish "genuinely empty" from "couldn't read the store"
 /// (e.g. denying a `TaskList` redirect with the real error, #1112) should use
 /// [`try_list_tasks`] instead.
-pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
+pub(crate) fn list_tasks(state_dir: &Path) -> Vec<Task> {
     match try_list_tasks(state_dir) {
         Ok(tasks) => tasks,
         Err(e) => {
@@ -210,7 +210,7 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
 /// # Errors
 /// Returns an error if the tasks directory exists but can't be read (e.g.
 /// permission denied).
-pub fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
+pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
     let dir = tasks_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -259,15 +259,15 @@ pub fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
 /// parent is depth 0, its subtasks depth 1, and so on (#926).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayRow {
-    pub depth: usize,
-    pub task: Task,
+    pub(crate) depth: usize,
+    pub(crate) task: Task,
 }
 
 /// Keep only tasks whose state is one of `states`. An empty `states` keeps
 /// everything (the "no `--state` filter" case), so callers pass either the
 /// states the user asked for or an empty slice.
 #[must_use]
-pub fn filter_by_state(tasks: Vec<Task>, states: &[TaskState]) -> Vec<Task> {
+pub(crate) fn filter_by_state(tasks: Vec<Task>, states: &[TaskState]) -> Vec<Task> {
     if states.is_empty() {
         return tasks;
     }
@@ -298,7 +298,7 @@ fn session_rank(key: &Option<String>, priority: &[String]) -> (u8, usize, String
 /// siblings in creation order. Nothing is dropped regardless of
 /// `session_priority`: any session present but unlisted still gets a group.
 #[must_use]
-pub fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<DisplayRow> {
+pub(crate) fn display_rows(tasks: Vec<Task>, session_priority: &[String]) -> Vec<DisplayRow> {
     let mut keys: Vec<Option<String>> = tasks
         .iter()
         .map(|t| t.session.clone())
@@ -389,7 +389,7 @@ fn visit<'a>(
 /// right now" fill-in (#905). `None` when nothing matching is currently
 /// `wip`/`waiting`, or when `session_ids` is empty.
 #[must_use]
-pub fn current_wip_title(state_dir: &Path, session_ids: &[String]) -> Option<String> {
+pub(crate) fn current_wip_title(state_dir: &Path, session_ids: &[String]) -> Option<String> {
     if session_ids.is_empty() {
         return None;
     }
@@ -446,7 +446,7 @@ pub enum ParentSpec<'a> {
 /// `project` → error telling the agent to run `llmenv task session start`
 /// or pass `--session`; omitted with exactly one open session for `project`
 /// → auto-resolved.
-pub fn add_task(
+pub(crate) fn add_task(
     state_dir: &Path,
     title: &str,
     parent: ParentSpec<'_>,
@@ -467,7 +467,7 @@ pub fn add_task(
 /// # Errors
 /// Errors if `parent` is [`ParentSpec::Explicit`] and doesn't resolve to an
 /// existing task — same eager-validation reasoning as `block_task`'s `on`.
-pub fn add_task_for_session(
+pub(crate) fn add_task_for_session(
     state_dir: &Path,
     title: &str,
     parent: ParentSpec<'_>,
@@ -555,7 +555,7 @@ fn resolve_session_for_add(
 /// path traversal / absolute-path attempts before any path is constructed —
 /// a task slug is always a single component), if no task matches, or if the
 /// prefix matches more than one task (the error lists every candidate slug).
-pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<String> {
+pub(crate) fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<String> {
     if !crate::paths::is_valid_short_name(input) {
         anyhow::bail!("'{input}' is not a valid task identifier");
     }
@@ -599,7 +599,7 @@ pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<Strin
 /// unmet, same rationale as [`is_actionable`]'s dangling-blocker handling.
 /// `force` overrides both cases — the agent may know better than the
 /// ordering hint.
-pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Task> {
+pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
@@ -641,7 +641,7 @@ pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<
 /// a hook's response text, …) — starting the task is never blocked by this,
 /// unlike an unmet `blocked_on` reference.
 #[must_use]
-pub fn parent_soft_block_warning(state_dir: &Path, task: &Task) -> Option<String> {
+pub(crate) fn parent_soft_block_warning(state_dir: &Path, task: &Task) -> Option<String> {
     let parent_slug = task.parent.as_ref()?;
     let parent = load_task(state_dir, parent_slug).ok()?;
     if parent.state == TaskState::Done {
@@ -680,7 +680,7 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
 /// other tasks' `parent`/`blocked_on` references to it, which already
 /// tolerate a dangling target the same way a deleted blocker does (see
 /// `start_task`'s warning path).
-pub fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+pub(crate) fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let task = load_task(state_dir, &slug)?;
@@ -690,7 +690,7 @@ pub fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
 }
 
 /// Mark a task done. Idempotent from any prior state (fast-path completion).
-pub fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+pub(crate) fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
@@ -704,7 +704,7 @@ pub fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
 }
 
 /// Append a timestamped progress note to a task.
-pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Task> {
+pub(crate) fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
@@ -727,7 +727,7 @@ pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Ta
 ///
 /// # Errors
 /// Errors if the task is already done.
-pub fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<Task> {
+pub(crate) fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
@@ -755,7 +755,7 @@ pub fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<
 /// (unlike the load-time tolerance for dangling `blocked_on` entries left
 /// behind by a since-deleted task file). Also errors if `input` and `on`
 /// resolve to the same task — a task cannot block itself.
-pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Task> {
+pub(crate) fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Task> {
     with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let on_slug = resolve_identifier(state_dir, on)?;
@@ -778,24 +778,24 @@ pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Tas
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TaskEdit<'a> {
     /// New title, if changing it.
-    pub title: Option<&'a str>,
+    pub(crate) title: Option<&'a str>,
     /// Set the parent to this id. Mutually exclusive with `no_parent` — the
     /// CLI enforces this with `conflicts_with`; if both are set here,
     /// `parent` wins.
-    pub parent: Option<&'a str>,
+    pub(crate) parent: Option<&'a str>,
     /// Clear the parent.
-    pub no_parent: bool,
+    pub(crate) no_parent: bool,
     /// Ids to add to `blocked_on`. Idempotent — an id already present is a
     /// no-op, same as `block_task`.
-    pub block_on: &'a [String],
+    pub(crate) block_on: &'a [String],
     /// Ids to remove from `blocked_on`. Idempotent — an id not present is a
     /// no-op.
-    pub unblock: &'a [String],
+    pub(crate) unblock: &'a [String],
     /// Append a new note.
-    pub add_note: Option<&'a str>,
+    pub(crate) add_note: Option<&'a str>,
     /// Remove a note, identified by its 0-based index or its exact RFC3339
     /// `at` timestamp.
-    pub delete_note: Option<&'a str>,
+    pub(crate) delete_note: Option<&'a str>,
 }
 
 /// Mutate an existing task's title, parent, `blocked_on` set, and notes in a
@@ -808,7 +808,11 @@ pub struct TaskEdit<'a> {
 ///   `input` itself — same eager-validation reasoning as [`block_task`].
 /// - Any `edit.unblock` id doesn't resolve to an existing task.
 /// - `edit.delete_note` doesn't match an existing note's index or timestamp.
-pub fn edit_task(state_dir: &Path, input: &str, edit: &TaskEdit<'_>) -> anyhow::Result<Task> {
+pub(crate) fn edit_task(
+    state_dir: &Path,
+    input: &str,
+    edit: &TaskEdit<'_>,
+) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
@@ -919,7 +923,7 @@ fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Resul
 /// `wip`/`waiting` task from a different project sharing this task store must
 /// never surface here. See [`wip_reminder`] for why, within the project, the
 /// footer never presumes a listed task belongs to this conversation (#1028).
-pub fn session_start_reminder(state_dir: &Path) -> String {
+pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
     let tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
     combine_reminders([
         wip_reminder(
@@ -954,7 +958,7 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 /// `wip` task from a different project sharing this task store must never
 /// surface here. See [`wip_reminder`] for why, within the project, the
 /// footer never presumes a listed task belongs to this conversation (#1028).
-pub fn stop_hook_reminder(state_dir: &Path) -> String {
+pub(crate) fn stop_hook_reminder(state_dir: &Path) -> String {
     let tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
     combine_reminders([
         wip_reminder(
@@ -1000,7 +1004,11 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
 /// project, and the conservative default is to never surface a task we
 /// can't attribute.
 #[must_use]
-pub fn filter_tasks_for_project(state_dir: &Path, project: &str, tasks: Vec<Task>) -> Vec<Task> {
+pub(crate) fn filter_tasks_for_project(
+    state_dir: &Path,
+    project: &str,
+    tasks: Vec<Task>,
+) -> Vec<Task> {
     let session_ids = session::session_ids_for_project(state_dir, project);
     tasks
         .into_iter()
@@ -1018,7 +1026,7 @@ pub fn filter_tasks_for_project(state_dir: &Path, project: &str, tasks: Vec<Task
 /// is `wip`. `tasks` is expected to already be scoped to one session — this
 /// makes no session judgment of its own.
 #[must_use]
-pub fn resolve_current_task(tasks: &[Task]) -> Option<Task> {
+pub(crate) fn resolve_current_task(tasks: &[Task]) -> Option<Task> {
     most_recently_updated(tasks.iter().filter(|t| t.state == TaskState::Wip))
         .or_else(|| most_recently_updated(tasks.iter().filter(|t| t.state != TaskState::Done)))
         .cloned()
@@ -1034,7 +1042,7 @@ pub fn resolve_current_task(tasks: &[Task]) -> Option<Task> {
 /// task it blocks). `None` if `current` isn't found in `session_tasks`, or
 /// nothing after it qualifies.
 #[must_use]
-pub fn resolve_next_task(
+pub(crate) fn resolve_next_task(
     all_tasks: &[Task],
     session_tasks: &[Task],
     current: &Task,

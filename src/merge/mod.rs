@@ -1,4 +1,4 @@
-pub mod agents_md;
+pub(crate) mod agents_md;
 pub mod capabilities;
 pub mod rules;
 
@@ -194,7 +194,7 @@ pub fn merge(
 /// touching any `bundle.yaml` content. Without hashing precedence, that edit
 /// would leave the signature unchanged and a stale cache entry would be
 /// served as a hit — silently resolving to the wrong `host` address.
-pub fn merge_signature(
+pub(crate) fn merge_signature(
     top_level: &Capabilities,
     native: &BTreeMap<String, serde_yaml::Value>,
     bundles: &[BundleRef],

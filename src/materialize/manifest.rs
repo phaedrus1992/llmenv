@@ -37,17 +37,17 @@ pub enum AuthSource {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthStatus {
     /// How auth arrived in this folder.
-    pub source: AuthSource,
+    pub(crate) source: AuthSource,
     /// `oauthAccount` UUID active in this folder, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    pub(crate) id: Option<String>,
     /// Email for display; not used as an identity key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    pub(crate) email: Option<String>,
 }
 
 /// The dotfile name written into every materialized folder.
-pub const MANIFEST_FILE: &str = ".llmenv-manifest.json";
+pub(crate) const MANIFEST_FILE: &str = ".llmenv-manifest.json";
 
 /// Records what llmenv owns in a materialized folder: the content hash (for
 /// drift detection) and the set of llmenv-written paths (for reconciliation).
@@ -56,22 +56,22 @@ pub const MANIFEST_FILE: &str = ".llmenv-manifest.json";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheManifest {
     /// The content hash llmenv rendered (see [`super::cache::hash_manifest`]).
-    pub content_hash: String,
+    pub(crate) content_hash: String,
     /// llmenv-owned paths in this folder, relative + `/`-separated, sorted.
-    pub owned: BTreeSet<String>,
+    pub(crate) owned: BTreeSet<String>,
     /// Plaintext active tags that produced this render (#246). Recorded for
     /// transparency — `ls`/`cat` of the dotfile reveals which selection a
     /// shape-named folder corresponds to. Empty by default (older manifests and
     /// the empty-selection convenience path).
     #[serde(default)]
-    pub active_tags: BTreeSet<String>,
+    active_tags: BTreeSet<String>,
     /// Plaintext directly-enabled bundles that produced this render (#246). See
     /// [`Self::active_tags`].
     #[serde(default)]
-    pub enabled_bundles: BTreeSet<String>,
+    enabled_bundles: BTreeSet<String>,
     /// Auth state for this materialized folder.
     #[serde(default)]
-    pub auth_status: AuthStatus,
+    pub(crate) auth_status: AuthStatus,
 }
 
 impl CacheManifest {
@@ -86,7 +86,10 @@ impl CacheManifest {
     /// outside the cache. llmenv only ever writes safe relative paths, so a
     /// rejected entry means a corrupt or tampered manifest, not lost ownership.
     #[must_use]
-    pub fn new(content_hash: impl Into<String>, owned: impl IntoIterator<Item = PathBuf>) -> Self {
+    pub(crate) fn new(
+        content_hash: impl Into<String>,
+        owned: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
         let owned = owned
             .into_iter()
             .map(|p| normalize_rel(&p))
@@ -106,7 +109,7 @@ impl CacheManifest {
     /// on the next `export` cycle. Kept separate from [`Self::new`] so callers
     /// that don't inject auth (tests, internal renders) skip it cleanly.
     #[must_use]
-    pub fn with_auth_status(mut self, auth_status: AuthStatus) -> Self {
+    pub(crate) fn with_auth_status(mut self, auth_status: AuthStatus) -> Self {
         self.auth_status = auth_status;
         self
     }
@@ -116,7 +119,7 @@ impl CacheManifest {
     /// separate from [`Self::new`] so the manifest stays within the ≤5-positional
     /// limit and callers without a selection (tests, internal renders) skip it.
     #[must_use]
-    pub fn with_selection(
+    pub(crate) fn with_selection(
         mut self,
         active_tags: BTreeSet<String>,
         enabled_bundles: BTreeSet<String>,
@@ -135,7 +138,7 @@ impl CacheManifest {
     /// # Errors
     /// Returns an error only on an I/O failure that is *not* "file not found"
     /// (e.g. a permissions error reading an existing dotfile).
-    pub fn read(folder: &Path) -> anyhow::Result<Option<Self>> {
+    pub(crate) fn read(folder: &Path) -> anyhow::Result<Option<Self>> {
         let path = folder.join(MANIFEST_FILE);
         match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -166,7 +169,7 @@ impl CacheManifest {
     ///
     /// # Errors
     /// Returns an error if serialization or the atomic write fails.
-    pub fn write(&self, folder: &Path) -> anyhow::Result<()> {
+    pub(crate) fn write(&self, folder: &Path) -> anyhow::Result<()> {
         let path = folder.join(MANIFEST_FILE);
         let json = serde_json::to_string_pretty(self)?;
         crate::paths::write_owner_only_atomic(&path, json.as_bytes())
@@ -179,7 +182,7 @@ impl CacheManifest {
     /// set is left untouched: either still-owned (rewritten in place) or never
     /// llmenv's to begin with.
     #[must_use]
-    pub fn stale_against(&self, current: &CacheManifest) -> Vec<String> {
+    pub(crate) fn stale_against(&self, current: &CacheManifest) -> Vec<String> {
         self.owned.difference(&current.owned).cloned().collect()
     }
 }

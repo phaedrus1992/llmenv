@@ -54,7 +54,7 @@ pub fn render_config_error(use_color: bool) -> String {
 /// **not** by [`finish`], so that widgets can still emit their own *trusted*
 /// escapes (OSC 8 hyperlinks, per-cell bar colors). Every widget that renders
 /// external string data must route it through here.
-pub(super) fn sanitize(s: &str) -> String {
+fn sanitize(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
         .collect()
@@ -63,13 +63,13 @@ pub(super) fn sanitize(s: &str) -> String {
 /// Wrap `text` in an OSC 8 terminal hyperlink to `url`. Callers must pass a
 /// URL that already passed [`valid_url`] (scheme-checked, control-char-free) —
 /// the OSC 8 payload is otherwise an escape-injection vector.
-pub(super) fn hyperlink(text: &str, url: &str) -> String {
+fn hyperlink(text: &str, url: &str) -> String {
     format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
 }
 
 /// Whether `url` is safe to embed in an OSC 8 hyperlink: `http`/`https` only,
 /// and no control characters (which would break out of the escape sequence).
-pub(super) fn valid_url(url: &str) -> bool {
+fn valid_url(url: &str) -> bool {
     (url.starts_with("http://") || url.starts_with("https://"))
         && !url.chars().any(char::is_control)
 }
@@ -84,7 +84,7 @@ pub(super) fn valid_url(url: &str) -> bool {
 /// widget can emit trusted escapes (OSC 8 links, colored bars). `max_len`
 /// truncation counts characters including any such escapes — set it only on
 /// plain-text widgets.
-pub(super) fn finish(
+fn finish(
     name: &str,
     raw: String,
     cfg: Option<&llmenv_config::WidgetConfig>,

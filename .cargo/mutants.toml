@@ -1,0 +1,19 @@
+# cargo-mutants scope (#1233).
+#
+# Mutation testing answers the question coverage can't: a test that executes a
+# branch but doesn't assert anything meaningful about it passes coverage and
+# fails here.
+#
+# Deliberately not the whole workspace. A full sweep finds 3571 mutants and each
+# one costs a rebuild plus a full test run (~150s measured), so an unscoped run
+# is tens of hours and produces far more surviving mutants than anyone can
+# triage in one pass. These three areas are the most consequential logic in the
+# tree — config validate/merge, the merge stage, and the hook-run path — and
+# come to 736 mutants. Widen this list once they're clean.
+#
+# `crates/*` mutants only appear with `--workspace`; the workflow passes it.
+examine_globs = [
+  "crates/llmenv-config/src/**",
+  "src/merge/**",
+  "src/hook_run/**",
+]

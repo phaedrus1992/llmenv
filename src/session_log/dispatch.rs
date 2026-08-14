@@ -20,7 +20,7 @@ use crate::session_log::transcript::{
 /// `is_whitespace()`/`is_control()`, which miss Unicode formatting characters
 /// like zero-width space or RTL override — closes the gap with no false
 /// positives.
-pub async fn start_session(
+pub(crate) async fn start_session(
     client: &McpHttpClient,
     agent: &str,
     project: Option<&str>,
@@ -64,7 +64,7 @@ pub async fn start_session(
 ///
 /// # Errors
 /// Any `call_tool` failure, including ICM reporting the session doesn't exist.
-pub async fn verify_session(client: &McpHttpClient, session_id: &str) -> anyhow::Result<()> {
+pub(crate) async fn verify_session(client: &McpHttpClient, session_id: &str) -> anyhow::Result<()> {
     client
         .call_tool(SHOW_TOOL, show_session_args(session_id))
         .await?;
@@ -75,7 +75,7 @@ pub async fn verify_session(client: &McpHttpClient, session_id: &str) -> anyhow:
 ///
 /// # Errors
 /// Any `call_tool` failure.
-pub async fn record(
+pub(crate) async fn record(
     client: &McpHttpClient,
     session_id: &str,
     ev: &SessionLogEvent,

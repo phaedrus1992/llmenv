@@ -23,19 +23,19 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 
 /// Subdirectory of the durable state dir holding Claude Code's transcripts.
-pub const PROJECTS_DIR: &str = "projects";
+const PROJECTS_DIR: &str = "projects";
 /// Subdirectory holding Claude Code's own internal session logs — unlike
 /// `projects/`'s per-session transcripts, these accumulate as one file per
 /// *calendar day* across every session, so a hash-directory change would
 /// otherwise silently truncate the visible history to whatever's been
 /// written since the last config edit (#1064).
-pub const SESSION_LOGS_DIR: &str = "session-logs";
+const SESSION_LOGS_DIR: &str = "session-logs";
 /// Prompt-history file (`↑` recall) inherited alongside the transcripts.
-pub const HISTORY_FILE: &str = "history.jsonl";
+const HISTORY_FILE: &str = "history.jsonl";
 /// Claude Code's record of which MCP servers still need an OAuth authorization.
 /// Holds no tokens — losing it just makes Claude Code re-probe every server
 /// after a hash change (#1058).
-pub const MCP_NEEDS_AUTH_FILE: &str = "mcp-needs-auth-cache.json";
+const MCP_NEEDS_AUTH_FILE: &str = "mcp-needs-auth-cache.json";
 
 /// Files inherited by copying them in when the folder has none.
 ///
@@ -79,7 +79,7 @@ fn link_durable_dir(name: &str, state_dir: &Path, config_dir: &Path) -> anyhow::
 /// # Errors
 /// Returns an error when the durable dir cannot be created, an existing tree
 /// cannot be folded in, or the link cannot be created.
-pub fn link_projects_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn link_projects_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
     link_durable_dir(PROJECTS_DIR, state_dir, config_dir)
 }
 
@@ -92,7 +92,7 @@ pub fn link_projects_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<
 /// # Errors
 /// Returns an error when the durable dir cannot be created, an existing tree
 /// cannot be folded in, or the link cannot be created.
-pub fn link_session_logs_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn link_session_logs_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
     link_durable_dir(SESSION_LOGS_DIR, state_dir, config_dir)
 }
 
@@ -101,7 +101,7 @@ pub fn link_session_logs_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Res
 ///
 /// # Errors
 /// Returns an error when a copy fails. A file absent from the store is a no-op.
-pub fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
     for name in COPIED_FILES {
         let src = state_dir.join(name);
         let dst = config_dir.join(name);
@@ -168,7 +168,7 @@ fn dest_already_present(path: &Path) -> bool {
 ///
 /// # Errors
 /// Returns an error when a copy fails.
-pub fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
     for name in COPIED_FILES {
         let src = config_dir.join(name);
         let dst = state_dir.join(name);
@@ -191,7 +191,10 @@ pub fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Resu
 ///
 /// # Errors
 /// Returns an error when a tree cannot be folded into the durable store.
-pub fn migrate_stranded_projects(adapter_root: &Path, state_dir: &Path) -> anyhow::Result<usize> {
+pub(crate) fn migrate_stranded_projects(
+    adapter_root: &Path,
+    state_dir: &Path,
+) -> anyhow::Result<usize> {
     let target = state_dir.join(PROJECTS_DIR);
     let mut folded = 0usize;
     for src in stranded_projects_dirs(adapter_root, state_dir) {

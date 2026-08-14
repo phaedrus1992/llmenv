@@ -21,16 +21,12 @@ use crate::merge::MergedManifest;
 /// content hash) so manual cleanup is obvious: `ls ~/.cache/llmenv/claude-code`
 /// groups folders by binary version, and pruning means removing anything not
 /// starting with the current tag.
-pub const VERSION_TAG: &str = env!("LLMENV_VERSION_TAG");
+const VERSION_TAG: &str = env!("LLMENV_VERSION_TAG");
 
 /// Bare package version (`X.Y.Z`, or a semver prerelease like `1.2.3-rc.1`),
 /// baked in by `build.rs`. Source for the `normal`-mode [`version_major`]
 /// folder segment.
-pub const PKG_VERSION: &str = env!("LLMENV_PKG_VERSION");
-
-/// Short git commit hash, or empty when built outside a git checkout (crates.io
-/// tarball). Carried in [`VERSION_TAG`] for `strict`-mode folder names.
-pub const GIT_HASH: &str = env!("LLMENV_GIT_HASH");
+const PKG_VERSION: &str = env!("LLMENV_PKG_VERSION");
 
 /// Compose the on-disk folder name (relative to the adapter root) for the
 /// active [`HashingMode`] (#246).
@@ -48,7 +44,7 @@ pub const GIT_HASH: &str = env!("LLMENV_GIT_HASH");
 ///   two folders that differ in version prefix but share the same content hash
 ///   are byte-identical — useful for diffing across upgrades.
 #[must_use]
-pub fn folder_name(mode: HashingMode, shape: &str, content_hash: &str) -> String {
+pub(crate) fn folder_name(mode: HashingMode, shape: &str, content_hash: &str) -> String {
     match mode {
         HashingMode::Loose => shape.to_string(),
         HashingMode::Normal => format!("{}/{}", version_major(), shape),
@@ -65,7 +61,7 @@ pub fn folder_name(mode: HashingMode, shape: &str, content_hash: &str) -> String
 /// every materialized folder on each upgrade for no reason the manifest's
 /// own content-hash drift detection required.
 #[must_use]
-pub fn version_major() -> String {
+pub(crate) fn version_major() -> String {
     PKG_VERSION
         .split('.')
         .next()
@@ -238,12 +234,12 @@ pub enum PruneMode {
 
 #[derive(Debug, Default)]
 pub struct PruneReport {
-    pub removed: Vec<PathBuf>,
-    pub kept: usize,
+    pub(crate) removed: Vec<PathBuf>,
+    pub(crate) kept: usize,
     /// Entries prune attempted to unlink but could not (a non-fatal symlink
     /// removal failure — see [`remove_link`]). Kept separate from `removed` so
     /// the report never claims work it didn't do (#255).
-    pub failed: Vec<PathBuf>,
+    pub(crate) failed: Vec<PathBuf>,
 }
 
 /// Prune cache folders under `cache_root` according to `mode` (#246).
@@ -273,7 +269,7 @@ pub struct PruneReport {
 ///
 /// # Errors
 /// Returns an error if reading `cache_root` or removing an entry fails.
-pub fn prune(
+pub(crate) fn prune(
     cache_root: &Path,
     mode: PruneMode,
     hashing: HashingMode,

@@ -25,7 +25,7 @@ const MAX_CORRELATION_ENTRIES: usize = 1000;
 /// (e.g. `$HOME` not set), so transcript correlation never silently breaks
 /// even without filesystem state dir. The fallback logs a `warn!`.
 #[must_use]
-pub fn state_path() -> PathBuf {
+pub(crate) fn state_path() -> PathBuf {
     state_dir()
         .map(|d| d.join("transcript-sessions.json"))
         .unwrap_or_else(|e| {
@@ -101,20 +101,6 @@ pub(crate) fn record_session_at(
     icm_session_id: &str,
 ) -> anyhow::Result<()> {
     record_at(path, claude_session_id, icm_session_id)
-}
-
-/// The ICM session id for a Claude session, if recorded.
-#[must_use]
-pub fn lookup_session(claude_session_id: &str) -> Option<String> {
-    lookup_session_at(&state_path(), claude_session_id)
-}
-
-/// Record the correlation (read-modify-write, atomic, 0o600).
-///
-/// # Errors
-/// Atomic-write failure.
-pub fn record_session(claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
-    record_session_at(&state_path(), claude_session_id, icm_session_id)
 }
 
 #[cfg(test)]

@@ -1,0 +1,5 @@
+src/hook_run/mod.rs:61:5: replace tag_recall_queries -> anyhow::Result<Vec<TagRecallQuery>> with Ok(vec![Default::default()])
+src/hook_run/mod.rs:102:5: replace bundle_recall_queries -> anyhow::Result<Vec<BundleRecallQuery>> with Ok(vec![Default::default()])
+src/hook_run/mod.rs:175:9: replace <impl FromStr for HookEvent>::from_str -> Result<Self, Self::Err> with Ok(Default::default())
+src/hook_run/mod.rs:231:5: replace dispatch -> Vec<Action> with vec![Default::default()]
+src/hook_run/mod.rs:255:5: replace event_to_log_kind -> Option<(EventKind, &'static str)> with Some((Default::default(), ""))

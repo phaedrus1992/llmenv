@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime};
 /// cannot be read, or when retention is zero (guarded by caller — the config
 /// validator rejects `retention_days: 0`, but this function still handles it
 /// defensively).
-pub fn reap_session_log(log_path: &Path, retention_days: u64) {
+pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
     if retention_days == 0 {
         return;
     }

@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 /// source bundle, e.g. `<!-- # from bundle: base -->`, so the resulting
 /// document keeps round-trip provenance for the materializer.
 #[must_use]
-pub fn concat(parts: &[(String, String)]) -> String {
+pub(crate) fn concat(parts: &[(String, String)]) -> String {
     let mut out = String::new();
     for (name, body) in parts {
         let _ = writeln!(out);
@@ -26,8 +26,18 @@ pub fn concat(parts: &[(String, String)]) -> String {
 /// The rules section is preceded by an HTML comment naming the source rule
 /// file (e.g. `<!-- # from bundle: base rules/rust.md -->`) so provenance is
 /// preserved.
+/// Not called by either shipped adapter today — both inline rule bodies
+/// themselves. Kept because `merge::rules`' module docs define this as the
+/// AGENTS.md-only path, and it stays covered by its own test (#1314).
 #[must_use]
-pub fn concat_with_rules(parts: &[(String, String)], rules: &[super::rules::RuleFile]) -> String {
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "documented AGENTS.md adapter contract, not yet consumed"
+    )
+)]
+fn concat_with_rules(parts: &[(String, String)], rules: &[super::rules::RuleFile]) -> String {
     let mut out = concat(parts);
     for r in rules {
         let _ = writeln!(out);

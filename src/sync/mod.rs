@@ -99,7 +99,7 @@ pub fn commit_and_push(repo: &Path, message: &str, push: PushMode) -> Result<Syn
 }
 
 /// Path to the sync state file within state_dir.
-pub fn state_path(state_dir: &Path) -> PathBuf {
+fn state_path(state_dir: &Path) -> PathBuf {
     state_dir.join("sync.json")
 }
 
