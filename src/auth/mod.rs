@@ -9,7 +9,7 @@
 //! Each file holds one [`AuthEntry`] serialized as JSON (owner-only, 0o600).
 
 pub mod credentials;
-pub mod detect;
+pub(crate) mod detect;
 
 use std::path::{Path, PathBuf};
 
@@ -27,18 +27,18 @@ const AUTH_SUBDIR: &str = "auth";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthEntry {
     /// Stable per-account UUID (`oauthAccount.id`). Used as the cache filename.
-    pub uuid: String,
+    pub(crate) uuid: String,
     /// Email address for human-readable stderr notifications.
-    pub email: String,
+    pub(crate) email: String,
     /// RFC 3339 timestamp of when this entry was last observed or refreshed.
-    pub last_seen: String,
+    last_seen: String,
     /// Full `oauthAccount` JSON blob, injected verbatim into new folders.
-    pub raw: serde_json::Value,
+    raw: serde_json::Value,
 }
 
 /// Auth cache directory: `<adapter_root>/state/auth/`.
 #[must_use]
-pub fn auth_cache_dir(adapter_root: &Path) -> PathBuf {
+fn auth_cache_dir(adapter_root: &Path) -> PathBuf {
     crate::materialize::state::state_dir(adapter_root).join(AUTH_SUBDIR)
 }
 
@@ -47,7 +47,7 @@ pub fn auth_cache_dir(adapter_root: &Path) -> PathBuf {
 /// # Errors
 /// Returns an error when `uuid` contains path-traversal or absolute components,
 /// or is not a valid UUID-like string.
-pub fn auth_entry_path(adapter_root: &Path, uuid: &str) -> anyhow::Result<PathBuf> {
+fn auth_entry_path(adapter_root: &Path, uuid: &str) -> anyhow::Result<PathBuf> {
     anyhow::ensure!(
         is_safe_uuid(uuid),
         "auth UUID contains unsafe characters and cannot be used as a filename: {uuid}"
@@ -59,7 +59,7 @@ pub fn auth_entry_path(adapter_root: &Path, uuid: &str) -> anyhow::Result<PathBu
 ///
 /// Returns `None` when `oauthAccount` is absent or missing required fields.
 #[must_use]
-pub fn extract_auth_entry(doc: &serde_json::Value) -> Option<AuthEntry> {
+pub(crate) fn extract_auth_entry(doc: &serde_json::Value) -> Option<AuthEntry> {
     let account = doc.get(OAUTH_ACCOUNT_KEY)?;
     let uuid = account.get("id")?.as_str()?.to_owned();
     if uuid.is_empty() {
@@ -85,7 +85,7 @@ pub fn extract_auth_entry(doc: &serde_json::Value) -> Option<AuthEntry> {
 ///
 /// # Errors
 /// Returns an error when the file exists but cannot be read or is not valid JSON.
-pub fn read_auth_from_dir(config_dir: &Path) -> anyhow::Result<Option<AuthEntry>> {
+pub(crate) fn read_auth_from_dir(config_dir: &Path) -> anyhow::Result<Option<AuthEntry>> {
     let path = config_dir.join(CLAUDE_JSON_FILE);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
@@ -103,7 +103,7 @@ pub fn read_auth_from_dir(config_dir: &Path) -> anyhow::Result<Option<AuthEntry>
 ///
 /// # Errors
 /// Returns an error when the UUID is unsafe or the write fails.
-pub fn save_auth_entry(adapter_root: &Path, entry: &AuthEntry) -> anyhow::Result<()> {
+pub(crate) fn save_auth_entry(adapter_root: &Path, entry: &AuthEntry) -> anyhow::Result<()> {
     let path = auth_entry_path(adapter_root, &entry.uuid)?;
     let json = serde_json::to_string_pretty(entry)?;
     crate::paths::write_owner_only_atomic(&path, json.as_bytes())
@@ -117,7 +117,7 @@ pub fn save_auth_entry(adapter_root: &Path, entry: &AuthEntry) -> anyhow::Result
 ///
 /// # Errors
 /// Returns an error only on I/O failure reading the cache directory itself.
-pub fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntry>> {
+fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntry>> {
     let dir = auth_cache_dir(adapter_root);
     let read_dir = match std::fs::read_dir(&dir) {
         Ok(d) => d,
@@ -166,7 +166,9 @@ pub fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntr
 ///
 /// # Errors
 /// Returns an error on I/O failure reading the cache directory.
-pub fn choose_auth_for_inheritance(adapter_root: &Path) -> anyhow::Result<Option<AuthEntry>> {
+pub(crate) fn choose_auth_for_inheritance(
+    adapter_root: &Path,
+) -> anyhow::Result<Option<AuthEntry>> {
     let entries = load_all_auth_entries(adapter_root)?;
     match entries.as_slice() {
         [] => Ok(None),
@@ -193,7 +195,10 @@ pub fn choose_auth_for_inheritance(adapter_root: &Path) -> anyhow::Result<Option
 ///
 /// # Errors
 /// Returns an error when `.claude.json` is corrupt or the atomic write fails.
-pub fn inject_auth_into_claude_json(config_dir: &Path, entry: &AuthEntry) -> anyhow::Result<()> {
+pub(crate) fn inject_auth_into_claude_json(
+    config_dir: &Path,
+    entry: &AuthEntry,
+) -> anyhow::Result<()> {
     let path = config_dir.join(CLAUDE_JSON_FILE);
     let mut doc = read_claude_json_for_inject(&path)?;
     let Some(obj) = doc.as_object_mut() else {

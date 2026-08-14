@@ -21,31 +21,31 @@ use super::{
 /// project it was started in, whose tasks are tracked as a group.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Session {
-    pub id: String,
-    pub name: Option<String>,
+    pub(crate) id: String,
+    pub(crate) name: Option<String>,
     /// The resolved project tag (see [`super::project::resolve_project_tag`])
     /// at the moment this session was started. Informational — used to
     /// filter/sort in `session ls`, `task add`'s auto-resolve, and `session
     /// start`'s checkpoint. Never used to partition storage.
-    pub project: String,
+    pub(crate) project: String,
     /// Free text set via `--description` (e.g. "dev-sprint issue 493").
     /// Display-only — never fed into slug/id generation, unlike `name`.
     #[serde(default)]
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
     /// RFC3339 timestamp.
-    pub started_at: String,
+    pub(crate) started_at: String,
     /// RFC3339 timestamp, updated whenever a task tagged to this session
     /// changes (add/start/done/note) or the session is resumed. Surfaced as
     /// an idle duration in `session ls` and the `session start` checkpoint.
-    pub last_activity: String,
+    pub(crate) last_activity: String,
     /// RFC3339 timestamp; `None` while the session is open.
     #[serde(default)]
-    pub finished_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
     /// RFC3339 timestamp; set instead of `finished_at` when an existing
     /// session was abandoned via `session start --replace` rather than
     /// explicitly finished.
     #[serde(default)]
-    pub abandoned_at: Option<String>,
+    abandoned_at: Option<String>,
 }
 
 impl Session {
@@ -114,7 +114,7 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
 /// empty" from "couldn't read the store" should use [`try_list_sessions`]
 /// instead (#1112).
 #[must_use]
-pub fn list_sessions(state_dir: &Path) -> Vec<Session> {
+pub(crate) fn list_sessions(state_dir: &Path) -> Vec<Session> {
     match try_list_sessions(state_dir) {
         Ok(sessions) => sessions,
         Err(e) => {
@@ -134,7 +134,7 @@ pub fn list_sessions(state_dir: &Path) -> Vec<Session> {
 /// # Errors
 /// Returns an error if the sessions directory exists but can't be read (e.g.
 /// permission denied).
-pub fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
+pub(crate) fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
     let dir = sessions_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -182,7 +182,7 @@ pub fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
 /// "genuinely empty" from "couldn't read the store" should use
 /// [`try_open_sessions_for_project`] instead (#1112).
 #[must_use]
-pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session> {
+pub(crate) fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session> {
     match try_open_sessions_for_project(state_dir, project) {
         Ok(sessions) => sessions,
         Err(e) => {
@@ -199,7 +199,7 @@ pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session
 ///
 /// # Errors
 /// Returns an error if the sessions directory exists but can't be read.
-pub fn try_open_sessions_for_project(
+pub(crate) fn try_open_sessions_for_project(
     state_dir: &Path,
     project: &str,
 ) -> anyhow::Result<Vec<Session>> {
@@ -238,7 +238,7 @@ pub(crate) fn session_ids_for_project(
 ///
 /// # Errors
 /// Propagates an I/O error only from the save of an existing, open session.
-pub fn touch_last_activity(state_dir: &Path, session_id: &str) -> anyhow::Result<()> {
+pub(crate) fn touch_last_activity(state_dir: &Path, session_id: &str) -> anyhow::Result<()> {
     super::with_store_lock(state_dir, || {
         let mut session = match load_session(state_dir, session_id) {
             Ok(session) => session,
@@ -273,7 +273,7 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 /// `Auto`: errors listing every existing open same-project session (with
 /// id/name/description/idle duration) when one or more already exist.
 /// `Resume`: errors if the named session doesn't exist or isn't open.
-pub fn start_session(
+pub(crate) fn start_session(
     state_dir: &Path,
     name: Option<&str>,
     description: Option<&str>,
@@ -434,7 +434,7 @@ fn abandon_session(state_dir: &Path, mut session: Session) -> anyhow::Result<Ses
 ///
 /// # Errors
 /// Errors if `id` doesn't resolve to an existing, currently-open session.
-pub fn finish_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
+pub(crate) fn finish_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     super::with_store_lock(state_dir, || {
         let mut session = load_session(state_dir, id)
             .map_err(|e| anyhow::anyhow!("no session '{id}' found: {e}"))?;
@@ -449,7 +449,7 @@ pub fn finish_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
 
 /// `(done, total)` counts for tasks tagged with `session_id`.
 #[must_use]
-pub fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
+pub(crate) fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
     let tasks = tasks_in_session(state_dir, session_id);
     let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
     (done, tasks.len() as u64)
@@ -462,12 +462,12 @@ pub fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
 /// the two happen to carry the same fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSummaryTask {
-    pub slug: String,
-    pub title: String,
-    pub state: TaskState,
-    pub parent: Option<String>,
-    pub blocked_on: Vec<String>,
-    pub notes: Vec<TaskNote>,
+    pub(crate) slug: String,
+    pub(crate) title: String,
+    pub(crate) state: TaskState,
+    parent: Option<String>,
+    blocked_on: Vec<String>,
+    pub(crate) notes: Vec<TaskNote>,
 }
 
 /// Session metadata plus every task tagged to it, in the same
@@ -475,19 +475,22 @@ pub struct SessionSummaryTask {
 /// memory-ingestion-friendly rollup of "what happened" in a session (#931).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSummary {
-    pub id: String,
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub done: u64,
-    pub total: u64,
-    pub tasks: Vec<SessionSummaryTask>,
+    pub(crate) id: String,
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) done: u64,
+    pub(crate) total: u64,
+    pub(crate) tasks: Vec<SessionSummaryTask>,
 }
 
 /// Build a [`SessionSummary`] for `session_id`.
 ///
 /// # Errors
 /// Errors if `session_id` doesn't name an existing session.
-pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<SessionSummary> {
+pub(crate) fn session_summary(
+    state_dir: &Path,
+    session_id: &str,
+) -> anyhow::Result<SessionSummary> {
     let session = list_sessions(state_dir)
         .into_iter()
         .find(|s| s.id == session_id)
@@ -526,7 +529,10 @@ pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<Ses
 
 /// Delete every task tagged with `session_id` outright. Returns the deleted
 /// tasks. Doesn't touch the session record itself.
-pub fn delete_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Vec<Task>> {
+pub(crate) fn delete_tasks_in_session(
+    state_dir: &Path,
+    session_id: &str,
+) -> anyhow::Result<Vec<Task>> {
     super::with_store_lock(state_dir, || {
         let tasks = tasks_in_session(state_dir, session_id);
         for t in &tasks {

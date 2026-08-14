@@ -8,19 +8,19 @@ use crate::hook_run::action::{bundle_keyword, tag_keyword};
 /// The active llmenv scope at session start.
 #[derive(Debug, Clone)]
 pub struct ScopeContext {
-    pub tags: Vec<String>,
-    pub bundles: Vec<String>,
-    pub project: Option<String>,
-    pub cwd: String,
-    pub adapter: String,
-    pub llmenv_version: String,
-    pub claude_code_version: String,
+    pub(crate) tags: Vec<String>,
+    pub(crate) bundles: Vec<String>,
+    pub(crate) project: Option<String>,
+    pub(crate) cwd: String,
+    pub(crate) adapter: String,
+    pub(crate) llmenv_version: String,
+    pub(crate) claude_code_version: String,
 }
 
 /// FTS-searchable header line: project plus one `llmenv-tag:<t>` /
 /// `llmenv-bundle:<b>` token per active scope element.
 #[must_use]
-pub fn scope_header_content(ctx: &ScopeContext) -> String {
+pub(crate) fn scope_header_content(ctx: &ScopeContext) -> String {
     let mut parts: Vec<String> = vec!["llmenv session".to_string()];
     if let Some(p) = &ctx.project {
         parts.push(format!("project:{p}"));
@@ -36,7 +36,7 @@ pub fn scope_header_content(ctx: &ScopeContext) -> String {
 
 /// Full structured session metadata for exact inspection / replay.
 #[must_use]
-pub fn scope_metadata_json(ctx: &ScopeContext) -> serde_json::Value {
+pub(crate) fn scope_metadata_json(ctx: &ScopeContext) -> serde_json::Value {
     serde_json::json!({
         "tags": ctx.tags,
         "bundles": ctx.bundles,

@@ -43,7 +43,7 @@ struct RecordPayload {
 /// (#1095) — production intentionally drops it unwaited, identical to the
 /// previous behavior, since the child is process-group-detached and outlives
 /// this process regardless.
-pub fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Child> {
+pub(crate) fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Child> {
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("session_log: cannot resolve current_exe for detached record");
         return None;
@@ -91,7 +91,7 @@ pub fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Child> {
 /// # Errors
 /// Malformed payload, no active memory backend, an invalid backend URL, or
 /// the MCP call itself failing.
-pub fn run_record(payload_json: &str) -> anyhow::Result<()> {
+pub(crate) fn run_record(payload_json: &str) -> anyhow::Result<()> {
     run_record_inner(payload_json).inspect_err(|e| {
         tracing::error!("session_log: detached record failed: {e}");
     })

@@ -26,7 +26,7 @@ fn effective_token_efficiency_var(
         .or_else(|| value.as_i64().map(|n| n.to_string()))
 }
 
-pub(super) fn run_doctor_token_efficiency(
+fn run_doctor_token_efficiency(
     use_color: bool,
     pass: &str,
     warn: &str,
@@ -95,10 +95,7 @@ pub(super) fn run_doctor_token_efficiency(
 }
 
 /// Returns bundle names whose directory does not exist under `bundles_dir`.
-pub(super) fn bundles_with_missing_dirs<'a>(
-    bundles: &'a [Bundle],
-    bundles_dir: &Path,
-) -> Vec<&'a str> {
+fn bundles_with_missing_dirs<'a>(bundles: &'a [Bundle], bundles_dir: &Path) -> Vec<&'a str> {
     bundles
         .iter()
         .filter(|b| !bundles_dir.join(&b.name).is_dir())
@@ -107,7 +104,7 @@ pub(super) fn bundles_with_missing_dirs<'a>(
 }
 
 /// Returns marketplace names defined in `config` that no plugin collection references.
-pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
+fn unused_marketplaces(config: &Config) -> Vec<&str> {
     use crate::config::split_plugin_ref;
     let referenced: HashSet<&str> = config
         .plugin_collection
@@ -130,7 +127,7 @@ pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
 /// ignored (#1051). A scope with no `gateway_mac` set can never match,
 /// regardless of what `ssid`/`cidr` say.
 #[must_use]
-pub(super) fn network_scope_cannot_match(m: &crate::config::NetworkMatch) -> bool {
+fn network_scope_cannot_match(m: &crate::config::NetworkMatch) -> bool {
     m.gateway_mac.is_none()
 }
 
@@ -139,7 +136,7 @@ pub(super) fn network_scope_cannot_match(m: &crate::config::NetworkMatch) -> boo
 /// Unlike `memory`, there's no `host:` table reference to check (codebase-
 /// memory-mcp always resolves to a local stdio process, never a network
 /// client).
-pub(super) fn orphan_codebase_memory_entries<'a>(
+fn orphan_codebase_memory_entries<'a>(
     config: &'a Config,
     bundle_caps: &'a Capabilities,
     emitted: &HashSet<String>,
@@ -167,7 +164,7 @@ pub(super) fn orphan_codebase_memory_entries<'a>(
 /// Every other memory check builds from the post-disable firing set, so the
 /// entry is already gone before doctor looks: memory works in `~/` and silently
 /// stops inside the project, with a green doctor (#1131).
-pub(super) fn memory_orphaned_by_disable_bundles(
+fn memory_orphaned_by_disable_bundles(
     config: &Config,
     config_dir: &Path,
     active: &crate::scope::ActiveScopes,
@@ -409,7 +406,7 @@ fn looks_like_file_glob(matcher: &str) -> bool {
 /// shaped like a file-extension glob instead of a Claude Code tool-name
 /// pattern — a common misconfiguration, since Claude Code matches
 /// `hook.matcher` against tool name only, never file path.
-pub(super) fn hooks_with_glob_like_matchers(config: &Config) -> Vec<String> {
+fn hooks_with_glob_like_matchers(config: &Config) -> Vec<String> {
     config
         .capabilities
         .hooks
@@ -479,7 +476,7 @@ fn native_bash_command(raw: &str) -> Option<&str> {
 /// engine's `native_permissions.<engine>.allow` — a replacement granted only
 /// there (a documented, exercised pattern) must silence the warning too,
 /// not just a neutral `permissions.allow` entry.
-pub(super) fn legacy_tools_missing_replacement(capabilities: &Capabilities) -> Vec<LegacyToolRule> {
+fn legacy_tools_missing_replacement(capabilities: &Capabilities) -> Vec<LegacyToolRule> {
     let neutral = capabilities
         .permissions
         .allow

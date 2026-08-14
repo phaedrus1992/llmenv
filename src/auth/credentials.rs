@@ -19,6 +19,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Only `keychain_service` hashes, and that is macOS/test-only — see its cfg.
+#[cfg(any(target_os = "macos", test))]
 use sha2::{Digest, Sha256};
 
 /// Credential store path relative to `CLAUDE_CONFIG_DIR`.
@@ -31,8 +33,14 @@ const MCP_OAUTH_KEY: &str = "mcpOAuth";
 /// Cache file name under the durable auth dir.
 pub(super) const CACHE_FILE: &str = "credentials.json";
 /// Service-name prefix Claude Code uses for its keychain credential item.
+///
+/// The keychain is macOS-only, so every non-test caller sits behind
+/// `cfg(target_os = "macos")`; without the same gate this is dead code on other
+/// targets, which only became visible once #1314 narrowed it from `pub`.
+#[cfg(any(target_os = "macos", test))]
 const KEYCHAIN_SERVICE_PREFIX: &str = "Claude Code-credentials";
 /// Hex characters of the config-dir digest Claude Code appends to the service.
+#[cfg(any(target_os = "macos", test))]
 const SERVICE_DIGEST_LEN: usize = 8;
 
 /// Where a materialized folder's OAuth token lives.
@@ -49,14 +57,14 @@ impl Backend {
     /// The backend Claude Code uses on this platform.
     #[cfg(target_os = "macos")]
     #[must_use]
-    pub const fn detect() -> Self {
+    pub(crate) const fn detect() -> Self {
         Self::Keychain
     }
 
     /// The backend Claude Code uses on this platform.
     #[cfg(not(target_os = "macos"))]
     #[must_use]
-    pub const fn detect() -> Self {
+    pub(crate) const fn detect() -> Self {
         Self::File
     }
 }
@@ -89,7 +97,7 @@ impl Credentials {
     /// MCP-only document is still worth caching (#1058). `None` when it has
     /// neither.
     #[must_use]
-    pub fn from_json(value: serde_json::Value) -> Option<Self> {
+    pub(crate) fn from_json(value: serde_json::Value) -> Option<Self> {
         let has_login = value
             .get(OAUTH_KEY)
             .is_some_and(serde_json::Value::is_object);
@@ -104,7 +112,7 @@ impl Credentials {
     /// Skips tokenless stubs — Claude Code writes an entry with neither token
     /// while an authorization flow is in flight and clears it afterwards.
     #[must_use]
-    pub fn mcp_server_count(&self) -> usize {
+    pub(crate) fn mcp_server_count(&self) -> usize {
         self.0
             .get(MCP_OAUTH_KEY)
             .and_then(serde_json::Value::as_object)
@@ -122,13 +130,13 @@ impl Credentials {
 
     /// Access-token expiry, epoch **milliseconds**.
     #[must_use]
-    pub fn expires_at(&self) -> Option<i64> {
+    pub(crate) fn expires_at(&self) -> Option<i64> {
         self.0.get(OAUTH_KEY)?.get("expiresAt")?.as_i64()
     }
 
     /// Refresh-token expiry, epoch **milliseconds**.
     #[must_use]
-    pub fn refresh_expires_at(&self) -> Option<i64> {
+    fn refresh_expires_at(&self) -> Option<i64> {
         self.0
             .get(OAUTH_KEY)?
             .get("refreshTokenExpiresAt")?
@@ -142,7 +150,7 @@ impl Credentials {
     /// A blob with no `expiresAt` is treated as live; an unknown expiry is not
     /// grounds for discarding a credential.
     #[must_use]
-    pub fn is_expired(&self, now_ms: i64) -> bool {
+    fn is_expired(&self, now_ms: i64) -> bool {
         // MCP server tokens are siblings of the login token in the same store and
         // expire independently, so a dead login token must not discard them —
         // that would silently log the user out of every third-party MCP server
@@ -158,13 +166,18 @@ impl Credentials {
 
     /// [`Credentials::is_expired`] against the current wall clock.
     #[must_use]
-    pub fn is_expired_now(&self) -> bool {
+    pub(crate) fn is_expired_now(&self) -> bool {
         self.is_expired(now_ms())
     }
 
     /// The raw document, for verbatim re-injection.
+    ///
+    /// Only the round-trip tests read this today; kept because it is the one
+    /// accessor for the inner document and removing it would leave those tests
+    /// reaching into the newtype's private field instead (#1314).
     #[must_use]
-    pub fn as_json(&self) -> &serde_json::Value {
+    #[cfg(test)]
+    fn as_json(&self) -> &serde_json::Value {
         &self.0
     }
 
@@ -178,7 +191,8 @@ impl Credentials {
 /// The macOS keychain service name Claude Code derives from a config dir:
 /// `Claude Code-credentials-<sha256(path)[..8]>`.
 #[must_use]
-pub fn keychain_service(config_dir: &Path) -> String {
+#[cfg(any(target_os = "macos", test))]
+fn keychain_service(config_dir: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(config_dir.to_string_lossy().as_bytes());
     let digest = hex::encode(hasher.finalize());
@@ -190,7 +204,7 @@ pub fn keychain_service(config_dir: &Path) -> String {
 
 /// Cache file path: `<state_dir>/auth/credentials.json`.
 #[must_use]
-pub fn cache_path(adapter_root: &Path) -> PathBuf {
+pub(crate) fn cache_path(adapter_root: &Path) -> PathBuf {
     super::auth_cache_dir(adapter_root).join(CACHE_FILE)
 }
 
@@ -201,7 +215,7 @@ pub fn cache_path(adapter_root: &Path) -> PathBuf {
 ///
 /// # Errors
 /// Returns an error only when the file exists but cannot be read.
-pub fn load_cached(adapter_root: &Path) -> anyhow::Result<Option<Credentials>> {
+pub(crate) fn load_cached(adapter_root: &Path) -> anyhow::Result<Option<Credentials>> {
     let path = cache_path(adapter_root);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
@@ -226,7 +240,7 @@ pub fn load_cached(adapter_root: &Path) -> anyhow::Result<Option<Credentials>> {
 ///
 /// # Errors
 /// Returns an error when serialization or the atomic write fails.
-pub fn save_cached(adapter_root: &Path, creds: &Credentials) -> anyhow::Result<()> {
+pub(crate) fn save_cached(adapter_root: &Path, creds: &Credentials) -> anyhow::Result<()> {
     let path = cache_path(adapter_root);
     let blob = creds.to_blob()?;
     crate::paths::write_owner_only_atomic(&path, blob.as_bytes())
@@ -237,7 +251,10 @@ pub fn save_cached(adapter_root: &Path, creds: &Credentials) -> anyhow::Result<(
 ///
 /// # Errors
 /// Returns an error when the backend is reachable but unreadable.
-pub fn read_backend(backend: Backend, config_dir: &Path) -> anyhow::Result<Option<Credentials>> {
+pub(crate) fn read_backend(
+    backend: Backend,
+    config_dir: &Path,
+) -> anyhow::Result<Option<Credentials>> {
     match backend {
         Backend::File => read_credentials_file(config_dir),
         #[cfg(target_os = "macos")]
@@ -254,7 +271,7 @@ pub fn read_backend(backend: Backend, config_dir: &Path) -> anyhow::Result<Optio
 ///
 /// # Errors
 /// Returns an error when the write fails. Never includes the token value.
-pub fn write_backend(
+pub(crate) fn write_backend(
     backend: Backend,
     config_dir: &Path,
     creds: &Credentials,
@@ -299,7 +316,7 @@ fn read_credentials_file(config_dir: &Path) -> anyhow::Result<Option<Credentials
 ///
 /// # Errors
 /// Returns an error when a backend read or the cache write fails.
-pub fn cache_if_needed(
+pub(crate) fn cache_if_needed(
     backend: Backend,
     adapter_root: &Path,
     config_dir: &Path,
@@ -326,7 +343,7 @@ pub fn cache_if_needed(
 ///
 /// # Errors
 /// Returns an error when a backend read or the backend write fails.
-pub fn inject_if_missing(
+pub(crate) fn inject_if_missing(
     backend: Backend,
     adapter_root: &Path,
     config_dir: &Path,
@@ -355,7 +372,7 @@ pub fn inject_if_missing(
 /// # Errors
 /// Returns an error when `security` cannot be run.
 #[cfg(target_os = "macos")]
-pub fn forget(config_dir: &Path) -> anyhow::Result<bool> {
+pub(crate) fn forget(config_dir: &Path) -> anyhow::Result<bool> {
     let service = keychain_service(config_dir);
     let account = keychain_account()?;
     // stderr discarded deliberately (#1092): the overwhelmingly common failure
@@ -378,7 +395,7 @@ pub fn forget(config_dir: &Path) -> anyhow::Result<bool> {
 /// # Errors
 /// Never fails on this platform.
 #[cfg(not(target_os = "macos"))]
-pub fn forget(_config_dir: &Path) -> anyhow::Result<bool> {
+pub(crate) fn forget(_config_dir: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
 

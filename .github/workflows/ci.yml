@@ -103,6 +103,6 @@ jobs:
           RUSTC_BOOTSTRAP: "1"
         with:
           tool: cargo-hawk@0.1.12
-      # -W (not -D): 330 pre-existing findings as of #923, not yet cleaned up.
-      # Report-only until that cleanup lands — see #1314.
-      - run: cargo hawk check -W warnings
+      # -D since #1314 cleared the 330-finding backlog from #923. The published
+      # `crates/*` libs are excluded as external boundaries by the script.
+      - run: bash scripts/hawk-check.sh -D warnings

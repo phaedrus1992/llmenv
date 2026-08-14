@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// keeps the cause recoverable under `RUST_LOG=debug` without spamming normal
 /// runs. `Command::output()` detaches stdin and captures stderr, so this never
 /// blocks on a prompt nor leaks to the terminal (#307).
-pub(crate) fn capture_stdout(label: &str, program: &str, args: &[&str]) -> Option<String> {
+fn capture_stdout(label: &str, program: &str, args: &[&str]) -> Option<String> {
     let out = match std::process::Command::new(program).args(args).output() {
         Ok(out) => out,
         Err(e) => {
@@ -42,7 +42,7 @@ pub struct ActiveScope {
     /// On-disk root the scope matched against. Populated only for
     /// `kind == "project"` (the directory containing `.llmenv.yaml`).
     /// `None` for all other scope kinds.
-    pub project_root: Option<PathBuf>,
+    pub(crate) project_root: Option<PathBuf>,
     /// Bundles this scope manually enables (from `.llmenv.yaml`'s
     /// `enable_bundles` list). Only populated for project scopes.
     pub enable_bundles: Vec<String>,
@@ -50,16 +50,16 @@ pub struct ActiveScope {
     /// `disable_bundles` list, #194). Only populated for project scopes.
     /// Disable always wins over any scope's tag-firing or `enable_bundles`,
     /// including this same scope's own `enable_bundles`.
-    pub disable_bundles: Vec<String>,
+    pub(crate) disable_bundles: Vec<String>,
     /// Project display name (from `.llmenv.yaml` `name` field or folder
     /// basename). Only present for `kind == "project"`.
     pub name: Option<String>,
     /// Project description (from `.llmenv.yaml` `description` field).
     /// Only present for `kind == "project"`.
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
     /// Unknown fields from `.llmenv.yaml` (for warnings in `llmenv doctor`).
     /// Only populated for project scopes.
-    pub unknown_fields: Vec<String>,
+    pub(crate) unknown_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,7 +87,7 @@ impl ActiveScopes {
     ///
     /// Non-project tags (network, host, user, content) describe the
     /// *environment*, which is the correct scope for host plugin decisions.
-    pub fn non_project_tags(&self) -> BTreeSet<String> {
+    pub(crate) fn non_project_tags(&self) -> BTreeSet<String> {
         // Tags from non-project scopes (network, host, user, content).
         let mut result: BTreeSet<String> = self
             .scopes

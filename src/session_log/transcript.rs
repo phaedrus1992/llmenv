@@ -7,17 +7,17 @@ use serde_json::{Value, json};
 use crate::session_log::event::SessionLogEvent;
 
 /// ICM MCP tool: create a transcript session, returns its id as text.
-pub const START_TOOL: &str = "icm_transcript_start_session";
+pub(crate) const START_TOOL: &str = "icm_transcript_start_session";
 /// ICM MCP tool: append one message to a session.
-pub const RECORD_TOOL: &str = "icm_transcript_record";
+pub(crate) const RECORD_TOOL: &str = "icm_transcript_record";
 /// ICM MCP tool: fetch a transcript session's content. Used to verify a
 /// cached session id still exists in ICM rather than trusting the local
 /// correlation record indefinitely (#1090).
-pub const SHOW_TOOL: &str = "icm_transcript_show";
+pub(crate) const SHOW_TOOL: &str = "icm_transcript_show";
 
 /// Arguments for `icm_transcript_start_session`.
 #[must_use]
-pub fn start_session_args(agent: &str, project: Option<&str>, metadata: &Value) -> Value {
+pub(crate) fn start_session_args(agent: &str, project: Option<&str>, metadata: &Value) -> Value {
     json!({
         "agent": agent,
         "project": project,
@@ -28,13 +28,13 @@ pub fn start_session_args(agent: &str, project: Option<&str>, metadata: &Value) 
 
 /// Arguments for `icm_transcript_show`.
 #[must_use]
-pub fn show_session_args(session_id: &str) -> Value {
+pub(crate) fn show_session_args(session_id: &str) -> Value {
     json!({ "session_id": session_id })
 }
 
 /// Arguments for `icm_transcript_record` for `ev` in session `session_id`.
 #[must_use]
-pub fn record_args(session_id: &str, ev: &SessionLogEvent) -> Value {
+pub(crate) fn record_args(session_id: &str, ev: &SessionLogEvent) -> Value {
     let mut a = json!({
         "session_id": session_id,
         "role": ev.role,

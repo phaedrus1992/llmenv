@@ -337,7 +337,10 @@ async fn store_rule(client: &McpHttpClient, rule: &str) -> anyhow::Result<()> {
 /// # Errors
 /// All errors are caught and logged via `tracing::warn!` — this function
 /// always returns `Ok(summary)` to match the fail-soft contract.
-pub async fn run(config: &crate::config::Config, client: &McpHttpClient) -> anyhow::Result<String> {
+pub(crate) async fn run(
+    config: &crate::config::Config,
+    client: &McpHttpClient,
+) -> anyhow::Result<String> {
     let Some(cc) = config
         .features
         .as_ref()

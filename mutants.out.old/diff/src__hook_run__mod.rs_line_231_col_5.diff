@@ -1,0 +1,38 @@
+--- src/hook_run/mod.rs
++++ replace dispatch -> Vec<Action> with vec![]
+@@ -223,34 +223,17 @@
+ /// project-unfiltered `RecallBundle` per active bundle (#228). The turn-capture
+ /// events carry no memory actions.
+ fn dispatch(
+     event: HookEvent,
+     tag_queries: &[TagRecallQuery],
+     bundle_queries: &[BundleRecallQuery],
+     wakeup_max_tokens: Option<u32>,
+ ) -> Vec<Action> {
+-    match event {
+-        HookEvent::SessionStart => vec![Action::WakeUp(wakeup_max_tokens)],
+-        HookEvent::TurnStart => {
+-            let mut actions = vec![Action::Recall];
+-            actions.extend(tag_queries.iter().cloned().map(Action::RecallTag));
+-            actions.extend(bundle_queries.iter().cloned().map(Action::RecallBundle));
+-            actions
+-        }
+-        HookEvent::SessionEnd => vec![Action::Store],
+-        HookEvent::UserPromptSubmit
+-        | HookEvent::PreToolUse
+-        | HookEvent::PostToolUse
+-        | HookEvent::Notification
+-        | HookEvent::Stop
+-        | HookEvent::SubagentStop
+-        | HookEvent::PreCompact => vec![],
+-        HookEvent::PostSession => vec![], // consolidation runs as a separate step
+-    }
++    vec![] /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Maps a `HookEvent` to its session-log `(kind, role)`. `None` for
+ /// the lifecycle/memory events (`SessionStart`/`TurnStart`/`SessionEnd`),
+ /// which `handle_session_log` handles separately.
+ fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
+     match event {
+         HookEvent::UserPromptSubmit => Some((EventKind::Prompt, "user")),

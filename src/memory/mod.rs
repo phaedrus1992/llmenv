@@ -53,7 +53,7 @@ fn call_tool_blocking(
 /// Same as `stats()` but returns the raw JSON string instead of printing it,
 /// for programmatic callers. Uses `CLI_TIMEOUT` — for an interactive command
 /// where the user is watching and waiting is acceptable.
-pub fn stats_json() -> anyhow::Result<String> {
+fn stats_json() -> anyhow::Result<String> {
     let client = connect()?;
     call_tool_blocking(client, "icm_memory_stats", serde_json::json!({}))
 }
@@ -64,19 +64,19 @@ pub fn stats_json() -> anyhow::Result<String> {
 /// on a slow/unreachable ICM backend. Returns `Err` when no memory backend
 /// is active for the current scope or the MCP call fails/times out —
 /// callers treat that as "no ICM stats available", not a hard error.
-pub fn stats_json_with_timeout(timeout: Duration) -> anyhow::Result<String> {
+pub(crate) fn stats_json_with_timeout(timeout: Duration) -> anyhow::Result<String> {
     let client = connect_with_timeout(timeout)?;
     call_tool_blocking(client, "icm_memory_stats", serde_json::json!({}))
 }
 
 /// Run the `stats` subcommand: connect to ICM and output memory stats.
-pub fn stats() -> anyhow::Result<()> {
+pub(crate) fn stats() -> anyhow::Result<()> {
     println!("{}", stats_json()?);
     Ok(())
 }
 
 /// Run the `list` subcommand: list stored memories for the active scope.
-pub fn list() -> anyhow::Result<()> {
+pub(crate) fn list() -> anyhow::Result<()> {
     let client = connect()?;
     let result = call_tool_blocking(
         client,
@@ -110,7 +110,7 @@ fn read_or_init_snapshot(snapshot_path: &Path, current: &str) -> anyhow::Result<
 }
 
 /// Run the `diff` subcommand: compare current state with last snapshot.
-pub fn diff() -> anyhow::Result<()> {
+pub(crate) fn diff() -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     let snapshot_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
 
@@ -156,7 +156,7 @@ pub fn diff() -> anyhow::Result<()> {
 }
 
 /// Run the `prune` subcommand: evaluate and forget expired memories.
-pub fn prune(dry_run: bool) -> anyhow::Result<()> {
+pub(crate) fn prune(dry_run: bool) -> anyhow::Result<()> {
     let result = prune::run(dry_run)?;
     if result.forgotten > 0 {
         tracing::info!("memory prune: forgot {} record(s)", result.forgotten);

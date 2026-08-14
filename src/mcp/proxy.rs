@@ -478,7 +478,7 @@ fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
 /// Returns an error if neither `XDG_STATE_HOME` nor `HOME` is set — writing a
 /// pidfile to a relative path in the caller's CWD would silently scatter state
 /// across whatever directories `llmenv` happens to be invoked from.
-pub fn default_pid_path() -> anyhow::Result<PathBuf> {
+pub(crate) fn default_pid_path() -> anyhow::Result<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
         && !xdg.is_empty()
     {
@@ -788,7 +788,7 @@ fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
 /// # Errors
 /// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor
 /// `uvx` is on `PATH`, or if the child cannot be spawned.
-pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
+pub(crate) fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
     let addr = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
     let mut cmd = Command::new(program);

@@ -9,18 +9,18 @@ use std::time::{Duration, Instant};
 /// and yields a minimal project with defaults (cwd folder name for id/name).
 #[derive(Debug, Clone)]
 pub struct ResolvedProject {
-    pub root: std::path::PathBuf,
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub tags: Vec<String>,
-    pub enable_bundles: Vec<String>,
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) enable_bundles: Vec<String>,
     /// Bundle names this scope removes from the firing set even if a lower-
     /// precedence scope's tag or `enable_bundles` turned them on (#194).
     /// Disable always wins, including within this same scope.
-    pub disable_bundles: Vec<String>,
+    pub(crate) disable_bundles: Vec<String>,
     /// Keys from the marker file not matching any declared field.
-    pub unknown_fields: Vec<String>,
+    pub(crate) unknown_fields: Vec<String>,
 }
 
 /// Schema for the body of `.llmenv.yaml` (project marker file).
@@ -283,7 +283,7 @@ fn detect_hostname() -> Option<String> {
 }
 
 #[must_use]
-pub fn matches_network(s: &NetworkScope, env: &Env) -> bool {
+pub(crate) fn matches_network(s: &NetworkScope, env: &Env) -> bool {
     let Some(want) = s.r#match.gateway_mac.as_deref() else {
         // ssid/cidr are not yet supported for matching; without gateway_mac we cannot match.
         return false;
@@ -334,7 +334,7 @@ pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
 }
 
 #[must_use]
-pub fn matches_host(s: &HostScope, env: &Env) -> bool {
+pub(crate) fn matches_host(s: &HostScope, env: &Env) -> bool {
     s.r#match
         .hostname
         .as_deref()
@@ -342,7 +342,7 @@ pub fn matches_host(s: &HostScope, env: &Env) -> bool {
 }
 
 #[must_use]
-pub fn matches_user(s: &UserScope, env: &Env) -> bool {
+pub(crate) fn matches_user(s: &UserScope, env: &Env) -> bool {
     s.r#match.user.as_deref().is_some_and(|u| u == env.user)
 }
 
@@ -356,7 +356,7 @@ pub fn matches_user(s: &UserScope, env: &Env) -> bool {
 ///
 /// Returns the `id`s of scopes whose glob matched.
 #[must_use]
-pub fn matches_content_all<'a>(
+pub(crate) fn matches_content_all<'a>(
     scopes: &'a [ContentScope],
     cwd: &std::path::Path,
 ) -> std::collections::BTreeSet<&'a str> {
@@ -442,7 +442,7 @@ pub fn matches_content_all<'a>(
 /// dropped in e.g. `/tmp` (on a shared host) or `/Volumes/...` from being
 /// picked up. When `$HOME` is unknown, only the cwd itself is checked.
 #[must_use]
-pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
+pub(crate) fn discover_project(env: &Env) -> Option<ResolvedProject> {
     let mut cur = std::path::PathBuf::from(&env.cwd);
     loop {
         let marker_path = cur.join(".llmenv.yaml");

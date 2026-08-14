@@ -25,11 +25,11 @@ use crate::config::{Config, HashingMode, McpServer, Throttle};
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StatusDataJson {
     #[serde(rename = "$schema")]
-    pub schema: &'static str,
-    pub v: u32,
-    pub ts: String,
+    schema: &'static str,
+    v: u32,
+    ts: String,
     #[serde(flatten)]
-    pub data: StatusData,
+    data: StatusData,
 }
 
 /// Inputs for config-staleness comparison (Task 10b), already resolved by the
@@ -39,8 +39,8 @@ pub struct StatusDataJson {
 /// not a false negative).
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigStaleInputs<'a> {
-    pub booted_hash: Option<&'a str>,
-    pub current_hash: &'a str,
+    pub(crate) booted_hash: Option<&'a str>,
+    pub(crate) current_hash: &'a str,
 }
 
 /// Gather every statusline stat. `cache_root` + `hashing` are needed for the

@@ -32,7 +32,7 @@ pub enum EventKind {
 
 impl EventKind {
     #[must_use]
-    pub fn log_level(self) -> LogLevel {
+    pub(crate) fn log_level(self) -> LogLevel {
         match self {
             EventKind::LifecycleStart
             | EventKind::LifecycleEnd
@@ -53,44 +53,44 @@ impl EventKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionLogEvent {
     /// RFC 3339 timestamp.
-    pub ts: String,
-    pub kind: EventKind,
-    pub scope: EventScope,
+    pub(crate) ts: String,
+    pub(crate) kind: EventKind,
+    pub(crate) scope: EventScope,
     /// Transcript role: `user` | `assistant` | `system` | `tool`.
-    pub role: String,
+    pub(crate) role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
+    pub(crate) tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<u64>,
+    pub(crate) tokens: Option<u64>,
     /// Log level for `internal` events (e.g. `INFO`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub level: Option<String>,
+    pub(crate) level: Option<String>,
     /// Rendered, FTS-searchable content.
-    pub content: String,
+    pub(crate) content: String,
     /// Structured payload (tags, bundles, scopes, op name, …).
-    pub fields: serde_json::Value,
+    pub(crate) fields: serde_json::Value,
     /// Hook diagnostics for Trace-level events: stdout, stderr, exit code.
     /// Only populated when the event is at Trace level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_fields: Option<serde_json::Value>,
+    pub(crate) trace_fields: Option<serde_json::Value>,
 }
 
 /// Current time as an RFC 3339 timestamp (e.g. `2026-06-30T00:00:00Z`).
 #[must_use]
-pub fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     jiff::Timestamp::now().to_string()
 }
 
 impl SessionLogEvent {
     /// Minimum level this event should be recorded at.
     #[must_use]
-    pub fn log_level(&self) -> LogLevel {
+    pub(crate) fn log_level(&self) -> LogLevel {
         self.kind.log_level()
     }
 
     /// Render to a single JSONL line (no trailing newline).
     #[must_use]
-    pub fn to_jsonl(&self) -> String {
+    pub(crate) fn to_jsonl(&self) -> String {
         // Serialize is infallible for this shape; fall back to a minimal line.
         serde_json::to_string(self)
             .inspect_err(|e| {
@@ -105,7 +105,7 @@ impl SessionLogEvent {
 
     /// Cap `content` to `max` bytes (on a char boundary), returning self.
     #[must_use]
-    pub fn truncated(mut self, max: usize) -> Self {
+    pub(crate) fn truncated(mut self, max: usize) -> Self {
         if self.content.len() > max {
             let mut end = max;
             while !self.content.is_char_boundary(end) {

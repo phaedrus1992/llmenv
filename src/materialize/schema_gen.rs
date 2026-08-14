@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 /// Returns the input schema unchanged (except for the inserted key) — it is
 /// an idempotent wrapper, not a schema constructor.
 #[must_use]
-pub fn with_root_additional_properties(mut schema: Value) -> Value {
+pub(crate) fn with_root_additional_properties(mut schema: Value) -> Value {
     if let Some(obj) = schema.as_object_mut() {
         obj.insert("additionalProperties".into(), json!(true));
     }

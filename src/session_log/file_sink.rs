@@ -15,21 +15,6 @@ pub fn default_file_path() -> anyhow::Result<PathBuf> {
     Ok(state_dir()?.join("session-log.jsonl"))
 }
 
-/// `default_file_path` as a string, falling back to a relative name if the
-/// state dir cannot be resolved (the open will then fail-soft).
-#[must_use]
-pub fn default_file_path_string() -> String {
-    default_file_path()
-        .inspect_err(|e| {
-            tracing::warn!(
-                error = %e,
-                "cannot resolve default session-log path, using CWD fallback"
-            )
-        })
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "session-log.jsonl".to_string())
-}
-
 /// Appends rendered events to one JSONL file.
 #[derive(Debug, Clone)]
 pub struct FileSink {
@@ -46,7 +31,7 @@ impl FileSink {
 
     /// Append one line (a `\n` is added). Best-effort; errors are logged and
     /// dropped.
-    pub fn append(&self, line: &str) {
+    pub(crate) fn append(&self, line: &str) {
         if let Err(e) = self.try_append(line) {
             tracing::debug!("session_log file append failed: {e}");
         }

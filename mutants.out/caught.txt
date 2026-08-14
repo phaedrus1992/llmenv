@@ -1,0 +1,2 @@
+src/merge/rules.rs:87:5: replace walk -> anyhow::Result<()> with Ok(())
+src/merge/rules.rs:101:12: delete ! in walk

@@ -1,0 +1,66 @@
+[
+  {
+    "diff": "--- src/merge/rules.rs\n+++ replace walk -> anyhow::Result<()> with Ok(())\n@@ -79,51 +79,17 @@\n fn walk(\n     bundle_root: &Path,\n     dir: &Path,\n     bundle_name: &str,\n     out: &mut Vec<RuleFile>,\n ) -> anyhow::Result<()> {\n     // #918: NotFound (missing dir, incl. a `rules/` that isn't there) → skip;\n     // other errors (e.g. permission denied) propagate.\n-    let Some(entries) = crate::paths::read_dir_optional(dir)? else {\n-        return Ok(());\n-    };\n-    for entry in entries {\n-        let entry = entry?;\n-        let file_type = entry.file_type()?;\n-        let p = entry.path();\n-        if file_type.is_symlink() {\n-            continue;\n-        }\n-        if file_type.is_dir() {\n-            walk(bundle_root, &p, bundle_name, out)?;\n-            continue;\n-        }\n-        if !file_type.is_file() {\n-            continue;\n-        }\n-        if p.extension().is_none_or(|e| e != \"md\") {\n-            continue;\n-        }\n-        let raw = std::fs::read_to_string(&p)?;\n-        let (frontmatter, body) = split_frontmatter(&raw);\n-        let rel = p\n-            .strip_prefix(bundle_root)\n-            .map_err(|e| anyhow::anyhow!(\"path {} not under bundle root: {e}\", p.display()))?\n-            .to_path_buf();\n-        out.push(RuleFile {\n-            bundle: bundle_name.to_owned(),\n-            rel,\n-            frontmatter,\n-            body,\n-            raw,\n-        });\n-    }\n-    Ok(())\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Split a file into (frontmatter, body). Frontmatter must start at byte 0\n /// with `---\\n` and be closed by a line containing only `---`. Any other\n /// shape (no leading fence, missing closer, etc.) yields `(None, raw)`.\n fn split_frontmatter(raw: &str) -> (Option<String>, String) {\n     let Some(rest) = raw.strip_prefix(\"---\\n\") else {\n         return (None, raw.to_owned());\n",
+    "file": "src/merge/rules.rs",
+    "function": {
+      "function_name": "walk",
+      "return_type": "-> anyhow::Result<()>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 122
+        },
+        "start": {
+          "column": 1,
+          "line": 79
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/merge/rules.rs:87:5: replace walk -> anyhow::Result<()> with Ok(())",
+    "package": "llmenv",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 11,
+        "line": 121
+      },
+      "start": {
+        "column": 5,
+        "line": 87
+      }
+    }
+  },
+  {
+    "diff": "--- src/merge/rules.rs\n+++ delete ! in walk\n@@ -93,17 +93,17 @@\n         let p = entry.path();\n         if file_type.is_symlink() {\n             continue;\n         }\n         if file_type.is_dir() {\n             walk(bundle_root, &p, bundle_name, out)?;\n             continue;\n         }\n-        if !file_type.is_file() {\n+        if  /* ~ changed by cargo-mutants ~ */file_type.is_file() {\n             continue;\n         }\n         if p.extension().is_none_or(|e| e != \"md\") {\n             continue;\n         }\n         let raw = std::fs::read_to_string(&p)?;\n         let (frontmatter, body) = split_frontmatter(&raw);\n         let rel = p\n",
+    "file": "src/merge/rules.rs",
+    "function": {
+      "function_name": "walk",
+      "return_type": "-> anyhow::Result<()>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 122
+        },
+        "start": {
+          "column": 1,
+          "line": 79
+        }
+      }
+    },
+    "genre": "UnaryOperator",
+    "name": "src/merge/rules.rs:101:12: delete ! in walk",
+    "package": "llmenv",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 13,
+        "line": 101
+      },
+      "start": {
+        "column": 12,
+        "line": 101
+      }
+    }
+  }
+]

@@ -4,7 +4,7 @@
 //! pure-function so it can be unit-tested with canned output.
 
 #[must_use]
-pub fn detect_gateway_mac() -> Option<String> {
+pub(crate) fn detect_gateway_mac() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         detect_macos()
