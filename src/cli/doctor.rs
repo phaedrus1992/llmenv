@@ -712,6 +712,26 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     // with the other structural checks above.
     super::warn_dead_config(&config, doctor_manifest.as_ref().map(|(m, _)| m), &warn);
 
+    // #741: which lifecycle hooks are actually wired for this scope. Without
+    // this there was no way to confirm from inside llmenv that session
+    // start/end, per-turn recall, or the Stop reminder would fire — the only
+    // check was reading the generated settings.json by hand.
+    if let Some((manifest, _)) = &doctor_manifest
+        && super::installed_adapters(&config).any(|a| a.name() == "claude_code")
+    {
+        eprintln!();
+        eprintln!("Lifecycle hooks (claude_code):");
+        for (event, registered, why) in
+            crate::adapter::claude_code::lifecycle_hook_registrations(manifest)
+        {
+            if registered {
+                eprintln!("{pass} {event}");
+            } else {
+                eprintln!("{info} {event} not registered — {why}");
+            }
+        }
+    }
+
     if let Some((manifest, _)) = &doctor_manifest {
         for adapter in super::installed_adapters(&config) {
             let supported = adapter.supported_hook_events();

@@ -13,14 +13,6 @@ use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
 
-/// Engine identifier baked into hook command lines so subcommands invoked by
-/// Command the auto-emitted SessionStart hook runs (#121/#85). It shells back
-/// into `llmenv` so the runtime check can compare the booted content hash (the
-/// `CLAUDE_CONFIG_DIR` folder name the session launched with) against what
-/// llmenv would materialize now, and warn the user to restart on drift. Kept as
-/// a bare command (resolved off `PATH`) so it works regardless of install dir.
-const STALE_CHECK_COMMAND: &str = "llmenv check-stale --engine claude_code";
-
 /// Command the auto-emitted SessionStart hook runs to inject source config paths
 /// into agent context (#289). Outputs `hookSpecificOutput.additionalContext` JSON
 /// so the agent always knows where to edit config rather than touching the cache.
@@ -74,6 +66,40 @@ const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("session_start", "SessionStart"),
     ("session_end", "SessionEnd"),
 ];
+
+/// Which engine-neutral lifecycle events get a `hook-run` registration for this
+/// manifest, and why.
+///
+/// The gating lives here so `generate_settings_json` and `llmenv doctor` can't
+/// disagree about what is wired (#741) — doctor previously had no visibility
+/// into lifecycle hooks at all, and re-deriving the conditions would just be a
+/// second copy to drift.
+pub(crate) fn lifecycle_hook_registrations(
+    manifest: &MergedManifest,
+) -> Vec<(&'static str, bool, &'static str)> {
+    let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
+    let session_log = manifest.session_log.any_sink_enabled();
+    let task_tracker = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .is_some_and(|t| t.enabled);
+    vec![
+        ("session_start", true, "always registered"),
+        ("session_end", true, "always registered"),
+        (
+            "turn_start",
+            icm_active,
+            "needs a memory backend (features.memory)",
+        ),
+        (
+            "stop",
+            session_log || task_tracker,
+            "needs session logging or features.task_tracker",
+        ),
+    ]
+}
 
 /// `(engine-neutral event, native Claude event)` pairs registered when any
 /// session-log sink is enabled — per-hook prompt/tool-use capture (#382).
@@ -1211,16 +1237,11 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .push(serde_json::Value::Object(hook_entry));
     }
 
-    // #121/#85: always register a SessionStart stale-context check. It concats
-    // with any bundle- or native-declared SessionStart entries (events union),
-    // so a user's own SessionStart hook is never clobbered. The runtime command
-    // reads the booted hash off CLAUDE_CONFIG_DIR and recomputes the current one.
-    hooks_by_event
-        .entry("SessionStart".to_string())
-        .or_default()
-        .push(json!({
-            "hooks": [{ "type": "command", "command": STALE_CHECK_COMMAND }],
-        }));
+    // #121/#85: the SessionStart drift check used to be registered here as its
+    // own hook. #741 folded it into `hook-run session_start` (registered below
+    // via BASELINE_HOOK_EVENTS), so session start spawns one `llmenv` process
+    // instead of two that each re-parsed the config. `llmenv check-stale`
+    // remains as a command users can run directly.
 
     // #289: inject source config paths at session start so the agent knows where
     // to edit llmenv config rather than touching managed cache files.
@@ -1316,7 +1337,12 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // just session start/end — an unconditional per-turn network-backed hook
     // would add latency for every scope, including ones with no memory backend
     // configured at all.
-    if icm_active {
+    // Gate read from `lifecycle_hook_registrations` so `doctor` reports exactly
+    // what gets written here rather than re-deriving the condition (#741).
+    if lifecycle_hook_registrations(manifest)
+        .iter()
+        .any(|(event, registered, _)| *event == "turn_start" && *registered)
+    {
         hooks_by_event
             .entry("UserPromptSubmit".to_string())
             .or_default()
@@ -2311,7 +2337,7 @@ mod tests {
         CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND,
         CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter, HOOK_RUN_COMMAND,
         ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS,
-        MODELED_SETTINGS_KEYS, STALE_CHECK_COMMAND, classify_claude_path, dedup_hooks_doc,
+        MODELED_SETTINGS_KEYS, classify_claude_path, dedup_hooks_doc,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
         read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
@@ -5325,11 +5351,83 @@ mod tests {
         }
     }
 
+    /// #741: doctor and the settings generator must agree on which lifecycle
+    /// hooks are wired, so the gate lives in one function both consult.
     #[test]
-    fn stale_check_command_carries_engine_flag() {
+    fn lifecycle_registrations_match_the_generated_settings() {
+        for (label, manifest) in [
+            ("bare", crate::merge::MergedManifest::default()),
+            (
+                "with memory",
+                crate::merge::MergedManifest {
+                    mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                        name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                        kind: crate::mcp::resolve::ResolvedKind::Remote {
+                            url: "http://localhost:9999".into(),
+                            transport: crate::config::McpTransport::Http,
+                        },
+                        headers: Default::default(),
+                        timeout: None,
+                        disabled_tools: vec![],
+                        mcp_permissions: None,
+                        wakeup_max_tokens: None,
+                    }],
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let registrations = super::lifecycle_hook_registrations(&manifest);
+            let settings: serde_json::Value =
+                serde_json::from_slice(&write_settings_bytes(&manifest)).unwrap();
+            let commands: Vec<String> = settings["hooks"]
+                .as_object()
+                .into_iter()
+                .flat_map(|events| events.values())
+                .flat_map(|entries| entries.as_array().cloned().unwrap_or_default())
+                .flat_map(|entry| entry["hooks"].as_array().cloned().unwrap_or_default())
+                .filter_map(|h| h["command"].as_str().map(str::to_owned))
+                .collect();
+
+            for (event, registered, why) in registrations {
+                let present = commands
+                    .iter()
+                    .any(|c| c.contains("hook-run") && c.ends_with(event));
+                assert_eq!(
+                    present,
+                    registered,
+                    "{label}: doctor says {event} registered={registered} ({why}) but \
+                     settings.json {}: {commands:?}",
+                    if present { "has it" } else { "does not" }
+                );
+            }
+        }
+    }
+
+    /// #741: the drift check now runs inside `hook-run session_start` rather
+    /// than from its own hook, so session start spawns one `llmenv` process
+    /// instead of two that each re-parse the config.
+    #[test]
+    fn session_start_registers_one_llmenv_command_not_a_separate_stale_check() {
+        let manifest = crate::merge::MergedManifest::default();
+        let bytes = write_settings_bytes(&manifest);
+        let settings: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let commands: Vec<String> = settings["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart hooks are always registered")
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().cloned().unwrap_or_default())
+            .filter_map(|h| h["command"].as_str().map(str::to_owned))
+            .collect();
+
         assert!(
-            STALE_CHECK_COMMAND.contains("--engine claude_code"),
-            "STALE_CHECK_COMMAND must carry --engine flag: {STALE_CHECK_COMMAND:?}"
+            !commands.iter().any(|c| c.contains("check-stale")),
+            "check-stale must not be registered separately any more: {commands:?}"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.contains("hook-run") && c.ends_with("session_start")),
+            "hook-run session_start carries the drift check now: {commands:?}"
         );
     }
 

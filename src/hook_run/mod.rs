@@ -376,6 +376,27 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     let null_payload = serde_json::Value::Null;
     let payload = stdin_json.as_ref().unwrap_or(&null_payload);
     let adapter = crate::adapter::adapter_for_engine(engine);
+
+    // #741: the drift check runs from here rather than from its own
+    // `SessionStart` hook. Both were registered unconditionally on the same
+    // event, so a session start spawned two `llmenv` processes that each parsed
+    // the config; folding it in leaves one, and leaves one place where "does
+    // session start check for drift" is decided.
+    //
+    // Claude Code only: the comparison baseline is the booted
+    // `CLAUDE_CONFIG_DIR`'s manifest, which no other engine sets.
+    //
+    // Fail-soft on purpose — a hook that can't answer "has the config drifted"
+    // must not take down memory wake-up or session logging with it.
+    if parsed == HookEvent::SessionStart && adapter.name() == "claude_code" {
+        // A hook's stderr is piped to the agent, never a terminal, so colors
+        // would only add escape codes to the model's context.
+        let use_color = crate::cli::should_use_color(None, false);
+        if let Err(e) = crate::cli::run_check_stale(use_color, false) {
+            tracing::debug!("hook-run session_start: drift check failed (non-fatal): {e:#}");
+        }
+    }
+
     match run_inner(
         parsed,
         claude_session_id,
