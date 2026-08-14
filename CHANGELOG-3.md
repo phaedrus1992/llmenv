@@ -11,7 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `llmenv doctor` now lists which lifecycle hooks (`session_start`, `session_end`, `turn_start`, `stop`) are wired for Claude Code in the active scope, and what would enable any that aren't. There was previously no way to confirm hook wiring from inside llmenv short of reading the generated `settings.json` by hand. The report reads the same gate the adapter generates from, so the two can't disagree. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#741)
+
 ### Changed
+
+- Claude Code's session start now runs one `llmenv` process instead of two. The drift check was registered as its own `SessionStart` hook alongside `hook-run session_start`, so both fired and each re-parsed the config; the check now runs inside `hook-run session_start`. Behaviour is unchanged — the same restart hint appears on drift — and `llmenv check-stale` remains available to run directly. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-claude-code-adapter-emits) (#741)
 
 - The `llmenv` crate's library surface is substantially narrower: ~300 items that were `pub` only because nothing had checked are now `pub(crate)` or private. The crate is published so the binary can be installed from crates.io, and its module tree exists to serve `main.rs` and the tests — it has never been a supported API, and the crate docs now say so explicitly. The four `llmenv-*` support crates are unaffected: they are real published libraries and their public API is excluded from this narrowing. (#1314)
 

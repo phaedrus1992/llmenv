@@ -640,6 +640,13 @@ active context (active bundles, active MCP servers, etc.). Checks:
   `server_host` missing from `host:`, unknown fields in project markers, and a
   network scope whose `match` has no `gateway_mac` (added in v3.8.0) — only
   `gateway_mac` is evaluated today, so `ssid`/`cidr` alone can never match
+- lifecycle hooks (added in v3.11.0) — lists which lifecycle events
+  (`session_start`, `session_end`, `turn_start`, `stop`) are wired for
+  `claude_code` in the active scope, and for any that aren't, what would enable
+  them. `session_start`/`session_end` are always registered; `turn_start` needs
+  a memory backend; `stop` needs session logging or `features.task_tracker`.
+  Read from the same gate the adapter writes `settings.json` from, so the report
+  can't disagree with what's on disk.
 - dead `native_<feature>.<engine>` keys (added in v3.8.0) — warns when a key in
   `native_permissions`, `native_hooks`, `native_plugins`, `native_mcp`,
   `native_model_providers`, or `native` names no registered engine (a typo), or

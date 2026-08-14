@@ -130,8 +130,9 @@ It also:
 - sets `CLAUDE_CONFIG_DIR` to the materialized directory so Claude Code uses it;
 - emits `autoMemoryEnabled: false` when the ICM memory server is present, so ICM
   and Claude's native auto-memory don't both write (a `native` override wins);
-- registers a `SessionStart` hook running `llmenv check-stale` for drift
-  detection.
+- registers a `SessionStart` hook running `llmenv hook-run session_start`, which
+  performs the drift check alongside memory wake-up (folded into one process in
+  v3.11.0 — it was a separate `llmenv check-stale` hook before).
 
 ## Where capabilities are declared
 
