@@ -912,21 +912,30 @@ fn session_start_stale_check_hook_emitted_in_settings_json() {
     assert_eq!(
         handler["type"],
         serde_json::Value::String("command".into()),
-        "stale-check is a command-type handler"
+        "the session-start handler is command-type"
     );
-    let cmd = handler["command"]
-        .as_str()
-        .expect("SessionStart handler has a command");
+    // #741: the drift check moved inside `hook-run session_start` — one llmenv
+    // process per session start instead of two that each re-parse the config.
+    let commands: Vec<&str> = session_start
+        .iter()
+        .filter_map(|e| e["hooks"][0]["command"].as_str())
+        .collect();
     assert!(
-        cmd.contains("llmenv") && cmd.contains("check-stale"),
-        "SessionStart command must invoke `llmenv check-stale`: {cmd}"
+        commands.iter().any(|c| c.contains("llmenv")
+            && c.contains("hook-run")
+            && c.ends_with("session_start")),
+        "SessionStart must invoke `llmenv hook-run session_start`: {commands:?}"
+    );
+    assert!(
+        !commands.iter().any(|c| c.contains("check-stale")),
+        "the separate check-stale hook is gone: {commands:?}"
     );
 }
 
 // Issue #121: a user-supplied native_hooks SessionStart entry must not be
-// clobbered by the auto-emitted stale-check — both survive (events concat).
+// clobbered by the auto-emitted lifecycle hook — both survive (events concat).
 #[test]
-fn session_start_native_hook_coexists_with_stale_check() {
+fn session_start_native_hook_coexists_with_lifecycle_hook() {
     let mut native_hooks = BTreeMap::new();
     native_hooks.insert(
         "claude_code".to_string(),
@@ -960,8 +969,8 @@ fn session_start_native_hook_coexists_with_stale_check() {
         .filter_map(|e| e["hooks"][0]["command"].as_str())
         .collect();
     assert!(
-        commands.iter().any(|c| c.contains("check-stale")),
-        "auto stale-check survives: {commands:?}"
+        commands.iter().any(|c| c.contains("hook-run")),
+        "auto lifecycle hook survives: {commands:?}"
     );
     assert!(
         commands.contains(&"/bin/user-start.sh"),

@@ -26,9 +26,6 @@ hooks:
           type: command
   SessionStart:
     - hooks:
-        - command: llmenv check-stale --engine claude_code
-          type: command
-    - hooks:
         - command: llmenv config-context --engine claude_code
           type: command
     - hooks:

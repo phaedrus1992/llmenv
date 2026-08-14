@@ -344,6 +344,20 @@ fn append_read_once_result(out: &mut String, text: &str) {
     out.push_str(text);
 }
 
+/// Whether this `hook-run` invocation should also check for config drift (#741).
+///
+/// Claude Code only: the comparison baseline is the booted `CLAUDE_CONFIG_DIR`'s
+/// manifest, which no other engine sets.
+///
+/// `engine` is [`crate::adapter::AgentAdapter::name`]'s hyphenated cache-dir
+/// form (`claude-code`), *not* the underscored `--engine` id
+/// ([`crate::adapter::engine_id`]). Comparing it against `claude_code` matches
+/// nothing and silently disables the check, which is exactly the bug the
+/// exhaustive test below exists to catch.
+fn should_check_stale(event: HookEvent, engine: &str) -> bool {
+    event == HookEvent::SessionStart && engine == "claude-code"
+}
+
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
 /// `Ok(())` even when the backend is unreachable.
 pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
@@ -376,6 +390,27 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
     let null_payload = serde_json::Value::Null;
     let payload = stdin_json.as_ref().unwrap_or(&null_payload);
     let adapter = crate::adapter::adapter_for_engine(engine);
+
+    // #741: the drift check runs from here rather than from its own
+    // `SessionStart` hook. Both were registered unconditionally on the same
+    // event, so a session start spawned two `llmenv` processes that each parsed
+    // the config; folding it in leaves one, and leaves one place where "does
+    // session start check for drift" is decided.
+    //
+    // Fail-soft on purpose — a hook that can't answer "has the config drifted"
+    // must not take down memory wake-up or session logging with it.
+    if should_check_stale(parsed, adapter.name()) {
+        // A hook's stderr is piped to the agent, never a terminal, so colors
+        // would only add escape codes to the model's context.
+        let use_color = crate::cli::should_use_color(None, false);
+        if let Err(e) = crate::cli::run_check_stale(use_color, false) {
+            // Visible, not `tracing::debug!`: the default `EnvFilter` is
+            // `ERROR`, so a debug line here would mean the user silently loses
+            // drift detection with no way to notice (#1345's lesson).
+            eprintln!("warning: llmenv could not check whether your config drifted: {e:#}");
+        }
+    }
+
     match run_inner(
         parsed,
         claude_session_id,
@@ -2235,6 +2270,59 @@ fn post_session_consolidation() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Every event `from_str` accepts. Kept as strings so a new variant that
+    /// forgets to round-trip is a test failure rather than a silent gap.
+    const ALL_HOOK_EVENTS: &[&str] = &[
+        "session_start",
+        "turn_start",
+        "session_end",
+        "post_session",
+        "user_prompt_submit",
+        "pre_tool_use",
+        "post_tool_use",
+        "notification",
+        "stop",
+        "subagent_stop",
+        "pre_compact",
+    ];
+
+    #[test]
+    fn all_hook_events_covers_every_variant() {
+        for name in ALL_HOOK_EVENTS {
+            let parsed = HookEvent::from_str(name).unwrap();
+            assert_eq!(&parsed.to_string(), name, "{name} does not round-trip");
+        }
+        // `HookEvent` derives no variant count, so this guards the list
+        // against a variant added to the enum but not to `from_str`.
+        assert_eq!(ALL_HOOK_EVENTS.len(), 11);
+    }
+
+    // The gate is fed `AgentAdapter::name` (hyphenated), not `engine_id`
+    // (underscored). Driving it from the real registry means a mismatch shows
+    // up here instead of silently disabling the check.
+    #[test]
+    fn only_claude_code_session_start_triggers_the_drift_check() {
+        let mut triggered = Vec::new();
+        for adapter in crate::adapter::registered_adapters() {
+            for name in ALL_HOOK_EVENTS {
+                let event = HookEvent::from_str(name).unwrap();
+                if should_check_stale(event, adapter.name()) {
+                    triggered.push(format!("{}/{name}", adapter.name()));
+                }
+            }
+        }
+        assert_eq!(triggered, vec!["claude-code/session_start".to_string()]);
+    }
+
+    #[test]
+    fn drift_check_gate_rejects_the_underscored_engine_id() {
+        // `engine_id` is what `--engine` and config keys use; `name` is what
+        // the gate actually receives. Asserting both directions keeps a future
+        // refactor from swapping one for the other unnoticed.
+        assert!(should_check_stale(HookEvent::SessionStart, "claude-code"));
+        assert!(!should_check_stale(HookEvent::SessionStart, "claude_code"));
+    }
 
     // #1128: the marker used to require reaching the full success path (only
     // 4 of 11 hook events ever got there); every early-return in run_inner

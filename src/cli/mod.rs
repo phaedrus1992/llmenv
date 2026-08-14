@@ -2327,7 +2327,7 @@ fn concat_dedup<T: PartialEq + Clone>(mut lead: Vec<T>, rest: Vec<T>) -> Vec<T> 
 /// too. On drift, prints a restart hint to stderr (the agent lifecycle hook
 /// relays it into the model's context). Resolution mirrors `export` but writes
 /// nothing and skips network marketplace refresh (fastest path).
-fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
+pub(crate) fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
     let booted = std::env::var("CLAUDE_CONFIG_DIR")
         .ok()
         .filter(|d| !d.is_empty())

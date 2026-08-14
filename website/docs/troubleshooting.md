@@ -56,9 +56,10 @@ active set, it stays dormant.
 ## The agent is running stale config
 
 After you change config, a running agent keeps the directory it booted with. The
-`SessionStart` hook runs `llmenv check-stale`, which compares the booted content
-hash against the current one and prints a restart hint on drift. You can run it
-manually:
+`SessionStart` hook runs `llmenv hook-run session_start`, which compares the
+booted content hash against the current one and prints a restart hint on drift
+(it ran as a separate `llmenv check-stale` hook before v3.11.0). You can run the
+check on its own:
 
 ```bash
 llmenv check-stale
