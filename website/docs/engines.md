@@ -278,7 +278,7 @@ Claude Code adapter.
 
 | Feature | opencode support | Notes |
 | --------- | ---------------- | ------- |
-| Permissions (`allow`/`ask`/`deny`) | Supported for the documented neutral tool vocabulary | Rendered as per-tool `pattern → action` maps; a bare tool emits a plain action string. `ask` is native (no fail-closed collapse). The neutral tool name is mapped to opencode's own permission key, source-verified against opencode's `permission.ts` schema (`bash`, `read`, `glob`, `grep`, `webfetch`, `websearch`, `todowrite`, `task` are a straight lowercase; `Write`/`MultiEdit` both map to `edit`, `LS` maps to `list` — opencode has no separate `write`/`multiedit`/`ls` key). A neutral tool with no confirmed opencode equivalent is dropped with a logged warning rather than guessing at a key (fixed in v3.10.0, [#1326](https://github.com/phaedrus1992/llmenv/issues/1326)). This mapping applies only to `capabilities.permissions`; `native_permissions.opencode` strings are opencode's own vocabulary already (`lsp`, `skill`, a bare `*` deny-all, ...) and are lowercased verbatim, never mapped. Because `Write` and `MultiEdit` collapse onto the same `edit` key as `Edit`, rules for any of the three now interact with each other under one shared key — allowing `Write` and denying `Edit` (or vice versa) resolves against the combined `edit` pattern map, not two independent tools. Two rule shapes opencode cannot represent are rejected at regeneration time rather than rendered (fixed in v3.11.0, [#1328](https://github.com/phaedrus1992/llmenv/issues/1328)) — see [Permission rules opencode cannot represent](#permission-rules-opencode-cannot-represent) |
+| Permissions (`allow`/`ask`/`deny`) | Supported for the documented neutral tool vocabulary | Rendered as per-tool `pattern → action` maps; a bare tool emits a plain action string. `ask` is native (no fail-closed collapse). The neutral tool name is mapped to opencode's own permission key, source-verified against opencode's `permission.ts` schema (`bash`, `read`, `glob`, `grep`, `webfetch`, `websearch`, `todowrite`, `task`, `skill` are a straight lowercase; `Write`/`MultiEdit` both map to `edit`, `LS` maps to `list` — opencode has no separate `write`/`multiedit`/`ls` key). A neutral tool with no confirmed opencode equivalent is dropped rather than guessing at a key (fixed in v3.10.0, [#1326](https://github.com/phaedrus1992/llmenv/issues/1326)), with a `warning:` line naming the tool (fixed in v3.11.0, [#1345](https://github.com/phaedrus1992/llmenv/issues/1345) — before that it went to a log level nothing displayed, so the rule vanished silently). This mapping applies only to `capabilities.permissions`; `native_permissions.opencode` strings are opencode's own vocabulary already (`lsp`, `question`, `doom_loop`, `external_directory`, a bare `*` deny-all, ...) and are lowercased verbatim, never mapped. Because `Write` and `MultiEdit` collapse onto the same `edit` key as `Edit`, rules for any of the three now interact with each other under one shared key — allowing `Write` and denying `Edit` (or vice versa) resolves against the combined `edit` pattern map, not two independent tools. Two rule shapes opencode cannot represent are rejected at regeneration time rather than rendered (fixed in v3.11.0, [#1328](https://github.com/phaedrus1992/llmenv/issues/1328)) — see [Permission rules opencode cannot represent](#permission-rules-opencode-cannot-represent) |
 | Hooks — `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` | Supported | Bridged through the generated `plugin/llmenv.js` shim |
 | Hooks — other events | **Warned, skipped** | Unsupported events are dropped with an actionable warning rather than a hard error |
 | Hooks — `mcp_tool` kind | **Warned, skipped** | No opencode equivalent; use a `command`-kind handler |
@@ -348,11 +348,35 @@ capabilities:
       - { tool: Bash, pattern: "git push*" } # narrower, sorts last, still wins
 ```
 
-Both checks compare patterns within a single tool's map. opencode also
-wildcard-matches the permission *key* itself, so a native rule whose key is a
-wildcard (`*(…)`) can overlap another tool's rules in a way llmenv does not yet
-check — tracked in
-[#1344](https://github.com/phaedrus1992/llmenv/issues/1344).
+This comparison spans permission *keys*, not just patterns within one key
+(added in v3.11.0, [#1344](https://github.com/phaedrus1992/llmenv/issues/1344)).
+opencode flattens every key into one ordered rule list and wildcard-matches the
+key against the tool name as well, so a native rule keyed `*` applies to every
+tool and is checked against the concrete keys that sort after it:
+
+```yaml
+capabilities:
+  native_permissions:
+    opencode:
+      deny: ["*(git push --force*)"]   # key "*" sorts before "bash"…
+  permissions:
+    allow:
+      - { tool: Bash }                 # …so this allow won for "git push --force"
+```
+
+A bare native `*` deny-all baseline is still fine alongside per-tool rules —
+it's broader in both key and pattern, so the narrower per-tool rule winning is
+what you asked for:
+
+```yaml
+capabilities:
+  native_permissions:
+    opencode:
+      deny: ["*"]        # deny everything by default
+  permissions:
+    allow:
+      - { tool: Bash }   # …except bash
+```
 
 ### The `native.opencode` escape hatch
 

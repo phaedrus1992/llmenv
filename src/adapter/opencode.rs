@@ -895,11 +895,16 @@ impl AgentAdapter for OpencodeAdapter {
 
         // Warn once, at the point a neutral tool name fails to map, that the
         // rule is dropped rather than rendering an unverified key.
+        //
+        // #1345: this has to be `eprintln!`, not `tracing::warn!` — the default
+        // `EnvFilter` is `ERROR`, so a `warn!` here reached neither stderr nor
+        // the log file and the dropped rule left no trace at all. Matches how
+        // this adapter already reports a skipped hook event.
         fn warn_unmapped_tool(tool: &str) {
-            tracing::warn!(
-                "opencode: no permission key for neutral tool `{tool}` — rule dropped, it can \
-                 never take effect for opencode. Remove it, or author a native rule directly \
-                 via `native_permissions.opencode`."
+            eprintln!(
+                "warning: opencode adapter has no permission key for neutral tool '{tool}' — \
+                 skipping this rule, it can never take effect for opencode. Remove it, or \
+                 author a native rule directly via `native_permissions.opencode`."
             );
         }
 
@@ -1034,6 +1039,7 @@ impl AgentAdapter for OpencodeAdapter {
         }
 
         let config_permission = if !permission_map.is_empty() {
+            check_rule_ordering(&permission_map)?;
             let mut perm_entries: BTreeMap<String, PermissionValue> = BTreeMap::new();
             for (tool, patterns) in &permission_map {
                 check_permission_patterns(tool, patterns)?;
@@ -1242,6 +1248,9 @@ fn opencode_tool_name(neutral: &str) -> Option<&'static str> {
         "WebSearch" => "websearch",
         "TodoWrite" => "todowrite",
         "Task" => "task",
+        // #1345: opencode has a real `skill` permission key, so a `Skill` rule
+        // was being dropped despite having an exact equivalent.
+        "Skill" => "skill",
         _ => return None,
     })
 }
@@ -1265,11 +1274,10 @@ const ACTION_ONLY_PERMISSION_KEYS: &[&str] = &[
     "websearch",
 ];
 
-/// Reject the two pattern-map shapes opencode cannot faithfully represent.
+/// Reject a pattern map opencode's schema cannot represent (#1328).
 ///
-/// Both are silent failures downstream — one voids the whole config file, the
-/// other quietly flips a rule's effect — so they surface here as hard errors
-/// instead (#1328).
+/// opencode discards the entire config file when any one key fails to decode,
+/// with no diagnostic, so this has to be a hard error rather than a warning.
 fn check_permission_patterns(
     tool: &str,
     patterns: &BTreeMap<String, String>,
@@ -1288,39 +1296,100 @@ fn check_permission_patterns(
              pattern/paths so the rule covers the whole tool."
         );
     }
-    check_pattern_ordering(tool, patterns)
+    Ok(())
 }
 
-/// Reject a pattern pair whose rendered order inverts the user's intent.
+/// Reject a rule pair whose rendered order inverts the user's intent.
 ///
-/// opencode resolves every pattern that matches a resource with `findLast` —
-/// the last key in the rendered JSON wins — and llmenv emits each tool's map in
-/// sorted key order. So for any two patterns that can match the same input, the
-/// later-sorting one governs the whole overlap. That is only what the user
-/// meant when the later pattern is the *narrower* of the two; otherwise the
-/// earlier rule silently stops applying to inputs it was written to cover.
+/// opencode flattens *every* permission key into one ordered rule list, in the
+/// rendered JSON's key order (`v1/config/migrate.ts`'s `permissions()`), then
+/// resolves a request with `findLast` over it — wildcard-matching both the key
+/// against the tool name and the pattern against the resource
+/// (`permission.ts`'s `evaluate`). So the last rule that matches wins, and that
+/// is only what the user meant when it is the *narrower* of the two; otherwise
+/// the earlier rule silently stops applying where they overlap.
+///
+/// llmenv emits keys sorted and each key's patterns sorted, so iterating the
+/// map in order reproduces exactly the list opencode evaluates. Comparing
+/// across keys as well as within them is what makes a wildcard key (`*`,
+/// authored via `native_permissions.opencode`) participate — #1344; a per-key
+/// check never saw it against the concrete keys it shadows.
 ///
 /// Only pairs with differing actions matter — when both say `deny`, whichever
 /// wins gives the same answer.
-fn check_pattern_ordering(tool: &str, patterns: &BTreeMap<String, String>) -> anyhow::Result<()> {
-    for (i, (earlier, earlier_action)) in patterns.iter().enumerate() {
-        for (later, later_action) in patterns.iter().skip(i + 1) {
-            if later_action == earlier_action
-                || !patterns_overlap(earlier, later)
-                || pattern_subsumes(earlier, later)
-            {
+fn check_rule_ordering(
+    permission_map: &BTreeMap<String, BTreeMap<String, String>>,
+) -> anyhow::Result<()> {
+    // (key, pattern, action) in rendered order — the order opencode sees.
+    let rules: Vec<(&str, &str, &str)> = permission_map
+        .iter()
+        .flat_map(|(tool, patterns)| {
+            patterns
+                .iter()
+                .map(move |(pattern, action)| (tool.as_str(), pattern.as_str(), action.as_str()))
+        })
+        .collect();
+
+    for (i, (early_tool, early_pat, early_action)) in rules.iter().enumerate() {
+        for (late_tool, late_pat, late_action) in rules.iter().skip(i + 1) {
+            let inverts = late_action != early_action
+                && patterns_overlap(early_tool, late_tool)
+                && patterns_overlap(early_pat, late_pat)
+                && !(pattern_subsumes(early_tool, late_tool)
+                    && pattern_subsumes(early_pat, late_pat));
+            if !inverts {
                 continue;
             }
             anyhow::bail!(
-                "opencode: permission `{tool}` patterns {earlier:?} ({earlier_action}) and \
-                 {later:?} ({later_action}) both match some inputs, and {later:?} sorts last \
-                 so opencode applies it to every input they share — {earlier:?} would not \
-                 take effect there. Rewrite {later:?} so it only covers inputs {earlier:?} \
-                 does not, or give the two the same action."
+                "opencode: permission rules {early} ({early_action}) and {late} ({late_action}) \
+                 both match some tool and input, and {late} sorts last so opencode applies it \
+                 wherever they overlap — {early} would not take effect there. {remedy}",
+                early = render_rule(early_tool, early_pat),
+                late = render_rule(late_tool, late_pat),
+                remedy = ordering_remedy(early_tool, early_pat, late_tool, late_pat),
             );
         }
     }
     Ok(())
+}
+
+/// How to rewrite an inverted pair so opencode resolves it as intended.
+///
+/// When the two rules sit on *different* permission keys the earlier one is
+/// almost always a wildcard key, and there is no way to narrow the later rule
+/// out of its way — opencode has no exclusion syntax and llmenv sorts the keys,
+/// so the user cannot reorder around it either. The fix that does work is to
+/// restate the earlier rule on the later rule's key, where it sorts after the
+/// broad pattern and wins.
+fn ordering_remedy(early_tool: &str, early_pat: &str, late_tool: &str, late_pat: &str) -> String {
+    if early_tool == late_tool {
+        return format!(
+            "Rewrite {late} so it only covers what {early} does not, or give the two the \
+             same action.",
+            late = render_rule(late_tool, late_pat),
+            early = render_rule(early_tool, early_pat),
+        );
+    }
+    format!(
+        "Move {early} onto the `{late_tool}` key so it sorts after {late} — e.g. \
+         `native_permissions.opencode` rule {moved} — or give the two the same action.",
+        early = render_rule(early_tool, early_pat),
+        late = render_rule(late_tool, late_pat),
+        moved = render_rule(late_tool, early_pat),
+    )
+}
+
+/// A rule in opencode's own `tool(pattern)` syntax.
+///
+/// That is the authoring syntax for `native_permissions.opencode`; a rule that
+/// came from `capabilities.permissions` is shown the same way, since this is
+/// how it lands in the generated config.
+fn render_rule(tool: &str, pattern: &str) -> String {
+    if pattern == "*" {
+        format!("`{tool}`")
+    } else {
+        format!("`{tool}({pattern})`")
+    }
 }
 
 /// True when some input matches both patterns.
@@ -2923,6 +2992,124 @@ mod tests {
         assert_eq!(doc["permission"]["lsp"]["foo"], serde_json::json!("deny"));
     }
 
+    /// #1344: opencode wildcard-matches the permission *key* against the tool
+    /// name too, so a rule authored under `*` shadows every concrete key that
+    /// sorts after it. A per-key check never compared the two.
+    #[test]
+    fn materialize_wildcard_key_shadowing_a_concrete_key_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec![],
+                ask: vec![],
+                deny: vec!["*(git push --force*)".into()],
+            },
+        );
+        caps.permissions.allow.push(crate::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("git push --force*") && msg.contains("bash"),
+            "error must name the wildcard rule and the key it shadows: {msg}"
+        );
+        // Narrowing the allow is not expressible in opencode, so the remedy has
+        // to be the one that works: restate the deny on the concrete key.
+        assert!(
+            msg.contains("`bash(git push --force*)`"),
+            "error must suggest moving the rule onto the shadowed key: {msg}"
+        );
+    }
+
+    /// The documented deny-all baseline — a bare native `*` plus a narrower
+    /// per-tool allow — is narrower in both dimensions, so it must still render.
+    #[test]
+    fn materialize_wildcard_key_deny_all_baseline_still_renders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.native_permissions.insert(
+            "opencode".into(),
+            crate::config::NativePermissionRules {
+                allow: vec![],
+                ask: vec![],
+                deny: vec!["*".into()],
+            },
+        );
+        caps.permissions.allow.push(crate::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["permission"]["*"], serde_json::json!("deny"));
+        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
+    }
+
+    /// Two concrete keys are distinct literals, so they never overlap and must
+    /// never be flagged against each other.
+    #[test]
+    fn materialize_distinct_concrete_keys_do_not_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.permissions.allow.push(crate::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        caps.permissions.deny.push(crate::config::PermissionRule {
+            tool: "Read".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
+        assert_eq!(doc["permission"]["read"], serde_json::json!("deny"));
+    }
+
+    /// #1345: opencode has a real `skill` permission key, so a `Skill` rule has
+    /// an exact equivalent and must not be dropped.
+    #[test]
+    fn materialize_skill_rule_maps_to_the_skill_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = crate::config::Capabilities::default();
+        caps.permissions.deny.push(crate::config::PermissionRule {
+            tool: "Skill".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        let manifest = MergedManifest {
+            capabilities: caps,
+            ..Default::default()
+        };
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["permission"]["skill"], serde_json::json!("deny"));
+    }
+
     #[test]
     fn patterns_overlap_matches_shared_inputs() {
         // Disjoint prefixes never share an input.
@@ -3014,6 +3201,67 @@ mod tests {
         ) {
             let chars: Vec<char> = input.chars().collect();
             let _ = glob_matches(&pattern, &chars);
+        }
+    }
+
+    /// Resolve a probe the way opencode does: flatten every key in rendered
+    /// order, keep the rules whose key matches the tool and whose pattern
+    /// matches the resource, and take the last one (`findLast`).
+    fn opencode_resolution<'a>(
+        map: &'a BTreeMap<String, BTreeMap<String, String>>,
+        tool: &str,
+        resource: &str,
+    ) -> Vec<(&'a str, &'a str, &'a str)> {
+        map.iter()
+            .flat_map(|(key, patterns)| {
+                patterns
+                    .iter()
+                    .map(move |(p, a)| (key.as_str(), p.as_str(), a.as_str()))
+            })
+            .filter(|(key, pattern, _)| {
+                wildcard_matches(key, tool) && wildcard_matches(pattern, resource)
+            })
+            .collect()
+    }
+
+    proptest! {
+        /// End-to-end oracle for the ordering check. For any permission map the
+        /// check *accepts*, replay opencode's own resolution over a probe: the
+        /// rule that wins must either agree with every other rule that matched,
+        /// or be narrower than it in both key and pattern. Anything else is an
+        /// inversion the check should have rejected.
+        #[test]
+        fn accepted_maps_never_let_a_broader_rule_win(
+            rules in proptest::collection::vec(
+                (
+                    "(\\*|bash|read|b\\*)",
+                    "(\\*|a\\*|ab|\\*b|a\\?|b)",
+                    "(allow|deny)",
+                ),
+                1..5,
+            ),
+            tool in "(bash|read)",
+            resource in "[ab]{0,3}",
+        ) {
+            let mut map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+            for (key, pattern, action) in rules {
+                map.entry(key).or_default().insert(pattern, action);
+            }
+            prop_assume!(check_rule_ordering(&map).is_ok());
+
+            let matched = opencode_resolution(&map, &tool, &resource);
+            let Some(winner) = matched.last() else { return Ok(()) };
+            for other in &matched {
+                if other.2 == winner.2 {
+                    continue;
+                }
+                prop_assert!(
+                    pattern_subsumes(other.0, winner.0) && pattern_subsumes(other.1, winner.1),
+                    "opencode would resolve ({tool:?}, {resource:?}) to {winner:?}, which is \
+                     not narrower than the also-matching {other:?} — the check accepted an \
+                     inverted map"
+                );
+            }
         }
     }
 

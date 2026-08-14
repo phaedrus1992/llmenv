@@ -324,9 +324,9 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
                     let name = match entry.get("name").and_then(|v| v.as_str()) {
                         Some(n) => n.to_string(),
                         None => {
-                            tracing::warn!(
-                                "marketplace entry skipped: missing or non-string 'name' field \
-                                 (entry = {:?})",
+                            eprintln!(
+                                "warning: marketplace entry skipped: missing or non-string 'name' \
+                                 field (entry = {:?})",
                                 entry
                             );
                             return None;
@@ -335,8 +335,9 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
                     let raw = match entry.get("source") {
                         Some(r) => r,
                         None => {
-                            tracing::warn!(
-                                "marketplace entry '{}': missing 'source' field — skipping entry",
+                            eprintln!(
+                                "warning: marketplace entry '{}': missing 'source' field — \
+                                 skipping entry",
                                 name
                             );
                             return None;
@@ -358,11 +359,10 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
                                 None => format!("npm:{pkg}"),
                             },
                             None => {
-                                tracing::warn!(
-                                    "marketplace entry '{}': npm-source object has no string \
-                                     'package' field (source = {:?}) — skipping entry",
-                                    name,
-                                    raw
+                                eprintln!(
+                                    "warning: marketplace entry '{}': npm-source object has no \
+                                     string 'package' field (source = {:?}) — skipping entry",
+                                    name, raw
                                 );
                                 return None;
                             }
@@ -371,11 +371,10 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
                         match raw.get("url").and_then(|v| v.as_str()) {
                             Some(u) => u.to_string(),
                             None => {
-                                tracing::warn!(
-                                    "marketplace entry '{}': object-form source has no string \
-                                     'url' field (source = {:?}) — skipping entry",
-                                    name,
-                                    raw
+                                eprintln!(
+                                    "warning: marketplace entry '{}': object-form source has no \
+                                     string 'url' field (source = {:?}) — skipping entry",
+                                    name, raw
                                 );
                                 return None;
                             }
