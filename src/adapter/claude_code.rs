@@ -70,10 +70,21 @@ const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
 /// Which engine-neutral lifecycle events get a `hook-run` registration for this
 /// manifest, and why.
 ///
-/// The gating lives here so `generate_settings_json` and `llmenv doctor` can't
-/// disagree about what is wired (#741) — doctor previously had no visibility
-/// into lifecycle hooks at all, and re-deriving the conditions would just be a
-/// second copy to drift.
+/// Exists so `llmenv doctor` reports what `generate_settings_json` actually
+/// writes (#741) rather than re-deriving it from scratch.
+///
+/// `turn_start`'s gate is read straight from here by the generator.
+/// `session_start`/`session_end` come from `BASELINE_HOOK_EVENTS`
+/// unconditionally, and `stop` is still derived independently in the
+/// session-log/task-tracker branch — folding that one in would mean
+/// restructuring how the whole session-log event set is emitted.
+///
+/// `lifecycle_registrations_match_the_generated_settings` is what keeps the
+/// independent gates honest: it renders settings for each combination and
+/// asserts this function agrees. Session logging is on in a default manifest,
+/// so fixtures that leave it that way can't tell the two halves of `stop`'s
+/// condition apart — the cases that disable it are the ones that make the
+/// assertion capable of failing.
 pub(crate) fn lifecycle_hook_registrations(
     manifest: &MergedManifest,
 ) -> Vec<(&'static str, bool, &'static str)> {
@@ -5375,6 +5386,30 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            // `stop`'s gate is the one still derived independently by the
+            // generator, so both of its enabling paths need covering.
+            // Session logging is on in a default manifest, so `stop` is
+            // registered either way there — these two isolate each half of its
+            // condition, which is what makes the assertion able to fail.
+            ("task tracker, no session log", {
+                let mut m = crate::merge::MergedManifest::default();
+                m.session_log.file = None;
+                m.session_log.transcript = None;
+                m.capabilities.features = Some(llmenv_config::Features {
+                    task_tracker: Some(llmenv_config::TaskTracker {
+                        enabled: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+                m
+            }),
+            ("neither session log nor task tracker", {
+                let mut m = crate::merge::MergedManifest::default();
+                m.session_log.file = None;
+                m.session_log.transcript = None;
+                m
+            }),
         ] {
             let registrations = super::lifecycle_hook_registrations(&manifest);
             let settings: serde_json::Value =
@@ -5389,9 +5424,13 @@ mod tests {
                 .collect();
 
             for (event, registered, why) in registrations {
+                // Space-delimited: `ends_with("stop")` also matches
+                // `subagent_stop`, which silently made this assertion pass on
+                // the wrong hook.
+                let suffix = format!(" {event}");
                 let present = commands
                     .iter()
-                    .any(|c| c.contains("hook-run") && c.ends_with(event));
+                    .any(|c| c.contains("hook-run") && c.ends_with(&suffix));
                 assert_eq!(
                     present,
                     registered,

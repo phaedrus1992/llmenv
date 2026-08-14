@@ -393,7 +393,10 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<()> {
         // would only add escape codes to the model's context.
         let use_color = crate::cli::should_use_color(None, false);
         if let Err(e) = crate::cli::run_check_stale(use_color, false) {
-            tracing::debug!("hook-run session_start: drift check failed (non-fatal): {e:#}");
+            // Visible, not `tracing::debug!`: the default `EnvFilter` is
+            // `ERROR`, so a debug line here would mean the user silently loses
+            // drift detection with no way to notice (#1345's lesson).
+            eprintln!("warning: llmenv could not check whether your config drifted: {e:#}");
         }
     }
 
