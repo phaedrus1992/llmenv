@@ -19,6 +19,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Only `keychain_service` hashes, and that is macOS/test-only — see its cfg.
+#[cfg(any(target_os = "macos", test))]
 use sha2::{Digest, Sha256};
 
 /// Credential store path relative to `CLAUDE_CONFIG_DIR`.
@@ -31,8 +33,14 @@ const MCP_OAUTH_KEY: &str = "mcpOAuth";
 /// Cache file name under the durable auth dir.
 pub(super) const CACHE_FILE: &str = "credentials.json";
 /// Service-name prefix Claude Code uses for its keychain credential item.
+///
+/// The keychain is macOS-only, so every non-test caller sits behind
+/// `cfg(target_os = "macos")`; without the same gate this is dead code on other
+/// targets, which only became visible once #1314 narrowed it from `pub`.
+#[cfg(any(target_os = "macos", test))]
 const KEYCHAIN_SERVICE_PREFIX: &str = "Claude Code-credentials";
 /// Hex characters of the config-dir digest Claude Code appends to the service.
+#[cfg(any(target_os = "macos", test))]
 const SERVICE_DIGEST_LEN: usize = 8;
 
 /// Where a materialized folder's OAuth token lives.
@@ -183,6 +191,7 @@ impl Credentials {
 /// The macOS keychain service name Claude Code derives from a config dir:
 /// `Claude Code-credentials-<sha256(path)[..8]>`.
 #[must_use]
+#[cfg(any(target_os = "macos", test))]
 fn keychain_service(config_dir: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(config_dir.to_string_lossy().as_bytes());
