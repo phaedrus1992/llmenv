@@ -76,7 +76,7 @@ pub use llmenv_config::MEMORY_MCP_NAME;
 
 /// Registration name for the codebase-memory-mcp server in the agent's MCP
 /// config.
-pub const CODEBASE_MEMORY_MCP_NAME: &str = "codebase-memory-mcp";
+pub(crate) const CODEBASE_MEMORY_MCP_NAME: &str = "codebase-memory-mcp";
 
 /// Errors raised while resolving MCP config for the active host.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -121,7 +121,7 @@ pub enum ResolveError {
 /// Returns a [`ResolveError`] when: a plain server is missing its required
 /// `command`/`url`; a memory backend references an unknown host; or more than
 /// one `memory` entry is active simultaneously ([`ResolveError::AmbiguousMemory`]).
-pub fn resolve_mcps(
+pub(crate) fn resolve_mcps(
     mcp: &[McpServer],
     memory: &[Memory],
     host: &BTreeMap<String, HostEntry>,
@@ -264,7 +264,7 @@ fn resolve_memory(
 /// # Errors
 /// Returns an error if the current directory or state directory can't be
 /// resolved.
-pub fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+pub(crate) fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
     let project_root = std::env::current_dir()?;
     let state_dir = crate::paths::state_dir()?;
     Ok((project_root, state_dir))
@@ -276,7 +276,7 @@ pub fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std::path:
 /// process per project. `CBM_CACHE_DIR` and `CBM_ALLOWED_ROOT` are always
 /// computed here, never left to the user, so a declared entry can't
 /// accidentally scope the indexer outside the intended project (#365).
-pub fn resolve_codebase_memory(
+fn resolve_codebase_memory(
     cm: &CodebaseMemory,
     project_root: &Path,
     state_dir: &Path,
@@ -324,7 +324,7 @@ pub fn resolve_codebase_memory(
 /// # Errors
 /// Returns [`ResolveError::AmbiguousCodebaseMemory`] when more than one entry
 /// is active simultaneously.
-pub fn resolve_codebase_memory_entries(
+pub(crate) fn resolve_codebase_memory_entries(
     entries: &[CodebaseMemory],
     active_tags: &BTreeSet<String>,
     project_root: &Path,

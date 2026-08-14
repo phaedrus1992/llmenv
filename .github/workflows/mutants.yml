@@ -1,0 +1,101 @@
+name: mutants
+# Mutation testing (#1233): coverage says a line ran, this says a test would
+# have noticed if it behaved differently.
+#
+# Deliberately not part of the `ci` workflow. Each mutant costs a rebuild plus a
+# full test run (~150s measured), so the scoped set in .cargo/mutants.toml is
+# ~30h serially — far too slow to gate a PR on. Instead:
+#
+#   in-diff  — PRs only test mutants on lines the PR actually changed, which is
+#              usually a handful, and fails if any survive.
+#   sweep    — the full scoped set, sharded, weekly. Report-only: the backlog is
+#              not clean yet, so failing here would just be permanently red.
+on:
+  pull_request:
+    paths:
+      - 'crates/llmenv-config/src/**'
+      - 'src/merge/**'
+      - 'src/hook_run/**'
+      - '.cargo/mutants.toml'
+      - '.github/workflows/mutants.yml'
+  schedule:
+    # Mondays 04:00 UTC — off-peak, and a week is long enough that the sweep's
+    # cost is amortized rather than blocking anyone.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  # Serialize rustup's component writes; parallel installs trip the runner's
+  # virtualized disk (os error 5, #553). Inert for steps that don't call rustup.
+  RUSTUP_IO_THREADS: "1"
+jobs:
+  in-diff:
+    name: mutants (changed lines)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # --in-diff needs the base commit present to diff against.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Detect CPU count
+        run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
+      - name: Diff against the merge base
+        # `base_ref` goes through the environment, not string interpolation — a
+        # branch name is attacker-controllable and would otherwise be pasted
+        # straight into the shell.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git diff "origin/${BASE_REF}"...HEAD > mutants-pr.diff
+          wc -l mutants-pr.diff
+      # Surviving mutants on lines this PR touched are the actionable case: the
+      # PR added or changed logic no test distinguishes from a wrong version.
+      - run: cargo mutants --workspace --in-diff mutants-pr.diff
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: mutants-in-diff
+          path: mutants.out/
+
+  sweep:
+    name: mutants (full sweep, shard ${{ matrix.shard }}/8)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    # Report-only, see the header: the scoped backlog has never been triaged, so
+    # a failing sweep would be red on day one and stay red.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Detect CPU count
+        run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
+      - run: cargo mutants --workspace --shard ${{ matrix.shard }}/8
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: mutants-sweep-${{ matrix.shard }}
+          path: mutants.out/

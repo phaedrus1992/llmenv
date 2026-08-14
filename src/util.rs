@@ -12,7 +12,7 @@ pub use llmenv_util::{dedup, merge_json, merge_yaml};
 /// config key, tool name, or pattern has no reason to contain either.
 ///
 /// Returns `s` unchanged (no allocation) when nothing needs escaping.
-pub fn display_safe(s: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn display_safe(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.chars().any(char::is_control) {
         return std::borrow::Cow::Borrowed(s);
     }

@@ -6,7 +6,7 @@
 //! by tag intersection (same model as memory).
 
 mod backend;
-pub use backend::{ThrottleBackend, UsageSnapshot, backend_for};
+pub(crate) use backend::{UsageSnapshot, backend_for};
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -24,7 +24,7 @@ use anyhow::Context;
 ///
 /// # Errors
 /// Returns an error if writing the state file fails.
-pub fn store_active_throttle(throttle: Option<&Throttle>) -> anyhow::Result<()> {
+pub(crate) fn store_active_throttle(throttle: Option<&Throttle>) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     store_active_throttle_with_state_dir(throttle, &state_dir)
 }
@@ -63,7 +63,7 @@ fn throttle_state_path(state_dir: &Path) -> std::path::PathBuf {
 ///
 /// # Errors
 /// Returns an error only if the state directory itself cannot be resolved.
-pub fn read_active_throttle() -> anyhow::Result<Option<Throttle>> {
+pub(crate) fn read_active_throttle() -> anyhow::Result<Option<Throttle>> {
     let state_dir = crate::paths::state_dir()?;
     read_active_throttle_with_state_dir(&state_dir)
 }
@@ -92,7 +92,7 @@ fn read_active_throttle_with_state_dir(state_dir: &Path) -> anyhow::Result<Optio
 ///
 /// # Errors
 /// Returns an error if more than one throttle entry is active.
-pub fn resolve_active_throttle(
+pub(crate) fn resolve_active_throttle(
     throttle: &[Throttle],
     active_tags: &BTreeSet<String>,
 ) -> anyhow::Result<Option<Throttle>> {
@@ -121,7 +121,7 @@ pub fn resolve_active_throttle(
 /// - `remaining == 0` → `max_wait`
 /// - `remaining < soft_threshold` → `max_wait * (soft_threshold - remaining) / soft_threshold`
 /// - otherwise → 0
-pub fn compute_delay(snapshot: &UsageSnapshot, cfg: &Throttle) -> Duration {
+fn compute_delay(snapshot: &UsageSnapshot, cfg: &Throttle) -> Duration {
     let max = Duration::from_secs(cfg.max_wait);
     if snapshot.penalized {
         return max;
@@ -144,7 +144,7 @@ pub fn compute_delay(snapshot: &UsageSnapshot, cfg: &Throttle) -> Duration {
 
 /// CLI entry for `llmenv throttle <event>`. Fail-soft: warns on stderr and
 /// exits 0 on any error. Never panics.
-pub fn run_throttle_hook(event: &str) {
+pub(crate) fn run_throttle_hook(event: &str) {
     use std::io::Read;
 
     // Consume stdin so the pipe doesn't break, even if we don't use the body.

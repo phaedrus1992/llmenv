@@ -19,13 +19,13 @@ use crate::materialize::manifest::normalize_rel;
 /// Folder name of the durable state directory, a sibling of the hashed config
 /// folders under an adapter's cache root. Has no content hash, so it is stable
 /// across every materialization.
-pub const STATE_DIR_NAME: &str = "state";
+pub(crate) const STATE_DIR_NAME: &str = "state";
 
 pub use llmenv_config::{RESERVED_STATE_ENV_VARS, STATE_DIR_ENV};
 /// The durable state directory for an adapter, given its cache root
 /// (`<cache_dir>/<adapter>`). Sibling to the hashed config folders.
 #[must_use]
-pub fn state_dir(adapter_root: &Path) -> PathBuf {
+pub(crate) fn state_dir(adapter_root: &Path) -> PathBuf {
     adapter_root.join(STATE_DIR_NAME)
 }
 
@@ -36,7 +36,7 @@ pub fn state_dir(adapter_root: &Path) -> PathBuf {
 /// compatibility. Pure: computes paths only, performs no I/O. Directory creation
 /// is [`ensure_state_dirs`].
 #[must_use]
-pub fn state_env_vars(cfg: &StateConfig, state_dir: &Path) -> Vec<(String, String)> {
+pub(crate) fn state_env_vars(cfg: &StateConfig, state_dir: &Path) -> Vec<(String, String)> {
     let mut vars = Vec::with_capacity(cfg.tools.len() + 1);
     vars.push((STATE_DIR_ENV.to_string(), normalize_rel(state_dir)));
     for tool in &cfg.tools {
@@ -54,7 +54,7 @@ pub fn state_env_vars(cfg: &StateConfig, state_dir: &Path) -> Vec<(String, Strin
 ///
 /// # Errors
 /// Returns an error if any directory cannot be created.
-pub fn ensure_state_dirs(cfg: &StateConfig, state_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn ensure_state_dirs(cfg: &StateConfig, state_dir: &Path) -> std::io::Result<()> {
     crate::paths::create_dir_owner_only(state_dir)?;
     for tool in &cfg.tools {
         crate::paths::create_dir_owner_only(&state_dir.join(&tool.subdir))?;
@@ -69,7 +69,7 @@ pub fn ensure_state_dirs(cfg: &StateConfig, state_dir: &Path) -> std::io::Result
 /// declared a `CONTEXT_MODE_DATA_DIR` tool (user config wins); otherwise returns
 /// a clone with the synthetic tool appended.
 #[must_use]
-pub fn effective_state_config(
+pub(crate) fn effective_state_config(
     cfg: &StateConfig,
     context_mode_enabled: bool,
 ) -> Cow<'_, StateConfig> {

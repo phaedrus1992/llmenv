@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 ///
 /// # Errors
 /// Propagates a failure to read the current working directory.
-pub fn current_tag() -> std::io::Result<String> {
+pub(crate) fn current_tag() -> std::io::Result<String> {
     let cwd = std::env::current_dir()?;
     let home = std::env::var("HOME")
         .ok()
@@ -43,7 +43,7 @@ pub fn current_tag() -> std::io::Result<String> {
 /// `id`, or a Unicode-heavy path) — reuses the same sanitizer task titles
 /// already go through rather than a second one.
 #[must_use]
-pub fn resolve_project_tag(cwd: &Path, home: Option<&Path>) -> String {
+fn resolve_project_tag(cwd: &Path, home: Option<&Path>) -> String {
     let (root, raw_name) = find_git_root(cwd)
         .map(|root| {
             let name = read_llmenv_yaml_id(&root).unwrap_or_else(|| basename(&root));

@@ -32,13 +32,13 @@ pub enum SyncError {
 
 /// Where all marketplace clones live, under the llmenv cache dir.
 #[must_use]
-pub fn marketplace_cache_root(cache_dir: &Path) -> PathBuf {
+fn marketplace_cache_root(cache_dir: &Path) -> PathBuf {
     cache_dir.join("marketplaces")
 }
 
 /// On-disk location for a single marketplace clone.
 #[must_use]
-pub fn marketplace_path(cache_dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn marketplace_path(cache_dir: &Path, name: &str) -> PathBuf {
     marketplace_cache_root(cache_dir).join(name)
 }
 
@@ -104,7 +104,7 @@ impl GitBackend for SystemGit {
 /// and refresh is false. Returns `SyncError::CloneFailed` if a git clone fails
 /// on first use. Returns `SyncError::Other` for path source resolution errors or
 /// when git HEAD cannot be resolved after a successful clone (broken clone).
-pub fn sync_marketplace(
+pub(crate) fn sync_marketplace(
     cache_dir: &Path,
     m: &Marketplace,
     refresh: bool,
@@ -283,7 +283,7 @@ fn sync_git(
 /// Stable path where an external plugin payload is cached, independent of any
 /// hash-keyed config dir so it survives config changes.
 #[must_use]
-pub fn plugin_payload_path(cache_dir: &Path, marketplace: &str, plugin: &str) -> PathBuf {
+fn plugin_payload_path(cache_dir: &Path, marketplace: &str, plugin: &str) -> PathBuf {
     cache_dir
         .join("plugin-payloads")
         .join(marketplace)
@@ -293,8 +293,8 @@ pub fn plugin_payload_path(cache_dir: &Path, marketplace: &str, plugin: &str) ->
 /// A plugin entry parsed from a marketplace's `.claude-plugin/marketplace.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketplacePluginEntry {
-    pub name: String,
-    pub source: String,
+    pub(crate) name: String,
+    pub(crate) source: String,
 }
 
 /// Parse plugin entries from a marketplace clone's `.claude-plugin/marketplace.json`.
@@ -302,7 +302,9 @@ pub struct MarketplacePluginEntry {
 ///
 /// # Errors
 /// Returns an error when the file exists but cannot be read or parsed.
-pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<MarketplacePluginEntry>> {
+pub(crate) fn read_marketplace_plugins(
+    marketplace_dir: &Path,
+) -> Result<Vec<MarketplacePluginEntry>> {
     let manifest_path = marketplace_dir
         .join(".claude-plugin")
         .join("marketplace.json");
@@ -394,7 +396,7 @@ pub fn read_marketplace_plugins(marketplace_dir: &Path) -> Result<Vec<Marketplac
 /// directory; npm sources (#1014) resolve through the target engine's own
 /// npm-install mechanism — llmenv has nothing to clone for either.
 #[must_use]
-pub fn is_external_plugin_source(source: &str) -> bool {
+pub(crate) fn is_external_plugin_source(source: &str) -> bool {
     !source.starts_with("./")
         && !source.starts_with("../")
         && !source.starts_with("npm:")
@@ -409,7 +411,7 @@ pub fn is_external_plugin_source(source: &str) -> bool {
 /// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
 /// is false. Returns `SyncError::CloneFailed` on clone failure. Returns
 /// `SyncError::Other` when git HEAD cannot be resolved after a successful clone.
-pub fn sync_external_plugin(
+pub(crate) fn sync_external_plugin(
     cache_dir: &Path,
     marketplace: &str,
     plugin: &str,
@@ -425,7 +427,7 @@ pub fn sync_external_plugin(
 /// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
 /// is false. Returns `SyncError::CloneFailed` on clone failure. Returns
 /// `SyncError::Other` when git HEAD cannot be resolved after a successful clone.
-pub fn sync_external_plugin_with(
+fn sync_external_plugin_with(
     cache_dir: &Path,
     marketplace: &str,
     plugin: &str,

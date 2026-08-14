@@ -57,9 +57,9 @@ pub struct ResolvedMarketplace {
 pub struct ResolvedPlugins {
     /// Selected plugins, deduplicated by `(marketplace, plugin)`, in stable
     /// order (collection declaration order, then plugin declaration order).
-    pub plugins: Vec<ResolvedPlugin>,
+    pub(crate) plugins: Vec<ResolvedPlugin>,
     /// Marketplaces referenced by `plugins`, in declaration order, deduplicated.
-    pub marketplaces: Vec<ResolvedMarketplace>,
+    pub(crate) marketplaces: Vec<ResolvedMarketplace>,
 }
 
 /// Errors raised while resolving plugin config for the active host.
@@ -148,7 +148,7 @@ fn inject_context_mode(
 /// or a plugin referencing a marketplace not declared at the top level.
 /// (Validation catches these too, but resolution must not silently emit garbage
 /// when called on a config that bypassed validation.)
-pub fn resolve_plugins(
+pub(crate) fn resolve_plugins(
     config: &Config,
     active_tags: &BTreeSet<String>,
 ) -> Result<ResolvedPlugins, ResolveError> {

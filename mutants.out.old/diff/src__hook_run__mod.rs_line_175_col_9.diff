@@ -1,0 +1,38 @@
+--- src/hook_run/mod.rs
++++ replace <impl FromStr for HookEvent>::from_str -> Result<Self, Self::Err> with Ok(Default::default())
+@@ -167,34 +167,17 @@
+     SubagentStop,
+     /// About to compact the transcript (Claude Code: `PreCompact`).
+     PreCompact,
+ }
+ 
+ impl FromStr for HookEvent {
+     type Err = anyhow::Error;
+     fn from_str(s: &str) -> Result<Self, Self::Err> {
+-        match s {
+-            "session_start" => Ok(HookEvent::SessionStart),
+-            "turn_start" => Ok(HookEvent::TurnStart),
+-            "session_end" => Ok(HookEvent::SessionEnd),
+-            "user_prompt_submit" => Ok(HookEvent::UserPromptSubmit),
+-            "post_session" => Ok(HookEvent::PostSession),
+-            "pre_tool_use" => Ok(HookEvent::PreToolUse),
+-            "post_tool_use" => Ok(HookEvent::PostToolUse),
+-            "notification" => Ok(HookEvent::Notification),
+-            "stop" => Ok(HookEvent::Stop),
+-            "subagent_stop" => Ok(HookEvent::SubagentStop),
+-            "pre_compact" => Ok(HookEvent::PreCompact),
+-            other => Err(anyhow::anyhow!(
+-                "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
+-                 user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
+-                 subagent_stop|pre_compact)"
+-            )),
+-        }
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ impl std::fmt::Display for HookEvent {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         let s = match self {
+             HookEvent::SessionStart => "session_start",
+             HookEvent::TurnStart => "turn_start",

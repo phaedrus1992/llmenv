@@ -16,14 +16,14 @@ use crate::config::Throttle;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UsageSnapshot {
     /// Requests remaining in the current window, if known.
-    pub remaining: Option<u64>,
+    pub(crate) remaining: Option<u64>,
     /// Total request limit for the window, if known.
-    pub limit: Option<u64>,
+    pub(crate) limit: Option<u64>,
     /// ISO8601 timestamp when the window resets, if known.
-    pub resets_at: Option<String>,
+    pub(crate) resets_at: Option<String>,
     /// True when the server is deprioritizing us (low-priority queue or
     /// boxed_until in the future).
-    pub penalized: bool,
+    pub(crate) penalized: bool,
 }
 
 /// Fetch fresh usage data from the backend.

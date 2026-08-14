@@ -1,0 +1,322 @@
+
+*** src/hook_run/mod.rs:255:5: replace event_to_log_kind -> Option<(EventKind, &'static str)> with Some((Default::default(), ""))
+
+*** mutation diff:
+--- src/hook_run/mod.rs
++++ replace event_to_log_kind -> Option<(EventKind, &'static str)> with Some((Default::default(), ""))
+@@ -247,26 +247,17 @@
+         HookEvent::PostSession => vec![], // consolidation runs as a separate step
+     }
+ }
+ 
+ /// Maps a `HookEvent` to its session-log `(kind, role)`. `None` for
+ /// the lifecycle/memory events (`SessionStart`/`TurnStart`/`SessionEnd`),
+ /// which `handle_session_log` handles separately.
+ fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
+-    match event {
+-        HookEvent::UserPromptSubmit => Some((EventKind::Prompt, "user")),
+-        HookEvent::PreToolUse => Some((EventKind::ToolUse, "tool")),
+-        HookEvent::PostToolUse => Some((EventKind::ToolResult, "tool")),
+-        HookEvent::Notification => Some((EventKind::Notification, "system")),
+-        HookEvent::Stop | HookEvent::SubagentStop => Some((EventKind::Stop, "assistant")),
+-        HookEvent::PreCompact => Some((EventKind::Notification, "system")),
+-        HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => None,
+-        HookEvent::PostSession => None, // consolidation runs as a separate step
+-    }
++    Some((Default::default(), "")) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Extract `(tool_name, content)` for a hook event from Claude's hook stdin
+ /// payload. Field names per the Claude Code hooks reference: prompt text on
+ /// `UserPromptSubmit` is `prompt`; tool calls carry `tool_name` +
+ /// `tool_input` (`PreToolUse`) or `tool_input` + `tool_response`
+ /// (`PostToolUse`); `Notification` carries `message`; `Stop`/`SubagentStop`
+ /// carry `last_assistant_message`; `PreCompact` carries `trigger`.
+
+
+*** /Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --no-run --verbose --package=llmenv@3.10.0
+[1m[92m       Fresh[0m unicode-ident v1.0.24
+[1m[92m       Fresh[0m memchr v2.8.3
+[1m[92m       Fresh[0m once_cell v1.21.4
+[1m[92m       Fresh[0m cfg-if v1.0.4
+[1m[92m       Fresh[0m itoa v1.0.18
+[1m[92m       Fresh[0m pin-project-lite v0.2.17
+[1m[92m       Fresh[0m find-msvc-tools v0.1.10
+[1m[92m       Fresh[0m shlex v2.0.1
+[1m[92m       Fresh[0m proc-macro2 v1.0.107
+[1m[92m       Fresh[0m stable_deref_trait v1.2.1
+[1m[92m       Fresh[0m futures-core v0.3.34
+[1m[92m       Fresh[0m bytes v1.12.1
+[1m[92m       Fresh[0m futures-sink v0.3.34
+[1m[92m       Fresh[0m regex-syntax v0.8.11
+[1m[92m       Fresh[0m pkg-config v0.3.33
+[1m[92m       Fresh[0m quote v1.0.47
+[1m[92m       Fresh[0m libc v0.2.189
+[1m[92m       Fresh[0m bitflags v2.13.1
+[1m[92m       Fresh[0m dunce v1.0.5
+[1m[92m       Fresh[0m fs_extra v1.3.0
+[1m[92m       Fresh[0m tracing-core v0.1.36
+[1m[92m       Fresh[0m smallvec v1.15.2
+[1m[92m       Fresh[0m syn v3.0.3
+[1m[92m       Fresh[0m syn v2.0.119
+[1m[92m       Fresh[0m errno v0.3.14
+[1m[92m       Fresh[0m jobserver v0.1.35
+[1m[92m       Fresh[0m serde_core v1.0.229
+[1m[92m       Fresh[0m socket2 v0.6.5
+[1m[92m       Fresh[0m mio v1.2.2
+[1m[92m       Fresh[0m slab v0.4.12
+[1m[92m       Fresh[0m futures-channel v0.3.34
+[1m[92m       Fresh[0m synstructure v0.13.2
+[1m[92m       Fresh[0m cc v1.4.2
+[1m[92m       Fresh[0m zerovec-derive v0.11.3
+[1m[92m       Fresh[0m serde_derive v1.0.229
+[1m[92m       Fresh[0m displaydoc v0.2.7
+[1m[92m       Fresh[0m signal-hook-registry v1.4.8
+[1m[92m       Fresh[0m tokio-macros v2.7.2
+[1m[92m       Fresh[0m zmij v1.0.23
+[1m[92m       Fresh[0m aho-corasick v1.1.5
+[1m[92m       Fresh[0m writeable v0.6.3
+[1m[92m       Fresh[0m zerofrom-derive v0.1.7
+[1m[92m       Fresh[0m yoke-derive v0.8.2
+[1m[92m       Fresh[0m serde v1.0.229
+[1m[92m       Fresh[0m cmake v0.1.58
+[1m[92m       Fresh[0m tokio v1.53.1
+[1m[92m       Fresh[0m autocfg v1.5.1
+[1m[92m       Fresh[0m litemap v0.8.2
+[1m[92m       Fresh[0m equivalent v1.0.2
+[1m[92m       Fresh[0m hashbrown v0.17.1
+[1m[92m       Fresh[0m serde_json v1.0.151
+[1m[92m       Fresh[0m regex-automata v0.4.18
+[1m[92m       Fresh[0m zerofrom v0.1.8
+[1m[92m       Fresh[0m indexmap v2.14.0
+[1m[92m       Fresh[0m zerocopy-derive v0.8.56
+[1m[92m       Fresh[0m futures-macro v0.3.34
+[1m[92m       Fresh[0m tracing-attributes v0.1.31
+[1m[92m       Fresh[0m http v1.5.0
+[1m[92m       Fresh[0m utf8_iter v1.0.4
+[1m[92m       Fresh[0m yoke v0.8.3
+[1m[92m       Fresh[0m futures-task v0.3.34
+[1m[92m       Fresh[0m fnv v1.0.7
+[1m[92m       Fresh[0m zeroize v1.9.0
+[1m[92m       Fresh[0m futures-io v0.3.34
+[1m[92m       Fresh[0m zerocopy v0.8.56
+[1m[92m       Fresh[0m tracing v0.1.44
+[1m[92m       Fresh[0m zerovec v0.11.6
+[1m[92m       Fresh[0m zerotrie v0.2.4
+[1m[92m       Fresh[0m futures-util v0.3.34
+[1m[92m       Fresh[0m num-traits v0.2.19
+[1m[92m       Fresh[0m aws-lc-sys v0.44.0
+[1m[92m       Fresh[0m tinystr v0.8.3
+[1m[92m       Fresh[0m potential_utf v0.1.5
+[1m[92m       Fresh[0m icu_normalizer_data v2.2.0
+[1m[92m       Fresh[0m icu_properties_data v2.2.0
+[1m[92m       Fresh[0m http-body v1.1.0
+[1m[92m       Fresh[0m anstyle v1.0.14
+[1m[92m       Fresh[0m percent-encoding v2.3.2
+[1m[92m       Fresh[0m icu_locale_core v2.2.0
+[1m[92m       Fresh[0m icu_collections v2.2.0
+[1m[92m       Fresh[0m getrandom v0.4.3
+[1m[92m       Fresh[0m getrandom v0.3.4
+[1m[92m       Fresh[0m rustix v1.1.4
+[1m[92m       Fresh[0m aws-lc-rs v1.18.0
+[1m[92m       Fresh[0m rustls-pki-types v1.15.1
+[1m[92m       Fresh[0m tokio-util v0.7.19
+[1m[92m       Fresh[0m untrusted v0.9.0
+[1m[92m       Fresh[0m tower-service v0.3.3
+[1m[92m       Fresh[0m icu_provider v2.2.0
+[1m[92m       Fresh[0m log v0.4.33
+[1m[92m       Fresh[0m fastrand v2.5.0
+[1m[92m       Fresh[0m try-lock v0.2.5
+[1m[92m       Fresh[0m atomic-waker v1.1.2
+[1m[92m       Fresh[0m utf8parse v0.2.2
+[1m[92m       Fresh[0m rustls-webpki v0.103.14
+[1m[92m       Fresh[0m rand_core v0.9.5
+[1m[92m       Fresh[0m httparse v1.10.1
+[1m[92m       Fresh[0m unicode-width v0.2.2
+[1m[92m       Fresh[0m icu_normalizer v2.2.0
+[1m[92m       Fresh[0m icu_properties v2.2.0
+[1m[92m       Fresh[0m anstyle-parse v1.0.0
+[1m[92m       Fresh[0m h2 v0.4.15
+[1m[92m       Fresh[0m tempfile v3.27.0
+[1m[92m       Fresh[0m want v0.3.1
+[1m[92m       Fresh[0m anstyle-query v1.1.5
+[1m[92m       Fresh[0m subtle v2.6.1
+[1m[92m       Fresh[0m httpdate v1.0.3
+[1m[92m       Fresh[0m colorchoice v1.0.5
+[1m[92m       Fresh[0m idna_adapter v1.2.2
+[1m[92m       Fresh[0m typenum v1.20.1
+[1m[92m       Fresh[0m is_terminal_polyfill v1.70.2
+[1m[92m       Fresh[0m core-foundation-sys v0.8.7
+[1m[92m       Fresh[0m hyper v1.11.0
+[1m[92m       Fresh[0m rustls v0.23.43
+[1m[92m       Fresh[0m form_urlencoded v1.2.2
+[1m[92m       Fresh[0m wait-timeout v0.2.1
+[1m[92m       Fresh[0m base64 v0.22.1
+[1m[92m       Fresh[0m heck v0.5.0
+[1m[92m       Fresh[0m idna v1.1.0
+[1m[92m       Fresh[0m anstream v1.0.0
+[1m[92m       Fresh[0m hybrid-array v0.4.14
+[1m[92m       Fresh[0m clap_lex v1.1.0
+[1m[92m       Fresh[0m lazy_static v1.5.0
+[1m[92m       Fresh[0m strsim v0.11.1
+[1m[92m       Fresh[0m ipnet v2.12.1
+[1m[92m       Fresh[0m clap_derive v4.6.4
+[1m[92m       Fresh[0m url v2.5.8
+[1m[92m       Fresh[0m clap_builder v4.6.6
+[1m[92m       Fresh[0m crossbeam-utils v0.8.22
+[1m[92m       Fresh[0m hyper-util v0.1.20
+[1m[92m       Fresh[0m core-foundation v0.10.1
+[1m[92m       Fresh[0m security-framework-sys v2.17.0
+[1m[92m       Fresh[0m ppv-lite86 v0.2.21
+[1m[92m       Fresh[0m sync_wrapper v1.0.2
+[1m[92m       Fresh[0m quick-error v1.2.3
+[1m[92m       Fresh[0m unsafe-libyaml v0.2.11
+[1m[92m       Fresh[0m ryu v1.0.23
+[1m[92m       Fresh[0m tower-layer v0.3.3
+[1m[92m       Fresh[0m bit-vec v0.8.0
+[1m[92m       Fresh[0m crossbeam-epoch v0.9.20
+[1m[92m       Fresh[0m rand_chacha v0.9.0
+[1m[92m       Fresh[0m anyhow v1.0.104
+[1m[92m       Fresh[0m clap v4.6.6
+[1m[92m       Fresh[0m rusty-fork v0.3.1
+[1m[92m       Fresh[0m tower v0.5.3
+[1m[92m       Fresh[0m serde_yaml_ng v0.10.0
+[1m[92m       Fresh[0m bit-set v0.8.0
+[1m[92m       Fresh[0m security-framework v3.7.0
+[1m[92m       Fresh[0m block-buffer v0.12.1
+[1m[92m       Fresh[0m crypto-common v0.2.2
+[1m[92m       Fresh[0m tokio-rustls v0.26.4
+[1m[92m       Fresh[0m rand v0.9.5
+[1m[92m       Fresh[0m console v0.16.4
+[1m[92m       Fresh[0m rand_xorshift v0.4.0
+[1m[92m       Fresh[0m http-body-util v0.1.4
+[1m[92m       Fresh[0m regex v1.13.1
+[1m[92m       Fresh[0m bstr v1.13.1
+[1m[92m       Fresh[0m serde_derive_internals v0.30.0
+[1m[92m       Fresh[0m ref-cast-impl v1.0.26
+[1m[92m       Fresh[0m thiserror-impl v2.0.20
+[1m[92m       Fresh[0m same-file v1.0.6
+[1m[92m       Fresh[0m unarray v0.1.4
+[1m[92m       Fresh[0m either v1.17.0
+[1m[92m       Fresh[0m option-ext v0.2.0
+[1m[92m       Fresh[0m const-oid v0.10.2
+[1m[92m       Fresh[0m schemars_derive v1.2.2
+[1m[92m       Fresh[0m ref-cast v1.0.26
+[1m[92m       Fresh[0m walkdir v2.5.0
+[1m[92m       Fresh[0m thiserror v2.0.20
+[1m[92m       Fresh[0m hyper-rustls v0.27.9
+[1m[92m       Fresh[0m dirs-sys v0.5.0
+[1m[92m       Fresh[0m proptest v1.11.0
+[1m[92m       Fresh[0m digest v0.11.3
+[1m[92m       Fresh[0m rustls-platform-verifier v0.7.0
+[1m[92m       Fresh[0m crossbeam-deque v0.8.7
+[1m[92m       Fresh[0m tower-http v0.6.11
+[1m[92m       Fresh[0m llmenv-paths v3.10.0 (/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/crates/llmenv-paths)
+[1m[92m       Fresh[0m sharded-slab v0.1.7
+[1m[92m       Fresh[0m tracing-log v0.2.0
+[1m[92m       Fresh[0m getopts v0.2.24
+[1m[92m       Fresh[0m half v2.7.1
+[1m[92m       Fresh[0m tracing-serde v0.2.0
+[1m[92m       Fresh[0m matchers v0.2.0
+[1m[92m       Fresh[0m cpufeatures v0.3.0
+[1m[92m       Fresh[0m thread_local v1.1.10
+[1m[92m       Fresh[0m pulldown-cmark-escape v0.11.0
+[1m[92m       Fresh[0m dyn-clone v1.0.20
+[1m[92m       Fresh[0m predicates-core v1.0.10
+[1m[92m       Fresh[0m unicase v2.9.0
+[1m[92m       Fresh[0m plotters-backend v0.3.7
+[1m[92m       Fresh[0m nu-ansi-term v0.50.3
+[1m[92m       Fresh[0m jiff-core v0.1.0
+[1m[92m       Fresh[0m shell-words v1.1.1
+[1m[92m       Fresh[0m ciborium-io v0.2.2
+[1m[92m       Fresh[0m sha2 v0.11.0
+[1m[92m       Fresh[0m plotters-svg v0.3.7
+[1m[92m       Fresh[0m pulldown-cmark v0.13.4
+[1m[92m       Fresh[0m schemars v1.2.2
+[1m[92m       Fresh[0m directories v6.0.0
+[1m[92m       Dirty[0m llmenv v3.10.0 (/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp): the file `.git/HEAD` is missing
+[1m[92m   Compiling[0m llmenv v3.10.0 (/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp)
+[1m[92m       Fresh[0m jiff v0.2.35
+[1m[92m       Fresh[0m tracing-subscriber v0.3.23
+[1m[92m       Fresh[0m ciborium-ll v0.2.2
+[1m[92m       Fresh[0m dialoguer v0.12.0
+[1m[92m       Fresh[0m rayon-core v1.13.0
+[1m[92m       Fresh[0m llmenv-config v3.10.0 (/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/crates/llmenv-config)
+[1m[92m       Fresh[0m llmenv-util v3.10.0 (/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/crates/llmenv-util)
+[1m[92m       Fresh[0m reqwest v0.13.4
+[1m[92m       Fresh[0m itertools v0.13.0
+[1m[92m       Fresh[0m globset v0.4.20
+[1m[92m     Running[0m `/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/build/llmenv-ac07fa50ae2fcf1f/build-script-build`
+[1m[92m       Fresh[0m clap_complete v4.6.9
+[1m[92m       Fresh[0m float-cmp v0.10.0
+[1m[92m       Fresh[0m futures-executor v0.3.34
+[1m[92m       Fresh[0m llmenv-git v3.10.0 (/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/crates/llmenv-git)
+[1m[92m       Fresh[0m num_cpus v1.17.0
+[1m[92m       Fresh[0m cast v0.3.0
+[1m[92m       Fresh[0m difflib v0.4.0
+[1m[92m       Fresh[0m hex v0.4.3
+[1m[92m       Fresh[0m glob v0.3.4
+[1m[92m       Fresh[0m termtree v0.5.1
+[1m[92m       Fresh[0m humantime v2.4.0
+[1m[92m       Fresh[0m deadpool-runtime v0.1.4
+[1m[92m       Fresh[0m normalize-line-endings v0.3.0
+[1m[92m       Fresh[0m futures v0.3.34
+[1m[92m       Fresh[0m criterion-plot v0.8.2
+[1m[92m       Fresh[0m rayon v1.12.0
+[1m[92m       Fresh[0m ciborium v0.2.2
+[1m[92m       Fresh[0m alloca v0.4.0
+[1m[92m       Fresh[0m deadpool v0.12.3
+[1m[92m       Fresh[0m predicates v3.1.4
+[1m[92m       Fresh[0m predicates-tree v1.0.13
+[1m[92m       Fresh[0m plotters v0.3.7
+[1m[92m       Fresh[0m tinytemplate v1.2.1
+[1m[92m       Fresh[0m assert-json-diff v2.0.2
+[1m[92m       Fresh[0m page_size v0.6.0
+[1m[92m       Fresh[0m oorandom v11.1.5
+[1m[92m       Fresh[0m similar v2.7.0
+[1m[92m       Fresh[0m anes v0.1.6
+[1m[92m       Fresh[0m criterion v0.8.2
+[1m[92m       Fresh[0m wiremock v0.6.5
+[1m[92m       Fresh[0m assert_cmd v2.2.2
+[1m[92m       Fresh[0m insta v1.48.0
+[1m[92m       Fresh[0m filetime v0.2.29
+[1m[92m     Running[0m `sccache rustc --crate-name llmenv --edition=2024 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked '--deny=clippy::unwrap_used' --forbid=unsafe_code '--deny=clippy::panic' '--deny=clippy::expect_used' --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=3c716e6adafbb1ed -C extra-filename=-586d1d87cdfb2da7 --out-dir /Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps -C incremental=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/incremental -L dependency=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps --extern anstyle=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libanstyle-bf1c531c98e1a5ba.rlib --extern anyhow=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libanyhow-a3e722315030dbb7.rlib --extern assert_cmd=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libassert_cmd-9c279d2f850f6ad7.rlib --extern clap=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libclap-64f7be361aaf08fa.rlib --extern clap_complete=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libclap_complete-8b9d5295e16bd7e6.rlib --extern criterion=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libcriterion-dbf0cca54eba7d5d.rlib --extern dialoguer=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libdialoguer-62d9097f37628f32.rlib --extern directories=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libdirectories-1eab8e3fa550ea96.rlib --extern filetime=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libfiletime-b281b0f47421864c.rlib --extern glob=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libglob-874f5def4bcc88d5.rlib --extern globset=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libglobset-5cb1a3f712fc7cd8.rlib --extern hex=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libhex-aa3171ad8c679914.rlib --extern humantime=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libhumantime-3f3c4eaf350ad4c3.rlib --extern insta=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libinsta-6cf0871c6a0d74c6.rlib --extern jiff=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libjiff-fe4d9657bf255979.rlib --extern llmenv_config=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_config-bda114fb3bbbfc45.rlib --extern llmenv_git=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_git-8737eba06c88bfac.rlib --extern llmenv_paths=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_paths-16af9cc906cd327d.rlib --extern llmenv_util=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_util-a33ee0f0c97da9c5.rlib --extern predicates=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libpredicates-e0de14d59310a471.rlib --extern proptest=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libproptest-e86716d501a0d8c4.rlib --extern pulldown_cmark=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libpulldown_cmark-dbd9ae8abd847eaa.rlib --extern reqwest=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libreqwest-ef060eae3e30d602.rlib --extern rustix=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/librustix-96b6e34d21d34eeb.rlib --extern schemars=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libschemars-6fb0e54e250c898d.rlib --extern security_framework=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libsecurity_framework-74a8d43d60675235.rlib --extern serde=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde-9d3740bcdacb24fc.rlib --extern serde_json=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde_json-ddf8f21541788469.rlib --extern serde_yaml=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde_yaml_ng-175bde2ec1cb6187.rlib --extern sha2=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libsha2-b1e759e8cbc2bcae.rlib --extern tempfile=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtempfile-acd27f4466016882.rlib --extern thiserror=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libthiserror-d333bad7d1521457.rlib --extern tokio=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtokio-10757fdd5dc95fb5.rlib --extern tracing=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtracing-d7a5fe9d430f9bb4.rlib --extern tracing_subscriber=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtracing_subscriber-eab767e29cb7338a.rlib --extern url=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/liburl-f7f05f6c941ec101.rlib --extern walkdir=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libwalkdir-7a01f55ad3720f01.rlib --extern wiremock=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libwiremock-98a3c4e78cc30142.rlib -L native=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/build/alloca-4a2ab6a24d864ec8/out -L native=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/build/aws-lc-sys-b2cc35b12a07c0e8/out`
+[1m[92m     Running[0m `sccache rustc --crate-name llmenv --edition=2024 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked '--deny=clippy::unwrap_used' --forbid=unsafe_code '--deny=clippy::panic' '--deny=clippy::expect_used' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=ad2163784cdf05bd -C extra-filename=-4a2863747f7c2221 --out-dir /Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps -C incremental=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/incremental -L dependency=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps --extern anstyle=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libanstyle-bf1c531c98e1a5ba.rmeta --extern anyhow=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libanyhow-a3e722315030dbb7.rmeta --extern clap=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libclap-64f7be361aaf08fa.rmeta --extern clap_complete=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libclap_complete-8b9d5295e16bd7e6.rmeta --extern dialoguer=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libdialoguer-62d9097f37628f32.rmeta --extern directories=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libdirectories-1eab8e3fa550ea96.rmeta --extern glob=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libglob-874f5def4bcc88d5.rmeta --extern globset=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libglobset-5cb1a3f712fc7cd8.rmeta --extern hex=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libhex-aa3171ad8c679914.rmeta --extern humantime=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libhumantime-3f3c4eaf350ad4c3.rmeta --extern jiff=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libjiff-fe4d9657bf255979.rmeta --extern llmenv_config=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_config-bda114fb3bbbfc45.rmeta --extern llmenv_git=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_git-8737eba06c88bfac.rmeta --extern llmenv_paths=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_paths-16af9cc906cd327d.rmeta --extern llmenv_util=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_util-a33ee0f0c97da9c5.rmeta --extern pulldown_cmark=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libpulldown_cmark-dbd9ae8abd847eaa.rmeta --extern reqwest=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libreqwest-ef060eae3e30d602.rmeta --extern rustix=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/librustix-96b6e34d21d34eeb.rmeta --extern schemars=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libschemars-6fb0e54e250c898d.rmeta --extern security_framework=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libsecurity_framework-74a8d43d60675235.rmeta --extern serde=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde-9d3740bcdacb24fc.rmeta --extern serde_json=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde_json-ddf8f21541788469.rmeta --extern serde_yaml=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde_yaml_ng-175bde2ec1cb6187.rmeta --extern sha2=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libsha2-b1e759e8cbc2bcae.rmeta --extern tempfile=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtempfile-acd27f4466016882.rmeta --extern thiserror=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libthiserror-d333bad7d1521457.rmeta --extern tokio=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtokio-10757fdd5dc95fb5.rmeta --extern tracing=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtracing-d7a5fe9d430f9bb4.rmeta --extern tracing_subscriber=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtracing_subscriber-eab767e29cb7338a.rmeta --extern url=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/liburl-f7f05f6c941ec101.rmeta --extern walkdir=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libwalkdir-7a01f55ad3720f01.rmeta -L native=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/build/aws-lc-sys-b2cc35b12a07c0e8/out`
+[1m[91merror[E0277][0m[1m: the trait bound `EventKind: std::default::Default` is not satisfied[0m
+   [1m[94m--> [0msrc/hook_run/mod.rs:255:11
+    [1m[94m|[0m
+[1m[94m255[0m [1m[94m|[0m     Some((Default::default(), "")) /* ~ changed by cargo-mutants ~ */
+    [1m[94m|[0m           [1m[91m^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `std::default::Default` is not implemented for `EventKind`[0m
+    [1m[94m|[0m
+[1m[96mhelp[0m: consider annotating `EventKind` with `#[derive(Default)]`
+   [1m[94m--> [0msrc/session_log/event.rs:21:1
+    [1m[94m|[0m
+[1m[94m 21[0m [92m+ #[derive(Default)][0m
+[1m[94m 22[0m [1m[94m|[0m pub enum EventKind {
+    [1m[94m|[0m
+
+[1mFor more information about this error, try `rustc --explain E0277`.[0m
+[1m[91merror[0m: could not compile `llmenv` (lib) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `sccache rustc --crate-name llmenv --edition=2024 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked '--deny=clippy::unwrap_used' --forbid=unsafe_code '--deny=clippy::panic' '--deny=clippy::expect_used' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=ad2163784cdf05bd -C extra-filename=-4a2863747f7c2221 --out-dir /Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps -C incremental=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/incremental -L dependency=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps --extern anstyle=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libanstyle-bf1c531c98e1a5ba.rmeta --extern anyhow=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libanyhow-a3e722315030dbb7.rmeta --extern clap=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libclap-64f7be361aaf08fa.rmeta --extern clap_complete=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libclap_complete-8b9d5295e16bd7e6.rmeta --extern dialoguer=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libdialoguer-62d9097f37628f32.rmeta --extern directories=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libdirectories-1eab8e3fa550ea96.rmeta --extern glob=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libglob-874f5def4bcc88d5.rmeta --extern globset=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libglobset-5cb1a3f712fc7cd8.rmeta --extern hex=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libhex-aa3171ad8c679914.rmeta --extern humantime=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libhumantime-3f3c4eaf350ad4c3.rmeta --extern jiff=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libjiff-fe4d9657bf255979.rmeta --extern llmenv_config=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_config-bda114fb3bbbfc45.rmeta --extern llmenv_git=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_git-8737eba06c88bfac.rmeta --extern llmenv_paths=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_paths-16af9cc906cd327d.rmeta --extern llmenv_util=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_util-a33ee0f0c97da9c5.rmeta --extern pulldown_cmark=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libpulldown_cmark-dbd9ae8abd847eaa.rmeta --extern reqwest=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libreqwest-ef060eae3e30d602.rmeta --extern rustix=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/librustix-96b6e34d21d34eeb.rmeta --extern schemars=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libschemars-6fb0e54e250c898d.rmeta --extern security_framework=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libsecurity_framework-74a8d43d60675235.rmeta --extern serde=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde-9d3740bcdacb24fc.rmeta --extern serde_json=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde_json-ddf8f21541788469.rmeta --extern serde_yaml=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde_yaml_ng-175bde2ec1cb6187.rmeta --extern sha2=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libsha2-b1e759e8cbc2bcae.rmeta --extern tempfile=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtempfile-acd27f4466016882.rmeta --extern thiserror=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libthiserror-d333bad7d1521457.rmeta --extern tokio=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtokio-10757fdd5dc95fb5.rmeta --extern tracing=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtracing-d7a5fe9d430f9bb4.rmeta --extern tracing_subscriber=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtracing_subscriber-eab767e29cb7338a.rmeta --extern url=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/liburl-f7f05f6c941ec101.rmeta --extern walkdir=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libwalkdir-7a01f55ad3720f01.rmeta -L native=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/build/aws-lc-sys-b2cc35b12a07c0e8/out` (exit status: 1)
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[91merror[E0277][0m[1m: the trait bound `session_log::event::EventKind: std::default::Default` is not satisfied[0m
+   [1m[94m--> [0msrc/hook_run/mod.rs:255:11
+    [1m[94m|[0m
+[1m[94m255[0m [1m[94m|[0m     Some((Default::default(), "")) /* ~ changed by cargo-mutants ~ */
+    [1m[94m|[0m           [1m[91m^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `std::default::Default` is not implemented for `session_log::event::EventKind`[0m
+    [1m[94m|[0m
+[1m[96mhelp[0m: consider annotating `session_log::event::EventKind` with `#[derive(Default)]`
+   [1m[94m--> [0msrc/session_log/event.rs:21:1
+    [1m[94m|[0m
+[1m[94m 21[0m [92m+ #[derive(Default)][0m
+[1m[94m 22[0m [1m[94m|[0m pub enum EventKind {
+    [1m[94m|[0m
+
+[1m[91merror[0m: could not compile `llmenv` (lib test) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `sccache rustc --crate-name llmenv --edition=2024 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked '--deny=clippy::unwrap_used' --forbid=unsafe_code '--deny=clippy::panic' '--deny=clippy::expect_used' --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=3c716e6adafbb1ed -C extra-filename=-586d1d87cdfb2da7 --out-dir /Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps -C incremental=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/incremental -L dependency=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps --extern anstyle=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libanstyle-bf1c531c98e1a5ba.rlib --extern anyhow=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libanyhow-a3e722315030dbb7.rlib --extern assert_cmd=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libassert_cmd-9c279d2f850f6ad7.rlib --extern clap=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libclap-64f7be361aaf08fa.rlib --extern clap_complete=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libclap_complete-8b9d5295e16bd7e6.rlib --extern criterion=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libcriterion-dbf0cca54eba7d5d.rlib --extern dialoguer=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libdialoguer-62d9097f37628f32.rlib --extern directories=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libdirectories-1eab8e3fa550ea96.rlib --extern filetime=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libfiletime-b281b0f47421864c.rlib --extern glob=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libglob-874f5def4bcc88d5.rlib --extern globset=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libglobset-5cb1a3f712fc7cd8.rlib --extern hex=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libhex-aa3171ad8c679914.rlib --extern humantime=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libhumantime-3f3c4eaf350ad4c3.rlib --extern insta=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libinsta-6cf0871c6a0d74c6.rlib --extern jiff=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libjiff-fe4d9657bf255979.rlib --extern llmenv_config=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_config-bda114fb3bbbfc45.rlib --extern llmenv_git=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_git-8737eba06c88bfac.rlib --extern llmenv_paths=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_paths-16af9cc906cd327d.rlib --extern llmenv_util=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libllmenv_util-a33ee0f0c97da9c5.rlib --extern predicates=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libpredicates-e0de14d59310a471.rlib --extern proptest=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libproptest-e86716d501a0d8c4.rlib --extern pulldown_cmark=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libpulldown_cmark-dbd9ae8abd847eaa.rlib --extern reqwest=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libreqwest-ef060eae3e30d602.rlib --extern rustix=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/librustix-96b6e34d21d34eeb.rlib --extern schemars=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libschemars-6fb0e54e250c898d.rlib --extern security_framework=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libsecurity_framework-74a8d43d60675235.rlib --extern serde=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde-9d3740bcdacb24fc.rlib --extern serde_json=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde_json-ddf8f21541788469.rlib --extern serde_yaml=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libserde_yaml_ng-175bde2ec1cb6187.rlib --extern sha2=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libsha2-b1e759e8cbc2bcae.rlib --extern tempfile=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtempfile-acd27f4466016882.rlib --extern thiserror=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libthiserror-d333bad7d1521457.rlib --extern tokio=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtokio-10757fdd5dc95fb5.rlib --extern tracing=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtracing-d7a5fe9d430f9bb4.rlib --extern tracing_subscriber=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libtracing_subscriber-eab767e29cb7338a.rlib --extern url=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/liburl-f7f05f6c941ec101.rlib --extern walkdir=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libwalkdir-7a01f55ad3720f01.rlib --extern wiremock=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/deps/libwiremock-98a3c4e78cc30142.rlib -L native=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/build/alloca-4a2ab6a24d864ec8/out -L native=/Users/ranger/.cache/llmenv/claude-code/3/65470f3c02b7/tmp/cargo-mutants-llmenv-WWh1Qy.tmp/target/debug/build/aws-lc-sys-b2cc35b12a07c0e8/out` (exit status: 1)
+
+*** result: Failure(101)

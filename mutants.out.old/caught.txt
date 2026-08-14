@@ -1,0 +1,2 @@
+src/hook_run/mod.rs:61:5: replace tag_recall_queries -> anyhow::Result<Vec<TagRecallQuery>> with Ok(vec![])
+src/hook_run/mod.rs:102:5: replace bundle_recall_queries -> anyhow::Result<Vec<BundleRecallQuery>> with Ok(vec![])

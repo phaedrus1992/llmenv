@@ -1,12 +1,12 @@
 pub mod cache;
-pub mod inherit;
+pub(crate) mod inherit;
 pub mod manifest;
-pub mod merge_cache;
-pub mod schema_gen;
+pub(crate) mod merge_cache;
+pub(crate) mod schema_gen;
 pub mod state;
 mod status_data;
 
-pub use status_data::{ConfigStaleInputs, StatusDataJson, collect_status_data};
+pub(crate) use status_data::{ConfigStaleInputs, collect_status_data};
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

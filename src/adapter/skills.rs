@@ -519,7 +519,7 @@ pub(crate) fn arb_string_map()
 /// [`arb_distinct_resolved_mcps`]) without the name generated here colliding
 /// with a key generated elsewhere.
 #[cfg(test)]
-pub(crate) fn arb_resolved_mcp_body() -> impl proptest::prelude::Strategy<
+fn arb_resolved_mcp_body() -> impl proptest::prelude::Strategy<
     Value = (
         crate::mcp::resolve::ResolvedKind,
         std::collections::BTreeMap<String, String>,
@@ -618,8 +618,7 @@ pub(crate) fn arb_permission_rule()
 /// when splicing a hook command into their output. Shared so
 /// `llmenv-config`'s schema round-trip tests exercise the same charset.
 #[cfg(test)]
-pub(crate) fn arb_hook_handler()
--> impl proptest::prelude::Strategy<Value = crate::config::HookHandler> {
+fn arb_hook_handler() -> impl proptest::prelude::Strategy<Value = crate::config::HookHandler> {
     use proptest::prelude::*;
 
     prop_oneof![

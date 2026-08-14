@@ -39,12 +39,11 @@ repos:
         pass_filenames: false
         stages: [pre-push]
       - id: cargo-hawk
-        name: cargo hawk check (warn-only, #923)
-        # -W warnings (not -D): 330 pre-existing findings as of #923, not yet
-        # cleaned up. Exits 0 regardless of findings at this level — only -D
-        # findings or a genuine tool error fail the run. Ratchets to -D once
-        # that cleanup lands — see #1314.
-        entry: cargo hawk check -W warnings
+        name: cargo hawk check
+        # -D since #1314 cleared the 330-finding backlog from #923. The script
+        # excludes the published `crates/*` libs as external boundaries and is
+        # shared with CI so the two invocations can't drift.
+        entry: bash scripts/hawk-check.sh -D warnings
         language: system
         pass_filenames: false
         stages: [pre-push]

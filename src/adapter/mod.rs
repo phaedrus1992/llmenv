@@ -138,7 +138,7 @@ pub(crate) fn yaml_value_kind_name(value: &serde_yaml::Value) -> &'static str {
 /// # Errors
 /// Returns an error if `fragment` contains any key in `modeled_keys`, with a
 /// message naming the key and where to put it instead.
-pub(crate) fn reject_modeled_native_keys(
+fn reject_modeled_native_keys(
     fragment: &serde_yaml::Value,
     modeled_keys: &[&str],
     engine: &str,
@@ -321,7 +321,7 @@ pub trait AgentAdapter {
 /// Used by hook-run and throttle subcommands that are invoked as subprocesses
 /// by the LLM CLI and don't receive the adapter identity through stdin.
 #[must_use]
-pub fn active_adapter() -> Box<dyn AgentAdapter> {
+pub(crate) fn active_adapter() -> Box<dyn AgentAdapter> {
     active_adapter_from(registered_adapters())
 }
 
@@ -352,7 +352,7 @@ fn active_adapter_from(adapters: Vec<Box<dyn AgentAdapter>>) -> Box<dyn AgentAda
 ///
 /// # Extending the registry
 /// Add new adapters here once their crate is wired in:
-pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
+pub(crate) fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     vec![
         Box::new(claude_code::ClaudeCodeAdapter),
         Box::new(crush::CrushAdapter),
@@ -367,7 +367,7 @@ pub fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
 /// Used by hook-run to honour the caller's `--engine` flag instead of
 /// re-sniffing environment variables for adapter detection.
 #[must_use]
-pub fn adapter_for_engine(engine: &str) -> Box<dyn AgentAdapter> {
+pub(crate) fn adapter_for_engine(engine: &str) -> Box<dyn AgentAdapter> {
     registered_adapters()
         .into_iter()
         .find(|a| engine_id(a.as_ref()) == engine)
@@ -403,7 +403,7 @@ pub(crate) fn known_engine_ids() -> Vec<String> {
 /// Names containing `/` or ASCII whitespace are unconditionally rejected;
 /// they cannot be plain binary names and would produce confusing `which` behaviour.
 #[must_use]
-pub fn binary_on_path(name: &str) -> bool {
+pub(crate) fn binary_on_path(name: &str) -> bool {
     if name.contains('/') || name.chars().any(char::is_whitespace) {
         return false;
     }
@@ -563,7 +563,7 @@ pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
 ///
 /// Shared across adapters: previously lived in `crush.rs` and was
 /// cross-imported by opencode via `super::crush::resolve_plugin_payload`.
-pub(crate) fn resolve_plugin_payload(
+fn resolve_plugin_payload(
     plugin: &crate::plugins::resolve::ResolvedPlugin,
     marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
 ) -> anyhow::Result<PathBuf> {

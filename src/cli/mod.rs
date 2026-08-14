@@ -17,9 +17,10 @@ pub(crate) mod statusline;
 mod style;
 mod upgrade;
 
+pub(crate) use style::doctor_info;
 pub use style::{
-    ColorMode, active_marker, doctor_fail, doctor_info, doctor_pass, doctor_warning,
-    inactive_annotation, orphan_annotation, should_use_color,
+    ColorMode, active_marker, doctor_fail, doctor_pass, doctor_warning, inactive_annotation,
+    orphan_annotation, should_use_color,
 };
 
 /// Outcome of comparing the content hash the agent booted with against the hash
@@ -875,7 +876,7 @@ fn engine_id_matches_any(target: &str, list: &[String]) -> bool {
 ///
 /// Called explicitly per command rather than from [`installed_adapters`] so the
 /// warning fires exactly once even in `doctor`, which calls that gate itself.
-pub(super) fn warn_dead_native_keys(
+fn warn_dead_native_keys(
     capabilities: &crate::config::Capabilities,
     native: &std::collections::BTreeMap<String, serde_yaml::Value>,
     prefix: &str,
@@ -913,7 +914,7 @@ pub(super) fn warn_dead_native_keys(
 /// every invocation, so a check that isn't "something silently doesn't work"
 /// has no business printing there. It's a `doctor`-only nudge instead, called
 /// directly from `run_doctor`.
-pub(super) fn warn_dead_config(
+fn warn_dead_config(
     config: &Config,
     manifest: Option<&crate::merge::MergedManifest>,
     prefix: &str,
@@ -938,7 +939,7 @@ pub(super) fn warn_dead_config(
 /// engine doesn't duplicate that output. Resolves the binary name through the
 /// registry rather than hardcoding it, so an adapter rename can't silently
 /// desynchronize the two.
-pub(super) fn engine_is_active(config: &Config, engine: &str) -> bool {
+fn engine_is_active(config: &Config, engine: &str) -> bool {
     if config
         .disabled_engines
         .iter()

@@ -1,0 +1,444 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 44.404200584,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 126.034274,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/hook_run/mod.rs:61:5: replace tag_recall_queries -> anyhow::Result<Vec<TagRecallQuery>> with Ok(vec![Default::default()])",
+          "package": "llmenv",
+          "file": "src/hook_run/mod.rs",
+          "function": {
+            "function_name": "tag_recall_queries",
+            "return_type": "-> anyhow::Result<Vec<TagRecallQuery>>",
+            "span": {
+              "start": {
+                "line": 54,
+                "column": 1
+              },
+              "end": {
+                "line": 79,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 61,
+              "column": 5
+            },
+            "end": {
+              "line": 78,
+              "column": 19
+            }
+          },
+          "replacement": "Ok(vec![Default::default()])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__hook_run__mod.rs_line_61_col_5_001.log",
+      "diff_path": "diff/src__hook_run__mod.rs_line_61_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 102.044788208,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/hook_run/mod.rs:102:5: replace bundle_recall_queries -> anyhow::Result<Vec<BundleRecallQuery>> with Ok(vec![Default::default()])",
+          "package": "llmenv",
+          "file": "src/hook_run/mod.rs",
+          "function": {
+            "function_name": "bundle_recall_queries",
+            "return_type": "-> anyhow::Result<Vec<BundleRecallQuery>>",
+            "span": {
+              "start": {
+                "line": 94,
+                "column": 1
+              },
+              "end": {
+                "line": 128,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 102,
+              "column": 5
+            },
+            "end": {
+              "line": 127,
+              "column": 19
+            }
+          },
+          "replacement": "Ok(vec![Default::default()])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__hook_run__mod.rs_line_102_col_5_001.log",
+      "diff_path": "diff/src__hook_run__mod.rs_line_102_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 109.472719542,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/hook_run/mod.rs:61:5: replace tag_recall_queries -> anyhow::Result<Vec<TagRecallQuery>> with Ok(vec![])",
+          "package": "llmenv",
+          "file": "src/hook_run/mod.rs",
+          "function": {
+            "function_name": "tag_recall_queries",
+            "return_type": "-> anyhow::Result<Vec<TagRecallQuery>>",
+            "span": {
+              "start": {
+                "line": 54,
+                "column": 1
+              },
+              "end": {
+                "line": 79,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 61,
+              "column": 5
+            },
+            "end": {
+              "line": 78,
+              "column": 19
+            }
+          },
+          "replacement": "Ok(vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__hook_run__mod.rs_line_61_col_5.log",
+      "diff_path": "diff/src__hook_run__mod.rs_line_61_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 14.634616375,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 118.909700792,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/hook_run/mod.rs:175:9: replace <impl FromStr for HookEvent>::from_str -> Result<Self, Self::Err> with Ok(Default::default())",
+          "package": "llmenv",
+          "file": "src/hook_run/mod.rs",
+          "function": {
+            "function_name": "<impl FromStr for HookEvent>::from_str",
+            "return_type": "-> Result<Self, Self::Err>",
+            "span": {
+              "start": {
+                "line": 174,
+                "column": 5
+              },
+              "end": {
+                "line": 193,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 175,
+              "column": 9
+            },
+            "end": {
+              "line": 192,
+              "column": 10
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__hook_run__mod.rs_line_175_col_9.log",
+      "diff_path": "diff/src__hook_run__mod.rs_line_175_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 15.80470975,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/hook_run/mod.rs:231:5: replace dispatch -> Vec<Action> with vec![Default::default()]",
+          "package": "llmenv",
+          "file": "src/hook_run/mod.rs",
+          "function": {
+            "function_name": "dispatch",
+            "return_type": "-> Vec<Action>",
+            "span": {
+              "start": {
+                "line": 215,
+                "column": 1
+              },
+              "end": {
+                "line": 249,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 231,
+              "column": 5
+            },
+            "end": {
+              "line": 248,
+              "column": 6
+            }
+          },
+          "replacement": "vec![Default::default()]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__hook_run__mod.rs_line_231_col_5_001.log",
+      "diff_path": "diff/src__hook_run__mod.rs_line_231_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 17.611438708,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/hook_run/mod.rs:102:5: replace bundle_recall_queries -> anyhow::Result<Vec<BundleRecallQuery>> with Ok(vec![])",
+          "package": "llmenv",
+          "file": "src/hook_run/mod.rs",
+          "function": {
+            "function_name": "bundle_recall_queries",
+            "return_type": "-> anyhow::Result<Vec<BundleRecallQuery>>",
+            "span": {
+              "start": {
+                "line": 94,
+                "column": 1
+              },
+              "end": {
+                "line": 128,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 102,
+              "column": 5
+            },
+            "end": {
+              "line": 127,
+              "column": 19
+            }
+          },
+          "replacement": "Ok(vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__hook_run__mod.rs_line_102_col_5.log",
+      "diff_path": "diff/src__hook_run__mod.rs_line_102_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 108.577041167,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 257.0092205,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/hook_run/mod.rs:255:5: replace event_to_log_kind -> Option<(EventKind, &'static str)> with Some((Default::default(), \"\"))",
+          "package": "llmenv",
+          "file": "src/hook_run/mod.rs",
+          "function": {
+            "function_name": "event_to_log_kind",
+            "return_type": "-> Option<(EventKind, &'static str)>",
+            "span": {
+              "start": {
+                "line": 251,
+                "column": 1
+              },
+              "end": {
+                "line": 265,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 255,
+              "column": 5
+            },
+            "end": {
+              "line": 264,
+              "column": 6
+            }
+          },
+          "replacement": "Some((Default::default(), \"\"))",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__hook_run__mod.rs_line_255_col_5_001.log",
+      "diff_path": "diff/src__hook_run__mod.rs_line_255_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 19.930197375,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ranger/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=llmenv@3.10.0"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 7,
+  "missed": 0,
+  "caught": 2,
+  "timeout": 0,
+  "unviable": 5,
+  "success": 0,
+  "start_time": "2026-08-14T05:20:51.807054Z",
+  "end_time": null,
+  "cargo_mutants_version": "27.1.0"
+}

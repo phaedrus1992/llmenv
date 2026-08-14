@@ -1,0 +1,55 @@
+--- src/merge/rules.rs
++++ replace walk -> anyhow::Result<()> with Ok(())
+@@ -79,51 +79,17 @@
+ fn walk(
+     bundle_root: &Path,
+     dir: &Path,
+     bundle_name: &str,
+     out: &mut Vec<RuleFile>,
+ ) -> anyhow::Result<()> {
+     // #918: NotFound (missing dir, incl. a `rules/` that isn't there) → skip;
+     // other errors (e.g. permission denied) propagate.
+-    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
+-        return Ok(());
+-    };
+-    for entry in entries {
+-        let entry = entry?;
+-        let file_type = entry.file_type()?;
+-        let p = entry.path();
+-        if file_type.is_symlink() {
+-            continue;
+-        }
+-        if file_type.is_dir() {
+-            walk(bundle_root, &p, bundle_name, out)?;
+-            continue;
+-        }
+-        if !file_type.is_file() {
+-            continue;
+-        }
+-        if p.extension().is_none_or(|e| e != "md") {
+-            continue;
+-        }
+-        let raw = std::fs::read_to_string(&p)?;
+-        let (frontmatter, body) = split_frontmatter(&raw);
+-        let rel = p
+-            .strip_prefix(bundle_root)
+-            .map_err(|e| anyhow::anyhow!("path {} not under bundle root: {e}", p.display()))?
+-            .to_path_buf();
+-        out.push(RuleFile {
+-            bundle: bundle_name.to_owned(),
+-            rel,
+-            frontmatter,
+-            body,
+-            raw,
+-        });
+-    }
+-    Ok(())
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Split a file into (frontmatter, body). Frontmatter must start at byte 0
+ /// with `---\n` and be closed by a line containing only `---`. Any other
+ /// shape (no leading fence, missing closer, etc.) yields `(None, raw)`.
+ fn split_frontmatter(raw: &str) -> (Option<String>, String) {
+     let Some(rest) = raw.strip_prefix("---\n") else {
+         return (None, raw.to_owned());

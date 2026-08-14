@@ -2,18 +2,17 @@
 //! independent sinks — a local JSONL file and ICM's transcript store via the
 //! ICM MCP. See `docs/superpowers/specs/2026-06-30-icm-transcript-session-logging-design.md`.
 
-pub mod detached;
-pub mod dispatch;
+pub(crate) mod detached;
+pub(crate) mod dispatch;
 pub mod event;
 pub mod file_sink;
-pub mod reaper;
+pub(crate) mod reaper;
 pub mod scope_header;
-pub mod state;
+pub(crate) mod state;
 pub mod tracing_layer;
-pub mod transcript;
+pub(crate) mod transcript;
 
-pub use event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
-pub use file_sink::{FileSink, default_file_path, default_file_path_string};
-pub use reaper::reap_session_log;
-pub use scope_header::{ScopeContext, scope_header_content, scope_metadata_json};
+pub use file_sink::{FileSink, default_file_path};
+pub(crate) use reaper::reap_session_log;
+pub(crate) use scope_header::{ScopeContext, scope_header_content, scope_metadata_json};
 pub use tracing_layer::FileLogLayer;

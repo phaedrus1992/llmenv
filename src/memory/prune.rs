@@ -62,19 +62,19 @@ impl Importance {
 #[derive(Debug, Default, PartialEq)]
 pub struct PruneResult {
     /// Total records found.
-    pub total: usize,
+    total: usize,
     /// Critical-importance records (always kept).
-    pub critical: usize,
+    critical: usize,
     /// High-importance records (always kept).
-    pub high: usize,
+    high: usize,
     /// Medium-importance records (prune candidates).
-    pub medium: usize,
+    medium: usize,
     /// Low-importance records (prune candidates).
-    pub low: usize,
+    low: usize,
     /// Number of records actually forgotten (non-dry-run only).
-    pub forgotten: usize,
+    pub(crate) forgotten: usize,
     /// Whether this was a dry run (no forget calls made).
-    pub dry_run: bool,
+    dry_run: bool,
 }
 
 fn connect() -> anyhow::Result<McpHttpClient> {
@@ -163,7 +163,7 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
 ///
 /// `dry_run` when true prints what would be pruned without making forget
 /// calls. Returns a [`PruneResult`] with counts.
-pub fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
+pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     let client = connect()?;
     let output = call_tool_blocking(
         client,
@@ -264,7 +264,7 @@ pub fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
 /// Run an automatic prune pass during materialize if the active config has
 /// `auto_prune: true`. Fail-soft: errors are logged as warnings, never
 /// returned.
-pub fn auto_prune_if_enabled(config: &crate::config::Config) {
+pub(crate) fn auto_prune_if_enabled(config: &crate::config::Config) {
     let auto = config
         .features
         .as_ref()

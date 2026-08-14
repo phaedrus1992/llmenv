@@ -16,7 +16,7 @@ use crate::materialize::manifest::{AuthSource, AuthStatus, CacheManifest};
 /// Detect and sync an in-session login change. Infallible from the caller's
 /// perspective — all errors are traced at debug and swallowed so `run_export`
 /// never fails because of auth sync.
-pub fn sync_auth_on_export(
+pub(crate) fn sync_auth_on_export(
     config_dir: &Path,
     adapter_root: &Path,
     manifest: &mut CacheManifest,

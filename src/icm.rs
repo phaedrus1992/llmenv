@@ -89,7 +89,7 @@ pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> Stri
 ///
 /// # Errors
 /// Returns an error if memory storage fails.
-pub fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Result<()> {
+pub(crate) fn store_tag_memory(active: &ActiveScopes, bundles: &[String]) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     let memory = IcmMemory {
         tags: active.tags.iter().cloned().collect::<Vec<_>>(),

@@ -36,7 +36,7 @@ fn cache_file(cache_root: &Path) -> PathBuf {
 /// the memory/host slice carries the same sensitivity (memory-backend
 /// hostnames/ports) as those, and a torn write would otherwise be readable
 /// as a false hit or corrupt-but-parseable value by a concurrent `hook-run`.
-pub fn write(
+pub(crate) fn write(
     cache_root: &Path,
     key: &str,
     bundle_memory: &[Memory],
@@ -57,7 +57,7 @@ pub fn write(
 /// rather than an error — this is a pure optimization over the live-merge
 /// fallback, so a broken cache file must never block resolution.
 #[must_use]
-pub fn read_if_matching(
+pub(crate) fn read_if_matching(
     cache_root: &Path,
     key: &str,
 ) -> Option<(Vec<Memory>, BTreeMap<String, HostEntry>)> {
