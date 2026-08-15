@@ -560,6 +560,7 @@ mod tests {
             "todowrite",
             todowrite_payload(json!([
                 todo("keep me", "pending"),
+                todo("keep me too", "pending"),
                 todo("already finished", "completed"),
             ]))
             .get("tool_input"),
@@ -573,9 +574,9 @@ mod tests {
             PROJECT,
         );
         assert!(
-            out.contains("1 tracked task(s) were absent"),
-            "exactly one task was dropped — a count that also included done or \
-             still-listed tasks would be wrong: {out}"
+            out.contains("2 tracked task(s) were absent"),
+            "exactly the two open, unlisted tasks count as dropped — counting \
+             the finished one too, or counting only it, is wrong: {out}"
         );
         assert!(
             out.contains("left open"),
