@@ -484,6 +484,18 @@ mod tests {
         );
         assert!(first.starts_with("__DENY__:"), "{first}");
         assert!(first.contains("added"), "{first}");
+        assert!(
+            first.contains("started"),
+            "an in_progress todo starts the task: {first}"
+        );
+        assert_eq!(
+            task::list_tasks(dir.path())
+                .iter()
+                .find(|t| t.title == "write the parser")
+                .map(|t| t.state),
+            Some(task::TaskState::Wip),
+            "in_progress must reach the tracker as `wip`, not just be reported"
+        );
 
         let second = handle_inner(
             "todowrite",
@@ -523,6 +535,17 @@ mod tests {
             "a resent list should be a no-op, got {second}"
         );
         assert_eq!(task::list_tasks(dir.path()).len(), 1, "no duplicate task");
+
+        // ...and the same for a completed entry: opencode keeps sending
+        // finished todos in the array forever, so `done` must fire once.
+        let done = todowrite_payload(json!([todo("ship it", "completed")]));
+        let closed = handle_inner("todowrite", done.get("tool_input"), dir.path(), PROJECT);
+        assert!(closed.contains("completed"), "{closed}");
+        let resent = handle_inner("todowrite", done.get("tool_input"), dir.path(), PROJECT);
+        assert!(
+            resent.contains("no changes"),
+            "an already-done todo must not be re-completed, got {resent}"
+        );
     }
 
     // The one real judgement call: a todo vanishing from the array carries no
@@ -530,9 +553,16 @@ mod tests {
     #[test]
     fn todowrite_leaves_dropped_todos_open_and_says_so() {
         let dir = tmp();
+        // A finished task alongside the open one: it is *also* absent from the
+        // next list, but it's already done, so it must not be counted as
+        // dropped. Without it the count can't tell `&&` from `||`.
         handle_inner(
             "todowrite",
-            todowrite_payload(json!([todo("keep me", "pending")])).get("tool_input"),
+            todowrite_payload(json!([
+                todo("keep me", "pending"),
+                todo("already finished", "completed"),
+            ]))
+            .get("tool_input"),
             dir.path(),
             PROJECT,
         );
@@ -541,6 +571,11 @@ mod tests {
             todowrite_payload(json!([todo("something else", "pending")])).get("tool_input"),
             dir.path(),
             PROJECT,
+        );
+        assert!(
+            out.contains("1 tracked task(s) were absent"),
+            "exactly one task was dropped — a count that also included done or \
+             still-listed tasks would be wrong: {out}"
         );
         assert!(
             out.contains("left open"),
