@@ -534,6 +534,12 @@ mod tests {
             second.contains("no changes"),
             "a resent list should be a no-op, got {second}"
         );
+        // Nothing was dropped, so the dropped-task sentence must not appear —
+        // otherwise every reply would claim "0 tracked task(s) were absent".
+        assert!(
+            !second.contains("were absent"),
+            "no tasks were dropped here, got {second}"
+        );
         assert_eq!(task::list_tasks(dir.path()).len(), 1, "no duplicate task");
 
         // ...and the same for a completed entry: opencode keeps sending
