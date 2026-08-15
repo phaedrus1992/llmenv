@@ -11,8 +11,6 @@ pub(crate) use status_data::{ConfigStaleInputs, collect_status_data};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
-
 use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
@@ -178,47 +176,66 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
 /// Per-entry errors are non-fatal: a leftover empty dir is cosmetically bad
 /// but not a correctness failure.
 pub(crate) fn prune_empty_dirs(root: &Path) -> anyhow::Result<()> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    collect_subdirs(root, &mut dirs)?;
-    dirs.reverse();
-    for dir in dirs {
-        let is_empty = match std::fs::read_dir(&dir) {
-            Ok(mut rd) => rd.next().is_none(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                tracing::warn!("prune_empty_dirs: could not read {}: {e}", dir.display());
-                continue;
-            }
-        };
-        if is_empty && let Err(e) = std::fs::remove_dir(&dir) {
-            tracing::warn!("prune_empty_dirs: could not remove {}: {e}", dir.display());
-        }
-    }
+    use std::os::fd::AsFd as _;
+
+    // #1066: `root` is resolved once and the walk descends by file descriptor.
+    // The path-based version recursed with `read_dir` on each path it had just
+    // stat'd, so an intermediate directory swapped for a symlink redirected
+    // the walk — and this walk *removes* directories, so a redirected one
+    // deletes empty directories somewhere the caller never named.
+    let dir = match crate::paths::dirfd::open_dir_nofollow(root) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(anyhow::anyhow!("reading directory {}: {e}", root.display())),
+    };
+    prune_empty_dirs_at(dir.as_fd(), root);
     Ok(())
 }
 
-/// Recursively collect every subdirectory under `dir` in depth-first pre-order.
-/// The caller reverses for bottom-up traversal.
-fn collect_subdirs(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    let rd = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(anyhow::anyhow!("reading directory {}: {e}", dir.display())),
+/// Remove empty directories under an already-open `dir`, bottom-up. `root` is
+/// never removed — only entries beneath it — which is what the caller relies
+/// on when pruning a tree it still intends to use.
+///
+/// Failures are warned rather than propagated, matching the previous
+/// behaviour: pruning is opportunistic tidying, and a directory that can't be
+/// read or removed is not a reason to fail the export around it.
+fn prune_empty_dirs_at(dir: std::os::fd::BorrowedFd<'_>, at: &Path) {
+    use std::os::fd::AsFd as _;
+
+    let entries = match crate::paths::dirfd::read_dir_entries(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("prune_empty_dirs: could not read {}: {e}", at.display());
+            return;
+        }
     };
-    for entry in rd {
-        let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
-        // DirEntry::metadata() uses lstat on Unix — does not follow symlinks,
-        // so symlinks to directories outside the render root are not traversed.
-        let path = entry.path();
-        let meta = entry
-            .metadata()
-            .with_context(|| format!("stat {}", path.display()))?;
-        if meta.is_dir() {
-            out.push(path.clone());
-            collect_subdirs(&path, out)?;
+    for entry in entries {
+        if !entry.is_dir() {
+            continue;
+        }
+        let child_at = at.join(&entry.name);
+        let child = match crate::paths::dirfd::open_dir_at(dir, &entry.name) {
+            Ok(child) => child,
+            Err(e) => {
+                tracing::warn!(
+                    "prune_empty_dirs: could not read {}: {e}",
+                    child_at.display()
+                );
+                continue;
+            }
+        };
+        prune_empty_dirs_at(child.as_fd(), &child_at);
+        // Re-read rather than tracking a count: the recursion above may have
+        // emptied it, and something else may have filled it.
+        let now_empty = crate::paths::dirfd::read_dir_entries(child.as_fd())
+            .is_ok_and(|remaining| remaining.is_empty());
+        if now_empty && let Err(e) = crate::paths::dirfd::remove_dir_at(dir, &entry.name) {
+            tracing::warn!(
+                "prune_empty_dirs: could not remove {}: {e}",
+                child_at.display()
+            );
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
