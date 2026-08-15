@@ -212,6 +212,110 @@ fn has_remote_memory_host(config: &Config) -> bool {
 /// Check that external tools referenced by the active config are available on
 /// `$PATH`. Printed to stderr using the doctor pass/fail/info helpers inline
 /// with the rest of `llmenv doctor`.
+/// How a dependent tool is updated once it's installed (#1185).
+///
+/// The distinction is load-bearing, not cosmetic: `icm upgrade --apply`
+/// installs the new binary itself, while `codebase-memory-mcp update` only
+/// *prints* the install command for the current machine and exits — it can't
+/// update itself. llmenv can therefore offer to run the first and can only
+/// report the second, so the two can't be collapsed into one "update command"
+/// string without the report claiming something false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdatePath {
+    /// The tool installs its own update when this command is run.
+    SelfApply(&'static str),
+    /// The tool can't install its own update; this command reports how.
+    Reports(&'static str),
+}
+
+impl UpdatePath {
+    fn command(self) -> &'static str {
+        match self {
+            UpdatePath::SelfApply(c) | UpdatePath::Reports(c) => c,
+        }
+    }
+}
+
+/// External tools llmenv wires in but doesn't own the lifecycle of (#1185).
+/// `llmenv upgrade` keeps the `llmenv` binary current; nothing kept these
+/// current, so they drifted silently.
+const DEPENDENT_TOOLS: &[(&str, UpdatePath)] = &[
+    ("icm", UpdatePath::SelfApply("icm upgrade --apply")),
+    (
+        "codebase-memory-mcp",
+        UpdatePath::Reports("codebase-memory-mcp update"),
+    ),
+];
+
+/// The version a tool reports through `--version`, as the last
+/// whitespace-separated token of its first output line.
+///
+/// Both tools answer `<name> <semver>` (`icm 0.10.61`), so one shared parse
+/// covers them rather than a per-tool format string — the fragile thing the
+/// issue was worried about. A tool whose output doesn't fit is reported as
+/// "version unknown" rather than guessed at.
+fn tool_version(binary: &str) -> Option<String> {
+    let out = std::process::Command::new(binary)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_version_line(&String::from_utf8_lossy(&out.stdout), binary)
+}
+
+/// The version token in `--version` output, or `None` when the output doesn't
+/// look like a version at all.
+///
+/// Split out from [`tool_version`] so the parse is testable without depending
+/// on whichever binaries happen to be installed — `true --version` prints a
+/// real version string on a machine with GNU coreutils and nothing on one
+/// without, which makes it useless as a fixture.
+fn parse_version_line(output: &str, binary: &str) -> Option<String> {
+    let token = output.lines().next()?.split_whitespace().last()?;
+    // A `--version` that echoes only the binary name tells us nothing, and a
+    // token with no digit in it isn't a version.
+    (token != binary && token.chars().any(|c| c.is_ascii_digit())).then(|| token.to_string())
+}
+
+/// Report installed versions and update commands for the tools llmenv depends
+/// on but doesn't ship (#1185). Tools that aren't installed are skipped —
+/// `run_doctor_tool_availability` already reports those, and repeating it here
+/// would say the same thing twice with less context.
+///
+/// Deliberately offline: no "an update is available" claim is made, because
+/// checking would mean a network round trip per tool on every `doctor` run.
+fn run_doctor_dependent_tools(use_color: bool) {
+    let pass = super::doctor_pass(use_color);
+    let info = super::doctor_info(use_color);
+
+    let installed: Vec<_> = DEPENDENT_TOOLS
+        .iter()
+        .filter(|(bin, _)| crate::adapter::binary_on_path(bin))
+        .collect();
+    if installed.is_empty() {
+        return;
+    }
+
+    eprintln!();
+    eprintln!("Dependent-tool versions:");
+    for (bin, update) in installed {
+        let version = tool_version(bin).unwrap_or_else(|| "version unknown".to_string());
+        let how = match update {
+            UpdatePath::SelfApply(_) => "update with",
+            UpdatePath::Reports(_) => "check for updates with",
+        };
+        let marker = if version == "version unknown" {
+            &info
+        } else {
+            &pass
+        };
+        eprintln!("{marker} {bin} {version} — {how} `{}`", update.command());
+    }
+}
+
 fn run_doctor_tool_availability(use_color: bool, config: &Config) {
     let pass = super::doctor_pass(use_color);
     let fail = super::doctor_fail(use_color);
@@ -1059,6 +1163,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled, native_claude_env);
 
     run_doctor_tool_availability(use_color, &config);
+    run_doctor_dependent_tools(use_color);
 
     // When context-mode is enabled, verify the marketplace clone exists so
     // inject_context_mode can actually resolve the plugin. A missing clone is
@@ -2006,5 +2111,62 @@ mod tests {
             ..Config::default()
         };
         run_doctor_tool_availability(false, &config);
+    }
+
+    // #1185: the two tools differ in what llmenv can actually do for them —
+    // icm installs its own update, codebase-memory-mcp only prints how. The
+    // report has to say which, or it claims something false about one of them.
+    #[test]
+    fn dependent_tool_update_paths_distinguish_self_apply_from_report_only() {
+        let by_name = |name: &str| {
+            DEPENDENT_TOOLS
+                .iter()
+                .find(|(bin, _)| *bin == name)
+                .map(|(_, u)| *u)
+                .expect("tool listed")
+        };
+        assert!(matches!(by_name("icm"), UpdatePath::SelfApply(_)));
+        assert!(matches!(
+            by_name("codebase-memory-mcp"),
+            UpdatePath::Reports(_)
+        ));
+        for (bin, update) in DEPENDENT_TOOLS {
+            assert!(
+                update.command().starts_with(bin),
+                "{bin}'s update command should invoke it, got {}",
+                update.command()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_version_line_reads_the_trailing_token_and_rejects_noise() {
+        // The real shapes, as reported by the installed binaries.
+        assert_eq!(
+            parse_version_line("icm 0.10.61\n", "icm").as_deref(),
+            Some("0.10.61")
+        );
+        assert_eq!(
+            parse_version_line("codebase-memory-mcp 0.10.2\n", "codebase-memory-mcp").as_deref(),
+            Some("0.10.2")
+        );
+        // Only the first line matters — a tool that prints a banner after it
+        // must not have the banner's last word read as a version.
+        assert_eq!(
+            parse_version_line("icm 1.2.3\nbuilt from source\n", "icm").as_deref(),
+            Some("1.2.3")
+        );
+        for junk in ["", "\n", "icm", "some words with no digits"] {
+            assert_eq!(
+                parse_version_line(junk, "icm"),
+                None,
+                "{junk:?} is not a version"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_version_of_a_missing_binary_is_none_not_a_panic() {
+        assert_eq!(tool_version("this-binary-does-not-exist-llmenv"), None);
     }
 }
