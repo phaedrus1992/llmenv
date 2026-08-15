@@ -1,3 +1,5 @@
+pub(crate) mod dirfd;
+
 pub use llmenv_paths::{
     config_dir, config_path, create_dir_owner_only, cwd_under_prefix, expand_tilde,
     has_parent_component, is_unsafe_join_target, is_valid_short_name, read_dir_optional, state_dir,

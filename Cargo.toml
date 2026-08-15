@@ -82,7 +82,7 @@ url = "=2.5.8"
 # fork+exec'ing `kill`, which narrows the already-small window in which a
 # reaped pid could be recycled before the group-kill fires. rustix is already
 # in the tree transitively. No unsafe.
-rustix = { version = "=1.1.4", features = ["process", "system"] }
+rustix = { version = "=1.1.4", features = ["fs", "process", "system"] }
 tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
 dialoguer = "=0.12.0"
