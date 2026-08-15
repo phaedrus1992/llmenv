@@ -68,11 +68,21 @@ jobs:
         run: |
           git diff "origin/${BASE_REF}"...HEAD > mutants-pr.diff
           wc -l mutants-pr.diff
+          # A PR that touches no Rust has nothing to mutate, and cargo-mutants
+          # exits non-zero on an empty set rather than treating it as "nothing
+          # to do" — which turns a docs- or workflow-only PR into a red build.
+          if git diff --name-only "origin/${BASE_REF}"...HEAD | grep -q '\.rs$'; then
+            echo "HAS_RUST=1" >> "$GITHUB_ENV"
+          else
+            echo "no Rust changed; skipping mutation testing"
+            echo "HAS_RUST=0" >> "$GITHUB_ENV"
+          fi
       # Surviving mutants on lines this PR touched are the actionable case: the
       # PR added or changed logic no test distinguishes from a wrong version.
-      - run: cargo mutants --workspace --in-diff mutants-pr.diff --shard ${{ matrix.shard }}/4
+      - if: env.HAS_RUST == '1'
+        run: cargo mutants --workspace --in-diff mutants-pr.diff --shard ${{ matrix.shard }}/4
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: always()
+        if: always() && env.HAS_RUST == '1'
         with:
           name: mutants-in-diff-${{ matrix.shard }}
           path: mutants.out/
