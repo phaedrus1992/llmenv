@@ -31,10 +31,19 @@ env:
   RUSTUP_IO_THREADS: "1"
 jobs:
   in-diff:
-    name: mutants (changed lines)
+    # Sharded because the budget is per-mutant, not per-PR: cargo-mutants runs a
+    # full build+test for each one (~100s here), so a PR touching ~25 mutable
+    # lines exceeds a single runner's 45 minutes and the job is killed mid-run —
+    # which reads as a CI failure while telling you nothing about the code. Four
+    # shards keep wall-clock roughly constant as diffs grow.
+    name: mutants (changed lines, shard ${{ matrix.shard }}/4)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -59,13 +68,23 @@ jobs:
         run: |
           git diff "origin/${BASE_REF}"...HEAD > mutants-pr.diff
           wc -l mutants-pr.diff
+          # A PR that touches no Rust has nothing to mutate, and cargo-mutants
+          # exits non-zero on an empty set rather than treating it as "nothing
+          # to do" — which turns a docs- or workflow-only PR into a red build.
+          if git diff --name-only "origin/${BASE_REF}"...HEAD | grep -q '\.rs$'; then
+            echo "HAS_RUST=1" >> "$GITHUB_ENV"
+          else
+            echo "no Rust changed; skipping mutation testing"
+            echo "HAS_RUST=0" >> "$GITHUB_ENV"
+          fi
       # Surviving mutants on lines this PR touched are the actionable case: the
       # PR added or changed logic no test distinguishes from a wrong version.
-      - run: cargo mutants --workspace --in-diff mutants-pr.diff
+      - if: env.HAS_RUST == '1'
+        run: cargo mutants --workspace --in-diff mutants-pr.diff --shard ${{ matrix.shard }}/4
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: always()
+        if: always() && env.HAS_RUST == '1'
         with:
-          name: mutants-in-diff
+          name: mutants-in-diff-${{ matrix.shard }}
           path: mutants.out/
 
   sweep:
