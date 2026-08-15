@@ -43,7 +43,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # cargo-mutants shards are zero-indexed — `k/n` requires k < n, so the
+        # last shard is 3/4, not 4/4. A 1-based list fails that shard outright
+        # (`shard k must be less than n`) rather than mis-splitting the work.
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -98,7 +101,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        # Zero-indexed, as above. This list was 1-8, so shard 8/8 failed on
+        # every weekly run — invisible because the sweep is report-only, and
+        # one eighth of the backlog therefore went untested.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
