@@ -857,10 +857,21 @@ fn read_claude_json(path: &Path) -> anyhow::Result<serde_json::Value> {
 /// `scan_skill_files_for_hardcoded_paths`). Returns the list of relative paths
 /// written (relative to `dest_dir`), for inclusion in the `owned` set.
 pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    copy_dir_owner_only_inner(src, dest, true)
+    // #1066: the walk descends by file descriptor, not by path. `src` is
+    // resolved exactly once, here; every step below opens an entry of a
+    // directory this process already holds open, so there is no window in
+    // which a directory can be swapped for a symlink between the check and the
+    // use. The `src` paths further down are carried for error messages only
+    // and are never handed back to the kernel.
+    use std::os::fd::AsFd as _;
+
+    let dir = crate::paths::dirfd::open_dir_nofollow(src)
+        .with_context(|| format!("opening source directory '{}'", src.display()))?;
+    copy_dir_owner_only_inner(dir.as_fd(), src, dest, true)
 }
 
 fn copy_dir_owner_only_inner(
+    src_dir: std::os::fd::BorrowedFd<'_>,
     src: &Path,
     dest: &Path,
     is_root: bool,
@@ -888,14 +899,14 @@ fn copy_dir_owner_only_inner(
                 .with_context(|| format!("checking destination path '{}'", dest.display()));
         }
     }
+    use std::os::fd::AsFd as _;
+
     let mut written: Vec<PathBuf> = Vec::new();
     create_dir_owner_only(dest)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let file_name = entry.file_name();
-        let meta = std::fs::symlink_metadata(&src_path)?;
-        if meta.file_type().is_symlink() {
+    for entry in crate::paths::dirfd::read_dir_entries(src_dir)? {
+        let file_name = entry.name.clone();
+        let src_path = src.join(&file_name);
+        if entry.is_symlink() {
             // #1341: a symlinked SKILL.md at the *skill's own root* is
             // silently dropped by the skip below, producing a skill
             // directory that only fails validation later with a misleading
@@ -925,10 +936,13 @@ fn copy_dir_owner_only_inner(
             continue;
         }
         let dest_path = dest.join(&file_name);
-        if meta.is_dir() {
-            let sub_written = copy_dir_owner_only_inner(&src_path, &dest_path, false)?;
+        if entry.is_dir() {
+            let child = crate::paths::dirfd::open_dir_at(src_dir, &file_name)
+                .with_context(|| format!("opening source directory '{}'", src_path.display()))?;
+            let sub_written =
+                copy_dir_owner_only_inner(child.as_fd(), &src_path, &dest_path, false)?;
             written.extend(sub_written);
-        } else if meta.is_file() {
+        } else if entry.is_file() {
             // #1341: a symlink already at `dest_path` is never legitimate —
             // `write_owner_only` opens with `create(true).truncate(true)`,
             // which follows a symlink and overwrites its target.
@@ -941,7 +955,8 @@ fn copy_dir_owner_only_inner(
                     dest_path.display()
                 );
             }
-            let content = std::fs::read(&src_path)?;
+            let content = crate::paths::dirfd::read_file_at(src_dir, &file_name)
+                .with_context(|| format!("reading '{}'", src_path.display()))?;
             crate::paths::write_owner_only(&dest_path, &content)?;
             written.push(dest_path);
         }
@@ -5614,6 +5629,27 @@ mod tests {
     // #1341: a symlink already present at the destination is never
     // legitimate — llmenv owns everything under the materialized output.
     #[cfg(unix)]
+    // #1066: the source root is now opened once, with O_NOFOLLOW, and the
+    // walk descends from that fd. A symlink standing where the source
+    // directory should be therefore fails instead of being copied through —
+    // the path-based version resolved it happily.
+    #[test]
+    fn copy_dir_owner_only_refuses_a_symlinked_source_root() {
+        let src_tmp = tempfile::tempdir().unwrap();
+        let out_tmp = tempfile::tempdir().unwrap();
+        let real = src_tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), b"x").unwrap();
+        let link = src_tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let err = super::copy_dir_owner_only(&link, &out_tmp.path().join("dest")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("opening source directory"),
+            "expected the source open to fail, got {err:#}"
+        );
+    }
+
     #[test]
     fn copy_dir_owner_only_rejects_symlinked_destination() {
         let src_tmp = tempfile::tempdir().unwrap();
