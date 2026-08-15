@@ -15,7 +15,9 @@ pub(crate) mod mcp_client;
 pub(crate) mod read_once;
 pub(crate) mod repeat_detect;
 mod session_state;
+pub(crate) mod slippage;
 pub(crate) mod task_tools;
+pub(crate) mod transcript;
 
 use std::io::Write;
 use std::str::FromStr;
@@ -643,6 +645,31 @@ fn resolve_pre_tool_text(
     task_tracker_enabled: bool,
     state_dir: &std::path::Path,
 ) -> Option<String> {
+    // #317: resolved before the other layers because it is the only one here
+    // that can deny, and a deny only counts when `__DENY__:` leads the string
+    // (see `append_read_once_result`). Folding it in beside `repeat_detect`,
+    // which matches every tool, would let an advisory prepend itself and
+    // silently downgrade the deny to an allow.
+    // #317 phase 3: checked before the write guard only because both deny and
+    // the first deny wins; neither ordering is load-bearing beyond that.
+    let scan_deny = crate::hook_run::slippage::handle_transcript_scan(
+        config.features.as_ref().and_then(|f| f.slippage.as_ref()),
+        stdin_payload,
+    );
+    if !scan_deny.is_empty() {
+        return Some(scan_deny);
+    }
+
+    let write_guard = crate::hook_run::slippage::handle_pre_tool_use(
+        config.features.as_ref().and_then(|f| f.slippage.as_ref()),
+        stdin_payload,
+        claude_session_id,
+        state_dir,
+    );
+    if !write_guard.is_empty() {
+        return Some(write_guard);
+    }
+
     let primary = if task_tracker_enabled
         && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload, state_dir)
     {
@@ -708,7 +735,19 @@ fn resolve_stop_reminder(
     claude_session_id: Option<&str>,
     config: &crate::config::Config,
 ) -> String {
-    let reminder = crate::task::stop_hook_reminder(state_dir);
+    let mut reminder = crate::task::stop_hook_reminder(state_dir);
+    // #317: appended before repeat-detect wraps the text, so a repeat warning
+    // stays the last thing read — it's about the turn that just happened,
+    // while the checklist is about what to do before ending.
+    let critique = crate::hook_run::slippage::handle_stop(
+        config.features.as_ref().and_then(|f| f.slippage.as_ref()),
+    );
+    if !critique.is_empty() {
+        if !reminder.is_empty() {
+            reminder.push_str("\n\n");
+        }
+        reminder.push_str(&critique);
+    }
     let repeat_detect_cfg = config
         .features
         .as_ref()
@@ -857,6 +896,43 @@ fn run_inner(
         None
     };
 
+    // #317: the per-turn rules digest. Computed here, beside `pre_tool_text`,
+    // for the same reason: it needs no scope/memory resolution, so it must
+    // survive the #702 early-exit below rather than being stranded behind it
+    // when nothing else wants this event.
+    // #317: counted here rather than inside the pipeline below, which the
+    // #702 early-exit can skip entirely — a metric that only accrues when
+    // something else happens to want the event would undercount silently.
+    if event == HookEvent::PostToolUse
+        && let Ok(state_dir) = crate::paths::state_dir()
+    {
+        crate::hook_run::slippage::handle_post_tool_use(
+            config.features.as_ref().and_then(|f| f.slippage.as_ref()),
+            stdin_payload,
+            claude_session_id,
+            &state_dir,
+        );
+    }
+
+    let turn_text = if event == HookEvent::UserPromptSubmit {
+        let text = crate::hook_run::slippage::handle_turn(
+            config.features.as_ref().and_then(|f| f.slippage.as_ref()),
+        );
+        if text.is_empty() {
+            None
+        } else {
+            let level =
+                event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
+            if !log_cfg.any_sink_wants(level) {
+                emit_trace_timing(t0, t_config, None, None, None);
+                return Ok(text);
+            }
+            Some(text)
+        }
+    } else {
+        None
+    };
+
     // #231: the task tracker's Stop reminder is computed before the #702
     // early-exit (below) so it can take the cheap fast path when session-log
     // has no interest in Stop, and be appended to `out` further down when
@@ -961,6 +1037,20 @@ fn run_inner(
         // Apply default type/importance markers from config (R1, R3) when no explicit
         // marker is present in the generated chunk.
         chunk = apply_memory_config_defaults(chunk, &config, &active);
+        // #317: folded into the chunk the SessionEnd store already sends,
+        // rather than issuing a second `icm_memory_store` — one store per
+        // session end keeps the memory readable and halves the round trips.
+        if event == HookEvent::SessionEnd
+            && let Ok(state_dir) = crate::paths::state_dir()
+            && let Some(summary) = crate::hook_run::slippage::session_metrics_summary(
+                config.features.as_ref().and_then(|f| f.slippage.as_ref()),
+                claude_session_id,
+                &state_dir,
+            )
+        {
+            chunk.push_str("\n\n");
+            chunk.push_str(&summary);
+        }
 
         // Reuse MCP HTTP client across events: the memory backend URL doesn't
         // change mid-session, so the reqwest Client (connection pool, TLS state,
@@ -1101,6 +1191,11 @@ fn run_inner(
             // circuited otherwise) — so this never displaces run_session_log, it
             // just adds to `out` (a deny replaces it via append_read_once_result).
             if let Some(text) = &pre_tool_text
+                && !text.is_empty()
+            {
+                append_read_once_result(&mut out, text);
+            }
+            if let Some(text) = &turn_text
                 && !text.is_empty()
             {
                 append_read_once_result(&mut out, text);

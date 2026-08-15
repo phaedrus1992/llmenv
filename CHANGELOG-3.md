@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `features.slippage`'s remaining layers now do something. `rule_reinjection`, `read_before_edit`, `self_critique`, and `metrics` were accepted by config — three of them defaulting to `true` — but had no implementation, so enabling them changed nothing. All four are wired now, along with the two opt-in transcript-scan layers (`explain_before_act`, `answer_before_act`). See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresslippage) (#317)
+
 - `llmenv doctor` now lists which lifecycle hooks (`session_start`, `session_end`, `turn_start`, `stop`) are wired for Claude Code in the active scope, and what would enable any that aren't. There was previously no way to confirm hook wiring from inside llmenv short of reading the generated `settings.json` by hand. `turn_start`'s gate is read straight from the generator; the rest are held in step by a test that renders `settings.json` for each combination and fails if the report disagrees. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#741)
 
 ### Security

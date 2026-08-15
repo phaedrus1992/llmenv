@@ -96,6 +96,15 @@ pub(crate) fn lifecycle_hook_registrations(
         .as_ref()
         .and_then(|f| f.task_tracker.as_ref())
         .is_some_and(|t| t.enabled);
+    // #317: the self-critique layer runs on Stop, so enabling it has to be a
+    // reason to register the event. Without this the layer is a phantom —
+    // config accepts it, `doctor` would report it, and nothing ever fires.
+    let slippage_critique = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && s.self_critique);
     vec![
         ("session_start", true, "always registered"),
         ("session_end", true, "always registered"),
@@ -106,8 +115,8 @@ pub(crate) fn lifecycle_hook_registrations(
         ),
         (
             "stop",
-            session_log || task_tracker,
-            "needs session logging or features.task_tracker",
+            session_log || task_tracker || slippage_critique,
+            "needs session logging, features.task_tracker, or slippage self_critique",
         ),
     ]
 }
@@ -1288,6 +1297,64 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
         }));
 
+    // #317: the metrics layer counts on PostToolUse, which only session
+    // logging registers today. Without this the counter never runs and the
+    // session-end summary is always empty.
+    if manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && s.metrics)
+        && !manifest.session_log.any_sink_enabled()
+    {
+        hooks_by_event
+            .entry("PostToolUse".to_string())
+            .or_default()
+            .push(json!({
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} post_tool_use") }],
+            }));
+    }
+
+    // #317 phase 3: the transcript-scan layers judge Bash commands, so Bash
+    // has to reach hook-run. Nothing else routes it there.
+    if manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && (s.answer_before_act || s.explain_before_act))
+    {
+        hooks_by_event
+            .entry("PreToolUse".to_string())
+            .or_default()
+            .push(json!({
+                "matcher": "^Bash$",
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
+            }));
+    }
+
+    // #317: the write guard needs to see `Write`. `Read` already reaches
+    // hook-run via the read-once registration above, but nothing routes
+    // `Write` there — the existing `^(Write|Edit|MultiEdit)$` entry runs the
+    // config guard, a different command. Without this the layer would record
+    // reads and never act on them.
+    if manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && s.read_before_edit)
+    {
+        hooks_by_event
+            .entry("PreToolUse".to_string())
+            .or_default()
+            .push(json!({
+                "matcher": "^Write$",
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
+            }));
+    }
+
     // #1331: block `index_repository`'s project-name override, which can
     // overwrite an unrelated project's index (see `hook_run::cbm_index_guard`).
     // Registered only when codebase-memory-mcp is actually wired — unlike
@@ -1362,6 +1429,30 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             }));
     }
 
+    // #317: the rules digest runs on UserPromptSubmit, so enabling the layer
+    // has to register the event — the memory-recall gate below and session
+    // logging are the only other things that do, and neither is implied by
+    // turning slippage on.
+    let slippage_reinjection = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && s.rule_reinjection);
+    if slippage_reinjection
+        && !manifest.session_log.any_sink_enabled()
+        && !lifecycle_hook_registrations(manifest)
+            .iter()
+            .any(|(event, registered, _)| *event == "turn_start" && *registered)
+    {
+        hooks_by_event
+            .entry("UserPromptSubmit".to_string())
+            .or_default()
+            .push(json!({
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} user_prompt_submit") }],
+            }));
+    }
+
     // #499: continuous per-prompt memory recall. Gated on icm_active (unlike the
     // always-on baseline events above) because this runs on every prompt, not
     // just session start/end — an unconditional per-turn network-backed hook
@@ -1392,18 +1483,17 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                     "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
                 }));
         }
-    } else if manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.task_tracker.as_ref())
-        .is_some_and(|t| t.enabled)
+    } else if lifecycle_hook_registrations(manifest)
+        .iter()
+        .any(|(event, registered, _)| *event == "stop" && *registered)
     {
         // #231: the task tracker's Stop reminder needs its own hook
         // registration — it must not depend on session logging happening to
-        // be on. Only registers `Stop` (not the other session-log events),
-        // and only in the `else` branch above so a session-log-enabled setup
-        // doesn't get two hook-run invocations on the same event.
+        // be on, and #317's self-critique layer needs the same. Only registers
+        // `Stop` (not the other session-log events), and only in the `else`
+        // branch above so a session-log-enabled setup doesn't get two hook-run
+        // invocations on the same event. Reads the shared gate rather than
+        // re-deriving the condition, so the two can't drift (#741).
         hooks_by_event
             .entry("Stop".to_string())
             .or_default()
@@ -5442,6 +5532,84 @@ mod tests {
 
     /// #741: doctor and the settings generator must agree on which lifecycle
     /// hooks are wired, so the gate lives in one function both consult.
+    // #317: same phantom-layer risk as self_critique, one event over. The
+    // digest runs on UserPromptSubmit, which nothing else registers in this
+    // fixture, so without the registration the layer would be config-only.
+    #[test]
+    fn slippage_rule_reinjection_alone_registers_user_prompt_submit() {
+        let mut m = crate::merge::MergedManifest::default();
+        m.session_log.file = None;
+        m.session_log.transcript = None;
+        m.capabilities.features = Some(llmenv_config::Features {
+            slippage: Some(llmenv_config::SlippageControl {
+                enabled: true,
+                rule_reinjection: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let settings = render_settings_for_test(&m);
+        assert!(
+            hook_commands_for(&settings, "UserPromptSubmit")
+                .iter()
+                .any(|c| c.ends_with(" user_prompt_submit")),
+            "got {:?}",
+            hook_commands_for(&settings, "UserPromptSubmit")
+        );
+
+        // With the layer off nothing else pulls the event in, so the
+        // assertion above can't be passing for an unrelated reason.
+        let mut off = m.clone();
+        off.capabilities.features = Some(llmenv_config::Features {
+            slippage: Some(llmenv_config::SlippageControl::default()),
+            ..Default::default()
+        });
+        assert!(
+            hook_commands_for(&render_settings_for_test(&off), "UserPromptSubmit").is_empty(),
+            "nothing but the layer should register UserPromptSubmit here"
+        );
+    }
+
+    // #317: the consistency test above compares the gate to what's generated,
+    // so it passes whenever the two agree — including when they agree that
+    // nothing is registered. This asserts the behaviour directly: enabling
+    // self_critique, with neither session logging nor the task tracker, must
+    // put a Stop hook in settings.json, or the layer never runs.
+    #[test]
+    fn slippage_self_critique_alone_registers_the_stop_hook() {
+        let mut m = crate::merge::MergedManifest::default();
+        m.session_log.file = None;
+        m.session_log.transcript = None;
+        m.capabilities.features = Some(llmenv_config::Features {
+            slippage: Some(llmenv_config::SlippageControl {
+                enabled: true,
+                self_critique: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let settings = render_settings_for_test(&m);
+        assert!(
+            hook_commands_for(&settings, "Stop")
+                .iter()
+                .any(|c| c.ends_with(" stop")),
+            "self_critique runs on Stop, so Stop must be registered: {:?}",
+            hook_commands_for(&settings, "Stop")
+        );
+
+        // And with the layer off, nothing else pulls Stop in — otherwise the
+        // assertion above would pass for the wrong reason.
+        let mut off = m.clone();
+        off.capabilities.features = Some(llmenv_config::Features {
+            slippage: Some(llmenv_config::SlippageControl::default()),
+            ..Default::default()
+        });
+        assert!(
+            hook_commands_for(&render_settings_for_test(&off), "Stop").is_empty(),
+            "nothing but the layer should be registering Stop in this fixture"
+        );
+    }
+
     #[test]
     fn lifecycle_registrations_match_the_generated_settings() {
         for (label, manifest) in [
@@ -5476,6 +5644,23 @@ mod tests {
                 m.capabilities.features = Some(llmenv_config::Features {
                     task_tracker: Some(llmenv_config::TaskTracker {
                         enabled: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+                m
+            }),
+            // #317: self_critique is a third path to a registered `stop`. A
+            // fixture with neither of the other two proves the layer isn't a
+            // phantom — config accepted, hook never registered, nothing fires.
+            ("slippage self_critique only", {
+                let mut m = crate::merge::MergedManifest::default();
+                m.session_log.file = None;
+                m.session_log.transcript = None;
+                m.capabilities.features = Some(llmenv_config::Features {
+                    slippage: Some(llmenv_config::SlippageControl {
+                        enabled: true,
+                        self_critique: true,
                         ..Default::default()
                     }),
                     ..Default::default()
