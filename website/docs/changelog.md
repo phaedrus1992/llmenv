@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- opencode's built-in todo list now feeds the `llmenv task` tracker, the way Claude Code's task tools have since 3.6.0. opencode's `todowrite` replaces the whole list on every call, so llmenv reconciles it against the tracker by task title: new titles are added, `in_progress` starts a task, `completed` finishes it, and a task that disappears from the list is left open rather than guessed at. Gated on the same `block_engine_task_tools` opt-out. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#1304)
+
 - `llmenv doctor` now lists which lifecycle hooks (`session_start`, `session_end`, `turn_start`, `stop`) are wired for Claude Code in the active scope, and what would enable any that aren't. There was previously no way to confirm hook wiring from inside llmenv short of reading the generated `settings.json` by hand. `turn_start`'s gate is read straight from the generator; the rest are held in step by a test that renders `settings.json` for each combination and fails if the report disagrees. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#741)
 
 ### Security
