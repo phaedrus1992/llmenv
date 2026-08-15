@@ -361,6 +361,27 @@ fn blocks_by_exit_code(engine: &str) -> bool {
     engine == "opencode"
 }
 
+/// Whether `event` is the one that records a completed tool call for the
+/// slippage metrics layer (#317).
+///
+/// Named rather than inlined so the event choice is testable: inside
+/// `run_inner` it sits behind a payload read and a state-dir resolve, where a
+/// wrong event is invisible until someone notices the counts are empty.
+fn counts_tool_use(event: HookEvent) -> bool {
+    event == HookEvent::PostToolUse
+}
+
+/// Whether `event` carries the per-turn rules digest (#317).
+fn carries_turn_digest(event: HookEvent) -> bool {
+    event == HookEvent::UserPromptSubmit
+}
+
+/// Whether `event` folds the session metrics summary into the stored chunk
+/// (#317).
+fn stores_session_metrics(event: HookEvent) -> bool {
+    event == HookEvent::SessionEnd
+}
+
 /// Whether this `hook-run` invocation should also check for config drift (#741).
 ///
 /// Claude Code only: the comparison baseline is the booted `CLAUDE_CONFIG_DIR`'s
@@ -903,7 +924,7 @@ fn run_inner(
     // #317: counted here rather than inside the pipeline below, which the
     // #702 early-exit can skip entirely — a metric that only accrues when
     // something else happens to want the event would undercount silently.
-    if event == HookEvent::PostToolUse
+    if counts_tool_use(event)
         && let Ok(state_dir) = crate::paths::state_dir()
     {
         crate::hook_run::slippage::handle_post_tool_use(
@@ -914,7 +935,7 @@ fn run_inner(
         );
     }
 
-    let turn_text = if event == HookEvent::UserPromptSubmit {
+    let turn_text = if carries_turn_digest(event) {
         let text = crate::hook_run::slippage::handle_turn(
             config.features.as_ref().and_then(|f| f.slippage.as_ref()),
         );
@@ -1040,7 +1061,7 @@ fn run_inner(
         // #317: folded into the chunk the SessionEnd store already sends,
         // rather than issuing a second `icm_memory_store` — one store per
         // session end keeps the memory readable and halves the round trips.
-        if event == HookEvent::SessionEnd
+        if stores_session_metrics(event)
             && let Ok(state_dir) = crate::paths::state_dir()
             && let Some(summary) = crate::hook_run::slippage::session_metrics_summary(
                 config.features.as_ref().and_then(|f| f.slippage.as_ref()),
@@ -2483,6 +2504,141 @@ mod tests {
     // #1331: opencode's shim blocks on `code === 2` alone, so a deny that
     // exits 0 there is silently allowed. Claude Code stays on exit 0 — it
     // honours the envelope, and this keeps a working path unchanged.
+
+    // #317: each layer fires on exactly one event. Inside `run_inner` these
+    // sit behind payload reads and state-dir resolves, so a wrong event shows
+    // up as "the feature quietly does nothing" rather than a failure.
+    #[test]
+    fn each_slippage_layer_fires_on_exactly_one_event() {
+        let matches = |f: fn(HookEvent) -> bool| {
+            ALL_HOOK_EVENTS
+                .iter()
+                .filter(|name| f(HookEvent::from_str(name).unwrap()))
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(matches(counts_tool_use), vec!["post_tool_use".to_string()]);
+        assert_eq!(
+            matches(carries_turn_digest),
+            vec!["user_prompt_submit".to_string()]
+        );
+        assert_eq!(
+            matches(stores_session_metrics),
+            vec!["session_end".to_string()]
+        );
+    }
+
+    // #317: the checklist is appended to whatever the Stop hook already had to
+    // say, and neither piece may swallow the other.
+    #[test]
+    fn stop_reminder_joins_the_tracker_text_and_the_critique() {
+        let state_dir = tempfile::tempdir().expect("test");
+        let with_critique = crate::config::Config {
+            features: Some(crate::config::Features {
+                slippage: Some(crate::config::SlippageControl {
+                    enabled: true,
+                    self_critique: true,
+                    ..Default::default()
+                }),
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: false,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &with_critique);
+        assert!(text.contains("tests"), "the critique is present: {text:?}");
+
+        let without = crate::config::Config {
+            features: Some(crate::config::Features {
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: false,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plain = resolve_stop_reminder(state_dir.path(), Some("s1"), &without);
+        assert!(
+            !plain.contains("tests"),
+            "no critique when the layer is off: {plain:?}"
+        );
+        // The tracker's own text survives either way — appending must not
+        // replace what was already there.
+        assert!(
+            text.starts_with(plain.as_str()) || plain.is_empty(),
+            "the critique is appended, not substituted: {text:?} vs {plain:?}"
+        );
+    }
+
+    // The separator only matters when the tracker actually said something, so
+    // an empty-tracker fixture can't tell a correct join from a missing or
+    // misplaced one. Seed a task first, then require both parts and a blank
+    // line between them.
+    #[test]
+    fn stop_reminder_separates_tracker_text_from_the_critique() {
+        let state_dir = tempfile::tempdir().expect("test");
+        // The reminder only lists `wip` tasks belonging to the *current*
+        // project, resolved from cwd — a fixture project string would be
+        // filtered straight back out.
+        let project = crate::task::project::current_tag().expect("test");
+        crate::task::session::start_session(
+            state_dir.path(),
+            None,
+            None,
+            &project,
+            crate::task::session::StartDecision::Auto,
+        )
+        .expect("test");
+        let task = crate::task::add_task(
+            state_dir.path(),
+            "finish the parser",
+            crate::task::ParentSpec::Auto,
+            None,
+            &project,
+        )
+        .expect("test");
+        crate::task::start_task(state_dir.path(), &task.slug, false).expect("test");
+
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                slippage: Some(crate::config::SlippageControl {
+                    enabled: true,
+                    self_critique: true,
+                    ..Default::default()
+                }),
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: false,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &config);
+        let tracker_only = crate::task::stop_hook_reminder(state_dir.path());
+        assert!(
+            !tracker_only.is_empty(),
+            "fixture must produce tracker text, or this proves nothing"
+        );
+        assert!(
+            text.contains(tracker_only.trim()),
+            "tracker text kept: {text:?}"
+        );
+        assert!(text.contains("tests"), "critique kept: {text:?}");
+        assert!(
+            text.contains("\n\n"),
+            "the two are separated by a blank line: {text:?}"
+        );
+        assert!(
+            !text.starts_with('\n'),
+            "no leading separator when the tracker already spoke: {text:?}"
+        );
+    }
+
     #[test]
     fn only_opencode_needs_the_exit_code_block_signal() {
         let mut by_exit_code = Vec::new();

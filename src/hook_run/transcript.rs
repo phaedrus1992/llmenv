@@ -275,4 +275,76 @@ mod tests {
     fn an_unreadable_transcript_is_none_rather_than_a_panic() {
         assert!(read_turn_state(Path::new("/nonexistent/llmenv/transcript.jsonl")).is_none());
     }
+    // Content arrives either as an array of blocks or as a bare string. Every
+    // test above uses the array form, so the string arm went unexercised —
+    // deleting it entirely left the suite green.
+    #[test]
+    fn string_content_is_read_for_both_roles() {
+        let file = transcript(&[serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": "is this right?" },
+        })]);
+        let state = read_turn_state(file.path()).unwrap();
+        assert_eq!(state.last_user_text.as_deref(), Some("is this right?"));
+        assert!(state.has_unanswered_question());
+
+        let answered = transcript(&[
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": "is this right?" },
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "content": "yes, it is" },
+            }),
+        ]);
+        assert!(
+            !read_turn_state(answered.path())
+                .unwrap()
+                .has_unanswered_question(),
+            "a string-form assistant reply is still the assistant speaking"
+        );
+    }
+
+    // An empty or whitespace-only reply is not an answer, in either shape.
+    #[test]
+    fn blank_assistant_text_does_not_count_as_speaking() {
+        for content in [
+            serde_json::json!("   "),
+            serde_json::json!([{ "type": "text", "text": "  " }]),
+        ] {
+            let file = transcript(&[
+                user("did it work?"),
+                serde_json::json!({
+                    "type": "assistant",
+                    "message": { "role": "assistant", "content": content },
+                }),
+            ]);
+            assert!(
+                read_turn_state(file.path())
+                    .unwrap()
+                    .has_unanswered_question(),
+                "blank text is not an answer"
+            );
+        }
+    }
+
+    // A text block with no `text` field, or a non-text block claiming to be
+    // one, must not register as speech — the `&&` between the two checks is
+    // what enforces that.
+    #[test]
+    fn a_text_block_without_text_is_not_speech() {
+        let file = transcript(&[
+            user("well?"),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "content": [{ "type": "text" }] },
+            }),
+        ]);
+        assert!(
+            read_turn_state(file.path())
+                .unwrap()
+                .has_unanswered_question()
+        );
+    }
 }
