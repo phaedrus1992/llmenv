@@ -295,59 +295,75 @@ fn move_dir_newest_wins(src: &Path, dst: &Path) -> anyhow::Result<()> {
         "durable transcript dir {} is not a real directory",
         dst.display()
     );
-    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
-        let entry = entry.with_context(|| format!("reading entry in {}", src.display()))?;
-        let file_type = entry.file_type()?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if file_type.is_symlink() {
+    // #1066: both ends are opened once and every entry below is reached
+    // through those descriptors. `src`/`dst` continue downward for error
+    // messages only — the kernel never re-resolves them, so a directory
+    // swapped for a symlink after the checks above cannot redirect the move.
+    use std::os::fd::AsFd as _;
+    let src_dir = crate::paths::dirfd::open_dir_nofollow(src)
+        .with_context(|| format!("reading {}", src.display()))?;
+    let dst_dir = crate::paths::dirfd::open_dir_nofollow(dst)
+        .with_context(|| format!("opening {}", dst.display()))?;
+    let entries = crate::paths::dirfd::read_dir_entries(src_dir.as_fd())
+        .with_context(|| format!("reading entry in {}", src.display()))?;
+    for entry in entries {
+        let from = src.join(&entry.name);
+        let to = dst.join(&entry.name);
+        if entry.is_symlink() {
             tracing::debug!("inherit: skipping symlink {}", from.display());
-        } else if file_type.is_dir() {
+        } else if entry.is_dir() {
             move_dir_newest_wins(&from, &to)?;
-        } else if file_type.is_file() && is_newer(&from, &to) {
-            move_file(&from, &to)?;
+        } else if entry.is_file() && is_newer_at(src_dir.as_fd(), dst_dir.as_fd(), &entry.name) {
+            move_file_at(src_dir.as_fd(), dst_dir.as_fd(), &entry.name, &from, &to)?;
         }
     }
     Ok(())
 }
 
 /// Rename `from` onto `to`, falling back to copy-then-delete across devices.
-fn move_file(from: &Path, to: &Path) -> anyhow::Result<()> {
-    if std::fs::rename(from, to).is_ok() {
+/// Move `name` from one open directory to another, newest-wins already decided.
+///
+/// `from`/`to` are for error messages only. `renameat` is tried first and the
+/// copy fallback exists for the cross-filesystem (`EXDEV`) case, which is why
+/// the durable store being on a different mount doesn't break inheritance.
+fn move_file_at(
+    src_dir: std::os::fd::BorrowedFd<'_>,
+    dst_dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+    from: &Path,
+    to: &Path,
+) -> anyhow::Result<()> {
+    use crate::paths::dirfd;
+
+    if dirfd::rename_at(src_dir, name, dst_dir, name).is_ok() {
         return Ok(());
     }
-    copy_replacing(from, to)?;
-    if let Err(e) = std::fs::remove_file(from) {
+    let bytes = dirfd::read_file_at(src_dir, name)
+        .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
+    // Owner-only, matching everything else llmenv writes into the durable
+    // store; the replace semantics (unlink, then create) are what keep a
+    // symlink at the destination from being written through (#1065).
+    dirfd::write_file_at(dst_dir, name, &bytes, rustix::fs::Mode::from(0o600))
+        .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
+    if let Err(e) = dirfd::remove_file_at(src_dir, name) {
         tracing::debug!("inherit: could not drop {} after copy: {e}", from.display());
     }
     Ok(())
 }
 
-/// Copy `from` onto `to`, replacing whatever is at `to` first — including a
-/// symlink. `std::fs::copy` alone resolves a symlink at `to` and writes
-/// through it rather than replacing it, unlike `rename(2)`'s replace
-/// semantics; this fallback exists specifically so `rename` failing
-/// (cross-device) doesn't downgrade to that weaker behavior (#1065).
-fn copy_replacing(from: &Path, to: &Path) -> anyhow::Result<()> {
-    let _ = std::fs::remove_file(to);
-    std::fs::copy(from, to)
-        .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
-    Ok(())
-}
-
-/// True when `from` is newer than `to`, or `to` does not exist yet.
-/// An unreadable source mtime is treated as "not newer" — never clobber on a
-/// stat failure. Uses `symlink_metadata` on both sides (#1065): following a
-/// symlink at `to` would compare against its *target's* mtime, which can
-/// read as "safe to clobber" and select the vulnerable `move_file` path for
-/// a `to` that's actually a symlink an attacker planted.
-fn is_newer(from: &Path, to: &Path) -> bool {
-    let Ok(src) = std::fs::symlink_metadata(from).and_then(|m| m.modified()) else {
+/// Whether `name` in `src_dir` is newer than the same name in `dst_dir`.
+/// A destination that can't be read counts as older, so the source wins.
+fn is_newer_at(
+    src_dir: std::os::fd::BorrowedFd<'_>,
+    dst_dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> bool {
+    let Some(src) = crate::paths::dirfd::mtime_at(src_dir, name) else {
         return false;
     };
-    match std::fs::symlink_metadata(to).and_then(|m| m.modified()) {
-        Ok(dst) => src > dst,
-        Err(_) => true,
+    match crate::paths::dirfd::mtime_at(dst_dir, name) {
+        Some(dst) => src > dst,
+        None => true,
     }
 }
 
@@ -838,27 +854,48 @@ mod tests {
     // symlink at `to`" — a plain `std::fs::copy` would follow the symlink
     // and overwrite whatever it points at instead of replacing the symlink
     // itself.
+    //
+    // #1066: both properties now belong to the fd-relative helpers — the
+    // path-based `copy_replacing`/`is_newer` they were written against are
+    // gone, replaced by `write_file_at`/`is_newer_at`, so the tests move with
+    // them rather than being deleted alongside the code.
     #[cfg(unix)]
     #[test]
-    fn copy_replacing_does_not_follow_a_symlink_at_destination() {
+    fn moving_a_file_replaces_a_symlink_at_the_destination() {
+        use std::os::fd::AsFd as _;
+
         let tmp = tempfile::TempDir::new().unwrap();
-        let from = tmp.path().join("from");
-        write(&from, "new-content");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        write(&src.join("f"), "new-content");
         let victim = tmp.path().join("victim");
         write(&victim, "must-not-be-touched");
-        let to = tmp.path().join("to-symlink");
-        std::os::unix::fs::symlink(&victim, &to).unwrap();
+        std::os::unix::fs::symlink(&victim, dst.join("f")).unwrap();
 
-        copy_replacing(&from, &to).unwrap();
+        let src_dir = crate::paths::dirfd::open_dir_nofollow(&src).unwrap();
+        let dst_dir = crate::paths::dirfd::open_dir_nofollow(&dst).unwrap();
+        move_file_at(
+            src_dir.as_fd(),
+            dst_dir.as_fd(),
+            std::ffi::OsStr::new("f"),
+            &src.join("f"),
+            &dst.join("f"),
+        )
+        .unwrap();
 
         assert!(
-            !std::fs::symlink_metadata(&to)
+            !std::fs::symlink_metadata(dst.join("f"))
                 .unwrap()
                 .file_type()
                 .is_symlink(),
-            "the symlink at `to` must be replaced, not written through"
+            "the symlink at the destination must be replaced, not written through"
         );
-        assert_eq!(std::fs::read_to_string(&to).unwrap(), "new-content");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("f")).unwrap(),
+            "new-content"
+        );
         assert_eq!(
             std::fs::read_to_string(&victim).unwrap(),
             "must-not-be-touched",
@@ -866,29 +903,30 @@ mod tests {
         );
     }
 
-    // #1065: following a symlink at `to` for the mtime comparison would read
-    // the *target's* mtime — an old target makes a planted symlink look
-    // "safe to clobber" and select the vulnerable `move_file` path.
+    // #1065: following a symlink at the destination for the mtime comparison
+    // would read the *target's* mtime — an old target makes a planted symlink
+    // look "safe to clobber" and selects the vulnerable move path.
     #[cfg(unix)]
     #[test]
-    fn is_newer_does_not_follow_a_symlink_at_destination() {
+    fn is_newer_at_does_not_follow_a_symlink_at_destination() {
+        use std::os::fd::AsFd as _;
+
         let tmp = tempfile::TempDir::new().unwrap();
-        let from = tmp.path().join("from");
-        write(&from, "content");
-        // An old target: if `is_newer` followed the symlink, `from` would
-        // read as newer than this ancient mtime.
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        write(&src.join("f"), "content");
         let old_target = tmp.path().join("old-target");
         write(&old_target, "old");
         filetime::set_file_mtime(&old_target, filetime::FileTime::from_unix_time(1, 0)).unwrap();
-        let to = tmp.path().join("to-symlink");
-        std::os::unix::fs::symlink(&old_target, &to).unwrap();
+        std::os::unix::fs::symlink(&old_target, dst.join("f")).unwrap();
 
-        // The symlink itself is freshly created (now), so its own mtime is
-        // recent — `from` must not read as newer than the symlink's own
-        // metadata just because the target underneath it is ancient.
+        let src_dir = crate::paths::dirfd::open_dir_nofollow(&src).unwrap();
+        let dst_dir = crate::paths::dirfd::open_dir_nofollow(&dst).unwrap();
         assert!(
-            !is_newer(&from, &to),
-            "a symlink at `to` must be compared by its own metadata, not its target's"
+            !is_newer_at(src_dir.as_fd(), dst_dir.as_fd(), std::ffi::OsStr::new("f")),
+            "a symlink at the destination is compared by its own metadata, not its target's"
         );
     }
 
