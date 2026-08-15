@@ -645,8 +645,18 @@ active context (active bundles, active MCP servers, etc.). Checks:
   `claude_code` in the active scope, and for any that aren't, what would enable
   them. `session_start`/`session_end` are always registered; `turn_start` needs
   a memory backend; `stop` needs session logging or `features.task_tracker`.
-  Read from the same gate the adapter writes `settings.json` from, so the report
-  can't disagree with what's on disk.
+  `turn_start`'s gate is read straight from the generator; the others are
+  derived separately and held in step by a test that renders `settings.json`
+  for each combination and fails if the report disagrees.
+- dependent-tool versions (added in v3.11.0) — reports the installed version of
+  the external tools llmenv wires in but doesn't ship (`icm`,
+  `codebase-memory-mcp`) and how to update each. `icm upgrade --apply` installs
+  its own update; `codebase-memory-mcp update` only prints the install command
+  for your machine, so llmenv reports it rather than claiming it updates
+  anything. Offline by design: no "an update is available" claim is made, since
+  checking would mean a network round trip per tool on every run. Tools that
+  aren't installed are skipped — the tool-availability checks above already
+  report those.
 - dead `native_<feature>.<engine>` keys (added in v3.8.0) — warns when a key in
   `native_permissions`, `native_hooks`, `native_plugins`, `native_mcp`,
   `native_model_providers`, or `native` names no registered engine (a typo), or

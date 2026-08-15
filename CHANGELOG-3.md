@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `llmenv doctor` now reports the installed version of the external tools llmenv wires in but doesn't ship (`icm`, `codebase-memory-mcp`) and how to update each. The two differ in what's possible: `icm upgrade --apply` installs its own update, while `codebase-memory-mcp update` only prints the install command for your machine — so llmenv reports that one rather than claiming it updates anything. No network check is made, so the report says what you have, not whether it's current. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#1185)
+
 - `llmenv doctor` now lists which lifecycle hooks (`session_start`, `session_end`, `turn_start`, `stop`) are wired for Claude Code in the active scope, and what would enable any that aren't. There was previously no way to confirm hook wiring from inside llmenv short of reading the generated `settings.json` by hand. `turn_start`'s gate is read straight from the generator; the rest are held in step by a test that renders `settings.json` for each combination and fails if the report disagrees. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#741)
 
 ### Security
