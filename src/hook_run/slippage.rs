@@ -908,4 +908,98 @@ mod tests {
             "the same file by a different spelling must count as read"
         );
     }
+    // Each layer's gate is `!enabled || !layer`. Flipping the `||` to `&&`
+    // means the master switch alone no longer stops the layer, and the
+    // existing tests can't see it: they turn the *layer* off while leaving
+    // `enabled` true, which both spellings handle the same way. These turn the
+    // master switch off with the layer on — the only shape that separates them.
+    #[test]
+    fn master_switch_off_stops_counting_even_with_metrics_on() {
+        let state = tempfile::tempdir().unwrap();
+        let master_off = SlippageControl {
+            enabled: false,
+            metrics: true,
+            ..Default::default()
+        };
+        handle_post_tool_use(
+            Some(&master_off),
+            &serde_json::json!({ "tool_name": "Read" }),
+            Some("s1"),
+            state.path(),
+        );
+
+        // Read the file directly: asking `session_metrics_summary` would gate
+        // on the same config and hide whether anything was written.
+        let stats = load_stats(state.path(), "s1");
+        assert!(
+            stats.tools.is_empty(),
+            "nothing should have been counted, got {:?}",
+            stats.tools
+        );
+    }
+
+    #[test]
+    fn master_switch_off_suppresses_a_summary_that_has_counts() {
+        let state = tempfile::tempdir().unwrap();
+        let on = SlippageControl {
+            enabled: true,
+            metrics: true,
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            handle_post_tool_use(
+                Some(&on),
+                &serde_json::json!({ "tool_name": "Read" }),
+                Some("s1"),
+                state.path(),
+            );
+        }
+        assert!(
+            session_metrics_summary(Some(&on), Some("s1"), state.path()).is_some(),
+            "fixture must have counts, or the master-switch check proves nothing"
+        );
+
+        let master_off = SlippageControl {
+            enabled: false,
+            ..on
+        };
+        assert!(
+            session_metrics_summary(Some(&master_off), Some("s1"), state.path()).is_none(),
+            "the master switch suppresses a summary that would otherwise exist"
+        );
+    }
+
+    #[test]
+    fn master_switch_off_stops_the_transcript_scan_with_layers_on() {
+        let file = transcript_with(&[user_line("should I?")]);
+        let master_off = SlippageControl {
+            enabled: false,
+            answer_before_act: true,
+            explain_before_act: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            handle_transcript_scan(Some(&master_off), &bash_payload(&file, "chmod 777 x")),
+            "",
+            "the master switch stops layers that would otherwise both fire"
+        );
+    }
+
+    // `explain_before_act && !assistant_spoke_since`: flipping to `||` makes
+    // the layer fire whenever the assistant hasn't spoken, regardless of its
+    // own toggle. Needs a case where the assistant is silent, the command is
+    // modifying, and only `answer_before_act` is on — with a statement rather
+    // than a question, so the answer layer stays quiet too.
+    #[test]
+    fn explain_layer_stays_off_when_only_the_answer_layer_is_enabled() {
+        let file = transcript_with(&[user_line("clean up the build directory")]);
+        assert_eq!(
+            handle_transcript_scan(
+                Some(&scan_cfg(true, false)),
+                &bash_payload(&file, "chmod 777 build")
+            ),
+            "",
+            "a disabled explain layer must not deny a modifying command"
+        );
+    }
 }
