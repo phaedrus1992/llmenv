@@ -1159,11 +1159,20 @@ impl AgentAdapter for OpencodeAdapter {
             .collect();
         all_hooks.extend(plugin_hooks);
 
-        let guard_index_repository = manifest
+        let guards_index_repository = manifest
             .mcps
             .iter()
             .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME);
-        let shim_js = generate_shim_js(&all_hooks, guard_index_repository)?;
+        // Same gate #980 gave Claude Code: a user who wants the tracker but
+        // still wants opencode's native todo list keeps `block_engine_task_tools`
+        // off and the redirect isn't registered.
+        let redirects_todowrite = manifest
+            .capabilities
+            .features
+            .as_ref()
+            .and_then(|f| f.task_tracker.as_ref())
+            .is_some_and(|t| t.enabled && t.block_engine_task_tools);
+        let shim_js = generate_shim_js(&all_hooks, guards_index_repository || redirects_todowrite)?;
         let plugin_dir = out.join("plugin");
         std::fs::create_dir_all(&plugin_dir)?;
         crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), shim_js.as_bytes())?;
@@ -1529,15 +1538,21 @@ fn glob_matches(pattern: &str, input: &[char]) -> bool {
 /// the three auto-hooks (`check-stale`, `config-context`, `config-guard`)
 /// that always run on `SessionStart` / `PreToolUse`.
 ///
-/// `guard_index_repository` adds a fourth (#1331): opencode receives the same
-/// `manifest.mcps` Claude Code does, so a codebase-memory-mcp `index_repository`
-/// call can overwrite another project's index here too. opencode's plugin API
-/// has no per-tool matcher, so unlike Claude Code's anchored matcher this hook
-/// runs on every tool call and filters by name itself — hence only registering
-/// it when that MCP is actually wired.
+/// `needs_pre_tool_hook` adds a fourth: `hook-run pre_tool_use`, which serves
+/// two consumers that both need to see tool calls by name —
+///
+/// - the `index_repository` name guard (#1331), since opencode gets the same
+///   `manifest.mcps` Claude Code does and the clobber is reachable here too;
+/// - the `todowrite` redirect (#1304), which mirrors opencode's built-in todo
+///   list into `llmenv task`.
+///
+/// One registration covers both: opencode's plugin API has no per-tool matcher,
+/// so unlike Claude Code's anchored matchers this hook runs on every tool call
+/// and `hook-run` dispatches on `tool_name` itself. That per-call cost is why
+/// it isn't registered unconditionally.
 fn generate_shim_js(
     hooks: &[crate::config::Hook],
-    guard_index_repository: bool,
+    needs_pre_tool_hook: bool,
 ) -> anyhow::Result<String> {
     let mut by_event: std::collections::BTreeMap<&str, Vec<serde_json::Value>> =
         std::collections::BTreeMap::new();
@@ -1590,7 +1605,7 @@ fn generate_shim_js(
             "command": "llmenv config-guard --engine opencode",
             "timeout": 5000,
         }));
-    if guard_index_repository {
+    if needs_pre_tool_hook {
         by_event
             .entry("PreToolUse")
             .or_default()
@@ -4192,6 +4207,37 @@ mod tests {
     // #1331: opencode gets the same `manifest.mcps` Claude Code does, so the
     // same `index_repository` clobber is reachable here. Its plugin API has no
     // per-tool matcher, so the hook is only registered when that MCP is wired.
+    // #1304: same `block_engine_task_tools` opt-out Claude Code got in #980 —
+    // a user who wants the tracker but keeps opencode's native todo list turns
+    // it off and no redirect is registered.
+    #[test]
+    fn todowrite_redirect_follows_the_task_tracker_gate() {
+        let tracker = |enabled: bool, block: bool| {
+            let mut m = crate::merge::MergedManifest::default();
+            m.capabilities.features = Some(crate::config::Features {
+                task_tracker: Some(crate::config::TaskTracker {
+                    enabled,
+                    block_engine_task_tools: block,
+                }),
+                ..Default::default()
+            });
+            m
+        };
+        let registered = |m: &crate::merge::MergedManifest| {
+            let tmp = tempfile::tempdir().unwrap();
+            OpencodeAdapter.materialize(m, tmp.path()).unwrap();
+            std::fs::read_to_string(tmp.path().join("plugin/llmenv.js"))
+                .unwrap()
+                .contains("hook-run pre_tool_use")
+        };
+        assert!(registered(&tracker(true, true)), "tracker on, redirect on");
+        assert!(
+            !registered(&tracker(true, false)),
+            "block_engine_task_tools off must leave the native todo list alone"
+        );
+        assert!(!registered(&tracker(false, true)), "tracker off");
+    }
+
     #[test]
     fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
         let with = generate_shim_js(&[], true).unwrap();
