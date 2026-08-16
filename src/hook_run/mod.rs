@@ -361,6 +361,19 @@ fn blocks_by_exit_code(engine: &str) -> bool {
     engine == "opencode"
 }
 
+/// Whether a hook decision can be returned immediately, or has to fall through
+/// so session logging still sees the event.
+///
+/// Both callers return the same text either way, so getting this wrong is
+/// invisible in the output and shows up only as missing log lines — the
+/// #231/#864 bug class, where an unconditional early return silently dropped
+/// Debug-level capture for every call. Named so the condition itself is
+/// testable rather than buried in a branch whose two arms look alike.
+fn can_short_circuit(event: HookEvent, log_cfg: &crate::config::SessionLog) -> bool {
+    let level = event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
+    !log_cfg.any_sink_wants(level)
+}
+
 /// Whether `event` is the one that records a completed tool call for the
 /// slippage metrics layer (#317).
 ///
@@ -899,13 +912,12 @@ fn run_inner(
         );
         match text {
             Some(t) => {
-                // Derived from the same `event_to_log_kind` mapping
-                // `run_session_log` uses, rather than hardcoding `LogLevel::Debug`
-                // — a hardcoded level would drift if `EventKind::ToolUse`'s level
-                // ever changed, reintroducing this exact bug class.
-                let level =
-                    event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
-                if !log_cfg.any_sink_wants(level) {
+                // Shares `can_short_circuit` with the turn digest below, so
+                // the level comes from the same `event_to_log_kind` mapping
+                // `run_session_log` uses rather than a hardcoded
+                // `LogLevel::Debug` that would drift if `EventKind::ToolUse`'s
+                // level ever changed.
+                if can_short_circuit(event, &log_cfg) {
                     emit_trace_timing(t0, t_config, None, None, None);
                     return Ok(t);
                 }
@@ -942,9 +954,7 @@ fn run_inner(
         if text.is_empty() {
             None
         } else {
-            let level =
-                event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
-            if !log_cfg.any_sink_wants(level) {
+            if can_short_circuit(event, &log_cfg) {
                 emit_trace_timing(t0, t_config, None, None, None);
                 return Ok(text);
             }
@@ -2504,6 +2514,33 @@ mod tests {
     // #1331: opencode's shim blocks on `code === 2` alone, so a deny that
     // exits 0 there is silently allowed. Claude Code stays on exit 0 — it
     // honours the envelope, and this keeps a working path unchanged.
+
+    // #231/#864: returning early when a sink still wants the event drops its
+    // log line, and both arms return the same text — so nothing but a direct
+    // test of the condition can tell the two apart.
+    #[test]
+    fn short_circuit_is_refused_while_a_sink_still_wants_the_event() {
+        let quiet = crate::config::SessionLog {
+            file: None,
+            transcript: None,
+            ..Default::default()
+        };
+        assert!(
+            can_short_circuit(HookEvent::UserPromptSubmit, &quiet),
+            "no sink wants it, so the decision can return immediately"
+        );
+        assert!(can_short_circuit(HookEvent::PreToolUse, &quiet));
+
+        let listening = crate::config::SessionLog::default();
+        assert!(
+            listening.any_sink_enabled(),
+            "fixture must have a sink on, or this proves nothing"
+        );
+        assert!(
+            !can_short_circuit(HookEvent::UserPromptSubmit, &listening),
+            "a listening sink must be reached before returning"
+        );
+    }
 
     // #317: each layer fires on exactly one event. Inside `run_inner` these
     // sit behind payload reads and state-dir resolves, so a wrong event shows
