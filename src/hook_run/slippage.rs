@@ -878,6 +878,37 @@ mod tests {
             "both layers are opt-in even with the feature on"
         );
     }
+    // `path_key` collapsing every path to one value would make the layer
+    // authorise any write after any read. The canonicalisation test can't see
+    // that — both sides map through the same function, so a constant still
+    // matches itself.
+    #[test]
+    fn reading_one_file_does_not_authorise_writing_a_different_one() {
+        let state = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let read_me = work.path().join("read.txt");
+        let other = work.path().join("other.txt");
+        std::fs::write(&read_me, "a").unwrap();
+        std::fs::write(&other, "b").unwrap();
+
+        handle_pre_tool_use(
+            Some(&on()),
+            &payload("Read", &read_me),
+            Some("s1"),
+            state.path(),
+        );
+        assert!(
+            handle_pre_tool_use(
+                Some(&on()),
+                &payload("Write", &other),
+                Some("s1"),
+                state.path()
+            )
+            .starts_with("__DENY__:"),
+            "a read of one file must not vouch for a write to another"
+        );
+    }
+
     // A read recorded under one spelling and a write checked under another
     // would deny a write to a file that *was* read — the false positive most
     // likely to get the layer switched off.

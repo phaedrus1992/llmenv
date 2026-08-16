@@ -1226,9 +1226,11 @@ fn run_inner(
             {
                 append_read_once_result(&mut out, text);
             }
-            if let Some(text) = &turn_text
-                && !text.is_empty()
-            {
+            // No emptiness check: `turn_text` is `None` rather than
+            // `Some("")` when the layer produces nothing, so testing it again
+            // here is dead — and a dead condition is one a future edit can
+            // silently invert.
+            if let Some(text) = &turn_text {
                 append_read_once_result(&mut out, text);
             }
 
