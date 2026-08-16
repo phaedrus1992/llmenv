@@ -869,11 +869,11 @@ See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
 
 Guardrails against model behavior drift across long sessions (effort decay,
 forgetting rules after context compaction). The master switch `enabled` gates
-every sub-layer. Currently `effort_level`, `compact_survival`, and
-`diagnose_command` are wired to behavior; the remaining `SlippageControl`
-schema fields (`rule_reinjection`, `read_before_edit`, `self_critique`,
-`metrics`, `explain_before_act`, `answer_before_act`) are accepted for
-forward-compatibility with planned future layers but have no effect yet.
+every sub-layer: with it off, no layer runs regardless of its own setting.
+
+All layers are wired to behavior as of v3.11.0. Before that, only
+`effort_level`, `compact_survival`, and `diagnose_command` had any effect —
+the other fields parsed but did nothing.
 
 ```yaml
 features:
@@ -882,14 +882,26 @@ features:
     effort_level: xhigh     # injected into generated engine settings; omit to leave untouched
     compact_survival: true  # CLAUDE.md fragment: re-read rules after compaction
     diagnose_command: true  # materializes a /diagnose skill (evidence-first debugging checklist)
+    rule_reinjection: true  # short standing-rules digest on every prompt
+    read_before_edit: true  # deny Write to an existing file not read this session
+    self_critique: true     # checklist appended at Stop
+    metrics: true           # count tool use; store a read:edit summary at session end
+    explain_before_act: false  # opt-in: deny a modifying command with no explanation yet
+    answer_before_act: false   # opt-in: deny a tool call while a question is unanswered
 ```
 
-| Field              | Required | Notes                                                                                                                                         |
-|--------------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`          | no       | Default `false` (opt-in master switch).                                                                                                       |
-| `effort_level`     | no       | Reasoning-effort value injected into generated engine settings (e.g. `"xhigh"`, `"high"`); omitted means untouched.                           |
-| `compact_survival` | no       | Default `true`. Merges a short rules fragment into the generated CLAUDE.md reminding the agent to re-read its rules after context compaction. |
-| `diagnose_command` | no       | Default `true`. Materializes a `/diagnose` skill: a structured symptoms → evidence → hypotheses → test → act checklist.                       |
+| Field                | Required | Notes                                                                                                                                                                                                                                       |
+|----------------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`            | no       | Default `false` (opt-in master switch).                                                                                                                                                                                                     |
+| `effort_level`       | no       | Reasoning-effort value injected into generated engine settings (e.g. `"xhigh"`, `"high"`); omitted means untouched.                                                                                                                         |
+| `compact_survival`   | no       | Default `true`. Merges a short rules fragment into the generated CLAUDE.md reminding the agent to re-read its rules after context compaction.                                                                                               |
+| `diagnose_command`   | no       | Default `true`. Materializes a `/diagnose` skill: a structured symptoms → evidence → hypotheses → test → act checklist.                                                                                                                     |
+| `rule_reinjection`   | no       | Default `true` (added in v3.11.0). Injects a short standing-rules digest on each `UserPromptSubmit`. Deliberately small — it is re-sent every turn. Not sent at session start, where CLAUDE.md already carries the rules.                   |
+| `read_before_edit`   | no       | Default `true` (added in v3.11.0). Denies a `Write` to a file that exists but hasn't been read this session; `Write` replaces the whole file. Files that don't exist yet are always allowed, and `Edit` is left to Claude Code's own guard. |
+| `self_critique`      | no       | Default `true` (added in v3.11.0). Appends a short checklist at `Stop` (tests run, anomalies explained, scope finished). Advisory — it never blocks.                                                                                        |
+| `metrics`            | no       | Default `true` (added in v3.11.0). Counts tool calls and stores a read-to-edit summary to memory at session end, folded into the store that already happens there.                                                                          |
+| `explain_before_act` | no       | Default `false` (added in v3.11.0). Denies a *modifying* Bash command when nothing has been said yet this turn. Off by default: a transcript heuristic.                                                                                     |
+| `answer_before_act`  | no       | Default `false` (added in v3.11.0). Denies a tool call while the user's question sits unanswered. Off by default: a transcript heuristic.                                                                                                   |
 
 ## `session_log:`
 

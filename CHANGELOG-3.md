@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `features.slippage`'s remaining layers now do something. `rule_reinjection`, `read_before_edit`, `self_critique`, and `metrics` were accepted by config — three of them defaulting to `true` — but had no implementation, so enabling them changed nothing. All four are wired now, along with the two opt-in transcript-scan layers (`explain_before_act`, `answer_before_act`). See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresslippage) (#317)
+
 - opencode's built-in todo list now feeds the `llmenv task` tracker, the way Claude Code's task tools have since 3.6.0. opencode's `todowrite` replaces the whole list on every call, so llmenv reconciles it against the tracker by task title: new titles are added, `in_progress` starts a task, `completed` finishes it, and a task that disappears from the list is left open rather than guessed at. Gated on the same `block_engine_task_tools` opt-out. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#1304)
 
 - `llmenv doctor` now reports the installed version of the external tools llmenv wires in but doesn't ship (`icm`, `codebase-memory-mcp`) and how to update each. The two differ in what's possible: `icm upgrade --apply` installs its own update, while `codebase-memory-mcp update` only prints the install command for your machine — so llmenv reports that one rather than claiming it updates anything. No network check is made, so the report says what you have, not whether it's current. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#1185)
