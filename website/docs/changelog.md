@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.11.0] - 2026-08-17
+
 The through-line for this release is configuration llmenv accepted but never acted on. Four `features.slippage` layers — three of them defaulting to `true` — were wired into the config schema and nothing else, so turning them on changed nothing; all four run now, along with two opt-in transcript-scan layers (#317). Most of the opencode adapter work is the same shape: a permission rule could name a key opencode has no equivalent for, overlap another pattern in a way that quietly reversed it, or carry stray whitespace that stopped it matching any tool — each rendered a rule that did nothing, and each is now either a hard render failure or a visible warning (#1328, #1344, #1345). Tags, bundles, and marketplace entries dropped for being malformed used to report at a log level the default filter discards, so a bundle that never fired left no trace anywhere; they say so out loud now (#1345). And `llmenv prune`/`llmenv regenerate` exit non-zero when they fail, instead of exiting 0 over a printed warning (#1346).
 
 `llmenv doctor` gained two reports: the installed versions of the external tools llmenv wires in but doesn't ship, and which Claude Code lifecycle hooks are actually wired in the active scope (#1185, #741). opencode's built-in todo list now feeds the `llmenv task` tracker, the way Claude Code's task tools have since 3.6.0 (#1304).
