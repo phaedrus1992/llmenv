@@ -96,19 +96,55 @@ fn llmenv(dir: &TempDir, path: &str, subcommand: &str) -> Command {
     cmd
 }
 
-/// #1345: a rule for a tool opencode has no key for is dropped — say so where
-/// the user can see it, with no `RUST_LOG` set.
+/// #1371: a rule for a known tool the engine has no analog for is working
+/// config — it still applies to the engines that *do* have the tool — so
+/// `regenerate` says nothing about it. #1345 surfaced this on every regenerate,
+/// which put an unactionable warning between two progress lines on every shell
+/// prompt; `doctor` and `engines.md` carry it now.
 #[test]
-fn dropped_permission_rule_is_reported_on_stderr() {
+fn unmappable_permission_rule_is_silent_on_regenerate() {
     let (dir, path) = setup("permissions:\n  deny:\n    - { tool: NotebookEdit }\n");
     llmenv(&dir, &path, "regenerate")
         .assert()
-        .stderr(predicate::str::contains("NotebookEdit"))
-        .stderr(predicate::str::contains("no permission key"));
+        .success()
+        .stderr(predicate::str::contains("Regenerated opencode"))
+        .stderr(predicate::str::contains("no permission key").not());
+}
+
+/// #1371: the trace #1345 wanted still exists — `doctor` reports which engines
+/// drop the rule, so the information isn't lost, just moved off the hot path.
+#[test]
+fn unmappable_permission_rule_is_reported_by_doctor() {
+    let (dir, path) = setup("permissions:\n  deny:\n    - { tool: NotebookEdit }\n");
+    llmenv(&dir, &path, "doctor")
+        .assert()
+        .stderr(predicate::str::contains("NotebookEdit"));
+}
+
+/// #1371: a tool name that isn't in the neutral vocabulary at all is a config
+/// typo rather than an engine gap, so it *is* reported — once, naming the
+/// config, not blaming whichever adapter noticed first.
+#[test]
+fn unknown_tool_name_is_reported_once_on_regenerate() {
+    let (dir, path) = setup(
+        "permissions:\n  deny:\n    - { tool: Create, pattern: \".tmp/**\" }\n    \
+         - { tool: Create, pattern: \"./.tmp/**\" }\n",
+    );
+    let out = llmenv(&dir, &path, "regenerate").assert().success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    let hits = stderr
+        .lines()
+        .filter(|l| l.contains("isn't one of llmenv's neutral tool names"))
+        .count();
+    assert_eq!(
+        hits, 1,
+        "two rules naming the same unknown tool is one problem: {stderr}"
+    );
+    assert!(stderr.contains("Create"), "{stderr}");
 }
 
 /// #1345: `Skill` has an exact opencode equivalent, so it must map rather than
-/// be reported as unmappable.
+/// be dropped.
 #[test]
 fn skill_rule_is_not_reported_as_unmappable() {
     let (dir, path) = setup("permissions:\n  deny:\n    - { tool: Skill }\n");

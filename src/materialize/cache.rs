@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tracing;
 
+use anyhow::Context as _;
 use sha2::{Digest, Sha256};
 
 use crate::config::HashingMode;
@@ -219,6 +220,9 @@ fn hash_native_capability_map(
 pub struct GcReport {
     pub removed: Vec<PathBuf>,
     pub kept: usize,
+    /// Entries gc tried to remove but couldn't. Same contract as
+    /// [`PruneReport::failed`] — never counted as `removed` (#1372).
+    pub(crate) failed: Vec<PathBuf>,
 }
 
 /// Selects which cache folders `prune` targets.
@@ -268,7 +272,10 @@ pub struct PruneReport {
 ///   lists what *would* be removed.
 ///
 /// # Errors
-/// Returns an error if reading `cache_root` or removing an entry fails.
+/// Returns an error if `cache_root` itself cannot be read. A single entry that
+/// cannot be removed is *not* an error: it lands in [`PruneReport::failed`] and
+/// the walk continues (#1372). Callers must treat a non-empty `failed` as a
+/// failure of the overall operation.
 pub(crate) fn prune(
     cache_root: &Path,
     mode: PruneMode,
@@ -284,12 +291,15 @@ pub(crate) fn prune(
     };
     let now = SystemTime::now();
     for entry in entries {
-        let entry = entry?;
+        let entry =
+            entry.with_context(|| format!("reading cache entry under {}", cache_root.display()))?;
         let p = entry.path();
         // lstat-equivalent: a symlink at the top level is never followed. We
         // remove the link itself (never its target) so the cache root can't be
         // used to delete arbitrary files outside it.
-        let ft = entry.file_type()?;
+        let ft = entry
+            .file_type()
+            .with_context(|| format!("stat cache entry {}", p.display()))?;
         if ft.is_symlink() {
             remove_link(&p, dry_run, &mut report);
             continue;
@@ -299,7 +309,7 @@ pub(crate) fn prune(
         }
         // Orphaned staging dirs are always removed regardless of mode.
         if p.extension().is_some_and(|e| e == "tmp") {
-            remove_dir(&p, dry_run, &mut report)?;
+            remove_dir(&p, dry_run, &mut report);
             continue;
         }
 
@@ -327,7 +337,8 @@ pub(crate) fn prune(
                 // Only current-version folders are aged out; stale folders are
                 // left to a StaleOnly/All pass so the two axes stay orthogonal.
                 if is_current {
-                    let m = newest_mtime(&p)?;
+                    let m = newest_mtime(&p)
+                        .with_context(|| format!("scanning mtimes under {}", p.display()))?;
                     match now.duration_since(m) {
                         Ok(elapsed) => elapsed > older_than,
                         Err(e) => {
@@ -346,7 +357,7 @@ pub(crate) fn prune(
         };
 
         if should_remove {
-            remove_dir(&p, dry_run, &mut report)?;
+            remove_dir(&p, dry_run, &mut report);
         } else {
             report.kept += 1;
         }
@@ -354,13 +365,94 @@ pub(crate) fn prune(
     Ok(report)
 }
 
-/// Record a directory removal, performing the unlink unless `dry_run`.
-fn remove_dir(p: &Path, dry_run: bool, report: &mut PruneReport) -> anyhow::Result<()> {
-    if !dry_run {
-        std::fs::remove_dir_all(p)?;
+/// Record a directory removal, performing the removal unless `dry_run`.
+///
+/// A failed removal is non-fatal, matching [`remove_link`]: the entry is
+/// recorded in `report.failed` and the caller keeps walking the rest of the
+/// cache root. Before #1372 this propagated instead, so the *first* entry the
+/// process couldn't remove aborted the whole prune — nothing after it was
+/// cleaned, and because the offending entry stayed put, every later run failed
+/// at the same place. Callers surface `failed` and exit non-zero on it, which
+/// preserves #1346's "a prune that couldn't remove everything is not a success"
+/// contract without giving up on the remaining entries.
+fn remove_dir(p: &Path, dry_run: bool, report: &mut PruneReport) {
+    if dry_run {
+        report.removed.push(p.to_path_buf());
+        return;
     }
-    report.removed.push(p.to_path_buf());
-    Ok(())
+    match remove_dir_all_forcing_writable(p) {
+        Ok(()) => report.removed.push(p.to_path_buf()),
+        Err(e) => {
+            tracing::error!(
+                path = %p.display(),
+                error = %e,
+                "failed to remove cache directory; skipping"
+            );
+            report.failed.push(p.to_path_buf());
+        }
+    }
+}
+
+/// `remove_dir_all`, retried once after restoring the owner write bit on any
+/// directory in the tree that lacks it.
+///
+/// `remove_dir_all` unlinks children *through* their parent directory, so a
+/// directory with no owner write bit (a `0o555` left behind by some other tool
+/// that used the cache as scratch space) makes its whole subtree undeletable
+/// and fails with `PermissionDenied`. llmenv created that tree, so a cache GC
+/// restoring write access to its own directories is expected behavior, not an
+/// escalation — without it the cache grows forever with no way for the tool to
+/// clean up after itself.
+fn remove_dir_all_forcing_writable(p: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            // Best-effort: if the chmod pass can't fix it either, the retry
+            // surfaces the real error rather than the chmod's.
+            restore_dir_write_bits(p);
+            std::fs::remove_dir_all(p)
+        }
+        other => other,
+    }
+}
+
+/// Add the owner `rwx` bits to `dir` and every directory beneath it.
+///
+/// Symlinks are never followed and never chmod'd, so a link planted inside the
+/// cache can't be used to widen permissions on a target outside it — the walk
+/// stays within the tree it was handed. Errors are ignored on purpose: this is
+/// a best-effort assist for the retry in [`remove_dir_all_forcing_writable`],
+/// and the retry reports the failure that actually matters.
+fn restore_dir_write_bits(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let Ok(meta) = std::fs::symlink_metadata(dir) else {
+            return;
+        };
+        if !meta.is_dir() {
+            return;
+        }
+        let mode = meta.permissions().mode();
+        // 0o700: traverse + write + read, the minimum needed to unlink children.
+        if mode & 0o700 != 0o700 {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700));
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            // `file_type()` is lstat-equivalent: a symlink reports as a symlink
+            // rather than as the directory it points at.
+            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                restore_dir_write_bits(&entry.path());
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
 }
 
 /// Record a symlink removal, performing the unlink unless `dry_run`.
@@ -432,23 +524,24 @@ pub fn gc(
         _ => None,
     };
     for entry in entries {
-        let entry = entry?;
+        let entry =
+            entry.with_context(|| format!("reading cache entry under {}", cache_root.display()))?;
         let p = entry.path();
         // Use `file_type()` (lstat-equivalent) — a symlink at the top level
         // is never treated as a cache directory we own. Removing one removes
         // only the link, never the target.
-        let ft = entry.file_type()?;
+        let ft = entry
+            .file_type()
+            .with_context(|| format!("stat cache entry {}", p.display()))?;
         if ft.is_symlink() {
-            std::fs::remove_file(&p)?;
-            report.removed.push(p);
+            gc_remove_link(&p, &mut report);
             continue;
         }
         if !ft.is_dir() {
             continue;
         }
         if p.extension().is_some_and(|e| e == "tmp") {
-            std::fs::remove_dir_all(&p)?;
-            report.removed.push(p);
+            gc_remove_dir(&p, &mut report);
             continue;
         }
         // The durable state dir (#175) is a stable sibling of the hashed config
@@ -467,16 +560,50 @@ pub fn gc(
             gc_normal_shapes(&p, older_than, &now, &mut report)?;
             continue;
         }
-        let m = newest_mtime(&p)?;
+        let m =
+            newest_mtime(&p).with_context(|| format!("scanning mtimes under {}", p.display()))?;
         let expired = is_expired(now, m, older_than);
         if expired {
-            std::fs::remove_dir_all(&p)?;
-            report.removed.push(p);
+            gc_remove_dir(&p, &mut report);
         } else {
             report.kept += 1;
         }
     }
     Ok(report)
+}
+
+/// Remove a directory for [`gc`], recording rather than propagating a failure.
+///
+/// Same reasoning as [`remove_dir`] (#1372): one undeletable entry must not
+/// abort collection of everything after it, since `doctor --gc` reported only
+/// the bare errno and left the rest of the cache untouched.
+fn gc_remove_dir(p: &Path, report: &mut GcReport) {
+    match remove_dir_all_forcing_writable(p) {
+        Ok(()) => report.removed.push(p.to_path_buf()),
+        Err(e) => {
+            tracing::error!(
+                path = %p.display(),
+                error = %e,
+                "gc: failed to remove cache directory; skipping"
+            );
+            report.failed.push(p.to_path_buf());
+        }
+    }
+}
+
+/// Unlink a symlink for [`gc`], recording rather than propagating a failure.
+fn gc_remove_link(p: &Path, report: &mut GcReport) {
+    match std::fs::remove_file(p) {
+        Ok(()) => report.removed.push(p.to_path_buf()),
+        Err(e) => {
+            tracing::error!(
+                path = %p.display(),
+                error = %e,
+                "gc: failed to unlink cache symlink; skipping"
+            );
+            report.failed.push(p.to_path_buf());
+        }
+    }
 }
 
 /// Age-check each per-shape leaf directory under a `<version_major>` generation
@@ -501,11 +628,17 @@ fn gc_normal_shapes(
             );
             return Ok(());
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => {
+            return Err(anyhow::Error::from(e)
+                .context(format!("reading version dir {}", version_dir.display())));
+        }
     } {
-        let entry = entry?;
+        let entry =
+            entry.with_context(|| format!("reading entry under {}", version_dir.display()))?;
         let p = entry.path();
-        let ft = entry.file_type()?;
+        let ft = entry
+            .file_type()
+            .with_context(|| format!("stat cache entry {}", p.display()))?;
         if ft.is_symlink() || !ft.is_dir() {
             tracing::trace!(
                 "gc_normal_shapes: skipping unexpected entry: {}",
@@ -516,8 +649,7 @@ fn gc_normal_shapes(
         // Unconditionally remove .tmp staging directories — they represent
         // orphaned partial writes from a previous crashed materialize call.
         if p.extension().is_some_and(|e| e == "tmp") {
-            std::fs::remove_dir_all(&p)?;
-            report.removed.push(p);
+            gc_remove_dir(&p, report);
             continue;
         }
         // The durable state dir (#175) may appear nested under a version dir
@@ -526,11 +658,11 @@ fn gc_normal_shapes(
             report.kept += 1;
             continue;
         }
-        let m = newest_mtime(&p)?;
+        let m =
+            newest_mtime(&p).with_context(|| format!("scanning mtimes under {}", p.display()))?;
         let expired = is_expired(*now, m, older_than);
         if expired {
-            std::fs::remove_dir_all(&p)?;
-            report.removed.push(p);
+            gc_remove_dir(&p, report);
         } else {
             report.kept += 1;
         }
@@ -540,24 +672,34 @@ fn gc_normal_shapes(
 
 /// Newest mtime found anywhere under `dir` (including the dir itself).
 fn newest_mtime(dir: &Path) -> anyhow::Result<SystemTime> {
-    let mut newest = dir.metadata()?.modified()?;
+    let mut newest = dir
+        .metadata()
+        .and_then(|m| m.modified())
+        .with_context(|| format!("stat {}", dir.display()))?;
     walk_mtime(dir, &mut newest)?;
     Ok(newest)
 }
 
 fn walk_mtime(dir: &Path, newest: &mut SystemTime) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry under {}", dir.display()))?;
+        let p = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("stat {}", p.display()))?;
         if file_type.is_symlink() {
             continue;
         }
-        let m = entry.metadata()?.modified()?;
+        let m = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .with_context(|| format!("stat {}", p.display()))?;
         if m > *newest {
             *newest = m;
         }
         if file_type.is_dir() {
-            walk_mtime(&entry.path(), newest)?;
+            walk_mtime(&p, newest)?;
         }
     }
     Ok(())
@@ -951,6 +1093,143 @@ mod tests {
         remove_link(missing, true, &mut report);
         assert_eq!(report.removed, vec![missing.to_path_buf()]);
         assert!(report.failed.is_empty());
+    }
+
+    /// Set `mode` on `p`, panicking with context on failure.
+    #[cfg(unix)]
+    fn chmod(p: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(p, fs::Permissions::from_mode(mode))
+            .unwrap_or_else(|e| panic!("chmod {mode:o} {}: {e}", p.display()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_removes_tree_containing_unwritable_directory() {
+        // #1372: the real-world failure. Another tool used the cache as scratch
+        // space and left a 0o555 directory behind; `remove_dir_all` can't unlink
+        // that directory's children, so prune died with a bare EACCES and the
+        // whole cache went uncollected — on every subsequent run too, because
+        // the offending directory never went away.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("cache");
+        let stale = touch_dir(&cache_root, "3.9");
+        let locked = stale.join("tmp").join("d20260811").join("par");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("trapped.txt"), b"x").unwrap();
+        chmod(&locked, 0o555);
+
+        let report = prune(
+            &cache_root,
+            PruneMode::All,
+            HashingMode::Strict,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.failed,
+            Vec::<PathBuf>::new(),
+            "restoring the write bit on a directory prune itself created must let \
+             the removal through"
+        );
+        assert_eq!(report.removed, vec![stale.clone()]);
+        assert!(!stale.exists(), "the whole subtree is gone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_continues_past_unremovable_entry() {
+        // #1372: one entry that genuinely cannot be removed must not abort the
+        // walk. A read-only cache root blocks the final rmdir of every child
+        // (unlinking a directory needs write on its *parent*, which no chmod of
+        // the child can grant), so this exercises the give-up path: every entry
+        // is attempted, each failure is recorded, and `prune` still returns Ok
+        // so the caller can report all of them at once.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("cache");
+        let a = touch_dir(&cache_root, "3.8");
+        let b = touch_dir(&cache_root, "3.9");
+        chmod(&cache_root, 0o555);
+
+        let result = prune(
+            &cache_root,
+            PruneMode::All,
+            HashingMode::Strict,
+            None,
+            false,
+        );
+
+        // Restore before asserting so a failure can't leave the tempdir
+        // undeletable and mask the real error with a cleanup panic.
+        chmod(&cache_root, 0o755);
+        let report = result.expect("an unremovable entry is reported, not propagated");
+
+        assert!(
+            report.removed.is_empty(),
+            "nothing was removed, so nothing may be claimed as removed"
+        );
+        let mut failed = report.failed;
+        failed.sort();
+        assert_eq!(
+            failed,
+            vec![a, b],
+            "the walk continued past the first failure and recorded both"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gc_continues_past_unremovable_entry() {
+        // #1372: same contract for the `doctor --gc` path, which had the same
+        // abort-on-first-failure behavior and reported only the bare errno.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("cache");
+        let a = touch_dir(&cache_root, &format!("{VERSION_TAG}-a"));
+        let b = touch_dir(&cache_root, &format!("{VERSION_TAG}-b"));
+        chmod(&cache_root, 0o555);
+
+        // older_than=0 expires everything.
+        let result = gc(&cache_root, Duration::ZERO, HashingMode::Strict);
+
+        chmod(&cache_root, 0o755);
+        let report = result.expect("an unremovable entry is reported, not propagated");
+
+        assert!(report.removed.is_empty());
+        let mut failed = report.failed;
+        failed.sort();
+        assert_eq!(failed, vec![a, b]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_io_error_names_the_path() {
+        // #1372: `llmenv prune` reported nothing but "Permission denied (os error
+        // 13)" — no path, no adapter, nothing to act on. An unreadable directory
+        // in the mtime scan is the same class of error; it must name the path.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("cache");
+        let shape = touch_dir(&cache_root, "shape");
+        let unreadable = shape.join("unreadable");
+        fs::create_dir_all(&unreadable).unwrap();
+        chmod(&unreadable, 0o000);
+
+        let result = prune(
+            &cache_root,
+            PruneMode::OlderThan(Duration::ZERO),
+            HashingMode::Loose,
+            None,
+            false,
+        );
+
+        chmod(&unreadable, 0o755);
+        let err = result.expect_err("an unreadable directory in the mtime scan is fatal");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("unreadable"),
+            "the error must name the path it happened on, got: {rendered}"
+        );
     }
 
     #[test]
