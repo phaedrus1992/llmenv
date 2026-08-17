@@ -40,7 +40,7 @@ pub(crate) enum ToolMapping {
 impl ToolMapping {
     /// The engine's permission key, or `None` when the engine has no analog and
     /// the rule must be dropped.
-    pub(crate) fn key(self) -> Option<&'static str> {
+    fn key(self) -> Option<&'static str> {
         match self {
             Self::Renamed(key) | Self::Closest { key, .. } => Some(key),
             Self::Unsupported { .. } => None,
@@ -60,7 +60,7 @@ impl ToolMapping {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NeutralTool {
     /// The name written in `capabilities.permissions[].tool`.
-    pub(crate) name: &'static str,
+    name: &'static str,
     pub(crate) opencode: ToolMapping,
     pub(crate) crush: ToolMapping,
 }
@@ -98,7 +98,7 @@ const CRUSH_EDIT_CREATES: &str = "crush's edit tools also create missing files a
 /// name straight through, so a rule naming one still works there. It *is*
 /// reported once by `cli::warn_dead_config`, because opencode and crush can only
 /// drop it.
-pub(crate) const NEUTRAL_TOOLS: &[NeutralTool] = &[
+const NEUTRAL_TOOLS: &[NeutralTool] = &[
     NeutralTool {
         name: "Bash",
         opencode: ToolMapping::Renamed("bash"),

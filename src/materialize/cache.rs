@@ -222,7 +222,7 @@ pub struct GcReport {
     pub kept: usize,
     /// Entries gc tried to remove but couldn't. Same contract as
     /// [`PruneReport::failed`] — never counted as `removed` (#1372).
-    pub failed: Vec<PathBuf>,
+    pub(crate) failed: Vec<PathBuf>,
 }
 
 /// Selects which cache folders `prune` targets.

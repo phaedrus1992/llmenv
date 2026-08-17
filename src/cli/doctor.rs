@@ -502,7 +502,7 @@ impl InexactToolMapping {
 ///
 /// `active_engines` is passed in rather than probed so this is testable without
 /// depending on the host's `PATH`.
-pub(super) fn inexact_tool_mappings(
+fn inexact_tool_mappings(
     capabilities: &Capabilities,
     active_engines: &[&str],
 ) -> Vec<InexactToolMapping> {
