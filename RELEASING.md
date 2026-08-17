@@ -65,6 +65,41 @@ to `release/X.x` or `main`:
 
 Code changes still go through a branch + PR.
 
+### Which `CHANGELOG-N.md` file an entry goes in
+
+There is one changelog file per major version (`CHANGELOG-1.md`, `CHANGELOG-2.md`,
+…). **The file is chosen by the version the change will ship in, not by the
+branch you happen to be on.** `release/X.x` accumulates patch and minor work
+under `CHANGELOG-X.md`'s `[Unreleased]`; `main` accumulates next-major work under
+`CHANGELOG-(X+1).md`'s `[Unreleased]`. Both files can have an open
+`[Unreleased]` section at the same time, and that is the normal steady state.
+
+Putting a breaking change into `CHANGELOG-X.md` because that's the file `main`
+already had is the mistake this section exists to prevent: it advertises a
+breaking change under the current major, and `cargo release` would then roll it
+into a patch or minor heading.
+
+When `main` first takes a change targeted at the next major, create its
+changelog file:
+
+1. Copy the preamble from the current major's file (the `markdownlint-disable`
+   comment, `# Changelog`, and the Keep a Changelog / SemVer note).
+2. Use a `<!-- (X+1).0 next-header -->` marker — `roll-changelog.sh` seeds each
+   new `[Unreleased]` directly below it.
+3. Add `## [Unreleased] - ReleaseDate`, then a `<!-- next-url -->` marker with an
+   `[Unreleased]: <repo>/compare/v<newest-tag>...HEAD` line below it.
+
+No wiring is needed beyond the file itself: `scripts/roll-changelog.sh` targets
+`CHANGELOG-<major>.md` for the version being released (#1003), and
+`scripts/sync-changelog-doc.sh` plus `tests/docs_sync.rs` discover
+`CHANGELOG-*.md` dynamically and emit each as a `## Version N.x` section on the
+docs site, newest major first.
+
+A fix that applies to the current major still lands on `release/X.x` in
+`CHANGELOG-X.md` and forward-merges from there — it is not re-listed in the
+next-major file. Only changes that cannot ship on the current major (breaking
+changes, removals) belong in `CHANGELOG-(X+1).md`.
+
 ### Forward-merged fixes appear in every release that ships them
 
 A fix lands once (on the oldest branch) but **ships in a separate release on
