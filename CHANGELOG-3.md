@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.11.0] - 2026-08-17
+
 The through-line for this release is configuration llmenv accepted but never acted on. Four `features.slippage` layers — three of them defaulting to `true` — were wired into the config schema and nothing else, so turning them on changed nothing; all four run now, along with two opt-in transcript-scan layers (#317). Most of the opencode adapter work is the same shape: a permission rule could name a key opencode has no equivalent for, overlap another pattern in a way that quietly reversed it, or carry stray whitespace that stopped it matching any tool — each rendered a rule that did nothing, and each is now either a hard render failure or a visible warning (#1328, #1344, #1345). Tags, bundles, and marketplace entries dropped for being malformed used to report at a log level the default filter discards, so a bundle that never fired left no trace anywhere; they say so out loud now (#1345). And `llmenv prune`/`llmenv regenerate` exit non-zero when they fail, instead of exiting 0 over a printed warning (#1346).
 
 `llmenv doctor` gained two reports: the installed versions of the external tools llmenv wires in but doesn't ship, and which Claude Code lifecycle hooks are actually wired in the active scope (#1185, #741). opencode's built-in todo list now feeds the `llmenv task` tracker, the way Claude Code's task tools have since 3.6.0 (#1304).
@@ -55,6 +57,8 @@ Security work concentrates on races and silent denies: directory tree walks desc
 - `llmenv regenerate` now exits non-zero when any engine's config could not be regenerated, naming the engines that failed. It previously exited 0 as long as one other engine succeeded, so a rejected config scrolled past as a warning above a success message while that engine kept its stale config. Every other engine is still regenerated. `llmenv export` deliberately keeps exiting 0 — it runs on every prompt — but now names the engines whose output is missing. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#when-one-engine-cant-be-rendered) (#1346)
 - `llmenv prune` no longer stops at the first cache entry it can't remove. One undeletable entry — most often a directory another tool left without its owner write bit — aborted the whole pass with nothing but `Permission denied (os error 13)`, so nothing was collected and every later run failed at the same place. Prune reports the entry with its path, keeps going, restores write access to directories it created itself and retries, and treats anything left behind as a failure of the command. `doctor --gc` had the same fault and gets the same fix. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#prune) (#1372)
 - Every filesystem error in the cache prune and GC walks now names the path it happened on, instead of surfacing a bare errno with nothing to act on. (#1372)
+- `TMPDIR` (and `TMP`/`TEMP`/`CLAUDE_CODE_TMPDIR`) now point into the durable state directory instead of the per-hash cache folder. That folder is deleted by `llmenv prune` and replaced whenever a config edit mints a new shape hash, which left every already-running shell with `TMPDIR` pointing at nothing — silently, until something needed a temp file, and then as somebody else's error: a signed `git commit`, for instance, fails with `could not create temporary file: No such file or directory` and never mentions llmenv. The state directory is never pruned, so the path stays valid for the life of the shell. See [Environment variables](https://phaedrus1992.github.io/llmenv/docs/env-vars) (#1379)
+- The forward-merge cascade now chains through each release branch — `release/3.x` into `release/4.x`, then `release/4.x` into `main` — instead of merging the pushed branch into every target independently. Merging into `main` directly meant `main` never received the intermediate branch's own commits from the cascade, and left the merge bases tangled so the next merge re-conflicted over the same files. It also resolves the version-manifest conflict that every forward-merge hits — two release lines always carry different versions, so `Cargo.toml`, `Cargo.lock`, and the four `crates/*/Cargo.toml` collided on every run and halted the cascade for a human. The target branch keeps its own version, but only after checking that the source changed nothing but version literals in that file, so a dependency edit can never be dropped silently. Only affects the release automation, not the shipped binary. (#1380, #1381)
 
 ## [3.10.0] - 2026-08-13
 
@@ -864,7 +868,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.11.0...HEAD
+[3.11.0]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...v3.11.0
 [3.10.0]: https://github.com/phaedrus1992/llmenv/compare/v3.9.0...v3.10.0
 [3.9.0]: https://github.com/phaedrus1992/llmenv/compare/v3.8.0...v3.9.0
 [3.8.0]: https://github.com/phaedrus1992/llmenv/compare/v3.7.0...v3.8.0
