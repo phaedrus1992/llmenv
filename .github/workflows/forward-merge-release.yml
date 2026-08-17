@@ -99,6 +99,17 @@ jobs:
           # rather than silently leaving downstream targets unmerged.
           HALTED=""
 
+          # The cascade is a *chain*: each target is merged from the previous
+          # link, not from the branch that was pushed. Pushing release/3.x with
+          # release/4.x in between means release/3.x → release/4.x → main, so
+          # main receives release/4.x's own commits along with the 3.x fix.
+          # Merging origin/$CURRENT into every target independently instead
+          # (which is what this did before) left main with 3.x merged directly
+          # and 4.x's commits still absent, and tangled the merge bases so the
+          # next 4.x → main merge re-conflicted over the same files.
+          SOURCE_REF="origin/$CURRENT"
+          SOURCE_DESC="$CURRENT"
+
           # Abort on conflict — never commit a broken merge or push a conflict
           # branch. The cascade exits with a clear error so whoever pushed to the
           # release branch resolves manually.
@@ -111,12 +122,17 @@ jobs:
           }
 
           for TARGET in "${TARGETS[@]}"; do
-            echo "::group::Forward-merge $CURRENT → $TARGET"
+            echo "::group::Forward-merge $SOURCE_DESC → $TARGET"
             TARGET_SHA=$(git rev-parse "origin/$TARGET" 2>/dev/null || echo "")
-            CURRENT_SHA=$(git rev-parse "origin/$CURRENT")
 
-            if [[ "$TARGET_SHA" == "$CURRENT_SHA" ]]; then
-              echo "Target $TARGET already up to date"
+            # `--is-ancestor`, not sha equality: once the chain has merged into
+            # an earlier target the heads are never equal, but the target can
+            # still already contain everything the source has (e.g. a human
+            # resolved the merge by hand first). Merging then would add an empty
+            # commit for no reason.
+            if [[ -n "$TARGET_SHA" ]] \
+                && git merge-base --is-ancestor "$SOURCE_REF" "origin/$TARGET"; then
+              echo "Target $TARGET already contains $SOURCE_DESC"
               echo "::endgroup::"
               continue
             fi
@@ -142,9 +158,9 @@ jobs:
 
             git checkout -q "origin/$TARGET"
 
-            MERGE_BRANCH="forward-merge/$CURRENT-to-$TARGET"
+            MERGE_BRANCH="forward-merge/$SOURCE_DESC-to-$TARGET"
 
-            if ! git merge --no-commit --no-ff "origin/$CURRENT" 2>/dev/null; then
+            if ! git merge --no-commit --no-ff "$SOURCE_REF" 2>/dev/null; then
               # website/docs/changelog.md is a generated artifact (from scripts/sync-changelog-doc.sh)
               # that almost always conflicts on forward-merge. If it's the only conflicted file,
               # resolve by regenerating from the merged CHANGELOG-*.md sources and continue.
@@ -162,7 +178,7 @@ jobs:
                     HALTED="merge abort failed at $TARGET"
                     break
                   fi
-                  bail_on_conflict "$CURRENT" "$TARGET" || true
+                  bail_on_conflict "$SOURCE_DESC" "$TARGET" || true
                   echo "::endgroup::"
                   HALTED="conflict at $TARGET"
                   break
@@ -175,7 +191,7 @@ jobs:
                   HALTED="merge abort failed at $TARGET"
                   break
                 fi
-                bail_on_conflict "$CURRENT" "$TARGET" || true
+                bail_on_conflict "$SOURCE_DESC" "$TARGET" || true
                 echo "::endgroup::"
                 HALTED="conflict at $TARGET"
                 break
@@ -188,8 +204,8 @@ jobs:
                 break
               fi
               git checkout -q "origin/$TARGET"
-              if ! git merge --no-edit "origin/$CURRENT"; then
-                echo "::error::Failed to merge $CURRENT into $TARGET"
+              if ! git merge --no-edit "$SOURCE_REF"; then
+                echo "::error::Failed to merge $SOURCE_DESC into $TARGET"
                 echo "::endgroup::"
                 HALTED="merge failed at $TARGET"
                 break
@@ -209,6 +225,13 @@ jobs:
             fi
             if [[ $PUSH_RC -eq 0 ]]; then
               echo "Pushed directly to $TARGET"
+              # Advance the chain. `update-ref` on the remote-tracking ref (no
+              # network) rather than reusing the raw HEAD sha, so the next
+              # merge's generated commit message names the branch instead of
+              # reading "Merge commit '<sha>'".
+              git update-ref "refs/remotes/origin/$TARGET" HEAD
+              SOURCE_REF="origin/$TARGET"
+              SOURCE_DESC="$TARGET"
               # A push made with GITHUB_TOKEN deliberately doesn't trigger other
               # workflows (GitHub's anti-recursion rule), so docs.yml's `push`
               # trigger never fires for this forward-merge even though it landed
@@ -262,7 +285,7 @@ jobs:
               fi
 
               if ! gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
-                --title "Forward-merge $CURRENT into $TARGET" \
+                --title "Forward-merge $SOURCE_DESC into $TARGET" \
                 --body "Direct push to $TARGET blocked by branch protection; opening PR."; then
                 echo "::error::Failed to create PR for $MERGE_BRANCH after protected-branch push was rejected"
               else

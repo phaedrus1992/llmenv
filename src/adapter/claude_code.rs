@@ -316,10 +316,25 @@ impl AgentAdapter for ClaudeCodeAdapter {
         })?;
         let mut vars = vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())];
 
-        // Per-hash temp dir: CLAUDE_CODE_TMPDIR + standard POSIX temp vars for
-        // subprocess isolation. Claude Code appends /claude-{uid}/ to the value
-        // on Unix; the tmp/ folder is cleaned when the parent hash dir is pruned.
-        let tmp_dir = cache_dir.join("tmp");
+        // Temp dir: CLAUDE_CODE_TMPDIR + the standard POSIX temp vars, so
+        // subprocesses scratch inside llmenv's tree rather than the shared
+        // /tmp. Claude Code appends /claude-{uid}/ to the value on Unix.
+        //
+        // Lives in the durable state dir, not the per-hash cache folder (#1379).
+        // It used to be `cache_dir.join("tmp")`, which put it inside a directory
+        // that both `llmenv prune` and an ordinary config edit are allowed to
+        // delete — pruning a stale generation, or minting a new shape hash by
+        // editing config.yaml, left every already-running shell with TMPDIR
+        // pointing at nothing. The breakage was silent until something needed a
+        // temp file, and then surfaced as someone else's error: git, for one,
+        // fails an SSH-signed commit with "could not create temporary file:
+        // No such file or directory" / "failed to write commit object", which
+        // names neither llmenv nor TMPDIR. The state dir is never a prune
+        // candidate under any mode (#175), same as `plugins_dir` below, so the
+        // path stays valid for the life of the shell. Temp files have no reason
+        // to be shape-scoped: `mktemp` already keeps concurrent users apart by
+        // generating unique names.
+        let tmp_dir = state_dir.join("tmp");
         std::fs::create_dir_all(&tmp_dir)?;
         let tmp_str = tmp_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!(

@@ -370,6 +370,64 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# Test 7 (Issue #1380): the cascade is a chain, not a fan-out
+#
+# Scenario: push to release/3.x with release/4.x in between, so TARGETS is
+# (release/4.x main). Each target must be merged from the PREVIOUS link —
+# release/3.x into release/4.x, then release/4.x into main — so main receives
+# release/4.x's own commits along with the 3.x fix.
+#
+# Old behaviour: `git merge origin/$CURRENT` for every target, so main got
+# release/3.x merged directly and 4.x's commits never arrived → FAIL.
+# Expected after fix: the second merge names release/4.x → PASS.
+# ---------------------------------------------------------------------------
+chain_block() {
+  cat <<'SHELL'
+set -euo pipefail
+SOURCE_REF="origin/$CURRENT"
+SOURCE_DESC="$CURRENT"
+for TARGET in $TARGETS; do
+  git merge --no-edit "$SOURCE_REF"
+  git push origin HEAD:"$TARGET"
+  git update-ref "refs/remotes/origin/$TARGET" HEAD
+  SOURCE_REF="origin/$TARGET"
+  SOURCE_DESC="$TARGET"
+done
+SHELL
+}
+
+test_1380_cascade_chains_through_each_target() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Stub git: record what each merge was handed, no-op everything else.
+  cat > "$tmpdir/git" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "merge" ]]; then
+  echo "MERGED_FROM:${*: -1}"
+fi
+exit 0
+EOF
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(chain_block)
+  export CURRENT="release/3.x" TARGETS="release/4.x main"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  rm -rf "$tmpdir"
+
+  # First merge takes the pushed branch; second takes the branch before it.
+  local expected
+  expected=$'MERGED_FROM:origin/release/3.x\nMERGED_FROM:origin/release/4.x'
+  if [[ "$out" == "$expected" ]]; then
+    return 0
+  fi
+  printf '  expected: %s\n' "${expected//$'\n'/ | }" >&2
+  printf '  got:      %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -389,6 +447,9 @@ run_test "Issue #482: fetch failure with stderr is logged and cascade halted" \
 
 run_test "Issue #482: fetch failure with empty stderr is logged" \
   test_482_fetch_fail_empty_stderr
+
+run_test "Issue #1380: cascade chains 3.x -> 4.x -> main instead of fanning out" \
+  test_1380_cascade_chains_through_each_target
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
