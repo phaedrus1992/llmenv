@@ -824,33 +824,54 @@ fn top_level_native_passthrough_merges_into_settings() {
     );
 }
 
-// Issue #96/#102 (security): the top-level `native.claude_code` catch-all is for
-// keys that belong to NO modeled feature. A modeled-feature key (`permissions`,
-// `hooks`) appearing there would be overlaid LAST over the rendered settings,
-// silently clobbering the security-rendered output — e.g. erasing the
-// permission `deny` array, bypassing the deny-never-weakened invariant. Per
-// design D3 ("Layer 1 wins, or hard-error"), this must hard-error, not silently
-// honor the catch-all. The key belongs in the `native_<feature>` sibling.
+// Issue #96/#102/#750: the top-level `native.<engine>` catch-all is for keys no
+// modeled feature owns. `hooks` still hard-errors there (an array of matcher
+// groups has no unambiguous additive merge), but `permissions` no longer does —
+// it goes through an additive merge instead.
+//
+// The security property that motivated the original hard-error is unchanged and
+// is what this test pins: nothing layered on top may weaken the rendered deny.
+// `deny: null` is the sharpest version of that — it was the original fixture
+// here precisely because a blind deep-merge would have erased the array.
 #[test]
-fn top_level_native_with_modeled_key_hard_errors() {
+fn top_level_native_permissions_cannot_erase_the_rendered_deny() {
     let mut native = BTreeMap::new();
     native.insert(
         "claude_code".to_string(),
         serde_yaml::from_str::<serde_yaml::Value>("permissions:\n  deny: null\n")
             .expect("parse native"),
     );
-    let m = llmenv::merge::MergedManifest {
+    let mut m = llmenv::merge::MergedManifest {
         native,
         ..Default::default()
     };
+    m.capabilities.permissions = llmenv::config::Permissions {
+        deny: vec![llmenv::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("curl:*".into()),
+            paths: Vec::new(),
+        }],
+        ..Default::default()
+    };
+
     let tmp = tempdir().expect("tempdir");
-    let err = ClaudeCodeAdapter
+    ClaudeCodeAdapter
         .materialize(&m, tmp.path())
-        .expect_err("modeled key in top-level native must hard-error");
-    let msg = err.to_string();
+        .expect("permissions in the catch-all merge rather than erroring");
+
+    let settings: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(tmp.path().join("settings.json")).expect("settings.json written"),
+    )
+    .expect("settings.json parses");
+    let deny: Vec<&str> = settings["permissions"]["deny"]
+        .as_array()
+        .expect("deny survives a native null")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
     assert!(
-        msg.contains("permissions") && msg.contains("native"),
-        "error must name the offending modeled key and point at native_<feature>: {msg}"
+        deny.contains(&"Bash(curl:*)"),
+        "a native `deny: null` must not erase the rendered deny: {deny:?}"
     );
 }
 

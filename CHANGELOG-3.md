@@ -11,7 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Removed
+
+- **Breaking:** the boolean `session_log` shape is gone. `session_log: { file: true, transcript: false, verbose: true }` parsed until now by being translated to the per-sink form behind the scenes; it is rejected outright in 4.0. Each sink is a mapping — `file: { enabled, level }`, `transcript: { enabled, level }` — and `verbose: true` becomes `level: debug` on whichever sink should capture prompts and tool calls, which means the two sinks can now differ. The parse error names the replacement; it does not rewrite your config. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#session_log) (#744)
+
 ### Added
+
+- `native.claude_code.permissions` is accepted instead of rejected, making the catch-all the escape hatch for Claude-Code-only permission keys llmenv doesn't model (`additionalDirectories`, `disableBypassPermissionsMode`, and whatever ships next) without waiting on a neutral-schema field. It's safe to accept because the merge is additive: `allow`/`ask`/`deny` append to what was rendered rather than replacing it, `deny > ask > allow` authority is re-applied afterwards, and every other key overwrites. A fragment can tighten permissions or add unmodeled keys; it cannot loosen what the renderer produced — an omitted or `null` `deny` leaves the rendered one intact. `native.claude_code.hooks` still hard-errors, since an array of matcher groups has no unambiguous additive merge. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#nativeclaude_codepermissions) (#750)
 
 - `features.slippage`'s remaining layers now do something. `rule_reinjection`, `read_before_edit`, `self_critique`, and `metrics` were accepted by config — three of them defaulting to `true` — but had no implementation, so enabling them changed nothing. All four are wired now, along with the two opt-in transcript-scan layers (`explain_before_act`, `answer_before_act`). See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresslippage) (#317)
 

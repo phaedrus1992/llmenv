@@ -108,10 +108,43 @@ native:
     alwaysThinkingEnabled: true
 ```
 
-It is overlaid onto the engine's config last. Putting a modeled-feature key
-(`permissions`, `hooks`) here is a hard error — that belongs in the matching
-`native_<feature>` sibling, so the security-rendered output is never silently
-clobbered.
+It is overlaid onto the engine's config last. `hooks` is a hard error here — it
+belongs in the matching `native_<feature>` sibling, so the security-rendered
+output is never silently clobbered.
+
+### `native.claude_code.permissions`
+
+(added in v4.0.0)
+
+`permissions` used to be a hard error here too. It is now accepted and layered
+over the rendered `permissions` object, which makes the catch-all the escape
+hatch for Claude-Code-only permission keys llmenv doesn't model —
+`additionalDirectories`, `disableBypassPermissionsMode`,
+`skipDangerousModePermissionPrompt`, and whatever Claude Code ships next —
+without waiting on a neutral-schema field and an llmenv release:
+
+```yaml
+native:
+  claude_code:
+    permissions:
+      defaultMode: plan
+      additionalDirectories: ["/srv/shared"]
+```
+
+It is accepted because the merge is **additive, not a replacement**:
+
+- `allow`, `ask`, and `deny` are appended to what was rendered and deduped —
+  never replaced. A fragment that omits `deny`, or sets it to `null`, leaves the
+  rendered `deny` intact.
+- `deny > ask > allow` authority is re-applied afterwards, so a native `allow`
+  of an already-denied rule is dropped rather than honoured.
+- Every other key overwrites, including `defaultMode` — those carry no rendered
+  security decision to weaken.
+
+The net effect is that a native fragment can tighten permissions or add keys
+llmenv doesn't model, but cannot loosen what the renderer produced. `hooks`
+keeps the hard error because it is an array of matcher groups, where "additive"
+has no unambiguous meaning; use `native_hooks` for those.
 
 ## What the Claude Code adapter emits
 
