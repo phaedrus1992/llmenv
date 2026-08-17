@@ -127,8 +127,8 @@ without waiting on a neutral-schema field and an llmenv release:
 native:
   claude_code:
     permissions:
-      defaultMode: plan
       additionalDirectories: ["/srv/shared"]
+      disableBypassPermissionsMode: "disable"
 ```
 
 It is accepted because the merge is **additive, not a replacement**:
@@ -138,8 +138,18 @@ It is accepted because the merge is **additive, not a replacement**:
   rendered `deny` intact.
 - `deny > ask > allow` authority is re-applied afterwards, so a native `allow`
   of an already-denied rule is dropped rather than honoured.
-- Every other key overwrites, including `defaultMode` — those carry no rendered
-  security decision to weaken.
+- Every other key overwrites — those carry no rendered security decision to
+  weaken.
+- `defaultMode` is the exception and is **rejected here**. It is a modeled key
+  (`capabilities.permissions.default_mode`), and setting it from the catch-all
+  would override the rendered mode — including to `bypassPermissions`, which
+  switches the permission system off entirely. Anything that can author a
+  `native:` block, bundles included, would otherwise have a one-line escalation
+  past every rendered `ask` and `deny`. Use the modeled field instead.
+
+Rule strings here get the same `Write` → `Edit` normalization the
+`native_permissions` sibling applies, so a `deny: ["Write(~/.ssh/**)"]` isn't
+silently rendered as a rule that matches nothing.
 
 The net effect is that a native fragment can tighten permissions or add keys
 llmenv doesn't model, but cannot loosen what the renderer produced. `hooks`
