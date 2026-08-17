@@ -894,28 +894,22 @@ impl AgentAdapter for OpencodeAdapter {
             std::collections::BTreeMap<String, String>,
         > = std::collections::BTreeMap::new();
 
-        // Warn once, at the point a neutral tool name fails to map, that the
-        // rule is dropped rather than rendering an unverified key.
-        //
-        // #1345: this has to be `eprintln!`, not `tracing::warn!` — the default
-        // `EnvFilter` is `ERROR`, so a `warn!` here reached neither stderr nor
-        // the log file and the dropped rule left no trace at all. Matches how
-        // this adapter already reports a skipped hook event.
-        fn warn_unmapped_tool(tool: &str) {
-            eprintln!(
-                "warning: opencode adapter has no permission key for neutral tool '{tool}' — \
-                 skipping this rule, it can never take effect for opencode. Remove it, or \
-                 author a native rule directly via `native_permissions.opencode`."
-            );
-        }
-
         // Convert a PermissionRule into (opencode_tool, pattern) pairs.
         // Rules with a pattern use it; rules with paths use each path as a pattern;
         // bare rules (no pattern, no paths) wildcard-match everything for the tool.
         // Empty when the tool has no opencode equivalent (see opencode_tool_name).
+        //
+        // #1371: rendering is silent about an unmapped tool. It used to `eprintln!`
+        // here — once per *rule*, so a repeated tool name warned repeatedly, in the
+        // middle of the progress output where it read as though the previous
+        // adapter had failed. The two cases it conflated are reported properly
+        // elsewhere now: a name outside the neutral vocabulary is a config error
+        // that `cli::warn_dead_config` reports once, and a known tool that this
+        // engine has no analog for is an adapter particularity documented in
+        // `website/docs/engines.md` and listed by `doctor` — not something to
+        // reprint on every shell prompt.
         fn rule_to_patterns(rule: &crate::config::PermissionRule) -> Vec<(String, String)> {
             let Some(tool) = opencode_tool_name(&rule.tool) else {
-                warn_unmapped_tool(&rule.tool);
                 return Vec::new();
             };
             if let Some(pat) = &rule.pattern {
@@ -1247,26 +1241,13 @@ impl AgentAdapter for OpencodeAdapter {
 /// names dropped with warning"
 /// (`docs/superpowers/specs/2026-07-10-opencode-adapter-design.md`), and
 /// silently emitting an unverified name would repeat exactly the mistake
-/// this fix corrects for `Write`/`MultiEdit`/`LS`. Every neutral tool name
-/// documented as valid in `capabilities.permissions` is covered here.
+/// this fix corrects for `Write`/`MultiEdit`/`LS`.
+///
+/// #1371: the mapping itself now lives in [`crate::adapter::tools`] alongside
+/// crush's, because the two hand-written tables had drifted apart — this is the
+/// opencode column of that one table.
 fn opencode_tool_name(neutral: &str) -> Option<&'static str> {
-    Some(match neutral {
-        "Bash" => "bash",
-        "Read" => "read",
-        "Write" | "MultiEdit" => "edit",
-        "Edit" => "edit",
-        "Glob" => "glob",
-        "Grep" => "grep",
-        "LS" => "list",
-        "WebFetch" => "webfetch",
-        "WebSearch" => "websearch",
-        "TodoWrite" => "todowrite",
-        "Task" => "task",
-        // #1345: opencode has a real `skill` permission key, so a `Skill` rule
-        // was being dropped despite having an exact equivalent.
-        "Skill" => "skill",
-        _ => return None,
-    })
+    crate::adapter::tools::opencode_key(neutral)
 }
 
 /// opencode permission keys typed as a bare `"ask"`/`"allow"`/`"deny"` string

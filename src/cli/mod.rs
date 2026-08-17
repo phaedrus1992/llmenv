@@ -935,6 +935,9 @@ fn warn_dead_config(
     for hit in doctor::claude_only_colon_permission_patterns(capabilities, opencode_active) {
         eprintln!("{prefix} {}", hit.message());
     }
+    for hit in doctor::unknown_neutral_tools(capabilities) {
+        eprintln!("{prefix} {}", hit.message());
+    }
 }
 
 /// Whether `engine` will actually be materialized on this host: an adapter with
