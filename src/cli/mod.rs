@@ -1437,7 +1437,7 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
 
     let resolved = resolve_env(None, None, false)?;
 
-    let mut cmd = std::process::Command::new(adapter.binary_name());
+    let mut cmd = tokio::process::Command::new(adapter.binary_name());
     cmd.args(&args);
     for (key, value) in &resolved.vars {
         cmd.env(key, value);
@@ -1446,14 +1446,78 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn '{}'", adapter.binary_name()))?;
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait on '{}'", adapter.binary_name()))?;
+    // `tokio::process::Command::spawn` registers the child with the runtime's
+    // signal reactor, so it has to run inside `block_on` — spawning first and
+    // entering the runtime afterwards panics with "there is no reactor running".
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for launch supervision")?;
+    let status = rt.block_on(spawn_and_supervise(&mut cmd, adapter.binary_name()))?;
 
     exit_with_status(status);
+}
+
+/// Spawn the engine and wait for it to exit, ignoring SIGINT/SIGTERM/SIGHUP
+/// delivered to this process: the terminal already delivers the same signal
+/// directly to the child (same process group, standard `Command::spawn`
+/// behavior), so `launch` doesn't need to forward it — it needs to *not die
+/// first*, and instead keep waiting until the child's own exit status is known.
+///
+/// The handlers are installed *before* the spawn on purpose. Installing them
+/// afterwards leaves a window in which a signal kills `launch` under its
+/// default disposition while the engine it just started keeps running,
+/// orphaning the child and returning a signal-derived status the caller has to
+/// interpret as the engine's.
+#[cfg(unix)]
+async fn spawn_and_supervise(
+    cmd: &mut tokio::process::Command,
+    binary: &str,
+) -> anyhow::Result<std::process::ExitStatus> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigint = signal(SignalKind::interrupt()).context("failed to install SIGINT handler")?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("failed to install SIGTERM handler")?;
+    let mut sighup = signal(SignalKind::hangup()).context("failed to install SIGHUP handler")?;
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn '{binary}'"))?;
+
+    loop {
+        tokio::select! {
+            status = child.wait() => {
+                return status.context("failed to wait on child engine process");
+            }
+            _ = sigint.recv() => {
+                tracing::debug!("launch: received SIGINT, still waiting on child");
+            }
+            _ = sigterm.recv() => {
+                tracing::debug!("launch: received SIGTERM, still waiting on child");
+            }
+            _ = sighup.recv() => {
+                tracing::debug!("launch: received SIGHUP, still waiting on child");
+            }
+        }
+    }
+}
+
+/// Non-unix fallback: no process-group signal semantics to defend against, so
+/// spawning and waiting is the whole job (`launch` is unix-only by design —
+/// see the design doc's non-goals — this keeps the crate compiling elsewhere).
+#[cfg(not(unix))]
+async fn spawn_and_supervise(
+    cmd: &mut tokio::process::Command,
+    binary: &str,
+) -> anyhow::Result<std::process::ExitStatus> {
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn '{binary}'"))?;
+    child
+        .wait()
+        .await
+        .context("failed to wait on child engine process")
 }
 
 /// Exit the current process mirroring `status`: the child's own exit code on
