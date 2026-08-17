@@ -375,6 +375,20 @@ pub(crate) fn adapter_for_engine(engine: &str) -> Box<dyn AgentAdapter> {
         .unwrap_or_else(active_adapter)
 }
 
+/// Resolve an adapter for `llmenv launch <target>`, matching `target` against
+/// either the adapter's binary name (what a user types on the command line,
+/// e.g. `claude`) or its engine id (the underscore form, e.g. `claude_code`).
+///
+/// Unlike [`adapter_for_engine`], this returns `None` instead of silently
+/// falling back to env-sniffing on no match: `launch` must error loudly on an
+/// unrecognized engine rather than risk launching the wrong binary.
+#[must_use]
+pub(crate) fn adapter_for_launch_target(target: &str) -> Option<Box<dyn AgentAdapter>> {
+    registered_adapters()
+        .into_iter()
+        .find(|a| a.binary_name() == target || engine_id(a.as_ref()) == target)
+}
+
 /// Normalise an adapter's identity to the underscore form used by `--engine`
 /// flags, `native.<engine>` config keys, and `disabled_engines` entries.
 /// [`AgentAdapter::name`] is the hyphenated cache-dir form (`claude-code`);
@@ -616,9 +630,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, active_adapter_from, binary_on_path, emit_hook_context, engine_id,
-        known_engine_ids, modeled_key_redirect, overlay_native_json, registered_adapters,
-        remote_transport_type_str, resolve_bundle_relative_paths,
+        AgentAdapter, active_adapter_from, adapter_for_launch_target, binary_on_path,
+        emit_hook_context, engine_id, known_engine_ids, modeled_key_redirect, overlay_native_json,
+        registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
         resolve_command_paths_against_files, strip_json_nulls,
     };
     use crate::merge::MergedManifest;
@@ -762,6 +776,43 @@ mod tests {
         assert_eq!(adapters[0].name(), "claude-code");
         assert_eq!(adapters[1].name(), "crush");
         assert_eq!(adapters[2].name(), "opencode");
+    }
+
+    #[test]
+    fn adapter_for_launch_target_matches_binary_name() {
+        let a = adapter_for_launch_target("claude").expect("binary name 'claude' should resolve");
+        assert_eq!(a.binary_name(), "claude");
+    }
+
+    #[test]
+    fn adapter_for_launch_target_matches_engine_id() {
+        let a = adapter_for_launch_target("claude_code")
+            .expect("engine id 'claude_code' should resolve");
+        assert_eq!(a.binary_name(), "claude");
+    }
+
+    #[test]
+    fn adapter_for_launch_target_matches_other_adapters() {
+        assert_eq!(
+            adapter_for_launch_target("crush")
+                .expect("crush should resolve")
+                .binary_name(),
+            "crush"
+        );
+        assert_eq!(
+            adapter_for_launch_target("opencode")
+                .expect("opencode should resolve")
+                .binary_name(),
+            "opencode"
+        );
+    }
+
+    #[test]
+    fn adapter_for_launch_target_rejects_unknown_target() {
+        assert!(
+            adapter_for_launch_target("__llmenv_no_such_engine_xyzzy__").is_none(),
+            "an unrecognized engine must not silently resolve to any adapter"
+        );
     }
 
     #[test]
