@@ -2,7 +2,11 @@
 # Resolve the base branch for a sprint/issue from its milestone.
 #
 # Rules:
-#   - Versioned milestone ("X.Y — theme", "vX.Y"): use release/X.Y.x if it exists.
+#   - Versioned milestone ("X.Y — theme", "vX.Y", "vX.Y.Z"): use the release branch
+#     for that version — release/X.Y.x if it exists, else release/X.x. Repos differ
+#     on which they cut (llmenv keeps one release/<major>.x per major), and matching
+#     only the X.Y form sent a v3.11.0 milestone to release/4.x via the
+#     latest-branch fallback below, which is the wrong line entirely.
 #   - "Large Features" milestone (title matches /large/i): use the default branch (main).
 #   - Bug Fixes / Small Enhancements (no version, not large): use the latest release/X.x.
 #   - No release branches at all: fall back to the default branch.
@@ -85,9 +89,22 @@ latest_release_branch() {
     | tail -1
 }
 
-if [[ -n "$VER" ]] && git ls-remote --exit-code --heads origin "release/${VER}.x" >/dev/null 2>&1; then
-  echo "resolve-base-branch.sh: milestone '$MILESTONE' -> release/${VER}.x" >&2
-  printf '%s\n' "release/${VER}.x"
+# The release branch for $VER, trying the minor-scoped name before the
+# major-scoped one. Empty when neither exists on the remote.
+version_release_branch() {
+  local candidate
+  for candidate in "release/${VER}.x" "release/${VER%%.*}.x"; do
+    if git ls-remote --exit-code --heads origin "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -n "$VER" ]] && versioned="$(version_release_branch)"; then
+  echo "resolve-base-branch.sh: milestone '$MILESTONE' -> $versioned" >&2
+  printf '%s\n' "$versioned"
 elif printf '%s' "$MILESTONE" | grep -qiE 'large'; then
   # Large Features milestones always target the default branch (main).
   emit_default_branch "large-features milestone '$MILESTONE'"
