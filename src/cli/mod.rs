@@ -4748,6 +4748,16 @@ fn run_prune(
     // everything it was asked to is not a success, even though the per-entry
     // failures were printed above. Returning `Ok(())` here meant a scripted
     // `llmenv prune` saw exit 0 and moved on with the cache still occupied.
+    //
+    // #1372: this originally covered only `plugin_failed`, so a cache entry that
+    // couldn't be removed printed "could not be removed" and still exited 0.
+    // Both lists gate the exit status now.
+    if !failed.is_empty() {
+        anyhow::bail!(
+            "{} cache entry(ies) could not be removed — see the failures above",
+            failed.len()
+        );
+    }
     if plugin_cache && !plugin_failed.is_empty() {
         anyhow::bail!(
             "{} plugin cache entry(ies) could not be removed — see the failures above",

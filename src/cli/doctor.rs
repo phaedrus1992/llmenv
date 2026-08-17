@@ -1240,6 +1240,12 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                                 report.removed.len(),
                                 report.kept
                             );
+                            // #1372: a removal failure no longer aborts the walk,
+                            // so the entries it skipped have to be reported here
+                            // or they'd vanish from the summary entirely.
+                            for p in &report.failed {
+                                eprintln!("{warn} GC: could not remove {}", p.display());
+                            }
                             let forgotten = forget_credentials_for(&report.removed);
                             if forgotten > 0 {
                                 eprintln!(
