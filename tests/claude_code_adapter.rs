@@ -85,9 +85,15 @@ fn env_vars_set_claude_config_dir() {
     assert_eq!(vars[0].0, "CLAUDE_CONFIG_DIR");
     assert_eq!(vars[0].1, tmp.path().to_str().expect("tempdir utf-8"));
 
-    // 2–5 — Per-hash temp vars (all point to <cache_dir>/tmp/)
-    let tmp_dir = tmp.path().join("tmp");
+    // 2–5 — Temp vars, all pointing at <state_dir>/tmp/. The state dir, not the
+    // per-hash cache dir: prune and a config edit both delete the latter out
+    // from under running shells (#1379).
+    let tmp_dir = state_tmp.path().join("tmp");
     assert!(tmp_dir.is_dir(), "tmp/ dir must exist");
+    assert!(
+        !tmp.path().join("tmp").exists(),
+        "tmp/ must not be created in the prunable per-hash cache dir"
+    );
     let tmp_str = tmp_dir.to_str().expect("tempdir utf-8").to_owned();
     assert_eq!(vars[1].0, "CLAUDE_CODE_TMPDIR");
     assert_eq!(vars[1].1, tmp_str);
