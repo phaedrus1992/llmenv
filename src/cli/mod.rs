@@ -1019,12 +1019,31 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
         })
 }
 
-fn run_export(
+/// The result of resolving the environment for the active scope, before it's
+/// either printed as `export` lines (`run_export`) or applied to a supervised
+/// child process (`run_launch`). Shared by both so there is exactly one
+/// resolution code path (#1056).
+struct ResolvedEnv {
+    /// Every variable llmenv would export, in deterministic (`BTreeMap`) order.
+    vars: std::collections::BTreeMap<String, String>,
+    /// Names of the bundles that fired, for `export --explain`'s
+    /// `# source: adapter (bundles: ...)` annotation.
+    firing_bundle_names: Vec<String>,
+}
+
+/// Resolve the environment for the active scope: load config, evaluate scopes
+/// and tags, merge bundles, resolve MCPs, and materialize the adapter config —
+/// the full pipeline `export` has always run, factored out so `launch` shares
+/// it verbatim rather than growing a second resolution behavior (#1056).
+///
+/// Every variable is validated before any is returned, so a validation failure
+/// yields zero output instead of the partial output the previous inline
+/// per-print validation could leave behind.
+fn resolve_env(
     scope: Option<String>,
     tag: Option<String>,
-    explain: bool,
     compress: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ResolvedEnv> {
     let config_path = paths::config_path()?;
     let config = crate::hook_run::load_cached_config(&config_path)?;
     let config_dir = paths::config_dir()?;
@@ -1338,16 +1357,31 @@ fn run_export(
     // Auto-prune: TTL-based memory retention pass after materialization (#270)
     crate::memory::prune::auto_prune_if_enabled(&config);
 
+    // Validate every variable before returning any of them — a failure here
+    // must produce zero output, not the partial output the old inline
+    // per-print validation could leave behind.
+    for (key, value) in &vars {
+        validate_var_name(key).with_context(|| format!("variable '{key}'"))?;
+        validate_var_value(value).with_context(|| format!("variable '{key}': invalid value"))?;
+    }
+
+    Ok(ResolvedEnv {
+        vars,
+        firing_bundle_names: bundles_for_icm,
+    })
+}
+
+fn run_export(
+    scope: Option<String>,
+    tag: Option<String>,
+    explain: bool,
+    compress: bool,
+) -> anyhow::Result<()> {
+    let resolved = resolve_env(scope, tag, compress)?;
+
     if explain {
-        let bundle_list = firing
-            .iter()
-            .map(|b| b.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        for (key, value) in vars {
-            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_var_value(&value)
-                .with_context(|| format!("variable '{key}': invalid value"))?;
+        let bundle_list = resolved.firing_bundle_names.join(", ");
+        for (key, value) in resolved.vars {
             if key.starts_with("LLMENV_") {
                 println!("# source: llmenv introspection");
             } else {
@@ -1356,10 +1390,7 @@ fn run_export(
             println!("export {}={}", key, shell_escape(&value));
         }
     } else {
-        for (key, value) in vars {
-            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_var_value(&value)
-                .with_context(|| format!("variable '{key}': invalid value"))?;
+        for (key, value) in resolved.vars {
             println!("export {}={}", key, shell_escape(&value));
         }
     }
