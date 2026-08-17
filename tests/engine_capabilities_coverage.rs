@@ -905,28 +905,29 @@ fn d3_native_fragment_for_other_engine_dropped_not_rendered() {
 }
 
 #[test]
-fn d3_hard_error_native_top_level_contains_modeled_feature_key() {
-    /// Test: per D3, if the top-level native.claude_code contains a modeled-feature key
-    /// (e.g., "permissions", "hooks"), hard-error naming the offending key and pointing
-    /// at the native_<feature> sibling.
-    /// Per D3: "The adapter therefore rejects any modeled-feature key found in the
-    /// top-level `native.<engine>` fragment, naming the offending key and pointing at the
-    /// `native_<feature>` sibling (which merges in the safe direction)."
-    /// Currently a gap per #102 (referenced in D3).
+fn d3_hard_error_native_top_level_contains_hooks() {
+    /// Test: per D3, a modeled-feature key in the top-level `native.claude_code`
+    /// hard-errors, naming the offending key and pointing at the
+    /// `native_<feature>` sibling (which merges in the safe direction).
+    ///
+    /// #750 narrowed which keys those are. `permissions` was removed from the
+    /// list — it now merges additively (see the sibling test below), which
+    /// satisfies D3's intent ("Layer 1 wins") without the hard error. `hooks`
+    /// still qualifies: it is an array of matcher groups, so there is no
+    /// unambiguous additive merge to fall back to.
     use llmenv::adapter::AgentAdapter;
     use llmenv::adapter::claude_code::ClaudeCodeAdapter;
 
     let tmp = tempfile::tempdir().expect("tempdir");
 
     let mut native = BTreeMap::new();
-    // Inject a modeled-feature key (should hard-error)
     native.insert(
         "claude_code".into(),
         serde_yaml::from_str(
             r#"
-permissions:
-  allow:
-    - Read
+hooks:
+  PreToolUse:
+    - matcher: "^Bash$"
 "#,
         )
         .expect("parse yaml"),
@@ -939,12 +940,78 @@ permissions:
     let result = ClaudeCodeAdapter.materialize(&manifest, tmp.path());
     assert!(
         result.is_err(),
-        "should hard-error when native.claude_code contains modeled-feature key (permissions)"
+        "should hard-error when native.claude_code contains modeled-feature key (hooks)"
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("permissions") || err_msg.contains("native"),
-        "error should name the offending key and suggest native_permissions sibling"
+        err_msg.contains("hooks") && err_msg.contains("native_hooks"),
+        "error should name the offending key and suggest the native_hooks sibling: {err_msg}"
+    );
+}
+
+#[test]
+fn d3_native_top_level_permissions_merge_additively_instead_of_erroring() {
+    /// #750: `permissions` in the top-level catch-all used to hard-error
+    /// alongside `hooks`. It now layers over the rendered object — additively,
+    /// so D3's "Layer 1 wins" still holds for anything security-relevant: the
+    /// native fragment can add rules but cannot remove a rendered one.
+    use llmenv::adapter::AgentAdapter;
+    use llmenv::adapter::claude_code::ClaudeCodeAdapter;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let mut native = BTreeMap::new();
+    native.insert(
+        "claude_code".into(),
+        serde_yaml::from_str(
+            r#"
+permissions:
+  allow:
+    - Read
+"#,
+        )
+        .expect("parse yaml"),
+    );
+    let mut manifest = llmenv::merge::MergedManifest {
+        native,
+        ..Default::default()
+    };
+    manifest.capabilities.permissions = llmenv::config::Permissions {
+        deny: vec![llmenv::config::PermissionRule {
+            tool: "Bash".into(),
+            pattern: Some("curl:*".into()),
+            paths: Vec::new(),
+        }],
+        ..Default::default()
+    };
+
+    ClaudeCodeAdapter
+        .materialize(&manifest, tmp.path())
+        .expect("permissions in the catch-all merge rather than erroring");
+
+    let settings: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(tmp.path().join("settings.json")).expect("settings.json written"),
+    )
+    .expect("settings.json parses");
+    let allow: Vec<&str> = settings["permissions"]["allow"]
+        .as_array()
+        .expect("allow present")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let deny: Vec<&str> = settings["permissions"]["deny"]
+        .as_array()
+        .expect("deny present")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        allow.contains(&"Read"),
+        "native allow layered in: {allow:?}"
+    );
+    assert!(
+        deny.contains(&"Bash(curl:*)"),
+        "rendered deny survives the native layer: {deny:?}"
     );
 }
 

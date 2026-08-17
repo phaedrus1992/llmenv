@@ -346,52 +346,39 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
         #[expect(clippy::unwrap_used, reason = "guarded by is_mapping() check above")]
         let m = v.as_mapping().unwrap();
 
-        let is_old_shape = m.iter().any(|(k, v)| {
-            let key = k.as_str().unwrap_or("");
-            (key == "file" || key == "transcript" || key == "verbose") && v.is_bool()
-        });
-
-        if is_old_shape {
-            #[derive(Deserialize)]
-            struct OldShape {
-                #[serde(default)]
-                file: bool,
-                #[serde(default = "default_true")]
-                transcript: bool,
-                #[serde(default)]
-                verbose: bool,
-                #[serde(default)]
-                path: Option<String>,
-                #[serde(default)]
-                max_content_bytes: Option<usize>,
-            }
-            let old: OldShape = serde_yaml::from_value(v).map_err(serde::de::Error::custom)?;
-            let level = if old.verbose {
-                LogLevel::Debug
-            } else {
-                LogLevel::Info
-            };
-            return Ok(SessionLog {
-                file: old.file.then_some(FileSinkConfig {
-                    enabled: true,
-                    level,
-                    path: old.path,
-                }),
-                transcript: if old.transcript {
-                    Some(TranscriptSinkConfig {
-                        enabled: true,
-                        level,
-                        retention_days: None,
-                    })
+        // #744: the pre-3.3 boolean shape (`file: bool`, `transcript: bool`,
+        // `verbose: bool`) was translated to the per-sink form here until 4.0.
+        // The translation is gone, but the *detection* stays: without it serde
+        // reports `invalid type: boolean, expected struct FileSinkConfig`,
+        // which tells someone upgrading nothing about what to write instead.
+        // Keyed on the boolean value rather than the field name, so the new
+        // mapping-valued `file:`/`transcript:` can't trip it.
+        let old_boolean_keys: Vec<&str> = m
+            .iter()
+            .filter_map(|(k, v)| {
+                let key = k.as_str()?;
+                (matches!(key, "file" | "transcript" | "verbose") && v.is_bool()).then_some(key)
+            })
+            .collect();
+        if !old_boolean_keys.is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "session_log{} {} a boolean; the boolean form is no longer supported. \
+                 Use the per-sink mapping instead: \
+                 `session_log: {{ file: {{ enabled: true, level: info }}, \
+                 transcript: {{ enabled: true, level: info }} }}`. \
+                 `verbose: true` is now `level: debug` on whichever sink should \
+                 capture prompts and tool use.",
+                if old_boolean_keys.len() == 1 {
+                    format!(".{}", old_boolean_keys[0])
                 } else {
-                    Some(TranscriptSinkConfig {
-                        enabled: false,
-                        level,
-                        retention_days: None,
-                    })
+                    format!(".{{{}}}", old_boolean_keys.join(","))
                 },
-                max_content_bytes: old.max_content_bytes,
-            });
+                if old_boolean_keys.len() == 1 {
+                    "is"
+                } else {
+                    "are"
+                },
+            )));
         }
 
         #[derive(Deserialize)]

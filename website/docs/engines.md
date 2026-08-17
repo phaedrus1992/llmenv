@@ -108,10 +108,53 @@ native:
     alwaysThinkingEnabled: true
 ```
 
-It is overlaid onto the engine's config last. Putting a modeled-feature key
-(`permissions`, `hooks`) here is a hard error — that belongs in the matching
-`native_<feature>` sibling, so the security-rendered output is never silently
-clobbered.
+It is overlaid onto the engine's config last. `hooks` is a hard error here — it
+belongs in the matching `native_<feature>` sibling, so the security-rendered
+output is never silently clobbered.
+
+### `native.claude_code.permissions`
+
+(added in v4.0.0)
+
+`permissions` used to be a hard error here too. It is now accepted and layered
+over the rendered `permissions` object, which makes the catch-all the escape
+hatch for Claude-Code-only permission keys llmenv doesn't model —
+`additionalDirectories`, `disableBypassPermissionsMode`,
+`skipDangerousModePermissionPrompt`, and whatever Claude Code ships next —
+without waiting on a neutral-schema field and an llmenv release:
+
+```yaml
+native:
+  claude_code:
+    permissions:
+      additionalDirectories: ["/srv/shared"]
+      disableBypassPermissionsMode: "disable"
+```
+
+It is accepted because the merge is **additive, not a replacement**:
+
+- `allow`, `ask`, and `deny` are appended to what was rendered and deduped —
+  never replaced. A fragment that omits `deny`, or sets it to `null`, leaves the
+  rendered `deny` intact.
+- `deny > ask > allow` authority is re-applied afterwards, so a native `allow`
+  of an already-denied rule is dropped rather than honoured.
+- Every other key overwrites — those carry no rendered security decision to
+  weaken.
+- `defaultMode` is the exception and is **rejected here**. It is a modeled key
+  (`capabilities.permissions.default_mode`), and setting it from the catch-all
+  would override the rendered mode — including to `bypassPermissions`, which
+  switches the permission system off entirely. Anything that can author a
+  `native:` block, bundles included, would otherwise have a one-line escalation
+  past every rendered `ask` and `deny`. Use the modeled field instead.
+
+Rule strings here get the same `Write` → `Edit` normalization the
+`native_permissions` sibling applies, so a `deny: ["Write(~/.ssh/**)"]` isn't
+silently rendered as a rule that matches nothing.
+
+The net effect is that a native fragment can tighten permissions or add keys
+llmenv doesn't model, but cannot loosen what the renderer produced. `hooks`
+keeps the hard error because it is an array of matcher groups, where "additive"
+has no unambiguous meaning; use `native_hooks` for those.
 
 ## What the Claude Code adapter emits
 

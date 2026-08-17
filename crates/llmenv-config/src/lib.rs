@@ -127,22 +127,64 @@ mod tests {
         assert_eq!(t.level, LogLevel::Info);
     }
 
+    // #744: the pre-3.3 boolean shape used to be silently translated. Removed in
+    // 4.0 — but a bare "invalid type: boolean" from serde tells a user upgrading
+    // nothing about what to write instead, so the shape is still *detected*, only
+    // to produce an error that names its replacement.
     #[test]
-    fn session_log_old_shape_translates_to_new() {
+    fn session_log_old_boolean_shape_is_rejected_with_migration_guidance() {
+        for body in [
+            "session_log:\n  file: true\n",
+            "session_log:\n  transcript: false\n",
+            "session_log:\n  verbose: true\n",
+            "session_log:\n  file: true\n  transcript: false\n  verbose: true\n",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let p = tmp.path().join("config.yaml");
+            std::fs::write(&p, body).unwrap();
+
+            let err = format!("{:#}", Config::load(&p).unwrap_err());
+            assert!(
+                err.contains("no longer supported"),
+                "error should say the shape is gone: {err}"
+            );
+            // The whole point of keeping a detection pass: the message has to
+            // show the replacement, not just refuse the input.
+            assert!(
+                err.contains("enabled:"),
+                "error should show the per-sink form: {err}"
+            );
+        }
+    }
+
+    // `verbose: true` meant Debug for both sinks; the replacement is a per-sink
+    // `level`. Naming it keeps the migration mechanical for anyone hitting this.
+    #[test]
+    fn old_shape_error_maps_verbose_onto_the_level_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        std::fs::write(&p, "session_log:\n  verbose: true\n").unwrap();
+        let err = format!("{:#}", Config::load(&p).unwrap_err());
+        assert!(err.contains("level:"), "verbose maps onto level: {err}");
+    }
+
+    // A mapping-valued `file`/`transcript` is the *new* shape and must not be
+    // caught by the old-shape guard — the detection keys on the boolean value,
+    // not on the field name.
+    #[test]
+    fn new_shape_keys_are_not_mistaken_for_the_old_boolean_shape() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("config.yaml");
         std::fs::write(
             &p,
-            "session_log:\n  file: true\n  transcript: false\n  verbose: true\n",
+            "session_log:\n  file:\n    enabled: true\n    level: debug\n",
         )
         .unwrap();
+        // The per-sink mapping form still parses.
         let r = Config::load(&p).unwrap().session_log_resolved();
         let f = r.file.as_ref().unwrap();
         assert!(f.enabled);
         assert_eq!(f.level, LogLevel::Debug);
-        let t = r.transcript.as_ref().unwrap();
-        assert!(!t.enabled);
-        assert_eq!(t.level, LogLevel::Debug);
     }
 
     #[test]

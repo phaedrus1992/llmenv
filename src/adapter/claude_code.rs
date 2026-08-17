@@ -547,13 +547,21 @@ fn overlay_native(
     Ok(())
 }
 
-/// Top-level settings.json keys that a modeled capability renders. The
-/// top-level `native` catch-all (D3) is for keys NO modeled feature owns, so
-/// these must never appear there — they belong in the `native_<feature>`
-/// sibling, which merges in the safe direction (e.g. native deny can't weaken a
-/// neutral deny). `enabledPlugins`/`extraKnownMarketplaces` (plugins) and the
-/// separate `mcp.json` doc use distinct keys and aren't catch-all collisions.
-const MODELED_SETTINGS_KEYS: [&str; 2] = ["permissions", "hooks"];
+/// Top-level settings.json keys that a modeled capability renders and that the
+/// catch-all still cannot carry. The top-level `native` catch-all (D3) is for
+/// keys NO modeled feature owns; a key here would be overlaid last by the blind
+/// deep-merge and clobber the rendered output.
+///
+/// `permissions` used to be in this list. It was removed in #750: it now goes
+/// through [`merge_native_permissions`], which appends instead of replacing, so
+/// the catch-all can carry Claude-Code-only permission keys llmenv doesn't
+/// model without a neutral-schema change. `hooks` stays because it is an array
+/// of matcher groups — "additive" has no unambiguous meaning there the way it
+/// does for flat allow/ask/deny lists.
+///
+/// `enabledPlugins`/`extraKnownMarketplaces` (plugins) and the separate
+/// `mcp.json` doc use distinct keys and aren't catch-all collisions.
+const MODELED_SETTINGS_KEYS: [&str; 1] = ["hooks"];
 
 /// Reject a top-level `native.<engine>` catch-all fragment that contains a
 /// modeled-feature key. Overlaying such a key last would silently clobber the
@@ -567,13 +575,145 @@ fn reject_modeled_keys_in_catch_all(fragment: &serde_yaml::Value) -> anyhow::Res
         if map.contains_key(serde_yaml::Value::String(key.into())) {
             anyhow::bail!(
                 "top-level `native.claude_code` carries the modeled-feature key \
-                 `{key}`, which would silently clobber the rendered `{key}` \
-                 (a security regression for permissions). Move it to the \
-                 `native_{key}` sibling instead, which merges in the safe direction."
+                 `{key}`, which would silently clobber the rendered `{key}`. \
+                 Move it to the `native_{key}` sibling instead, which merges in \
+                 the safe direction."
             );
         }
     }
     Ok(())
+}
+
+/// Layer a `native.claude_code.permissions` fragment over the rendered
+/// `permissions` object (#750), and return the fragment with that key removed
+/// so the generic catch-all overlay never sees it.
+///
+/// The catch-all rejected `permissions` outright before this, because
+/// [`overlay_native`] is a blind deep-merge: a native `allow`/`ask`/`deny`
+/// would *replace* the rendered array, and an omitted or empty `deny` would
+/// erase it. That is a security regression — the rendered `deny` is the output
+/// of tier policy and neutral rules, and nothing layered on top may weaken it.
+///
+/// So the arrays merge the way `native_permissions.claude_code` already does:
+/// append, dedupe, then re-apply deny > ask > allow authority. A native rule
+/// can only ever *add* a restriction or add an allowance that isn't already
+/// denied. Every other key — `defaultMode`, `additionalDirectories`,
+/// `disableBypassPermissionsMode`, and whatever Claude Code ships next —
+/// overwrites, which is the escape-hatch behaviour the issue asks for: those
+/// keys carry no rendered security decision to weaken.
+fn merge_native_permissions(
+    settings: &mut serde_json::Map<String, serde_json::Value>,
+    fragment: Option<&serde_yaml::Value>,
+) -> anyhow::Result<Option<serde_yaml::Value>> {
+    let Some(fragment) = fragment else {
+        return Ok(None);
+    };
+    let Some(map) = fragment.as_mapping() else {
+        return Ok(Some(fragment.clone()));
+    };
+    let perms_key = serde_yaml::Value::String("permissions".into());
+    let Some(native_perms) = map.get(&perms_key) else {
+        return Ok(Some(fragment.clone()));
+    };
+
+    let native_json: serde_json::Value = serde_json::to_value(native_perms)
+        .context("converting native.claude_code.permissions to JSON")?;
+    let native_obj = native_json.as_object().cloned().unwrap_or_default();
+
+    let mut rendered = settings
+        .get("permissions")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    // `defaultMode` is modeled (#748 put it in the neutral vocabulary as
+    // `capabilities.permissions.default_mode`), and `bypassPermissions` turns
+    // the permission system off outright. Letting the catch-all set it would
+    // give anything that can author a `native:` block — bundles included — a
+    // one-line escalation past every rendered `ask` and `deny`, which is
+    // exactly what the old hard error prevented. So it keeps a hard error of
+    // its own, pointing at the modeled field. The catch-all stays the escape
+    // hatch for keys llmenv genuinely doesn't model.
+    if native_obj.contains_key("defaultMode") {
+        anyhow::bail!(
+            "`native.claude_code.permissions.defaultMode` is not accepted: \
+             `defaultMode` is a modeled key, and setting it here would override \
+             the rendered permission mode (including to `bypassPermissions`, \
+             which disables the permission system). Use \
+             `capabilities.permissions.default_mode` instead."
+        );
+    }
+
+    // Arrays append; everything else overwrites.
+    for (key, value) in native_obj {
+        if matches!(key.as_str(), "allow" | "ask" | "deny") {
+            let mut merged: Vec<String> = rendered
+                .get(&key)
+                .and_then(serde_json::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // #888: normalize here too. The `native_permissions` sibling maps
+            // the renamed `Write` tool onto `Edit`; without the same pass a
+            // catch-all `Write(...)` rule renders verbatim and matches nothing,
+            // which for a `deny` reads as protection that isn't there.
+            merged.extend(
+                value
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(normalize_deprecated_tool)),
+            );
+            dedup(&mut merged);
+            rendered.insert(key, json!(merged));
+        } else {
+            rendered.insert(key, value);
+        }
+    }
+
+    apply_permission_authority(&mut rendered);
+    settings.insert("permissions".into(), serde_json::Value::Object(rendered));
+
+    // Hand back the fragment without `permissions`, so the caller's generic
+    // overlay can't re-apply it as a blind deep-merge afterwards.
+    let mut rest = map.clone();
+    rest.remove(&perms_key);
+    Ok(Some(serde_yaml::Value::Mapping(rest)))
+}
+
+/// Enforce deny > ask > allow on a rendered `permissions` object: a rule that
+/// appears in a higher-authority bucket is removed from the lower ones.
+///
+/// Shared by the renderer and [`merge_native_permissions`] so a native fragment
+/// can't produce a combination the renderer would never emit — e.g. a rule
+/// sitting in both `deny` and `allow`.
+fn apply_permission_authority(perms: &mut serde_json::Map<String, serde_json::Value>) {
+    let strings = |perms: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        perms
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let deny = strings(perms, "deny");
+    let retain = |perms: &mut serde_json::Map<String, serde_json::Value>,
+                  key: &str,
+                  drop: &std::collections::BTreeSet<String>| {
+        if let Some(arr) = perms.get_mut(key).and_then(serde_json::Value::as_array_mut) {
+            arr.retain(|v| v.as_str().is_none_or(|s| !drop.contains(s)));
+        }
+    };
+    retain(perms, "ask", &deny);
+    retain(perms, "allow", &deny);
+    let ask = strings(perms, "ask");
+    retain(perms, "allow", &ask);
 }
 
 /// True if `rel` is a JSON file under the bundle's `hooks/` subtree —
@@ -1774,6 +1914,32 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // level (plugin-related keys Claude understands but llmenv has no neutral
     // form for, e.g. extra `enabledPlugins` entries).
     let mut settings_value = serde_json::Value::Object(settings);
+    // This overlay runs *before* the catch-all guard below, and `merge_json` is
+    // a blind deep-merge, so an unguarded fragment here could clobber the
+    // security-rendered output the catch-all is so careful about — a scalar
+    // `permissions.deny` would replace the rendered array outright, and a
+    // scalar fragment would replace the whole settings object (taking the
+    // object-ness the permissions merge depends on with it). Hold it to the
+    // same rules.
+    if let Some(plugins) = manifest.capabilities.native_plugins.get("claude_code") {
+        anyhow::ensure!(
+            plugins.is_mapping(),
+            "`native_plugins.claude_code` must be a mapping of settings keys, \
+             not a scalar or sequence"
+        );
+        reject_modeled_keys_in_catch_all(plugins)?;
+        if plugins
+            .as_mapping()
+            .is_some_and(|m| m.contains_key(serde_yaml::Value::String("permissions".into())))
+        {
+            anyhow::bail!(
+                "`native_plugins.claude_code` carries a `permissions` key, which \
+                 would overwrite the rendered permissions rather than layering \
+                 additively. Put it under `native.claude_code.permissions` \
+                 (additive) or `native_permissions.claude_code` instead."
+            );
+        }
+    }
     overlay_native(
         &mut settings_value,
         manifest.capabilities.native_plugins.get("claude_code"),
@@ -1793,7 +1959,15 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     if let Some(native) = manifest.native.get("claude_code") {
         reject_modeled_keys_in_catch_all(native)?;
     }
-    overlay_native(&mut settings_value, manifest.native.get("claude_code"))?;
+    // #750: `permissions` is pulled out of the fragment and merged additively
+    // before the generic overlay runs, so the blind deep-merge below never sees
+    // it. `rest` is the fragment minus that key.
+    let rest = if let Some(obj) = settings_value.as_object_mut() {
+        merge_native_permissions(obj, manifest.native.get("claude_code"))?
+    } else {
+        manifest.native.get("claude_code").cloned()
+    };
+    overlay_native(&mut settings_value, rest.as_ref())?;
 
     // #1264: a native `null` deletes the key rather than emitting an explicit
     // JSON null — `merge_json`'s shared-key overwrite arm deliberately does not
@@ -3158,6 +3332,226 @@ mod tests {
     }
 
     // ---- generate_settings_json: permission render ----
+
+    /// A manifest with one rendered rule per bucket, plus a `native.claude_code`
+    /// fragment. #750's whole question is what the fragment may and may not do
+    /// to what the renderer produced.
+    fn manifest_with_native_permissions(fragment: &str) -> crate::merge::MergedManifest {
+        let mut m = crate::merge::MergedManifest::default();
+        m.capabilities.permissions = crate::config::Permissions {
+            allow: vec![crate::config::PermissionRule {
+                tool: "Read".into(),
+                pattern: Some("//a".into()),
+                paths: Vec::new(),
+            }],
+            ask: vec![crate::config::PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("git push:*".into()),
+                paths: Vec::new(),
+            }],
+            deny: vec![crate::config::PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("curl:*".into()),
+                paths: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        m.native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str(fragment).expect("fragment parses"),
+        );
+        m
+    }
+
+    fn perm_strings(settings: &serde_json::Value, action: &str) -> Vec<String> {
+        settings["permissions"][action]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    // #750: the catch-all used to hard-reject `permissions` outright. It now
+    // merges, which is only acceptable because the merge is additive.
+    #[test]
+    fn native_permissions_in_catch_all_append_without_replacing() {
+        let settings = render_settings_for_test(&manifest_with_native_permissions(
+            "permissions:\n  allow: [\"Read(//b)\"]\n  ask: [\"Bash(git tag:*)\"]\n  deny: [\"Bash(rm:*)\"]\n",
+        ));
+        for (action, rendered, added) in [
+            ("allow", "Read(//a)", "Read(//b)"),
+            ("ask", "Bash(git tag:*)", "Bash(git tag:*)"),
+            ("deny", "Bash(curl:*)", "Bash(rm:*)"),
+        ] {
+            let got = perm_strings(&settings, action);
+            assert!(
+                got.contains(&rendered.to_string()),
+                "{action} kept the rendered rule: {got:?}"
+            );
+            assert!(
+                got.contains(&added.to_string()),
+                "{action} gained the native rule: {got:?}"
+            );
+        }
+        // The rendered ask survives too — spelled out separately because the
+        // loop above reuses one string for both roles on `ask`.
+        assert!(perm_strings(&settings, "ask").contains(&"Bash(git push:*)".to_string()));
+    }
+
+    // The security property the hard-reject existed to protect. A fragment that
+    // omits a rendered deny, or tries to allow it, must not weaken the output.
+    #[test]
+    fn native_permissions_cannot_drop_or_downgrade_a_rendered_deny() {
+        let settings = render_settings_for_test(&manifest_with_native_permissions(
+            "permissions:\n  allow: [\"Bash(curl:*)\"]\n  deny: []\n",
+        ));
+        assert!(
+            perm_strings(&settings, "deny").contains(&"Bash(curl:*)".to_string()),
+            "an empty native deny must not erase the rendered deny: {:?}",
+            perm_strings(&settings, "deny")
+        );
+        assert!(
+            !perm_strings(&settings, "allow").contains(&"Bash(curl:*)".to_string()),
+            "deny outranks a native allow of the same rule: {:?}",
+            perm_strings(&settings, "allow")
+        );
+    }
+
+    // The reason #750 exists: keys llmenv doesn't model reach settings.json
+    // without waiting for the neutral schema (and a release) to grow a field.
+    #[test]
+    fn native_permissions_pass_through_keys_llmenv_does_not_model() {
+        let settings = render_settings_for_test(&manifest_with_native_permissions(
+            "permissions:\n  additionalDirectories: [\"/srv/shared\"]\n  disableBypassPermissionsMode: disable\n",
+        ));
+        assert_eq!(
+            settings["permissions"]["additionalDirectories"][0].as_str(),
+            Some("/srv/shared")
+        );
+        assert_eq!(
+            settings["permissions"]["disableBypassPermissionsMode"].as_str(),
+            Some("disable")
+        );
+        // ...and doing so leaves the rendered arrays intact.
+        assert!(perm_strings(&settings, "deny").contains(&"Bash(curl:*)".to_string()));
+    }
+
+    // A fragment with no `permissions` key must still reach settings.json
+    // through the generic catch-all path, unchanged by #750's special-casing.
+    #[test]
+    fn catch_all_keys_other_than_permissions_still_overlay() {
+        let settings = render_settings_for_test(&manifest_with_native_permissions(
+            "permissions:\n  allow: [\"Read(//b)\"]\napiKeyHelper: /usr/local/bin/key.sh\n",
+        ));
+        assert_eq!(
+            settings["apiKeyHelper"].as_str(),
+            Some("/usr/local/bin/key.sh")
+        );
+    }
+
+    // P0 from pre-pr-review. `defaultMode` is a *modeled* key (#748 put it in the
+    // neutral vocabulary as `capabilities.permissions.default_mode`), and
+    // `bypassPermissions` switches the permission system off wholesale. Letting
+    // the catch-all set it would hand any bundle that can author `native:` a
+    // one-line escalation past every rendered ask and deny — which is precisely
+    // what the hard error used to prevent.
+    #[test]
+    fn native_catch_all_cannot_set_default_mode() {
+        let mut m =
+            manifest_with_native_permissions("permissions:\n  defaultMode: bypassPermissions\n");
+        m.capabilities.permissions.default_mode = Some(crate::config::PermissionMode::Default);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = generate_settings_json(tmp.path(), &m)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("defaultMode"), "names the key: {err}");
+        assert!(
+            err.contains("permissions.default_mode"),
+            "points at the modeled field: {err}"
+        );
+    }
+
+    // The escape hatch still works for the keys it exists for.
+    #[test]
+    fn native_catch_all_still_carries_unmodeled_permission_keys() {
+        let settings = render_settings_for_test(&manifest_with_native_permissions(
+            "permissions:\n  disableBypassPermissionsMode: disable\n",
+        ));
+        assert_eq!(
+            settings["permissions"]["disableBypassPermissionsMode"].as_str(),
+            Some("disable")
+        );
+    }
+
+    // P1 from pre-pr-review. `native_plugins` blind-merges at the settings top
+    // level *before* the catch-all guard runs, so a `permissions` key there
+    // reached `merge_json` unguarded — a scalar could replace the whole rendered
+    // array. The additive merge is only additive if nothing upstream of it can
+    // clobber the base first.
+    #[test]
+    fn native_plugins_cannot_smuggle_a_permissions_key() {
+        let mut m = crate::merge::MergedManifest::default();
+        m.capabilities.native_plugins.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("permissions:\n  deny: \"clobbered\"\n").unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let err = generate_settings_json(tmp.path(), &m)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("permissions"), "names the key: {err}");
+    }
+
+    // P2 from pre-pr-review. A scalar `native_plugins` fragment replaced the
+    // entire settings object via merge_json's shape-mismatch arm, which also
+    // took the object-ness the permissions merge depends on with it.
+    #[test]
+    fn native_plugins_must_be_a_mapping() {
+        let mut m = crate::merge::MergedManifest::default();
+        m.capabilities.native_plugins.insert(
+            "claude_code".to_string(),
+            serde_yaml::Value::String("not a mapping".into()),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let err = generate_settings_json(tmp.path(), &m)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mapping"), "explains the shape: {err}");
+    }
+
+    // P2 from pre-pr-review. The doc comment claims parity with the
+    // `native_permissions` sibling, which runs #888's deprecated-tool
+    // normalization. Without it a catch-all `Write(...)` rule silently matches
+    // nothing, because Claude Code renamed the tool to `Edit`.
+    #[test]
+    fn native_catch_all_permission_strings_are_normalized_like_the_sibling() {
+        let settings = render_settings_for_test(&manifest_with_native_permissions(
+            "permissions:\n  deny: [\"Write(~/.ssh/**)\"]\n",
+        ));
+        let deny = perm_strings(&settings, "deny");
+        assert!(
+            deny.contains(&"Edit(~/.ssh/**)".to_string()),
+            "Write should normalize to Edit like native_permissions does: {deny:?}"
+        );
+    }
+
+    // `hooks` keeps the hard-reject: an array of matcher groups has no
+    // unambiguous additive merge, so #750 deliberately stops at permissions.
+    #[test]
+    fn hooks_in_the_catch_all_are_still_rejected() {
+        let mut m = crate::merge::MergedManifest::default();
+        m.native.insert(
+            "claude_code".to_string(),
+            serde_yaml::from_str("hooks:\n  PreToolUse: []\n").unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let err = generate_settings_json(tmp.path(), &m)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("hooks"), "got: {err}");
+        assert!(err.contains("native_hooks"), "points at the sibling: {err}");
+    }
 
     fn render_settings_for_test(manifest: &crate::merge::MergedManifest) -> serde_json::Value {
         let tmp = tempfile::tempdir().unwrap();

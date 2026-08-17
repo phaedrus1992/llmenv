@@ -44,22 +44,32 @@ cache:
 # two independent sinks: a local JSONL file and ICM's transcript store (via the
 # ICM MCP — works even when this host is not the primary ICM host).
 #
-#   transcript: true   ICM transcript (default ON). Discoverable later by tag
+# Each sink is a mapping with its own `enabled` and `level`:
+#
+#   transcript:        ICM transcript (default ON). Discoverable later by tag
 #                      via `icm_transcript_search "llmenv-tag:<tag>"`.
-#   file: false        Mirror the same stream to a local JSONL file.
-#   verbose: false     Also capture per-hook prompts and tool use, not just the
+#   file:              Mirror the same stream to a local JSONL file.
+#   level: debug       Also capture per-hook prompts and tool use, not just the
 #                      scope header + lifecycle. WARNING: captures raw prompt
 #                      and tool content unredacted, including any secrets you
-#                      paste — treat the resulting log like shell history.
+#                      paste — treat the resulting log like shell history. Set
+#                      it per sink, so the file can be verbose while the
+#                      transcript stays at `info` (or the reverse).
 #
-# Omitting this block entirely is equivalent to `transcript: true` (ICM only).
-# This is NOT the same thing as the `bundles/base/hooks/session-log.sh` example
-# hook, which is a user-authored bundle hook unrelated to this built-in feature.
+# The boolean form (`transcript: true`, `verbose: true`) was removed in 4.0.
+#
+# Omitting this block entirely is equivalent to the transcript sink enabled at
+# `info`. This is NOT the same thing as the `bundles/base/hooks/session-log.sh`
+# example hook, which is a user-authored bundle hook unrelated to this built-in
+# feature.
 ################################################################################
 session_log:
-  transcript: true
-  file: false
-  verbose: false
+  transcript:
+    enabled: true
+    level: info
+  file:
+    enabled: false
+    level: info
 
 ################################################################################
 # Engine-agnostic capabilities.

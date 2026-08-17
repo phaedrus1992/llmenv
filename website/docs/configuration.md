@@ -915,74 +915,77 @@ vice versa.
 
 ```yaml
 session_log:
-  transcript: true    # ICM transcript sink (default ON)
-  file: false          # local JSONL file sink
-  verbose: false        # also capture per-hook prompts and tool use
-  # path: "~/.local/state/llmenv/session-log.jsonl"  # override the file path
-  # max_content_bytes: 16384                          # cap per-event content size
+  transcript:            # ICM transcript sink (on by default)
+    enabled: true
+    level: info
+  file:                  # local JSONL file sink
+    enabled: false
+    level: info
+  # max_content_bytes: 16384   # cap per-event content size
 ```
+
+Each sink is a mapping with its own `enabled` and `level`, so one can capture
+prompts and tool calls while the other records only lifecycle events.
 
 | Field | Required | Notes |
 | ------- | ---------- | ------- |
-| `transcript` | no | Record into ICM's transcript store via the ICM MCP; default `true` |
-| `file` | no | Mirror the same event stream to a local JSONL file; default `false` |
-| `verbose` | no | Also capture `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop`/`SubagentStop`/`PreCompact` events, not just the lifecycle + scope header; default `false` |
-| `path` | no | Override the file sink's path; default `<state_dir>/session-log.jsonl` |
+| `transcript` | no | ICM transcript sink, recorded via the ICM MCP. Enabled by default; omit the block entirely and you get this sink at `info` |
+| `file` | no | Mirror the same event stream to a local JSONL file; disabled by default |
 | `max_content_bytes` | no | Cap each event's `content` field to this many bytes before it's written/recorded; default `16384` |
 
-For finer control, `transcript` can be a mapping instead of a boolean:
+Both sinks take the same sub-fields, plus one each of their own:
+
+| Sub-field | Required | Applies to | Notes |
+| --------- | -------- | ---------- | ----- |
+| `enabled` | no | both | Turn the sink on or off |
+| `level` | no | both | Minimum event level (`info`, `debug`, `trace`); default `info`. `debug` is what adds prompts and tool calls — see [What gets logged](#what-gets-logged) |
+| `path` | no | `file` | Override the file sink's path; default `<state_dir>/session-log.jsonl` |
+| `retention_days` | no | `transcript` | Stale file-sink transcripts on disk are best-effort removed when older than this many days; `null` = disabled; must be >= 1 |
+
+Omitting the `session_log:` block entirely enables the transcript sink at
+`info` — ICM transcript logging is **on by default**. To turn logging off
+entirely, disable both sinks:
 
 ```yaml
 session_log:
   transcript:
-    enabled: true
-    retention_days: 30    # best-effort delete stale file transcripts after 30 days
+    enabled: false
   file:
     enabled: false
-    path: "~/custom/path.jsonl"
 ```
 
-| Sub-field | Required | Notes |
-| --------- | -------- | ----- |
-| `enabled` | yes | Enable/disable the ICM transcript sink |
-| `level` | no | Minimum event level (`info`, `debug`, `trace`); default `info` |
-| `retention_days` | no | Stale file-sink transcripts on disk are best-effort removed when older than this many days; `null` = disabled; must be >= 1 |
-
-In this shape, `file` is also a mapping (`FileSinkConfig: enabled, level, path`) and the
-shorthand `verbose` flag is unavailable — set `level: debug` on each sink instead.
-
-Omitting the `session_log:` block entirely is equivalent to `transcript: true`
-(everything else off) — ICM transcript logging is **on by default**. To turn
-logging off entirely, set both flags to `false`:
-
-```yaml
-session_log:
-  transcript: false
-  file: false
-```
-
+> Breaking change in 4.0 (added in v4.0.0): the boolean form — `transcript: true`,
+> `file: true`, `verbose: true` — is rejected rather than translated. Each sink
+> is now a mapping, and `verbose: true` became `level: debug` on whichever sink
+> should capture prompts and tool use, so the two sinks can differ. llmenv names
+> the replacement in the parse error; it does not migrate the file for you.
+>
 > Breaking change in 3.0: `session_log:` used to be a bare path string (the
 > file sink only). That form is now rejected with a migration hint — wrap the
 > path in `path:` under the new table shape.
 
 ### What gets logged
 
-Two layers, gated by `verbose`:
+Two layers, gated by each sink's `level`:
 
-- **Baseline** (always, when a sink is enabled): one `lifecycle_start` event at
-  session start, one `scope` event carrying the active tags/bundles/project,
-  and one `lifecycle_end` event at session end.
-- **Verbose** (`verbose: true`): every prompt submission, tool call (before and
+- **Baseline** (`level: info`, the default, whenever a sink is enabled): one
+  `lifecycle_start` event at session start, one `scope` event carrying the
+  active tags/bundles/project, and one `lifecycle_end` event at session end.
+- **Verbose** (`level: debug`): every prompt submission, tool call (before and
   after), notification, stop, subagent stop, and pre-compact event, each
   tagged with its role and (for tool events) the tool name.
 
-> **Privacy note:** `verbose: true` captures the *raw* text of every prompt
+Because `level` is per sink, a common setup is `debug` on the local file and
+`info` on the transcript — full detail stays on the machine, only the shape of
+the session reaches ICM.
+
+> **Privacy note:** `level: debug` captures the *raw* text of every prompt
 > you submit and every tool call's input/output — including any secrets,
 > credentials, or personal data that text happens to contain. That content is
-> written to disk (`file: true`) and/or sent to ICM (`transcript: true`)
+> written to disk (the `file` sink) and/or sent to ICM (the `transcript` sink)
 > unredacted, capped only by `max_content_bytes` (default 16 KiB, not a
-> sensitivity filter). Treat a `session-log.jsonl` with `verbose: true` enabled
-> the same way you'd treat shell history that might contain pasted secrets.
+> sensitivity filter). Treat a `session-log.jsonl` recorded at `debug` the same
+> way you'd treat shell history that might contain pasted secrets.
 
 ### Finding a session later
 
