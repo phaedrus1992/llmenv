@@ -145,6 +145,17 @@ enum Command {
         #[arg(long)]
         compress: bool,
     },
+    /// Resolve the environment and run `engine` as a supervised child process —
+    /// see #1056. Everything after `--` is passed through to the engine
+    /// unmodified.
+    Launch {
+        /// Engine to launch: a binary name (claude, crush, opencode) or the
+        /// underscore-form engine id (claude_code)
+        engine: String,
+        /// Arguments passed through to the engine binary unmodified
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Regenerate the materialized config without exporting shell variables
     Regenerate,
     /// Render the statusline (reads engine session JSON from stdin)
@@ -618,6 +629,9 @@ pub fn run() -> anyhow::Result<()> {
             compress,
         }) => {
             run_export(scope, tag, explain, compress)?;
+        }
+        Some(Command::Launch { engine, args }) => {
+            run_launch(&engine, args)?;
         }
         Some(Command::Regenerate) => {
             run_regenerate()?;
@@ -1396,6 +1410,67 @@ fn run_export(
     }
 
     Ok(())
+}
+
+/// `llmenv launch <engine>`: resolve the environment the same way `export`
+/// does, then spawn `engine` as a supervised child process with that
+/// environment applied on top of the inherited one, inherited stdio, and the
+/// child's exit code propagated as `launch`'s own (see #1056).
+fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
+    let adapter = crate::adapter::adapter_for_launch_target(engine).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unrecognized engine '{engine}' — expected one of: {}",
+            crate::adapter::registered_adapters()
+                .iter()
+                .map(|a| a.binary_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+
+    if !crate::adapter::binary_on_path(adapter.binary_name()) {
+        anyhow::bail!(
+            "'{}' not found on PATH — install it before running `llmenv launch {engine}`",
+            adapter.binary_name()
+        );
+    }
+
+    let resolved = resolve_env(None, None, false)?;
+
+    let mut cmd = std::process::Command::new(adapter.binary_name());
+    cmd.args(&args);
+    for (key, value) in &resolved.vars {
+        cmd.env(key, value);
+    }
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn '{}'", adapter.binary_name()))?;
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait on '{}'", adapter.binary_name()))?;
+
+    exit_with_status(status);
+}
+
+/// Exit the current process mirroring `status`: the child's own exit code on
+/// a normal exit, or `128 + signum` (POSIX convention — what a shell's `$?`
+/// shows for a signal-killed process) if it died by signal.
+fn exit_with_status(status: std::process::ExitStatus) -> ! {
+    if let Some(code) = status.code() {
+        std::process::exit(code);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            std::process::exit(128 + sig);
+        }
+    }
+    std::process::exit(1)
 }
 
 /// `llmenv statusline`: read the engine's session JSON from stdin, load the
