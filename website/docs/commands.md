@@ -16,10 +16,11 @@ repository instead of writing a template. No-op if a config already exists.
 
 ## `export`
 
-Deprecated (as of v3.10.0): superseded by `llmenv launch <engine>`
-([#1056](https://github.com/phaedrus1992/llmenv/issues/1056)), a supervised,
-ambient replacement landing in v4.0.0. `export`/the shell-hook flow keeps
-working through v4.0.0 — this is advance notice, not a removal.
+Deprecated (as of v3.10.0): superseded by [`launch`](#launch)
+([#1056](https://github.com/phaedrus1992/llmenv/issues/1056)), which shipped in
+v4.0.0 and supervises the engine instead of relying on the ambient shell hook.
+`export`/the shell-hook flow keeps working through v4.0.0 — this is advance
+notice, not a removal.
 
 ```text
 llmenv export [--scope ID] [--tag TAG] [--explain] [--compress]
@@ -40,6 +41,45 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
   from llmenv introspection.
 - `--compress` strips trailing whitespace and collapses repeated blank lines in
   the materialized `CLAUDE.md` / `AGENTS.md` to reduce token cost.
+
+## `launch`
+
+```text
+llmenv launch <engine> [-- ARGS...]
+```
+
+(added in v4.0.0) Resolve the environment exactly the way `export` does, then
+run `<engine>` as a supervised child process. `<engine>` is either a binary name
+(`claude`, `crush`, `opencode`) or the underscore-form engine id (`claude_code`);
+an unrecognized name errors and lists the supported ones. Anything after `--` is
+passed through to the engine binary unmodified, e.g.:
+
+```text
+llmenv launch claude -- --resume
+```
+
+Unlike the shell-hook + `export` model, `launch` needs no shell integration — it
+behaves the same from an interactive shell, a script, a CI job, or an IDE task,
+and it resolves once at startup instead of on every shell prompt.
+
+Supervision details:
+
+- **Stdio is inherited**, so the engine's terminal I/O passes through
+  transparently (no pty layer, the same way `env` or `time` wrap a command).
+- **The resolved environment is layered on top of the inherited one**, so the
+  engine sees llmenv's variables even if the calling shell never ran the hook.
+- **SIGINT/SIGTERM/SIGHUP are ignored by `llmenv` itself.** The terminal already
+  delivers them to the engine directly (same process group), so `launch` stays
+  alive and keeps waiting rather than exiting ahead of the engine and orphaning
+  it mid-shutdown.
+- **The exit code mirrors the engine's** — its own status on a normal exit, or
+  `128 + signum` if it was killed by a signal, matching what a shell's `$?`
+  reports.
+
+`export` and `hook` remain available for scripts and CI that want resolved
+environment variables without launching an engine.
+
+Unix only: it relies on process-group signal semantics.
 
 ## `regenerate`
 
