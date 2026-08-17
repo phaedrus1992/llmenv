@@ -421,6 +421,122 @@ fn uses_colon_prefix_syntax(pattern: &str) -> bool {
             .any(|prefix| pattern.starts_with(prefix))
 }
 
+/// A permission rule naming a tool outside llmenv's neutral vocabulary (#1371).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UnknownToolRule {
+    /// The tool name as written, sanitized for terminal output.
+    pub tool: String,
+}
+
+impl UnknownToolRule {
+    /// The diagnostic for this rule.
+    ///
+    /// Deliberately *not* phrased as "this does nothing": Claude Code's adapter
+    /// passes an unrecognized name through verbatim, so a rule naming a real
+    /// Claude Code tool llmenv doesn't map still works there. What's certain is
+    /// that the engines needing translation can only drop it.
+    pub fn message(&self) -> String {
+        format!(
+            "permission rule tool `{}` isn't one of llmenv's neutral tool names ({}), so \
+             opencode and crush have no key to render and drop the rule. Claude Code still \
+             receives it verbatim. Fix the name, or use `native_permissions.<engine>` to \
+             target an engine's own tool directly",
+            self.tool,
+            crate::adapter::tools::known_names().join(", ")
+        )
+    }
+}
+
+/// Returns each distinct tool name in the neutral permission rules that isn't in
+/// llmenv's vocabulary (#1371).
+///
+/// Deduplicated by name: the same typo repeated across `allow`/`ask`/`deny`, or
+/// across several rules, is one problem to fix and reporting it once is what
+/// makes this printable from `export`/`regenerate` at all — the per-rule warning
+/// this replaced fired once per rule per adapter.
+///
+/// Takes merged `capabilities` so a bad rule contributed by a `bundle.yaml` is
+/// covered too.
+pub(super) fn unknown_neutral_tools(capabilities: &Capabilities) -> Vec<UnknownToolRule> {
+    let perms = &capabilities.permissions;
+    let mut seen = std::collections::BTreeSet::new();
+    [&perms.allow, &perms.ask, &perms.deny]
+        .into_iter()
+        .flatten()
+        .filter(|rule| !crate::adapter::tools::is_known(&rule.tool))
+        .filter(|rule| seen.insert(rule.tool.clone()))
+        .map(|rule| UnknownToolRule {
+            tool: crate::util::display_safe(&rule.tool).into_owned(),
+        })
+        .collect()
+}
+
+/// A neutral tool whose mapping onto an active engine isn't one-to-one (#1371).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InexactToolMapping {
+    /// The neutral tool name the user wrote.
+    pub tool: String,
+    /// The engine id whose mapping differs.
+    pub engine: &'static str,
+    /// How it differs, from the mapping table.
+    pub note: &'static str,
+}
+
+impl InexactToolMapping {
+    pub fn message(&self) -> String {
+        let Self { tool, engine, note } = self;
+        format!("permission rule tool `{tool}` on {engine}: {note}")
+    }
+}
+
+/// Returns every neutral tool the config actually uses whose mapping onto an
+/// active engine is either broader than the neutral name implies or absent
+/// (#1371).
+///
+/// `doctor`-only on purpose. Unlike [`unknown_neutral_tools`] this is not broken
+/// config — it's a documented particularity of the adapter
+/// (`website/docs/engines.md`) — and `export`/`regenerate` run from the shell
+/// prompt on every invocation, so a note about working config has no business
+/// printing there. That's the same line [`super::warn_dead_config`] draws for the
+/// #975 legacy-tool lint.
+///
+/// `active_engines` is passed in rather than probed so this is testable without
+/// depending on the host's `PATH`.
+fn inexact_tool_mappings(
+    capabilities: &Capabilities,
+    active_engines: &[&str],
+) -> Vec<InexactToolMapping> {
+    use crate::adapter::tools;
+
+    let perms = &capabilities.permissions;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut hits = Vec::new();
+    for rule in [&perms.allow, &perms.ask, &perms.deny]
+        .into_iter()
+        .flatten()
+    {
+        let Some(entry) = tools::lookup(&rule.tool) else {
+            continue; // reported by `unknown_neutral_tools` instead
+        };
+        for (engine, mapping) in [("opencode", entry.opencode), ("crush", entry.crush)] {
+            if !active_engines.contains(&engine) {
+                continue;
+            }
+            let Some(note) = mapping.note() else {
+                continue; // one-to-one rename; nothing to say
+            };
+            if seen.insert((rule.tool.clone(), engine)) {
+                hits.push(InexactToolMapping {
+                    tool: crate::util::display_safe(&rule.tool).into_owned(),
+                    engine,
+                    note,
+                });
+            }
+        }
+    }
+    hits
+}
+
 /// A permission rule that is dead config under opencode (#838).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ColonPrefixRule {
@@ -815,6 +931,24 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     // config is covered, which is why this sits below build_manifest rather than
     // with the other structural checks above.
     super::warn_dead_config(&config, doctor_manifest.as_ref().map(|(m, _)| m), &warn);
+
+    // #1371: how each active engine actually renders the neutral tools this
+    // config uses — the rules an engine widens, and the ones it drops for want
+    // of an equivalent. Working config, so `export`/`regenerate` stay quiet
+    // about it and this is where a user looks instead. Plain `doctor`, not
+    // `--all`: "why isn't my permission rule working on opencode" is the
+    // question doctor exists to answer.
+    {
+        let caps = doctor_manifest
+            .as_ref()
+            .map_or(&config.capabilities, |(m, _)| &m.capabilities);
+        let active_engines: Vec<&str> = super::installed_adapters(&config)
+            .map(|a| a.name())
+            .collect();
+        for hit in inexact_tool_mappings(caps, &active_engines) {
+            eprintln!("{warn} {}", hit.message());
+        }
+    }
 
     // #741: which lifecycle hooks are actually wired for this scope. Without
     // this there was no way to confirm from inside llmenv that session
@@ -1240,6 +1374,12 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                                 report.removed.len(),
                                 report.kept
                             );
+                            // #1372: a removal failure no longer aborts the walk,
+                            // so the entries it skipped have to be reported here
+                            // or they'd vanish from the summary entirely.
+                            for p in &report.failed {
+                                eprintln!("{warn} GC: could not remove {}", p.display());
+                            }
                             let forgotten = forget_credentials_for(&report.removed);
                             if forgotten > 0 {
                                 eprintln!(
@@ -1810,6 +1950,83 @@ mod tests {
             let pattern = format!("{cmd} {sub} *");
             prop_assert!(!uses_colon_prefix_syntax(&pattern));
         }
+    }
+
+    // -- unknown_neutral_tools / inexact_tool_mappings (#1371) --
+
+    #[test]
+    fn flags_a_tool_name_outside_the_vocabulary() {
+        // The reported case: `Create` is not a tool on any engine llmenv maps.
+        let caps = caps_with_allow("Create", ".tmp/**");
+        let found = unknown_neutral_tools(&caps);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].tool, "Create");
+        let msg = found[0].message();
+        assert!(msg.contains("Create"), "{msg}");
+        assert!(
+            msg.contains("Bash"),
+            "the diagnostic must list the valid names: {msg}"
+        );
+    }
+
+    #[test]
+    fn known_tool_names_are_not_flagged() {
+        assert!(unknown_neutral_tools(&caps_with_allow("Bash", "ls *")).is_empty());
+        // Mapped for opencode but not crush — still a known neutral name, so
+        // this check stays quiet and the docs cover the per-engine gap.
+        assert!(unknown_neutral_tools(&caps_with_allow("Task", "*")).is_empty());
+    }
+
+    #[test]
+    fn repeated_unknown_tool_is_reported_once() {
+        // Why this check can print from `export`/`regenerate` at all: the
+        // per-rule warning it replaced fired once per rule *per adapter*, so two
+        // rules naming the same bad tool produced four lines (#1371).
+        let caps = Capabilities {
+            permissions: Permissions {
+                allow: vec![
+                    rule("Create", Some(".tmp/**"), vec![]),
+                    rule("Create", Some("./.tmp/**"), vec![]),
+                ],
+                deny: vec![rule("Create", None, vec![])],
+                ..Default::default()
+            },
+            ..Capabilities::default()
+        };
+        let found = unknown_neutral_tools(&caps);
+        assert_eq!(found.len(), 1, "one problem to fix, one line");
+    }
+
+    #[test]
+    fn inexact_mapping_is_reported_only_for_an_active_engine() {
+        // `Write` reaches opencode as `edit`, which also covers `Edit`.
+        let caps = caps_with_allow("Write", "./src/**");
+        let found = inexact_tool_mappings(&caps, &["opencode"]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine, "opencode");
+        assert!(found[0].note.contains("edit"), "{}", found[0].note);
+
+        // crush renders `Write` as its own `write` tool, so with only crush
+        // active there's nothing to say.
+        assert!(inexact_tool_mappings(&caps, &["crush"]).is_empty());
+        assert!(inexact_tool_mappings(&caps, &[]).is_empty());
+    }
+
+    #[test]
+    fn inexact_mapping_covers_a_dropped_tool() {
+        // `Task` has no crush equivalent — the rule is dropped there, which is
+        // exactly what a user needs told.
+        let found = inexact_tool_mappings(&caps_with_allow("Task", "*"), &["crush"]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine, "crush");
+    }
+
+    #[test]
+    fn unknown_tool_is_not_reported_as_an_inexact_mapping() {
+        // The two checks must not double-report: an unknown name has no table
+        // entry, so it belongs to `unknown_neutral_tools` alone.
+        let caps = caps_with_allow("Create", ".tmp/**");
+        assert!(inexact_tool_mappings(&caps, &["opencode", "crush"]).is_empty());
     }
 
     // -- legacy_tools_missing_replacement --

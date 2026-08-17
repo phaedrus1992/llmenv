@@ -97,6 +97,46 @@ whether it came from the structured `permissions:` block or the engine's
 `native_permissions` override — a native `allow` can never silently unset a
 structured `deny` for the same rule.
 
+### The neutral tool vocabulary
+
+(table consolidated in v3.11.1; the mappings themselves predate it)
+
+`permissions[].tool` names a tool in one neutral vocabulary — Claude Code's
+PascalCase tool names — and each adapter renders it in its own engine's grammar.
+Claude Code receives the name as written. opencode and crush have closed key
+sets, so their names are translated:
+
+| Neutral tool | opencode key | crush tool | Not one-to-one? |
+| ------------ | ------------ | ---------- | --------------- |
+| `Bash` | `bash` | `bash` | |
+| `Read` | `read` | `view` | |
+| `Edit` | `edit` | `edit` | crush's edit tools also create missing files and parent directories, so allowing `Edit` on crush also allows file creation |
+| `Write` | `edit` | `write` | opencode gates every file mutation through the single `edit` key, so a `Write` rule there also covers `Edit` |
+| `MultiEdit` | `edit` | `multiedit` | opencode has no separate multi-edit key; same file-creation caveat as `Edit` on crush |
+| `Glob` | `glob` | `glob` | |
+| `Grep` | `grep` | `grep` | |
+| `LS` | `list` | `ls` | |
+| `WebFetch` | `webfetch` | `fetch` | crush's more specialized `agentic_fetch` is not used |
+| `WebSearch` | `websearch` | — | crush's `web_search` is more specialized and isn't treated as a direct equivalent; the rule is dropped for crush |
+| `TodoWrite` | `todowrite` | `todos` | |
+| `Task` | `task` | — | dropped for crush |
+| `Skill` | `skill` | — | dropped for crush |
+| `NotebookEdit` | — | — | neither engine has an equivalent; the rule takes effect on Claude Code only |
+
+A `—` means that engine has no analog llmenv will map to, so the rule is
+**dropped** for that engine and takes effect on the others. This is deliberate:
+guessing at a lowercase pass-through renders a key opencode's schema rejects
+(which makes it discard the whole config file) or a name crush's exact-match
+allowlist never matches. Use `native_permissions.<engine>` to target that
+engine's own tool directly.
+
+A tool name that isn't in this table is **not** rejected — Claude Code gains
+tools llmenv has no reason to know about, and its adapter passes the name
+straight through, so such a rule still works there. `export` and `regenerate`
+report it once, because opencode and crush can only drop it. `llmenv doctor`
+additionally lists any tool in your config whose mapping onto an active engine
+falls in the "not one-to-one" column above.
+
 ## The catch-all `native:` block
 
 Separately, the top-level `native:` block is a per-engine catch-all for keys that

@@ -667,20 +667,14 @@ fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<Strin
 /// [`render_permission_rule`]'s existing drop-and-log handling for
 /// pattern/path scoping, so unmapped tools get the same treatment instead
 /// of a harder failure mode.
+///
+/// #1371: the mapping itself now lives in [`crate::adapter::tools`] alongside
+/// opencode's — the two hand-written tables had drifted (crush treated
+/// `MultiEdit` as its own tool while opencode folded it into `edit`, and neither
+/// recorded whether an absent entry meant "no analog" or "not done yet"). This
+/// is the crush column of that one table.
 fn crush_tool_name(neutral: &str) -> Option<&'static str> {
-    Some(match neutral {
-        "Bash" => "bash",
-        "Read" => "view",
-        "Write" => "write",
-        "Edit" => "edit",
-        "MultiEdit" => "multiedit",
-        "Glob" => "glob",
-        "Grep" => "grep",
-        "LS" => "ls",
-        "WebFetch" => "fetch",
-        "TodoWrite" => "todos",
-        _ => return None,
-    })
+    crate::adapter::tools::crush_key(neutral)
 }
 
 /// Render a rule for Crush's `permissions.allowed_tools`.

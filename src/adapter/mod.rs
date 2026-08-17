@@ -5,6 +5,7 @@ pub(crate) mod native_keys;
 pub mod opencode;
 pub(crate) mod output_styles;
 pub(crate) mod skills;
+pub(crate) mod tools;
 
 use std::path::{Path, PathBuf};
 
