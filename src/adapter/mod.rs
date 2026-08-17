@@ -804,6 +804,33 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        /// The safety contract in `adapter_for_launch_target`'s doc comment —
+        /// never silently resolve an unrecognized engine, because that risks
+        /// launching the wrong binary. Example tests only cover the four names
+        /// someone thought to write down; this covers arbitrary input.
+        #[test]
+        fn adapter_for_launch_target_only_resolves_known_names(target in r"\PC*") {
+            let known: Vec<String> = registered_adapters()
+                .iter()
+                .flat_map(|a| [a.binary_name().to_string(), engine_id(a.as_ref())])
+                .collect();
+            match adapter_for_launch_target(&target) {
+                None => proptest::prop_assert!(
+                    !known.contains(&target),
+                    "a known engine name '{}' failed to resolve",
+                    target
+                ),
+                Some(a) => proptest::prop_assert!(
+                    a.binary_name() == target || engine_id(a.as_ref()) == target,
+                    "'{}' resolved to unrelated adapter '{}'",
+                    target,
+                    a.binary_name()
+                ),
+            }
+        }
+    }
+
     #[test]
     fn adapter_for_launch_target_rejects_unknown_target() {
         assert!(
