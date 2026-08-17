@@ -1429,9 +1429,13 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
     })?;
 
     if !crate::adapter::binary_on_path(adapter.binary_name()) {
+        // `binary_on_path` reports false both when the engine is genuinely
+        // absent and when it couldn't run `which` to find out (#1382), so the
+        // message names both rather than asserting the engine isn't installed.
         anyhow::bail!(
-            "'{}' not found on PATH — install it before running `llmenv launch {engine}`",
-            adapter.binary_name()
+            "'{bin}' not found on PATH — install it before running `llmenv launch {engine}`. \
+             If '{bin}' is installed, check that `which` is available and PATH is set correctly.",
+            bin = adapter.binary_name()
         );
     }
 
@@ -1469,7 +1473,9 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
 /// default disposition while the engine it just started keeps running,
 /// orphaning the child and returning a signal-derived status the caller has to
 /// interpret as the engine's.
-#[cfg(unix)]
+///
+/// Unix-only, like `launch` itself — the shipped targets are linux-musl and
+/// apple-darwin, and the whole design rests on process-group signal semantics.
 async fn spawn_and_supervise(
     cmd: &mut tokio::process::Command,
     binary: &str,
@@ -1503,38 +1509,38 @@ async fn spawn_and_supervise(
     }
 }
 
-/// Non-unix fallback: no process-group signal semantics to defend against, so
-/// spawning and waiting is the whole job (`launch` is unix-only by design —
-/// see the design doc's non-goals — this keeps the crate compiling elsewhere).
-#[cfg(not(unix))]
-async fn spawn_and_supervise(
-    cmd: &mut tokio::process::Command,
-    binary: &str,
-) -> anyhow::Result<std::process::ExitStatus> {
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn '{binary}'"))?;
-    child
-        .wait()
-        .await
-        .context("failed to wait on child engine process")
-}
-
-/// Exit the current process mirroring `status`: the child's own exit code on
-/// a normal exit, or `128 + signum` (POSIX convention — what a shell's `$?`
-/// shows for a signal-killed process) if it died by signal.
-fn exit_with_status(status: std::process::ExitStatus) -> ! {
+/// The exit code `launch` should exit with to mirror `status`: the child's own
+/// code on a normal exit, or `128 + signum` (POSIX convention — what a shell's
+/// `$?` shows for a signal-killed process) if it died by signal.
+///
+/// Split out from [`exit_with_status`] so the mapping is testable: the caller
+/// diverges via `process::exit`, which can't be asserted on in-process.
+fn exit_code_for_status(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
-        std::process::exit(code);
+        return code;
     }
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
         if let Some(sig) = status.signal() {
-            std::process::exit(128 + sig);
+            return 128 + sig;
         }
     }
-    std::process::exit(1)
+    // `wait` only yields terminated statuses, so a status with neither an exit
+    // code nor a termination signal shouldn't be reachable. Say so rather than
+    // exiting 1 mutely, which would be indistinguishable from the engine
+    // legitimately exiting 1.
+    tracing::error!(
+        ?status,
+        "launch: child exited with neither an exit code nor a signal; reporting exit 1"
+    );
+    1
+}
+
+/// Exit the current process mirroring the child's status — see
+/// [`exit_code_for_status`].
+fn exit_with_status(status: std::process::ExitStatus) -> ! {
+    std::process::exit(exit_code_for_status(status))
 }
 
 /// `llmenv statusline`: read the engine's session JSON from stdin, load the
@@ -6513,6 +6519,51 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
 fn is_within_cache(cache_root: &std::path::Path, expanded_path: &str) -> bool {
     let path = normalize_path(std::path::Path::new(expanded_path));
     path.starts_with(cache_root)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test code")]
+mod exit_code_tests {
+    use super::exit_code_for_status;
+    use proptest::prelude::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    #[test]
+    fn normal_exit_reports_the_childs_own_code() {
+        assert_eq!(exit_code_for_status(ExitStatus::from_raw(7 << 8)), 7);
+        assert_eq!(exit_code_for_status(ExitStatus::from_raw(0)), 0);
+    }
+
+    #[test]
+    fn signal_death_reports_128_plus_signum() {
+        // SIGINT (2) is what a Ctrl-C'd engine dies from; a shell reports 130.
+        assert_eq!(exit_code_for_status(ExitStatus::from_raw(2)), 130);
+    }
+
+    proptest! {
+        /// A normally-exited child's code passes through unchanged, for every
+        /// code a POSIX wait status can carry.
+        #[test]
+        fn exit_code_passes_through_for_every_normal_exit(code in 0i32..=255) {
+            let status = ExitStatus::from_raw(code << 8);
+            prop_assert_eq!(exit_code_for_status(status), code);
+        }
+
+        /// A signal-killed child maps to `128 + signum`, the value a shell's
+        /// `$?` reports — so a caller's exit-code checks keep working.
+        #[test]
+        fn signal_death_maps_to_128_plus_signum(sig in 1i32..=31) {
+            let status = ExitStatus::from_raw(sig);
+            prop_assert_eq!(exit_code_for_status(status), 128 + sig);
+        }
+
+        /// Never panics, whatever raw wait status the OS hands back.
+        #[test]
+        fn never_panics_on_arbitrary_raw_status(raw in any::<i32>()) {
+            let _ = exit_code_for_status(ExitStatus::from_raw(raw));
+        }
+    }
 }
 
 #[cfg(test)]
