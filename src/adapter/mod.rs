@@ -780,29 +780,26 @@ mod tests {
 
     #[test]
     fn adapter_for_launch_target_matches_binary_name() {
-        let a = adapter_for_launch_target("claude").expect("binary name 'claude' should resolve");
-        assert_eq!(a.binary_name(), "claude");
+        let a = adapter_for_launch_target("claude");
+        assert!(a.is_some(), "binary name 'claude' should resolve");
+        assert_eq!(a.unwrap().binary_name(), "claude");
     }
 
     #[test]
     fn adapter_for_launch_target_matches_engine_id() {
-        let a = adapter_for_launch_target("claude_code")
-            .expect("engine id 'claude_code' should resolve");
-        assert_eq!(a.binary_name(), "claude");
+        let a = adapter_for_launch_target("claude_code");
+        assert!(a.is_some(), "engine id 'claude_code' should resolve");
+        assert_eq!(a.unwrap().binary_name(), "claude");
     }
 
     #[test]
     fn adapter_for_launch_target_matches_other_adapters() {
         assert_eq!(
-            adapter_for_launch_target("crush")
-                .expect("crush should resolve")
-                .binary_name(),
+            adapter_for_launch_target("crush").unwrap().binary_name(),
             "crush"
         );
         assert_eq!(
-            adapter_for_launch_target("opencode")
-                .expect("opencode should resolve")
-                .binary_name(),
+            adapter_for_launch_target("opencode").unwrap().binary_name(),
             "opencode"
         );
     }

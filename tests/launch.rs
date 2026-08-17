@@ -1,4 +1,5 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
+#![expect(clippy::expect_used, reason = "test scaffolding")]
 //! Integration tests for `llmenv launch <engine>` (#1056).
 //!
 //! Uses `tests/fixtures/fake_engine.sh` as a stand-in for a real engine binary
