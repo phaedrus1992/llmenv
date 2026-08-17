@@ -427,6 +427,142 @@ EOF
   return 1
 }
 
+# Build the auto-resolution script — mirrors version_only_change and
+# auto_resolve_conflicts in forward-merge-release.yml. Unlike the blocks above
+# this runs against a real git repo, because the whole point of the guard is
+# what the source branch did to the file in history.
+# Callers export: SOURCE_REF TARGET SOURCE_DESC and run it inside a conflicted merge.
+resolve_block() {
+  cat <<'SHELL'
+set -euo pipefail
+
+version_only_change() {
+  local file="$1" base before after
+  base=$(git merge-base HEAD "$SOURCE_REF") || return 1
+  before=$(git show "$base:$file" 2>/dev/null \
+    | sed -E 's/version = "[^"]*"/version = "*"/g') || return 1
+  after=$(git show "$SOURCE_REF:$file" 2>/dev/null \
+    | sed -E 's/version = "[^"]*"/version = "*"/g') || return 1
+  [[ "$before" == "$after" ]]
+}
+
+auto_resolve_conflicts() {
+  local file
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    case "$file" in
+      website/docs/changelog.md)
+        echo "  $file: regenerating from the merged CHANGELOG-*.md sources"
+        git checkout --ours -- "$file"
+        bash scripts/sync-changelog-doc.sh
+        git add -- "$file"
+        ;;
+      Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
+        if ! version_only_change "$file"; then
+          echo "::error::$file: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
+          return 1
+        fi
+        echo "  $file: keeping $TARGET's own version"
+        git checkout --ours -- "$file"
+        git add -- "$file"
+        ;;
+      *)
+        echo "::error::$file: conflict has no auto-resolution rule"
+        return 1
+        ;;
+    esac
+  done < <(git diff --name-only --diff-filter=U)
+  [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+}
+
+if auto_resolve_conflicts; then
+  echo "RESOLVED"
+else
+  echo "BAILED"
+fi
+SHELL
+}
+
+# Build a repo where `source` and `target` both moved their own version, plus
+# whatever extra change `$1` adds to source's Cargo.toml. Leaves the caller
+# inside a conflicted `git merge source` on the target branch. Echoes the path.
+make_version_conflict_repo() {
+  local extra="${1:-}" repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf 'version = "1.0.0"\n\n[dependencies]\nanyhow = { version = "1" }\n' > Cargo.toml
+    git add Cargo.toml
+    git commit -q -m base
+
+    git switch -q -c source
+    printf 'version = "4.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n%s' "$extra" \
+      > Cargo.toml
+    git commit -q -am "source bump"
+
+    git switch -q target
+    printf 'version = "5.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n' > Cargo.toml
+    git commit -q -am "target bump"
+
+    git merge --no-commit --no-ff source >/dev/null 2>&1 || true
+  )
+  printf '%s\n' "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Test 8 (Issue #1381): a version-only manifest conflict resolves to the
+# target's version.
+#
+# Two release lines always carry different versions, so release/4.x
+# (4.0.0-alpha.1) into main (5.0.0-alpha.1) conflicts on every manifest on
+# every single forward-merge. A forward-merge must never change the target's
+# own version, so the target's side wins and the cascade continues.
+# ---------------------------------------------------------------------------
+test_1381_version_only_conflict_keeps_target_version() {
+  local repo out version
+  repo=$(make_version_conflict_repo "")
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  version=$(cd "$repo" && head -1 Cargo.toml)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *RESOLVED* ]] && [[ "$version" == 'version = "5.0.0-alpha.1"' ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  version kept: %s\n' "$version" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test 9 (Issue #1381): a manifest carrying more than a version bump bails.
+#
+# The dangerous case. `git checkout --ours` throws away the source's whole
+# file, so if the source also added a dependency, auto-resolving would drop it
+# silently and main would build without it. Note the added line contains
+# `version = "1"` — a regex looking for version-shaped changed lines would call
+# this safe, which is why the guard compares whole files with versions blanked.
+# ---------------------------------------------------------------------------
+test_1381_non_version_change_bails() {
+  local repo out
+  repo=$(make_version_conflict_repo 'serde = { version = "1" }\n')
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"more than version numbers"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
@@ -450,6 +586,12 @@ run_test "Issue #482: fetch failure with empty stderr is logged" \
 
 run_test "Issue #1380: cascade chains 3.x -> 4.x -> main instead of fanning out" \
   test_1380_cascade_chains_through_each_target
+
+run_test "Issue #1381: version-only manifest conflict keeps the target's version" \
+  test_1381_version_only_conflict_keeps_target_version
+
+run_test "Issue #1381: a manifest change beyond the version bails instead of dropping it" \
+  test_1381_non_version_change_bails
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
