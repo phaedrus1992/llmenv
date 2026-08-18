@@ -549,11 +549,16 @@ Two things are skipped with a warning rather than rendered:
   leave a hook that looks wired and never fires.
 - **`mcp_tool` handlers.** Codex hooks run commands only.
 
-What llmenv does *not* yet do is auto-emit its own lifecycle hooks for Codex the
-way it does for Claude Code (`check-stale`, `config-context`, `config-guard`,
-throttle, session-log) — that's
-[#1108](https://github.com/phaedrus1992/llmenv/issues/1108). Hooks you declare in
-`capabilities.hooks` are rendered today.
+llmenv also wires its own hooks for Codex, the same set it gives Claude Code
+(added in v4.0.0): the config-source context at `SessionStart`, the managed-cache
+write guard and read-once dedup on `PreToolUse`, the ICM memory and session-log
+lifecycle events on `SessionStart`/`SessionEnd`, and the throttle hooks when a
+throttle is configured.
+
+Those point at `llmenv hook-run --engine codex`, which works because Codex reads
+the same hook output shape Claude Code does — `hookSpecificOutput` carrying
+`hookEventName` and `additionalContext` — so injected context reaches the model
+without a translation layer.
 
 ### Capability map
 
@@ -562,7 +567,7 @@ throttle, session-log) — that's
 | MCP servers                   | rendered                                                                                                                                                                                                          |
 | Merged `AGENTS.md`            | rendered, via `model_instructions_file`                                                                                                                                                                           |
 | Permissions                   | not yet ([#1102](https://github.com/phaedrus1992/llmenv/issues/1102)) — Codex uses named profiles under `permissions.entries` plus `approval_policy`/`sandbox_mode`, which does not map onto `allow`/`ask`/`deny` |
-| Lifecycle hooks               | rendered into `hooks.events.<Event>`; llmenv's own auto-emitted hooks are [#1108](https://github.com/phaedrus1992/llmenv/issues/1108)                                                                             |
+| Lifecycle hooks               | rendered, including llmenv's own baseline hooks                                                                                                                                                                   |
 | Statusline                    | not yet ([#1104](https://github.com/phaedrus1992/llmenv/issues/1104))                                                                                                                                             |
 | Auth inheritance              | not yet ([#1105](https://github.com/phaedrus1992/llmenv/issues/1105))                                                                                                                                             |
 | Plugins / skills              | not yet ([#1106](https://github.com/phaedrus1992/llmenv/issues/1106))                                                                                                                                             |
