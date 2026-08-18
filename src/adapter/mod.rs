@@ -1,4 +1,5 @@
 pub mod claude_code;
+pub mod codex;
 pub mod crush;
 pub(crate) mod llmenv_skill;
 pub(crate) mod native_keys;
@@ -356,6 +357,7 @@ fn active_adapter_from(adapters: Vec<Box<dyn AgentAdapter>>) -> Box<dyn AgentAda
 pub(crate) fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     vec![
         Box::new(claude_code::ClaudeCodeAdapter),
+        Box::new(codex::CodexAdapter),
         Box::new(crush::CrushAdapter),
         Box::new(opencode::OpencodeAdapter),
     ]
@@ -784,12 +786,13 @@ mod tests {
         let adapters = registered_adapters();
         assert_eq!(
             adapters.len(),
-            3,
-            "registry should have exactly three adapters"
+            4,
+            "registry should have exactly four adapters"
         );
         assert_eq!(adapters[0].name(), "claude-code");
-        assert_eq!(adapters[1].name(), "crush");
-        assert_eq!(adapters[2].name(), "opencode");
+        assert_eq!(adapters[1].name(), "codex");
+        assert_eq!(adapters[2].name(), "crush");
+        assert_eq!(adapters[3].name(), "opencode");
     }
 
     #[test]
@@ -884,8 +887,18 @@ mod tests {
             );
         }
 
+        // CodexAdapter (#233 slice 1: MCP + AGENTS.md only)
+        let x = &*adapters[1];
+        assert_eq!(x.binary_name(), "codex");
+        assert!(!x.supports_plugins(), "Codex plugin parity is #1106");
+        assert!(!x.supports_lsp(), "Codex has no LSP config block");
+        assert!(
+            x.supported_hook_events().is_empty(),
+            "Codex hook wiring is #1108 — claiming support would silently drop hooks"
+        );
+
         // CrushAdapter
-        let c = &*adapters[1];
+        let c = &*adapters[2];
         assert_eq!(c.binary_name(), "crush");
         assert!(
             !c.supports_plugins(),
@@ -906,13 +919,17 @@ mod tests {
     fn engine_id_normalises_hyphen_to_underscore() {
         let adapters = registered_adapters();
         assert_eq!(engine_id(adapters[0].as_ref()), "claude_code");
-        assert_eq!(engine_id(adapters[1].as_ref()), "crush");
-        assert_eq!(engine_id(adapters[2].as_ref()), "opencode");
+        assert_eq!(engine_id(adapters[1].as_ref()), "codex");
+        assert_eq!(engine_id(adapters[2].as_ref()), "crush");
+        assert_eq!(engine_id(adapters[3].as_ref()), "opencode");
     }
 
     #[test]
     fn known_engine_ids_matches_registered_adapters() {
-        assert_eq!(known_engine_ids(), vec!["claude_code", "crush", "opencode"]);
+        assert_eq!(
+            known_engine_ids(),
+            vec!["claude_code", "codex", "crush", "opencode"]
+        );
     }
 
     /// Locks the `native_*` consumption matrix (#1032). This is the source of
@@ -940,6 +957,11 @@ mod tests {
                         nk::NATIVE,
                     ]
                 ),
+                // Codex renders only MCP so far (#233 slice 1). The absent maps
+                // are the tracked parity gaps — permissions (#1102) and hooks
+                // (#1108) — and must stay absent until those render, so
+                // `doctor` keeps reporting those keys as dead for Codex.
+                ("codex".to_string(), vec![nk::NATIVE_MCP, nk::NATIVE]),
                 (
                     "crush".to_string(),
                     vec![

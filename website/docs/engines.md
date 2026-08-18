@@ -7,9 +7,9 @@ configuration you write is engine-neutral; each adapter translates it into one
 engine's native shape. Anything that can't be expressed neutrally drops through a
 per-engine escape hatch.
 
-Two adapters ship today: **Claude Code** and **Crush**. Both activate when their
-binary is on `PATH`; users who only have one binary on PATH see no output from the
-other adapter. The design doc behind this model is
+Four adapters ship today: **Claude Code**, **Codex**, **Crush**, and
+**opencode**. Each activates when its binary is on `PATH`; users who only have
+one of those binaries see no output from the other adapters. The design doc behind this model is
 [`docs/design/engine-capabilities.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md) (related: #34, #59).
 
 ## The principle
@@ -56,14 +56,14 @@ only its own key. Two kinds of key are therefore never rendered:
 
 The current matrix of which adapter reads which map:
 
-| Map | `claude_code` | `crush` | `opencode` |
-| --- | --- | --- | --- |
-| `native_permissions` | yes | yes | yes |
-| `native_hooks` | yes | yes | no |
-| `native_plugins` | yes | no | no |
-| `native_mcp` | yes | yes | yes |
-| `native_model_providers` | no | yes | yes |
-| `native` | yes | yes | yes |
+| Map                      | `claude_code` | `codex` | `crush` | `opencode` |
+|--------------------------|---------------|---------|---------|------------|
+| `native_permissions`     | yes           | no      | yes     | yes        |
+| `native_hooks`           | yes           | no      | yes     | no         |
+| `native_plugins`         | yes           | no      | no      | no         |
+| `native_mcp`             | yes           | yes     | yes     | yes        |
+| `native_model_providers` | no            | no      | yes     | yes        |
+| `native`                 | yes           | yes     | yes     | yes        |
 
 `llmenv export`, `llmenv regenerate`, and `llmenv doctor` warn about both kinds,
 reading the *merged* config so a key contributed by a `bundle.yaml` is covered
@@ -483,8 +483,75 @@ them through the sibling that merges in the safe direction instead:
 `provider`. `model` and `small_model` are plain `provider_id/model_id` strings
 with no engine-specific extras — use `capabilities.default_models` for those.
 
+## The Codex adapter
+
+(added in v4.0.0)
+
+[Codex](https://github.com/openai/codex) is a supported engine, PATH-gated the
+same way as Crush and opencode: `export`, `hook`, and `regenerate` skip it
+silently when `codex` is not on `PATH`.
+
+This is the **first slice** of Codex parity
+([#233](https://github.com/phaedrus1992/llmenv/issues/233)) — MCP servers and the
+merged `AGENTS.md`. What isn't wired yet is listed below, with its tracking
+issue, so nothing here is a silent gap.
+
+### Env vars
+
+| Variable     | Points to                                                    | Notes                                                                           |
+|--------------|--------------------------------------------------------------|---------------------------------------------------------------------------------|
+| `CODEX_HOME` | `<cache>/codex/...` (the directory containing `config.toml`) | Codex's analogue of `CLAUDE_CONFIG_DIR`; it must be the directory, not the file |
+
+### What the Codex adapter emits
+
+`config.toml`, in Codex's own TOML config format:
+
+- **`mcp_servers`** — one table per resolved MCP server. A stdio server renders
+  `command`/`args`/`env`; a streamable-HTTP server renders `url` (plus
+  `http_headers`). There is deliberately **no `type` key**: Codex's transport
+  enum is untagged and rejects unknown fields, so the transport is implied by
+  which key is present. A per-server `timeout` maps to `tool_timeout_sec`, since
+  llmenv's timeout is a request timeout and Codex's `startup_timeout_sec` covers
+  initialization instead.
+- **`model_instructions_file`** — an absolute path to the merged `AGENTS.md`,
+  which is written alongside `config.toml`. Codex finds a *project's* AGENTS.md
+  on its own; this pointer is for llmenv's merged copy, which lives in the cache
+  directory rather than a project root.
+
+### SSE MCP servers are skipped
+
+Codex speaks stdio and streamable HTTP. It has no SSE transport at all, so an
+MCP server declared with `transport: sse` is skipped for Codex with a warning
+rather than rendered as a `url` — which Codex would read as streamable HTTP and
+then fail to talk to. Other engines still receive the server.
+
+### Capability map
+
+| Capability                    | Status                                                                                                                                                                                                            |
+|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| MCP servers                   | rendered                                                                                                                                                                                                          |
+| Merged `AGENTS.md`            | rendered, via `model_instructions_file`                                                                                                                                                                           |
+| Permissions                   | not yet ([#1102](https://github.com/phaedrus1992/llmenv/issues/1102)) — Codex uses named profiles under `permissions.entries` plus `approval_policy`/`sandbox_mode`, which does not map onto `allow`/`ask`/`deny` |
+| Lifecycle hooks               | not yet ([#1108](https://github.com/phaedrus1992/llmenv/issues/1108)) — declared hooks are skipped with a warning                                                                                                 |
+| Statusline                    | not yet ([#1104](https://github.com/phaedrus1992/llmenv/issues/1104))                                                                                                                                             |
+| Auth inheritance              | not yet ([#1105](https://github.com/phaedrus1992/llmenv/issues/1105))                                                                                                                                             |
+| Plugins / skills              | not yet ([#1106](https://github.com/phaedrus1992/llmenv/issues/1106))                                                                                                                                             |
+| Rules beyond merged AGENTS.md | not yet ([#1103](https://github.com/phaedrus1992/llmenv/issues/1103))                                                                                                                                             |
+| `doctor` diagnostics          | not yet ([#1100](https://github.com/phaedrus1992/llmenv/issues/1100))                                                                                                                                             |
+
+### The `native.codex` escape hatch
+
+`native.codex` merges arbitrary keys into `config.toml` — useful for anything
+llmenv doesn't model yet (`model`, `approval_policy`, `sandbox_mode`, …).
+`mcp_servers` is rejected there, because it would clobber the rendered block;
+use `native_mcp.codex` to merge into it instead.
+
+A `null` value deletes the key it targets, matching the other adapters. That
+matters more here than elsewhere: TOML has no null, so an unstripped one would
+fail the whole render rather than removing a key.
+
 ## Other engines
 
-The capability model is engine-neutral by design, so additional adapters (e.g.
-Codex) can render the same neutral config into their own shape and expose their
-own `native_*` overrides.
+The capability model is engine-neutral by design, so additional adapters can
+render the same neutral config into their own shape and expose their own
+`native_*` overrides.

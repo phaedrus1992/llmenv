@@ -6187,6 +6187,7 @@ mod tests {
         let config = Config {
             disabled_engines: vec![
                 "Claude_Code".to_string(),
+                "CoDeX".to_string(),
                 "CRUSH".to_string(),
                 "oPeNcOdE".to_string(),
             ],
