@@ -433,6 +433,55 @@ fn write_owner_only_atomic_in_dir(
     }))
 }
 
+/// Copy `src` to `dst`, replacing whatever is at `dst` — including a symlink
+/// — rather than writing through it.
+///
+/// A plain `std::fs::copy(src, dst)` opens `dst` with `O_TRUNC`, which
+/// follows a symlink there and truncates/overwrites its target instead of
+/// replacing the link itself — the same class of gap `write_owner_only_atomic`
+/// closes for in-memory content, applied here to copying from another file.
+/// Copies to a same-directory temp file first (so the copy itself can't land
+/// on a planted symlink — the name is unique per call), then `rename`s over
+/// `dst`, which POSIX guarantees replaces the destination directory entry
+/// atomically without following it.
+///
+/// Preserves `src`'s permission mode (`std::fs::copy` does this for the temp
+/// file), unlike [`write_owner_only`]/[`write_owner_only_atomic`] which force
+/// owner-only — this is for arbitrary file content (bundle assets, which may
+/// need to stay executable), not credentials.
+///
+/// # Errors
+/// Propagates the copy or rename failure. Removes the temp file on error.
+pub fn copy_replacing_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let parent = dst.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no parent: {}", dst.display()),
+        )
+    })?;
+    let file_name = dst.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no file name: {}", dst.display()),
+        )
+    })?;
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(format!(".{pid}.{nanos}.tmp"));
+    let tmp_path = parent.join(&tmp_name);
+
+    std::fs::copy(src, &tmp_path)?;
+    if let Err(e) = std::fs::rename(&tmp_path, dst) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1039,6 +1088,110 @@ mod tests {
         let path = tmp.path().join("a/b/c/file.json");
         write_owner_only_atomic(&path, b"nested").expect("write");
         assert_eq!(std::fs::read(&path).expect("read"), b"nested");
+    }
+
+    // ---- copy_replacing_symlink ----
+
+    #[test]
+    fn copy_replacing_symlink_copies_content_to_a_fresh_destination() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"payload").expect("write src");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        assert_eq!(std::fs::read(&dst).expect("read"), b"payload");
+    }
+
+    #[test]
+    fn copy_replacing_symlink_overwrites_an_existing_regular_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"new-content").expect("write src");
+        std::fs::write(&dst, b"old-content").expect("write dst");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        assert_eq!(std::fs::read(&dst).expect("read"), b"new-content");
+    }
+
+    /// A plain `std::fs::copy` opens the destination with `O_TRUNC`, which
+    /// follows a symlink and truncates/overwrites whatever it points at
+    /// instead of replacing the link itself. `copy_replacing_symlink` must
+    /// replace the destination directory entry atomically (via `rename`),
+    /// which never follows a symlink at the destination.
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_symlink_does_not_write_through_a_symlinked_destination() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let victim = tmp.path().join("victim");
+        std::fs::write(&src, b"attacker-controlled").expect("write src");
+        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
+        std::os::unix::fs::symlink(&victim, &dst).expect("symlink");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        assert!(
+            !std::fs::symlink_metadata(&dst)
+                .expect("stat dst")
+                .file_type()
+                .is_symlink(),
+            "the symlink at the destination must be replaced, not written through"
+        );
+        assert_eq!(
+            std::fs::read(&dst).expect("read dst"),
+            b"attacker-controlled"
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("read victim"),
+            b"must-not-be-touched",
+            "the symlink's target must be untouched"
+        );
+    }
+
+    /// The copy preserves the source's permission mode — unlike the
+    /// owner-only writers above, this helper is for arbitrary bundle content
+    /// (which may need to stay executable), not credentials.
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_symlink_preserves_the_source_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"#!/bin/sh\necho hi\n").expect("write src");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        let mode = std::fs::metadata(&dst)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "the executable bit must survive the copy");
+    }
+
+    #[test]
+    fn copy_replacing_symlink_leaves_no_temp_files() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"payload").expect("write src");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(entries.len(), 2, "found stray files: {entries:?}");
     }
 
     // #1178: write_owner_only_atomic must create every missing ancestor

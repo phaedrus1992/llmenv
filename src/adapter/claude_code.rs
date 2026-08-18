@@ -433,7 +433,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let rendered = raw.replace("{{ICM_MCP}}", MEMORY_MCP_NAME);
                 crate::paths::write_owner_only(&dest, rendered.as_bytes())?;
             } else {
-                std::fs::copy(abs, &dest)?;
+                // `copy_replacing_symlink`, not `std::fs::copy`: `out` is the
+                // agent's live config dir and persists across renders, so a
+                // prior render's output at `dest` could have been replaced
+                // by a symlink between calls — a plain copy would write
+                // through it (#1341-class TOCTOU, #1422).
+                crate::paths::copy_replacing_symlink(abs, &dest)?;
             }
             owned.push(rel.clone());
         }
@@ -2673,6 +2678,55 @@ mod tests {
     use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
     use proptest::prelude::*;
     use std::path::PathBuf;
+
+    /// `materialize`'s bundle-files loop re-renders into `out`, a folder that
+    /// persists across calls (the agent's live config dir). If a prior
+    /// render's destination entry gets replaced by a symlink, the next
+    /// render must replace the symlink rather than write through it —
+    /// the same class of TOCTOU bug `src/materialize/inherit.rs` was
+    /// hardened against for #1341, extended here per #1422.
+    #[cfg(unix)]
+    #[test]
+    fn materialize_does_not_write_bundle_files_through_a_symlinked_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_src = tmp.path().join("bundle-file.txt");
+        std::fs::write(&bundle_src, b"bundle-content").unwrap();
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, b"must-not-be-touched").unwrap();
+
+        let mut manifest = MergedManifest {
+            files: std::collections::BTreeMap::new(),
+            ..MergedManifest::default()
+        };
+        manifest
+            .files
+            .insert(PathBuf::from("out.txt"), bundle_src.clone());
+
+        ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+        let dest_file = tmp.path().join("out.txt");
+        std::fs::remove_file(&dest_file).unwrap();
+        std::os::unix::fs::symlink(&victim, &dest_file).unwrap();
+
+        ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+
+        assert!(
+            !std::fs::symlink_metadata(&dest_file)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted symlink must be replaced, not written through"
+        );
+        assert_eq!(std::fs::read(&dest_file).unwrap(), b"bundle-content");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"must-not-be-touched",
+            "the symlink's target must be untouched"
+        );
+    }
 
     /// #1262: an empty `agents_md` with no applicable fragment must not leave a
     /// 0-byte `CLAUDE.md` on disk.
