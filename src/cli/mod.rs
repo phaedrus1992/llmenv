@@ -1444,7 +1444,7 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
 
     let resolved = resolve_env(None, None, false)?;
 
-    let mut cmd = tokio::process::Command::new(adapter.binary_name());
+    let mut cmd = std::process::Command::new(adapter.binary_name());
     cmd.args(&args);
     for (key, value) in &resolved.vars {
         cmd.env(key, value);
@@ -1453,16 +1453,50 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
+    let status = run_supervised(cmd, adapter.binary_name(), None)?;
+
+    exit_with_status(status);
+}
+
+/// Run `cmd` as a supervised foreground child and return its exit status —
+/// the synchronous entry point to [`spawn_and_supervise`] for the call sites
+/// that aren't already inside a runtime.
+///
+/// Every place llmenv hands the terminal to a long-running interactive child
+/// goes through here (`launch`, `login`'s `claude auth login`, `setup`'s engine
+/// handoff, `edit`'s `$EDITOR`). Before #1385 only `launch` did, and the others
+/// waited under the default signal disposition: a Ctrl-C or a `kill` during that
+/// window terminated `llmenv` while the child kept running — orphaning it, and
+/// leaving the caller a signal-derived status instead of the child's own. The
+/// shell then drew a prompt on top of a still-live full-screen program.
+///
+/// `stdin_payload`, when set, is written to the child's stdin (piped) and the
+/// pipe is then closed. Written before the wait loop starts, so a payload larger
+/// than the pipe buffer relies on the child reading as it goes — true for every
+/// current caller, whose stdout and stderr are inherited and therefore never
+/// blocked on llmenv draining them.
+///
+/// # Errors
+/// Returns an error when the runtime can't be built, the spawn fails, a
+/// `stdin_payload` can't be written, or the wait fails.
+pub(crate) fn run_supervised(
+    mut cmd: std::process::Command,
+    binary: &str,
+    stdin_payload: Option<&[u8]>,
+) -> anyhow::Result<std::process::ExitStatus> {
+    if stdin_payload.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut cmd = tokio::process::Command::from(cmd);
+
     // `tokio::process::Command::spawn` registers the child with the runtime's
     // signal reactor, so it has to run inside `block_on` — spawning first and
     // entering the runtime afterwards panics with "there is no reactor running".
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("failed to build tokio runtime for launch supervision")?;
-    let status = rt.block_on(spawn_and_supervise(&mut cmd, adapter.binary_name()))?;
-
-    exit_with_status(status);
+        .context("failed to build tokio runtime for child supervision")?;
+    rt.block_on(spawn_and_supervise(&mut cmd, binary, stdin_payload))
 }
 
 /// Spawn the engine and wait for it to exit, never dying on a signal itself —
@@ -1497,6 +1531,7 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
 async fn spawn_and_supervise(
     cmd: &mut tokio::process::Command,
     binary: &str,
+    stdin_payload: Option<&[u8]>,
 ) -> anyhow::Result<std::process::ExitStatus> {
     use tokio::signal::unix::{SignalKind, signal};
 
@@ -1508,6 +1543,10 @@ async fn spawn_and_supervise(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to spawn '{binary}'"))?;
+
+    if let Some(payload) = stdin_payload {
+        write_child_stdin(&mut child, payload, binary).await?;
+    }
 
     loop {
         tokio::select! {
@@ -1526,6 +1565,36 @@ async fn spawn_and_supervise(
             }
         }
     }
+}
+
+/// Write `payload` to the freshly spawned child's stdin and close the pipe.
+///
+/// Closing it is the point: `setup`'s crush handoff feeds the skill text on
+/// stdin, and crush reads until EOF — leaving the handle open would hang.
+///
+/// # Errors
+/// Returns an error when the child has no stdin pipe (the caller didn't ask for
+/// one) or the write fails.
+async fn write_child_stdin(
+    child: &mut tokio::process::Child,
+    payload: &[u8],
+    binary: &str,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        anyhow::bail!("'{binary}' was spawned without a stdin pipe to write to");
+    };
+    stdin
+        .write_all(payload)
+        .await
+        .with_context(|| format!("writing to '{binary}' stdin"))?;
+    // `shutdown` flushes and closes; the `stdin` handle is then dropped, so
+    // nothing is left holding the write end open.
+    stdin
+        .shutdown()
+        .await
+        .with_context(|| format!("closing '{binary}' stdin"))
 }
 
 /// Send `signal` to the supervised engine, best-effort.
@@ -4010,19 +4079,22 @@ fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyh
     let tmp = tempfile::TempDir::new()
         .map_err(|e| anyhow::anyhow!("creating temp dir for login: {e}"))?;
 
-    let status = std::process::Command::new("claude")
-        .args(["auth", "login"])
+    let mut cmd = std::process::Command::new("claude");
+    cmd.args(["auth", "login"])
         .env("CLAUDE_CONFIG_DIR", tmp.path())
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "running `claude auth login` failed: {e}. \
+        .stderr(std::process::Stdio::inherit());
+    // Supervised (#1385): `claude auth login` is a full-screen interactive flow,
+    // and an unsupervised wait let a Ctrl-C kill llmenv while the login kept
+    // running — writing its credential into a `TempDir` whose cleanup no longer
+    // ran, with no `llmenv` left to capture the result.
+    let status = run_supervised(cmd, "claude", None).map_err(|e| {
+        anyhow::anyhow!(
+            "running `claude auth login` failed: {e:#}. \
              Is the Claude Code CLI installed and on PATH?"
-            )
-        })?;
+        )
+    })?;
 
     if !status.success() {
         anyhow::bail!("`claude auth login` exited with status {status}");
@@ -4708,10 +4780,15 @@ fn run_edit(bundle: Option<String>) -> anyhow::Result<()> {
         .copied()
         .ok_or_else(|| anyhow::anyhow!("$EDITOR / $VISUAL is set but empty"))?;
     let extra_args = parts.get(1..).unwrap_or_default();
-    let status = std::process::Command::new(bin)
-        .args(extra_args)
-        .arg(&path)
-        .status()
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(extra_args).arg(&path);
+    // Supervised (#1385) despite the editor being the one thing that arguably
+    // wants Ctrl-C for itself. It still gets it: the terminal generates SIGINT
+    // for the whole foreground process group, so the editor receives its own
+    // copy and handles it however it likes. What supervision changes is only
+    // llmenv's half — it stops dying first and handing the shell a prompt to
+    // draw over a still-running full-screen editor.
+    let status = run_supervised(cmd, bin, None)
         .with_context(|| format!("failed to launch editor: {editor}"))?;
     if !status.success() {
         anyhow::bail!("editor exited with {status}");
@@ -6644,6 +6721,79 @@ mod exit_code_tests {
         fn never_panics_on_arbitrary_raw_status(raw in any::<i32>()) {
             let _ = exit_code_for_status(ExitStatus::from_raw(raw));
         }
+    }
+}
+
+/// #1385: the shared supervised-spawn helper every foreground call site now uses
+/// (`launch`, `login`, `setup`'s handoff, `edit`).
+#[cfg(test)]
+#[cfg(unix)]
+#[allow(clippy::unwrap_used, reason = "test code")]
+mod run_supervised_tests {
+    use super::{exit_code_for_status, run_supervised};
+
+    #[test]
+    fn returns_the_childs_own_exit_code() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exit 7"]);
+        let status = run_supervised(cmd, "sh", None).unwrap();
+        assert_eq!(
+            status.code(),
+            Some(7),
+            "the child's real exit code must survive supervision; got {status:?}"
+        );
+    }
+
+    /// A child that dies by signal must be reported as such, not collapsed into
+    /// a generic failure — `exit_code_for_status` turns it into the `128+signum`
+    /// a shell would show.
+    #[test]
+    fn signal_killed_child_maps_to_128_plus_signum() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "kill -TERM $$"]);
+        let status = run_supervised(cmd, "sh", None).unwrap();
+        assert_eq!(
+            exit_code_for_status(status),
+            128 + 15,
+            "a SIGTERM'd child should report 143; got {status:?}"
+        );
+    }
+
+    /// `setup`'s crush handoff feeds the skill text on stdin and crush reads to
+    /// EOF, so the payload must arrive *and* the pipe must be closed afterwards
+    /// — a still-open write end would hang the child instead of ending it.
+    #[test]
+    fn stdin_payload_is_delivered_and_the_pipe_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("stdin.txt");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "cat > \"$OUT\""]).env("OUT", &out);
+
+        let status = run_supervised(cmd, "sh", Some(b"skill body\n")).unwrap();
+        assert!(
+            status.success(),
+            "`cat` should have seen EOF and exited cleanly; got {status:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "skill body\n");
+    }
+
+    /// Nothing is written when no payload is requested, and the child still sees
+    /// a usable (inherited) stdin rather than a dangling pipe.
+    #[test]
+    fn no_payload_leaves_stdin_alone() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        assert!(run_supervised(cmd, "sh", None).unwrap().success());
+    }
+
+    #[test]
+    fn spawn_failure_names_the_binary() {
+        let cmd = std::process::Command::new("__llmenv_no_such_binary_xyzzy__");
+        let err = run_supervised(cmd, "__llmenv_no_such_binary_xyzzy__", None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("__llmenv_no_such_binary_xyzzy__"),
+            "spawn failure must name the binary, got: {err:#}"
+        );
     }
 }
 
