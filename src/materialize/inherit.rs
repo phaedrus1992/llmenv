@@ -44,6 +44,28 @@ const MCP_NEEDS_AUTH_FILE: &str = "mcp-needs-auth-cache.json";
 /// is never overwritten.
 const COPIED_FILES: &[&str] = &[HISTORY_FILE, MCP_NEEDS_AUTH_FILE];
 
+/// Subdirectory of the durable state dir holding Codex's transcripts —
+/// `sessions/`, the direct analogue of Claude Code's `projects/` (#1105).
+const CODEX_SESSIONS_DIR: &str = "sessions";
+/// Subdirectory holding Codex's archived sessions, alongside `sessions/`.
+const CODEX_ARCHIVED_SESSIONS_DIR: &str = "archived_sessions";
+/// Codex's prompt-recall history file — same name and role as Claude Code's.
+const CODEX_HISTORY_FILE: &str = "history.jsonl";
+/// Codex's combined identity + OAuth token store (`$CODEX_HOME/auth.json`).
+///
+/// Unlike the [`COPIED_FILES`]/[`CODEX_COPIED_FILES`] contract — copy in only
+/// when absent, never overwrite — this credential legitimately changes over
+/// time (a user re-runs `codex login`, rotates a token), so pinning the first
+/// captured copy forever would serve a stale or revoked credential to every
+/// new folder indefinitely. [`inherit_codex_auth`]/[`capture_codex_auth`]
+/// give it its own newest-wins contract instead (security-audit, #1421).
+const CODEX_AUTH_FILE: &str = "auth.json";
+/// Codex's [`COPIED_FILES`] equivalent — `auth.json` is deliberately excluded:
+/// it gets its own newest-wins capture via [`capture_codex_auth`] rather than
+/// this list's plain "copy in only when absent" contract (security-audit,
+/// #1421).
+const CODEX_COPIED_FILES: &[&str] = &[CODEX_HISTORY_FILE];
+
 /// Point `<config_dir>/<name>` at `<state_dir>/<name>`, folding in a
 /// pre-existing real directory first so its contents survive.
 ///
@@ -96,20 +118,61 @@ pub(crate) fn link_session_logs_dir(state_dir: &Path, config_dir: &Path) -> anyh
     link_durable_dir(SESSION_LOGS_DIR, state_dir, config_dir)
 }
 
+/// Point `<config_dir>/sessions` at `<state_dir>/sessions` (#1105) — the Codex
+/// analogue of [`link_projects_dir`].
+///
+/// # Errors
+/// Returns an error when the durable dir cannot be created, an existing tree
+/// cannot be folded in, or the link cannot be created.
+pub(crate) fn link_codex_sessions_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    link_durable_dir(CODEX_SESSIONS_DIR, state_dir, config_dir)
+}
+
+/// Point `<config_dir>/archived_sessions` at `<state_dir>/archived_sessions`
+/// (#1105), alongside [`link_codex_sessions_dir`].
+///
+/// # Errors
+/// Returns an error when the durable dir cannot be created, an existing tree
+/// cannot be folded in, or the link cannot be created.
+pub(crate) fn link_codex_archived_sessions_dir(
+    state_dir: &Path,
+    config_dir: &Path,
+) -> anyhow::Result<()> {
+    link_durable_dir(CODEX_ARCHIVED_SESSIONS_DIR, state_dir, config_dir)
+}
+
 /// Copy each [`COPIED_FILES`] entry from the durable store into a folder that
 /// has none of its own.
 ///
 /// # Errors
 /// Returns an error when a copy fails. A file absent from the store is a no-op.
 pub(crate) fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
-    for name in COPIED_FILES {
+    inherit_copied_files_named(state_dir, config_dir, COPIED_FILES)
+}
+
+/// [`inherit_copied_files`] over Codex's [`CODEX_COPIED_FILES`].
+///
+/// # Errors
+/// Returns an error when a copy fails. A file absent from the store is a no-op.
+pub(crate) fn inherit_codex_copied_files(
+    state_dir: &Path,
+    config_dir: &Path,
+) -> anyhow::Result<()> {
+    inherit_copied_files_named(state_dir, config_dir, CODEX_COPIED_FILES)
+}
+
+fn inherit_copied_files_named(
+    state_dir: &Path,
+    config_dir: &Path,
+    files: &[&str],
+) -> anyhow::Result<()> {
+    for name in files {
         let src = state_dir.join(name);
         let dst = config_dir.join(name);
         if dest_already_present(&dst) || !is_real_file(&src) {
             continue;
         }
-        std::fs::copy(&src, &dst)
-            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+        copy_owner_only(&src, &dst)?;
     }
     Ok(())
 }
@@ -169,16 +232,114 @@ fn dest_already_present(path: &Path) -> bool {
 /// # Errors
 /// Returns an error when a copy fails.
 pub(crate) fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
-    for name in COPIED_FILES {
+    capture_copied_files_named(state_dir, config_dir, COPIED_FILES)
+}
+
+/// [`capture_copied_files`] over Codex's [`CODEX_COPIED_FILES`].
+///
+/// # Errors
+/// Returns an error when a copy fails.
+pub(crate) fn capture_codex_copied_files(
+    state_dir: &Path,
+    config_dir: &Path,
+) -> anyhow::Result<()> {
+    capture_copied_files_named(state_dir, config_dir, CODEX_COPIED_FILES)
+}
+
+fn capture_copied_files_named(
+    state_dir: &Path,
+    config_dir: &Path,
+    files: &[&str],
+) -> anyhow::Result<()> {
+    for name in files {
         let src = config_dir.join(name);
         let dst = state_dir.join(name);
         if dest_already_present(&dst) || !is_real_file(&src) {
             continue;
         }
-        std::fs::copy(&src, &dst)
-            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+        copy_owner_only(&src, &dst)?;
     }
     Ok(())
+}
+
+/// Copy `src` to `dst` and force the result to owner-only (0o600) permissions.
+///
+/// `std::fs::copy` propagates the *source's* mode to the destination — a
+/// history/auth file created under a looser umask would otherwise carry that
+/// looser mode into the durable store or a fresh hashed folder alike
+/// (security-audit, #1421). Every file this module copies is either a
+/// credential or prompt history, so owner-only is the right floor
+/// unconditionally, matching how everything else llmenv writes into the
+/// durable store and materialized folders is owner-only.
+///
+/// # Errors
+/// Returns an error when the copy or the permission change fails.
+fn copy_owner_only(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::copy(src, dst)
+        .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting owner-only permissions on {}", dst.display()))?;
+    }
+    Ok(())
+}
+
+/// Copy `auth.json` into a folder that has none of its own — same "copy in
+/// only when absent" contract as [`inherit_codex_copied_files`]. A fresh
+/// folder never has a stale copy to protect, so freshness only matters on the
+/// capture side; see [`capture_codex_auth`].
+///
+/// # Errors
+/// Returns an error when a copy fails. A file absent from the store is a no-op.
+pub(crate) fn inherit_codex_auth(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    let src = state_dir.join(CODEX_AUTH_FILE);
+    let dst = config_dir.join(CODEX_AUTH_FILE);
+    if dest_already_present(&dst) || !is_real_file(&src) {
+        return Ok(());
+    }
+    copy_owner_only(&src, &dst)
+}
+
+/// Capture a folder's `auth.json` into the durable store, newest `mtime`
+/// wins — unlike [`capture_copied_files`]'s "only when the store has none"
+/// contract, an existing store copy is replaced when the folder's is newer
+/// (security-audit, #1421). Codex's login is a single global credential, but
+/// it does change over time (re-running `codex login`, rotating a token), and
+/// pinning the first-ever capture forever would serve a stale or revoked
+/// credential to every new folder indefinitely.
+///
+/// A destination that can't be read counts as older, so a corrupt or missing
+/// store entry never blocks the folder's copy from winning — mirrors
+/// [`is_newer_at`]'s same tie-break for the reverse reason (a missing
+/// *source* there vs. a missing *destination* here).
+///
+/// # Errors
+/// Returns an error when a copy fails. A file absent from the folder is a
+/// no-op.
+pub(crate) fn capture_codex_auth(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    let src = config_dir.join(CODEX_AUTH_FILE);
+    let dst = state_dir.join(CODEX_AUTH_FILE);
+    if !is_real_file(&src) {
+        return Ok(());
+    }
+    if dest_already_present(&dst) && !src_is_newer(&src, &dst) {
+        return Ok(());
+    }
+    copy_owner_only(&src, &dst)
+}
+
+/// Whether `src`'s mtime is strictly newer than `dst`'s. A destination whose
+/// mtime can't be read counts as older, so the source wins.
+fn src_is_newer(src: &Path, dst: &Path) -> bool {
+    let Ok(src_modified) = std::fs::metadata(src).and_then(|m| m.modified()) else {
+        return false;
+    };
+    match std::fs::metadata(dst).and_then(|m| m.modified()) {
+        Ok(dst_modified) => src_modified > dst_modified,
+        Err(_) => true,
+    }
 }
 
 /// Move every `projects/` tree stranded in an old hashed folder into the durable
@@ -841,6 +1002,264 @@ mod tests {
             std::fs::read_to_string(state.join(HISTORY_FILE)).unwrap(),
             "from-folder",
             "the store's copy is authoritative once it exists"
+        );
+    }
+
+    // ---- Codex durable-state inheritance (#1105) ----
+
+    /// First run: a fresh folder's `sessions/` becomes a symlink into the
+    /// state dir, same as Claude Code's `projects/` (#1105).
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sessions_creates_symlink_into_state_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        link_codex_sessions_dir(&state, &cfg).unwrap();
+
+        let link = cfg.join(CODEX_SESSIONS_DIR);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            state.join(CODEX_SESSIONS_DIR)
+        );
+    }
+
+    /// A pre-existing real `sessions/` dir is folded into the state dir, then
+    /// replaced by the symlink — its transcripts must survive.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sessions_folds_existing_real_dir_then_links() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        write(
+            &cfg.join(CODEX_SESSIONS_DIR).join("-proj").join("a.jsonl"),
+            "old",
+        );
+
+        link_codex_sessions_dir(&state, &cfg).unwrap();
+
+        let link = cfg.join(CODEX_SESSIONS_DIR);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let moved = state.join(CODEX_SESSIONS_DIR).join("-proj").join("a.jsonl");
+        assert_eq!(std::fs::read_to_string(moved).unwrap(), "old");
+    }
+
+    /// Re-render: a correct `sessions/` symlink is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sessions_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        link_codex_sessions_dir(&state, &cfg).unwrap();
+        link_codex_sessions_dir(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(cfg.join(CODEX_SESSIONS_DIR)).unwrap(),
+            state.join(CODEX_SESSIONS_DIR)
+        );
+    }
+
+    /// `archived_sessions/` gets the same fold-then-link treatment as
+    /// `sessions/`.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_archived_sessions_creates_symlink_into_state_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        link_codex_archived_sessions_dir(&state, &cfg).unwrap();
+
+        let link = cfg.join(CODEX_ARCHIVED_SESSIONS_DIR);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            state.join(CODEX_ARCHIVED_SESSIONS_DIR)
+        );
+    }
+
+    /// First run: `history.jsonl` is copied in from the store when the folder
+    /// has none.
+    #[test]
+    fn codex_copied_files_are_inherited_on_first_run() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+        write(&state.join(CODEX_HISTORY_FILE), "prompt-one\n");
+
+        inherit_codex_copied_files(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cfg.join(CODEX_HISTORY_FILE)).unwrap(),
+            "prompt-one\n"
+        );
+    }
+
+    /// A copied file's permissions are forced to owner-only regardless of the
+    /// source's mode — `std::fs::copy` propagates the source's permission
+    /// bits, which would otherwise carry a looser umask into the durable
+    /// store (security-audit, #1421).
+    #[cfg(unix)]
+    #[test]
+    fn copied_files_are_forced_owner_only_regardless_of_source_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let src = state.join(CODEX_HISTORY_FILE);
+        write(&src, "prompt-one\n");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        inherit_codex_copied_files(&state, &cfg).unwrap();
+
+        let mode = std::fs::metadata(cfg.join(CODEX_HISTORY_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a 0o644 source must not produce a 0o644 destination"
+        );
+    }
+
+    /// First run: `auth.json` is copied in from the store when the folder has
+    /// none.
+    #[test]
+    fn codex_auth_is_inherited_on_first_run() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+        write(&state.join(CODEX_AUTH_FILE), r#"{"OPENAI_API_KEY":"sk-x"}"#);
+
+        inherit_codex_auth(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cfg.join(CODEX_AUTH_FILE)).unwrap(),
+            r#"{"OPENAI_API_KEY":"sk-x"}"#
+        );
+    }
+
+    /// Re-render: an existing folder's own `auth.json` is never clobbered by
+    /// the store's copy.
+    #[test]
+    fn codex_auth_is_never_overwritten_by_the_store() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+        write(&state.join(CODEX_AUTH_FILE), "stale-store-copy");
+        write(&cfg.join(CODEX_AUTH_FILE), "folder-own-current-auth");
+
+        inherit_codex_auth(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cfg.join(CODEX_AUTH_FILE)).unwrap(),
+            "folder-own-current-auth",
+            "must not clobber the folder's own auth.json"
+        );
+    }
+
+    /// Existing state: capture seeds the store from a folder that logged in
+    /// directly, so the *next* folder can inherit it — without this the store
+    /// never gains a copy, since Codex only writes `auth.json` into
+    /// `$CODEX_HOME`.
+    #[test]
+    fn codex_auth_capture_seeds_an_empty_store() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&cfg.join(CODEX_AUTH_FILE), "from-folder");
+
+        capture_codex_auth(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(state.join(CODEX_AUTH_FILE)).unwrap(),
+            "from-folder"
+        );
+    }
+
+    /// Capture replaces the store's copy once the folder's `auth.json` is
+    /// newer — a re-login or token rotation must propagate, unlike
+    /// `history.jsonl`'s "first copy wins forever" contract (security-audit,
+    /// #1421: pinning the first captured credential forever would serve a
+    /// stale or revoked token to every new folder indefinitely).
+    #[test]
+    fn codex_auth_capture_replaces_the_store_when_the_folder_copy_is_newer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&state.join(CODEX_AUTH_FILE), "old-account");
+        write(&cfg.join(CODEX_AUTH_FILE), "re-logged-in-account");
+        let now = filetime::FileTime::now();
+        filetime::set_file_mtime(
+            cfg.join(CODEX_AUTH_FILE),
+            filetime::FileTime::from_unix_time(now.unix_seconds() + 60, 0),
+        )
+        .unwrap();
+
+        capture_codex_auth(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(state.join(CODEX_AUTH_FILE)).unwrap(),
+            "re-logged-in-account",
+            "a newer folder credential must replace the store's stale one"
+        );
+    }
+
+    /// The reverse of the above: an *older* folder copy must not roll the
+    /// store's newer credential back — e.g. a stale hashed folder that never
+    /// got cleaned up must not stomp the account a fresher folder captured.
+    #[test]
+    fn codex_auth_capture_does_not_roll_back_a_newer_store_copy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&cfg.join(CODEX_AUTH_FILE), "stale-folder-account");
+        write(&state.join(CODEX_AUTH_FILE), "current-account");
+        let now = filetime::FileTime::now();
+        filetime::set_file_mtime(
+            state.join(CODEX_AUTH_FILE),
+            filetime::FileTime::from_unix_time(now.unix_seconds() + 60, 0),
+        )
+        .unwrap();
+
+        capture_codex_auth(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(state.join(CODEX_AUTH_FILE)).unwrap(),
+            "current-account",
+            "an older folder copy must not roll back a newer store credential"
         );
     }
 
