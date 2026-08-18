@@ -57,6 +57,29 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[
     "Stop",
 ];
 
+/// `hook-run` invocation baked into the hooks llmenv emits for Codex. The
+/// `--engine` value is validated at the CLI boundary (#1386), so a rename here
+/// fails loudly rather than sniffing a different engine's config.
+const HOOK_RUN_COMMAND: &str = "llmenv hook-run --engine codex";
+
+/// Injects the source config paths at session start so the agent edits llmenv's
+/// config rather than the managed cache (#289).
+const CONFIG_CONTEXT_COMMAND: &str = "llmenv config-context --engine codex";
+
+/// Warns when the agent writes inside the managed cache dir (#289).
+const CONFIG_GUARD_COMMAND: &str = "llmenv config-guard --engine codex";
+
+/// Polls the usage backend and sleeps an adaptive delay.
+const THROTTLE_COMMAND: &str = "llmenv throttle";
+
+/// Engine-neutral lifecycle events that always get a `hook-run` registration,
+/// paired with Codex's native event name. Mirrors the Claude Code adapter's
+/// baseline: ICM memory wake-up/store plus the session-log lifecycle events.
+const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("session_start", "SessionStart"),
+    ("session_end", "SessionEnd"),
+];
+
 /// Keys this adapter renders itself, and which a `native.codex` catch-all
 /// fragment must therefore not overwrite.
 ///
@@ -171,6 +194,8 @@ impl AgentAdapter for CodexAdapter {
             }
         }
 
+        // Always non-empty now: `render_hooks` appends the baseline registrations
+        // llmenv wires itself, not just what a bundle declared.
         let hooks = render_hooks(manifest);
         if !hooks.is_empty() || manifest.capabilities.native_hooks.contains_key("codex") {
             let mut value = serde_json::json!({ "events": hooks });
@@ -305,10 +330,73 @@ fn render_hooks(manifest: &MergedManifest) -> serde_json::Map<String, serde_json
             .push(serde_json::Value::Object(group));
     }
 
+    emit_baseline_hooks(manifest, &mut by_event);
+
     by_event
         .into_iter()
         .map(|(event, groups)| (event, json!(groups)))
         .collect()
+}
+
+/// Register the hooks llmenv wires itself, rather than ones a bundle declared —
+/// the Codex half of the set the Claude Code adapter emits (#1108).
+///
+/// Safe to point at `hook-run` because Codex reads the same hook-output shape
+/// Claude Code does: `{"hookSpecificOutput": {"hookEventName", "additionalContext"}}`,
+/// which is exactly what `emit_hook_context` produces. Verified against
+/// `codex-rs/hooks/src/engine/output_parser.rs`.
+fn emit_baseline_hooks(
+    manifest: &MergedManifest,
+    by_event: &mut std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+) {
+    let command_group =
+        |command: String| json!({ "hooks": [{ "type": "command", "command": command }] });
+    let matched_group = |matcher: &str, command: String| json!({ "matcher": matcher, "hooks": [{ "type": "command", "command": command }] });
+
+    // Where to edit llmenv's config, injected at session start (#289).
+    by_event
+        .entry("SessionStart".into())
+        .or_default()
+        .push(command_group(CONFIG_CONTEXT_COMMAND.to_string()));
+
+    // Anchored so only exact tool names match, not substrings like BatchEdit.
+    // Exits 0 — it warns, it never blocks the write.
+    by_event
+        .entry("PreToolUse".into())
+        .or_default()
+        .push(matched_group(
+            "^(Write|Edit|MultiEdit)$",
+            CONFIG_GUARD_COMMAND.to_string(),
+        ));
+
+    // Read-once dedup (#318). Registered unconditionally: the `hook-run`
+    // handler checks `features.read_once.enabled` and passes through when off,
+    // so the matcher is the only cost when the feature is disabled.
+    by_event
+        .entry("PreToolUse".into())
+        .or_default()
+        .push(matched_group(
+            "^Read$",
+            format!("{HOOK_RUN_COMMAND} pre_tool_use"),
+        ));
+
+    if manifest.throttle.is_some() {
+        by_event
+            .entry("PreToolUse".into())
+            .or_default()
+            .push(command_group(format!("{THROTTLE_COMMAND} pre-tool")));
+        by_event
+            .entry("UserPromptSubmit".into())
+            .or_default()
+            .push(command_group(format!("{THROTTLE_COMMAND} prompt")));
+    }
+
+    for (neutral_event, native_event) in BASELINE_HOOK_EVENTS {
+        by_event
+            .entry((*native_event).to_string())
+            .or_default()
+            .push(command_group(format!("{HOOK_RUN_COMMAND} {neutral_event}")));
+    }
 }
 
 /// Render `manifest.mcps` into Codex's `mcp_servers` table.
@@ -650,11 +738,62 @@ mod tests {
         let (_dir, parsed) = materialize_to_toml(&manifest);
         let groups = parsed["hooks"]["events"]["PreToolUse"].as_array().unwrap();
 
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0]["matcher"].as_str(), Some("Bash"));
-        let handlers = groups[0]["hooks"].as_array().unwrap();
+        // Other groups on this event are the baseline hooks llmenv wires itself.
+        let declared = groups
+            .iter()
+            .find(|g| g.get("matcher").and_then(toml::Value::as_str) == Some("Bash"))
+            .expect("the declared hook must be present among the baseline ones");
+        let handlers = declared["hooks"].as_array().unwrap();
         assert_eq!(handlers[0]["type"].as_str(), Some("command"));
         assert_eq!(handlers[0]["command"].as_str(), Some("echo guard"));
+    }
+
+    /// llmenv wires its own lifecycle hooks for Codex the way it does for Claude
+    /// Code (#1108). They point at `hook-run --engine codex`, which is safe
+    /// because Codex reads the same `hookSpecificOutput`/`additionalContext`
+    /// shape `emit_hook_context` produces.
+    #[test]
+    fn baseline_hooks_are_registered_without_any_declared_hooks() {
+        let manifest = MergedManifest::default();
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        let events = parsed["hooks"]["events"].as_table().unwrap();
+        let rendered = format!("{events:?}");
+
+        for expected in [
+            "llmenv config-context --engine codex",
+            "llmenv config-guard --engine codex",
+            "llmenv hook-run --engine codex pre_tool_use",
+            "llmenv hook-run --engine codex session_start",
+            "llmenv hook-run --engine codex session_end",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}: {rendered}"
+            );
+        }
+        assert!(events.contains_key("SessionStart"));
+        assert!(events.contains_key("SessionEnd"));
+    }
+
+    /// The `--engine` value is validated at the CLI boundary (#1386), so it has
+    /// to name a registered adapter or every hook fails at runtime.
+    #[test]
+    fn baseline_hook_commands_name_a_registered_engine() {
+        assert!(
+            crate::adapter::require_known_engine("codex").is_ok(),
+            "the engine id baked into the hook commands must resolve"
+        );
+    }
+
+    /// Throttle hooks only appear when the manifest asks for them.
+    #[test]
+    fn throttle_hooks_are_gated_on_the_manifest() {
+        let manifest = MergedManifest::default();
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(
+            !format!("{:?}", parsed["hooks"]).contains("llmenv throttle"),
+            "throttle must not be wired when the manifest has none"
+        );
     }
 
     /// `Notification` is Claude-only — `HookEventsToml` has no field for it. An
@@ -693,9 +832,11 @@ mod tests {
         manifest.capabilities.hooks.push(hook);
 
         let (_dir, parsed) = materialize_to_toml(&manifest);
+        // The baseline hooks still render; the mcp_tool one must not appear.
+        let rendered = format!("{:?}", parsed["hooks"]);
         assert!(
-            !parsed.contains_key("hooks"),
-            "an mcp_tool-only hook set must render no hooks block: {parsed:?}"
+            !rendered.contains("some_tool"),
+            "the mcp_tool hook must be skipped: {rendered}"
         );
     }
 
