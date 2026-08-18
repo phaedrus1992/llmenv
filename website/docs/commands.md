@@ -45,7 +45,7 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 ## `launch`
 
 ```text
-llmenv launch <engine> [-- ARGS...]
+llmenv launch [--scope ID] [--tag TAG] [--compress] <engine> [-- ARGS...]
 ```
 
 (added in v4.0.0) Resolve the environment exactly the way `export` does, then
@@ -57,6 +57,22 @@ passed through to the engine binary unmodified, e.g.:
 ```text
 llmenv launch claude -- --resume
 ```
+
+`--scope`, `--tag`, and `--compress` (added in v4.0.0) mean exactly what they do
+for [`export`](#export), including the warning when a requested scope isn't
+active in the current environment. Without them, `launch` resolves the scopes the
+current directory and environment make active.
+
+They may appear before or after `<engine>`, but must come before `--`:
+
+```text
+llmenv launch --scope work claude -- --resume
+llmenv launch claude --scope work -- --resume     # same thing
+llmenv launch claude -- --scope work              # --scope goes to the engine
+```
+
+Everything after `--` belongs to the engine, so an engine with its own `--scope`
+(or `--tag`, or `--compress`) is still reachable — put it there.
 
 Unlike the shell-hook + `export` model, `launch` needs no shell integration — it
 behaves the same from an interactive shell, a script, a CI job, or an IDE task,

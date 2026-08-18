@@ -149,6 +149,16 @@ enum Command {
     /// see #1056. Everything after `--` is passed through to the engine
     /// unmodified.
     Launch {
+        /// Scope ID to resolve (defaults to the scopes the cwd and environment
+        /// make active, as `export` does)
+        #[arg(short, long)]
+        scope: Option<String>,
+        /// Tag filter (optional)
+        #[arg(short, long)]
+        tag: Option<String>,
+        /// Compress the materialized AGENTS.md (CLAUDE.md) to reduce token cost
+        #[arg(long)]
+        compress: bool,
         /// Engine to launch: a binary name (claude, crush, opencode) or the
         /// underscore-form engine id (claude_code)
         engine: String,
@@ -630,8 +640,22 @@ pub fn run() -> anyhow::Result<()> {
         }) => {
             run_export(scope, tag, explain, compress)?;
         }
-        Some(Command::Launch { engine, args }) => {
-            run_launch(&engine, args)?;
+        Some(Command::Launch {
+            scope,
+            tag,
+            compress,
+            engine,
+            args,
+        }) => {
+            run_launch(
+                &engine,
+                args,
+                LaunchScope {
+                    scope,
+                    tag,
+                    compress,
+                },
+            )?;
         }
         Some(Command::Regenerate) => {
             run_regenerate()?;
@@ -1416,11 +1440,20 @@ fn run_export(
     Ok(())
 }
 
+/// The scope-narrowing flags `launch` shares with `export` (#1384), bundled so
+/// [`run_launch`] stays inside the 5-positional-param limit and so the three
+/// always travel to [`resolve_env`] together.
+struct LaunchScope {
+    scope: Option<String>,
+    tag: Option<String>,
+    compress: bool,
+}
+
 /// `llmenv launch <engine>`: resolve the environment the same way `export`
 /// does, then spawn `engine` as a supervised child process with that
 /// environment applied on top of the inherited one, inherited stdio, and the
 /// child's exit code propagated as `launch`'s own (see #1056).
-fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
+fn run_launch(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyhow::Result<()> {
     let adapter = crate::adapter::adapter_for_launch_target(engine).ok_or_else(|| {
         anyhow::anyhow!(
             "unrecognized engine '{engine}' — expected one of: {}",
@@ -1442,7 +1475,7 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
         );
     }
 
-    let resolved = resolve_env(None, None, false)?;
+    let resolved = resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
 
     let mut cmd = std::process::Command::new(adapter.binary_name());
     cmd.args(&args);
