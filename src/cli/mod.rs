@@ -1203,11 +1203,13 @@ fn resolve_env(
                 // Still a warning, not an error: the two commands stay at parity
                 // and keep exiting 0, they just no longer resolve more than was
                 // asked for.
-                let empty = ActiveScopes {
-                    scopes: Vec::new(),
-                    tags: BTreeSet::new(),
-                    extra_tags: active.extra_tags.clone(),
-                };
+                //
+                // Fully empty, including `extra_tags`. Carrying those over would
+                // produce a shape the matched branch never does — it folds
+                // `extra_tags` into `tags`, so everything downstream sees them as
+                // a subset — and "nothing fired" is easier to reason about than
+                // "nothing except the tags that aren't attached to a scope".
+                let empty = ActiveScopes::default();
                 let firing = firing_bundles(&config.bundle, &empty, tag.as_deref());
                 (firing, empty)
             } else {
