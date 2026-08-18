@@ -2148,7 +2148,7 @@ fn find_claude_binary() -> Option<String> {
     // `which` itself couldn't run, so on an image without `which` — routine
     // for distroless and minimal containers — this reported no binary and the
     // caller silently seeded `installMethod` as if claude were unmanaged.
-    super::resolve_on_path("claude").map(|p| p.display().to_string())
+    crate::paths::resolve_on_path("claude").map(|p| p.display().to_string())
 }
 
 /// Seed `installMethod` into `out/settings.json` if absent (#346).

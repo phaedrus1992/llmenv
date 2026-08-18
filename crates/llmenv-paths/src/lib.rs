@@ -89,6 +89,107 @@ pub fn is_valid_short_name(name: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Returns `true` when `name` resolves to an executable on the current `PATH`.
+///
+/// Walks `PATH` directly rather than shelling out to `which` (#1382). The
+/// subprocess returned the same `false` for "the binary isn't installed" and
+/// "`which` itself couldn't be run", so on an image without `which` — routine
+/// for distroless and minimal containers — an installed engine looked missing.
+/// That was harmless while every caller was advisory, but `run_launch` turns a
+/// negative result into a hard error, which made the ambiguity user-visible as
+/// a false "not installed". Resolving `PATH` in-process has no such failure
+/// mode, and skips a fork+exec on a hot path.
+///
+/// Names containing `/` or ASCII whitespace are unconditionally rejected;
+/// they cannot be plain binary names.
+///
+/// Lives here rather than in `llmenv`'s adapter module because it is a plain
+/// path helper with two unrelated callers — adapter/engine detection and
+/// `mcp-proxy` lookup. Each kept its own copy until #1390, and they diverged:
+/// the proxy's never got the empty-`PATH`-entry guard below.
+#[must_use]
+pub fn binary_on_path(name: &str) -> bool {
+    resolve_on_path(name).is_some()
+}
+
+/// The full path `name` resolves to on `PATH`, or `None` when it isn't there.
+///
+/// Callers that only need a yes/no answer should use [`binary_on_path`]; this
+/// exists for the ones that need the location itself (claude-code's
+/// install-method detection inspects the resolved path).
+#[must_use]
+pub fn resolve_on_path(name: &str) -> Option<PathBuf> {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        // Distinguished from "PATH is set but has no match" only in the log:
+        // both mean the binary is unusable, but an absent PATH points at a
+        // stripped environment rather than a missing install.
+        tracing::debug!("PATH is unset; cannot resolve '{name}'");
+        return None;
+    };
+    resolve_in_path_list(name, &path_var)
+}
+
+/// [`resolve_on_path`] against an explicit `PATH` value.
+///
+/// Split out so the lookup is testable without mutating the process
+/// environment: `std::env::set_var` is `unsafe` as of Rust 2024 and this
+/// workspace sets `unsafe_code = "forbid"`, so a test cannot legally point the
+/// real `PATH` somewhere else. Callers with a `PATH` value in hand (rather than
+/// the process's own) use it directly.
+#[must_use]
+pub fn resolve_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace) {
+        return None;
+    }
+    std::env::split_paths(path_var)
+        // A literal empty `PATH` entry means "the current directory" to a POSIX
+        // shell. Deliberately not honoured: resolving a binary out of the
+        // working directory is a hijack vector, and nothing llmenv looks up
+        // legitimately lives there.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// True when `path` is a regular file carrying an execute bit — what a shell's
+/// `PATH` search accepts.
+///
+/// `metadata` follows symlinks, so a symlinked binary resolves the way a shell
+/// would. Any I/O error (a `PATH` entry that doesn't exist, or one the user
+/// can't stat) simply means "not usable here", which is the same conclusion a
+/// shell reaches.
+fn is_executable_file(path: &Path) -> bool {
+    let md = match std::fs::metadata(path) {
+        Ok(md) => md,
+        Err(e) => {
+            // A missing entry is the overwhelmingly common case and not worth
+            // reporting. Anything else (an unreadable directory, a stalled
+            // network mount, fd exhaustion) also resolves to "not usable
+            // here", but it can make an installed binary look absent — so
+            // leave a breadcrumb rather than discarding it entirely.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("PATH probe could not stat {}: {e}", path.display());
+            }
+            return false;
+        }
+    };
+    if !md.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        md.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        // Fail closed. There is no shipped non-unix target (release builds are
+        // linux-musl and apple-darwin), and treating every regular file as
+        // executable would be weaker than the `which` call this replaced.
+        false
+    }
+}
+
 /// Return true if `cwd` is at or below `prefix`, treating both as filesystem
 /// paths (component-wise) rather than raw strings. This avoids the
 /// `/home/alice/git/xyz` matches prefix `/home/alice/git/x` bug.
@@ -329,6 +430,173 @@ fn write_owner_only_atomic_in_dir(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Marks a file executable so the `PATH` tests exercise the real predicate.
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn binary_on_path_true_for_sh() {
+        assert!(binary_on_path("sh"), "sh must be on PATH in any POSIX env");
+    }
+
+    #[test]
+    fn binary_on_path_false_for_bogus_binary() {
+        assert!(
+            !binary_on_path("__llmenv_no_such_binary_xyzzy__"),
+            "bogus binary must not be found on PATH"
+        );
+    }
+
+    /// #1382: resolution must not need a `which` binary anywhere. A `PATH`
+    /// holding nothing but the directory containing the target still resolves
+    /// it — the case that produced a false "not installed" on distroless
+    /// images, where `run_launch` turned it into a hard error.
+    #[test]
+    fn binary_in_path_list_resolves_without_any_helper_binaries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("some-engine");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        make_executable(&bin);
+        let found = resolve_in_path_list("some-engine", dir.path().as_os_str());
+        assert_eq!(
+            found.as_deref(),
+            Some(bin.as_path()),
+            "an executable in the only PATH entry must resolve to its full path"
+        );
+    }
+
+    #[test]
+    fn binary_in_path_list_rejects_non_executable_and_directories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plain = dir.path().join("not-executable");
+        std::fs::write(&plain, "data").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(
+                resolve_in_path_list("not-executable", dir.path().as_os_str()).is_none(),
+                "a file without an execute bit is not runnable"
+            );
+        }
+        std::fs::create_dir(dir.path().join("a-directory")).unwrap();
+        assert!(
+            resolve_in_path_list("a-directory", dir.path().as_os_str()).is_none(),
+            "a directory is not an executable even though it has the exec bit"
+        );
+    }
+
+    /// An empty `PATH` element means "current directory" to a POSIX shell.
+    /// Honouring it would let a binary in the working directory shadow a real
+    /// engine, so it is skipped deliberately.
+    #[test]
+    fn binary_in_path_list_ignores_empty_entries() {
+        assert!(
+            resolve_in_path_list("some-engine", std::ffi::OsStr::new("")).is_none(),
+            "an empty PATH must resolve nothing"
+        );
+        assert!(
+            resolve_in_path_list("some-engine", std::ffi::OsStr::new(":")).is_none(),
+            "empty PATH entries must not be treated as the cwd"
+        );
+    }
+
+    /// #1390: the empty-entry guard has to hold even when a matching executable
+    /// really is sitting in the process working directory — the hijack the
+    /// duplicated resolver in `mcp/proxy.rs` was open to. Uses a name no test
+    /// fixture would create so a hit could only have come from cwd resolution.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_does_not_resolve_out_of_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let bin = cwd.join("__llmenv_cwd_hijack_probe__");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+        let found = resolve_in_path_list("__llmenv_cwd_hijack_probe__", std::ffi::OsStr::new("::"));
+        std::fs::remove_file(&bin).unwrap();
+        assert!(
+            found.is_none(),
+            "an executable in the working directory must not satisfy an empty PATH entry"
+        );
+    }
+
+    /// The name guard has to bite even when the joined path would really resolve.
+    /// `binary_on_path_rejects_slash`/`_whitespace` only show that *absent* files
+    /// aren't found, which holds with the guard deleted — so they don't actually
+    /// pin it. Here the target exists: without the guard, `dir.join("sub/tool")`
+    /// finds it and a caller could reach outside the `PATH` entry it named.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_rejects_a_traversing_name_that_would_otherwise_resolve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let bin = sub.join("tool");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        // Sanity: the guardless join would have found it.
+        assert!(is_executable_file(&dir.path().join("sub/tool")));
+
+        assert!(
+            resolve_in_path_list("sub/tool", dir.path().as_os_str()).is_none(),
+            "a name containing '/' must be rejected outright, not resolved relative \
+             to a PATH entry"
+        );
+    }
+
+    /// Same shape for the whitespace guard: a file whose name really does contain
+    /// a space is present, and must still not resolve — a `PATH` lookup takes a
+    /// plain binary name, and accepting one with whitespace would let a value like
+    /// `sh -c echo` look installed.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_rejects_a_whitespace_name_that_would_otherwise_resolve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("two words");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        assert!(is_executable_file(&bin));
+        assert!(
+            resolve_in_path_list("two words", dir.path().as_os_str()).is_none(),
+            "a name containing whitespace must be rejected outright"
+        );
+    }
+
+    #[test]
+    fn binary_in_path_list_rejects_empty_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(
+            resolve_in_path_list("", dir.path().as_os_str()).is_none(),
+            "an empty name must not resolve to the PATH directory itself"
+        );
+    }
+
+    #[test]
+    fn binary_on_path_rejects_slash() {
+        assert!(
+            !binary_on_path("/usr/bin/sh"),
+            "path with '/' must be rejected without spawning which"
+        );
+    }
+
+    #[test]
+    fn binary_on_path_rejects_whitespace() {
+        assert!(
+            !binary_on_path("sh -c echo"),
+            "name with whitespace must be rejected without spawning which"
+        );
+        assert!(
+            !binary_on_path("sh\techo"),
+            "name with tab must be rejected without spawning which"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -825,6 +1093,50 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        /// A `PATH` of nothing but empty entries resolves nothing, for any name —
+        /// the cwd-hijack guard (#1382, #1390) generalised past the `""` and `":"`
+        /// the example tests pin.
+        #[test]
+        fn resolve_in_path_list_never_resolves_from_an_all_empty_path(
+            name in "[a-zA-Z0-9_.-]{1,12}",
+            separators in 0usize..8,
+        ) {
+            let path_var = ":".repeat(separators);
+            prop_assert!(
+                resolve_in_path_list(&name, std::ffi::OsStr::new(&path_var)).is_none(),
+                "name {:?} resolved against an all-empty PATH {:?}",
+                name,
+                path_var
+            );
+        }
+
+        /// Never panics, whatever arbitrary text arrives as either argument, and
+        /// anything it does return is the name joined onto one of the `PATH`
+        /// entries — never a path it invented.
+        #[test]
+        fn resolve_in_path_list_returns_only_a_path_var_entry_join(
+            name in ".*",
+            path_var in ".*",
+        ) {
+            let os_path = std::ffi::OsStr::new(&path_var);
+            if let Some(found) = resolve_in_path_list(&name, os_path) {
+                prop_assert_eq!(
+                    found.file_name(),
+                    Some(std::ffi::OsStr::new(&name)),
+                    "resolved {:?} for name {:?}",
+                    found,
+                    name
+                );
+                let parent = found.parent().map(std::path::Path::to_path_buf);
+                prop_assert!(
+                    std::env::split_paths(os_path).any(|dir| Some(&dir) == parent.as_ref()),
+                    "resolved {:?}, whose parent is not a PATH entry of {:?}",
+                    found,
+                    path_var
+                );
+            }
+        }
+
         #[test]
         fn has_parent_component_no_panic(s in ".*") {
             let _ = has_parent_component(&s);

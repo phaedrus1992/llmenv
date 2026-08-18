@@ -94,9 +94,10 @@ fn install_fake_engine(dir: &std::path::Path, binary_name: &str) -> std::path::P
     bin_dir
 }
 
-/// Build a `launch claude` command with the fake engine on `PATH` ahead of
-/// the real one (if any), pointed at the given isolated config.
-fn launch_cmd(config_dir: &std::path::Path, config_path: &std::path::Path) -> Command {
+/// An `llmenv launch` command with the fake engine on `PATH` ahead of the real
+/// one (if any) and no arguments yet — for tests that need llmenv's own flags
+/// *before* the engine name (#1384).
+fn launch_cmd_no_args(config_dir: &std::path::Path, config_path: &std::path::Path) -> Command {
     let bin_dir = install_fake_engine(config_dir, "claude");
     let mut cmd = support::isolated_llmenv_cmd(config_dir);
     cmd.env("LLMENV_CONFIG", config_path);
@@ -108,7 +109,15 @@ fn launch_cmd(config_dir: &std::path::Path, config_path: &std::path::Path) -> Co
             std::env::var("PATH").unwrap_or_default()
         ),
     );
-    cmd.arg("launch").arg("claude");
+    cmd.arg("launch");
+    cmd
+}
+
+/// Build a `launch claude` command with the fake engine on `PATH` ahead of
+/// the real one (if any), pointed at the given isolated config.
+fn launch_cmd(config_dir: &std::path::Path, config_path: &std::path::Path) -> Command {
+    let mut cmd = launch_cmd_no_args(config_dir, config_path);
+    cmd.arg("claude");
     cmd
 }
 
@@ -226,6 +235,158 @@ fn launch_passes_trailing_args_through_to_the_engine() {
     );
 }
 
+/// Variable names `llmenv export` emits with extra flags appended — the same
+/// parse as [`exported_var_names`], used to hold `launch`'s scope narrowing to
+/// `export`'s (#1384).
+fn exported_var_names_with(
+    config_dir: &std::path::Path,
+    config_path: &std::path::Path,
+    extra: &[&str],
+) -> Vec<String> {
+    let mut cmd = support::isolated_llmenv_cmd(config_dir);
+    cmd.env("LLMENV_CONFIG", config_path);
+    cmd.arg("export").args(extra);
+    let out = cmd
+        .timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.strip_prefix("export "))
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.to_string()))
+        .collect()
+}
+
+/// The literal parity `export` has always had and `launch` didn't (#1384):
+/// `--scope` narrows resolution, and the post-`--` arguments still reach the
+/// engine untouched, despite `args` being a `trailing_var_arg`.
+#[test]
+fn launch_scope_flag_narrows_and_still_passes_trailing_args() {
+    let (dir, config_path) = setup_config();
+    let argv_path = dir.path().join("argv.txt");
+    let dump_path = dir.path().join("env_dump.txt");
+
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    cmd.env("FAKE_ENGINE_ARGV_DUMP", &argv_path);
+    cmd.env("FAKE_ENGINE_ENV_DUMP", &dump_path);
+    cmd.args(["--scope", "test-user", "--", "--resume"]);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&argv_path).unwrap(),
+        "--resume\n",
+        "llmenv's own --scope must not leak into the engine's argv, and --resume must reach it"
+    );
+    let dumped = fs::read_to_string(&dump_path).unwrap();
+    let tags = dumped
+        .lines()
+        .find_map(|l| l.strip_prefix("LLMENV_ACTIVE_TAGS="))
+        .expect("child env should carry LLMENV_ACTIVE_TAGS");
+    assert!(
+        tags.split(',').any(|t| t == "test"),
+        "the named scope's tag should have resolved; got {tags:?}"
+    );
+}
+
+/// Same flags, written before the engine name. Both orders have to work: clap
+/// only starts collecting the trailing var-arg at `--`, so a flag anywhere ahead
+/// of that is llmenv's.
+#[test]
+fn launch_scope_flag_may_precede_the_engine() {
+    let (dir, config_path) = setup_config();
+    let argv_path = dir.path().join("argv.txt");
+
+    let mut cmd = launch_cmd_no_args(dir.path(), &config_path);
+    cmd.env("FAKE_ENGINE_ARGV_DUMP", &argv_path);
+    cmd.args(["--scope", "test-user", "claude", "--", "--resume"]);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+
+    assert_eq!(fs::read_to_string(&argv_path).unwrap(), "--resume\n");
+}
+
+/// An engine with its own `--scope` is still reachable: everything after `--`
+/// belongs to the engine, including names llmenv also uses.
+#[test]
+fn launch_leaves_the_engines_own_scope_flag_alone_after_the_separator() {
+    let (dir, config_path) = setup_config();
+    let argv_path = dir.path().join("argv.txt");
+
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    cmd.env("FAKE_ENGINE_ARGV_DUMP", &argv_path);
+    cmd.args(["--", "--scope", "engine-side", "--compress"]);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&argv_path).unwrap(),
+        "--scope\nengine-side\n--compress\n",
+        "post-`--` arguments are the engine's, even when they collide with llmenv's flag names"
+    );
+}
+
+/// A requested scope that isn't active warns rather than failing — identical to
+/// `export`'s behavior, asserted against `export` itself so the two can't drift.
+#[test]
+fn launch_warns_about_an_inactive_scope_like_export() {
+    let (dir, config_path) = setup_config();
+    const NEEDLE: &str = "not active in current environment";
+
+    let mut export_cmd = support::isolated_llmenv_cmd(dir.path());
+    export_cmd.env("LLMENV_CONFIG", &config_path);
+    export_cmd.args(["export", "--scope", "__no_such_scope__"]);
+    export_cmd
+        .timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(NEEDLE));
+
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    cmd.args(["--scope", "__no_such_scope__"]);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(NEEDLE));
+}
+
+/// `--tag` and `--compress` reach `resolve_env` too, held to `export`'s resolved
+/// variable set for the same flags rather than to a hardcoded list.
+#[test]
+fn launch_tag_and_compress_flags_match_export() {
+    let (dir, config_path) = setup_config();
+    let flags = ["--tag", "test", "--compress"];
+    let expected = exported_var_names_with(dir.path(), &config_path, &flags);
+    assert!(
+        expected.iter().any(|k| k == "LLMENV_ACTIVE_TAGS"),
+        "export should have resolved at least LLMENV_ACTIVE_TAGS; got {expected:?}"
+    );
+
+    let dump_path = dir.path().join("env_dump.txt");
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    cmd.env("FAKE_ENGINE_ENV_DUMP", &dump_path);
+    cmd.args(flags);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+
+    let dumped = fs::read_to_string(&dump_path).unwrap();
+    for key in &expected {
+        assert!(
+            dumped.lines().any(|l| l.starts_with(&format!("{key}="))),
+            "child env is missing '{key}', which `export {}` resolved:\n{dumped}",
+            flags.join(" ")
+        );
+    }
+}
+
 /// Same configuration as [`launch_cmd`], but as a plain `std::process::Command`
 /// so the test can hold the spawned child and signal it mid-run — `assert_cmd`'s
 /// wrapper runs to completion, which is exactly what this test must not do.
@@ -290,6 +451,58 @@ fn launch_sleeping_engine(
         std::thread::sleep(Duration::from_millis(20));
     }
     child
+}
+
+/// The guard `binary_on_path` applies has to hold at *exec* time, not just at
+/// check time. `std::process::Command` execs a bare name via `execvp`, which runs
+/// its own `PATH` search and — per POSIX — treats a zero-length entry as the
+/// working directory. So with `PATH=":<real bin dir>"`, the check found the real
+/// engine while `execvp` ran `./claude` from the cwd, and `launch` layered the
+/// resolved environment (MCP endpoints, tokens) onto it.
+///
+/// `launch` resolves once and spawns the absolute path, so the decoy is ignored.
+#[test]
+#[cfg(unix)]
+fn launch_ignores_an_engine_decoy_in_the_working_directory() {
+    let (dir, config_path) = setup_config();
+    let bin_dir = install_fake_engine(dir.path(), "claude");
+    let argv_path = dir.path().join("argv.txt");
+
+    // The decoy: a `claude` in the process working directory that would report
+    // itself if run. `cwd` is the test's own temp dir, set on the command below.
+    let cwd = dir.path().join("run-from-here");
+    fs::create_dir_all(&cwd).unwrap();
+    let decoy = cwd.join("claude");
+    fs::write(
+        &decoy,
+        "#!/bin/sh\nprintf 'DECOY' > \"$FAKE_ENGINE_ARGV_DUMP\"\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&decoy, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
+    cmd.env("LLMENV_CONFIG", &config_path);
+    cmd.current_dir(&cwd);
+    // The leading `:` is the empty entry — what `PATH="$MAYBE_UNSET:$PATH"` in a
+    // shell profile produces. The real engine is present, later in the list.
+    cmd.env("PATH", format!(":{}", bin_dir.display()));
+    cmd.env("FAKE_ENGINE_ARGV_DUMP", &argv_path);
+    cmd.arg("launch").arg("claude");
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+
+    // `install_fake_engine`'s stub writes one line per argument, so an empty file
+    // is the real engine having run with no args. "DECOY" means the cwd copy ran.
+    let dumped = fs::read_to_string(&argv_path).unwrap();
+    assert!(
+        !dumped.contains("DECOY"),
+        "launch executed the `claude` in its working directory via the empty PATH \
+         entry instead of the real one on PATH"
+    );
 }
 
 /// Send `signal` (a `kill(1)` name like `TERM`) to `pid`.

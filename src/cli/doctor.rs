@@ -293,7 +293,7 @@ fn run_doctor_dependent_tools(use_color: bool) {
 
     let installed: Vec<_> = DEPENDENT_TOOLS
         .iter()
-        .filter(|(bin, _)| crate::adapter::binary_on_path(bin))
+        .filter(|(bin, _)| crate::paths::binary_on_path(bin))
         .collect();
     if installed.is_empty() {
         return;
@@ -332,15 +332,14 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
     // icm — required when features.memory has entries
     // mcp-proxy or uvx — required when any memory server_host is remote
     if has_memory {
-        if crate::adapter::binary_on_path("icm") {
+        if crate::paths::binary_on_path("icm") {
             eprintln!("{pass} icm found on PATH");
         } else {
             eprintln!("{fail} icm not found on PATH (required when features.memory is configured)");
         }
 
         if has_remote_memory_host(config) {
-            if crate::adapter::binary_on_path("mcp-proxy") || crate::adapter::binary_on_path("uvx")
-            {
+            if crate::paths::binary_on_path("mcp-proxy") || crate::paths::binary_on_path("uvx") {
                 eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
             } else {
                 eprintln!(
@@ -357,7 +356,7 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         .as_ref()
         .is_some_and(|f| !f.codebase_memory.is_empty());
     if has_codebase_memory {
-        if crate::adapter::binary_on_path("codebase-memory-mcp") {
+        if crate::paths::binary_on_path("codebase-memory-mcp") {
             eprintln!("{pass} codebase-memory-mcp found on PATH");
         } else {
             eprintln!(
@@ -374,7 +373,7 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         .iter()
         .any(|e| e.eq_ignore_ascii_case("claude_code"));
     if !claude_disabled {
-        if crate::adapter::binary_on_path("claude") {
+        if crate::paths::binary_on_path("claude") {
             eprintln!("{pass} claude found on PATH");
         } else {
             eprintln!(
@@ -392,7 +391,7 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
             continue; // reported above, where it is required rather than optional
         }
         let bin = adapter.binary_name();
-        if crate::adapter::binary_on_path(bin) {
+        if crate::paths::binary_on_path(bin) {
             eprintln!("{pass} {bin} found on PATH");
         } else {
             eprintln!("{info} {bin} not found on PATH (optional engine)");

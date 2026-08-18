@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 
-use super::{AgentAdapter, binary_on_path, yaml_value_kind_name};
+use super::{AgentAdapter, yaml_value_kind_name};
 use crate::mcp::resolve::ResolvedKind;
 use crate::merge::MergedManifest;
+use crate::paths::binary_on_path;
 
 /// Adapter for opencode: writes `AGENTS.md` and `opencode.json` into the
 /// cache dir and exports `OPENCODE_CONFIG_DIR` so opencode discovers them.
