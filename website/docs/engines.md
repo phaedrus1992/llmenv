@@ -562,17 +562,87 @@ without a translation layer.
 
 ### Capability map
 
-| Capability                    | Status                                                                                                                                                                                                            |
-|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| MCP servers                   | rendered                                                                                                                                                                                                          |
-| Merged `AGENTS.md`            | rendered, via `model_instructions_file`                                                                                                                                                                           |
-| Permissions                   | not yet ([#1102](https://github.com/phaedrus1992/llmenv/issues/1102)) — Codex uses named profiles under `permissions.entries` plus `approval_policy`/`sandbox_mode`, which does not map onto `allow`/`ask`/`deny` |
-| Lifecycle hooks               | rendered, including llmenv's own baseline hooks                                                                                                                                                                   |
-| Statusline                    | not yet ([#1104](https://github.com/phaedrus1992/llmenv/issues/1104))                                                                                                                                             |
-| Auth inheritance              | not yet ([#1105](https://github.com/phaedrus1992/llmenv/issues/1105))                                                                                                                                             |
-| Plugins / skills              | not yet ([#1106](https://github.com/phaedrus1992/llmenv/issues/1106))                                                                                                                                             |
-| Rules beyond merged AGENTS.md | not yet ([#1103](https://github.com/phaedrus1992/llmenv/issues/1103))                                                                                                                                             |
-| `doctor` diagnostics          | not yet ([#1100](https://github.com/phaedrus1992/llmenv/issues/1100))                                                                                                                                             |
+| Capability                       | Status                                                                                                                                                                                                            |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MCP servers                      | rendered                                                                                                                                                                                                          |
+| Merged `AGENTS.md`               | rendered, via `model_instructions_file`                                                                                                                                                                           |
+| Permissions                      | not yet ([#1102](https://github.com/phaedrus1992/llmenv/issues/1102)) — Codex uses named profiles under `permissions.entries` plus `approval_policy`/`sandbox_mode`, which does not map onto `allow`/`ask`/`deny` |
+| Lifecycle hooks                  | rendered, including llmenv's own baseline hooks                                                                                                                                                                   |
+| Seeded settings                  | applied to `config.toml` (added in v4.0.0, [#1107](https://github.com/phaedrus1992/llmenv/issues/1107)) — see [Seeded settings](#seeded-settings)                                                                 |
+| Install-method seed              | n/a — Codex self-detects its own install method in-process ([#1107](https://github.com/phaedrus1992/llmenv/issues/1107))                                                                                          |
+| Statusline                       | n/a — no external-command hook exists (added in v4.0.0, [#1104](https://github.com/phaedrus1992/llmenv/issues/1104)) — see [Statusline](#statusline)                                                              |
+| Session/history/auth inheritance | inherited across hash changes (added in v4.0.0, [#1105](https://github.com/phaedrus1992/llmenv/issues/1105)) — see [Durable state inheritance](#durable-state-inheritance)                                        |
+| SQLite state DBs                 | not yet ([#1420](https://github.com/phaedrus1992/llmenv/issues/1420)) — `state`/`logs`/`goals`/`memories`/`queue`/`thread-history` databases under `$CODEX_HOME`                                                  |
+| Plugins / skills                 | not yet ([#1106](https://github.com/phaedrus1992/llmenv/issues/1106))                                                                                                                                             |
+| Rules beyond merged AGENTS.md    | not yet ([#1103](https://github.com/phaedrus1992/llmenv/issues/1103))                                                                                                                                             |
+| `doctor` diagnostics             | not yet ([#1100](https://github.com/phaedrus1992/llmenv/issues/1100))                                                                                                                                             |
+
+### Seeded settings
+
+(added in v4.0.0)
+
+`init.seeded_settings` (see [`init:`](configuration.md#init) for Claude Code's
+version of this feature) is merged into `config.toml` the same way:
+once a key is present — llmenv's own render, a prior seed, or a value Codex
+itself wrote — it is left alone. Seeding never touches a
+[modeled key](#the-nativecodex-escape-hatch) (`mcp_servers`,
+`model_instructions_file`, `hooks`); those are llmenv's own render surface.
+
+A security-sensitive key — `approval_policy`, `sandbox_mode`,
+`sandbox_workspace_write`, `trusted_projects`, `shell_environment_policy` — is
+refused with a warning rather than seeded, even though none of them are
+modeled keys. llmenv doesn't render Codex permissions yet ([#1102](https://github.com/phaedrus1992/llmenv/issues/1102)),
+so a seeded value there could silently run Codex less restrictively than the
+posture `capabilities.permissions` establishes on every other engine.
+
+Codex needs no install-method seed the way Claude Code does: it detects its
+own install method (`brew`, `npm`, standalone, …) in-process from its own
+executable path, so there is no config key for llmenv to pre-seed.
+
+### Statusline
+
+(added in v4.0.0)
+
+Claude Code's `statusLine` runs an external command and displays whatever it
+prints, which is what lets llmenv seed `llmenv statusline` there. Codex's
+`tui.status_line` is structurally different: a fixed, ordered list of built-in
+item identifiers (`model-with-reasoning`, `git-branch`, `context-remaining`,
+`five-hour-limit`, …) rendered natively by Codex's own TUI. There is no
+"run a command and show its output" surface, so `llmenv statusline` has
+nothing to attach to on Codex — this is a structural gap, not missing work.
+
+### Durable state inheritance
+
+(added in v4.0.0)
+
+`CODEX_HOME` is llmenv's hashed cache dir, so anything Codex persists under it
+— session transcripts, prompt history, the cached login — would otherwise be
+lost on every config edit or version bump, the same problem Claude Code's
+`/resume` transcripts have. llmenv relocates the same way:
+
+- **`sessions/`** and **`archived_sessions/`** — Codex's transcript stores,
+  the direct analogue of Claude Code's `projects/`. Relocated to the durable
+  state dir and symlinked back in, so `/resume` history survives a hash
+  change instead of a copy-per-hash.
+- **`history.jsonl`** — Codex's prompt-recall file, copied in when a folder
+  has none and never overwritten once one exists.
+- **`auth.json`** — Codex's combined identity + OAuth token file. Copied in
+  when a folder has none, same as `history.jsonl`, but capture uses a
+  newest-`mtime`-wins rule instead of "only when the store has none": a
+  re-login or token rotation replaces the store's copy, rather than pinning
+  the first-ever captured credential forever and serving a stale or revoked
+  token to every new folder indefinitely.
+
+Every file this relocates is copied with permissions forced to owner-only
+(`0o600`) regardless of the source's mode — `std::fs::copy` otherwise
+propagates whatever mode the source had, which would carry a looser umask
+into the durable store or a fresh folder alike.
+
+Codex also writes six SQLite databases directly into `$CODEX_HOME`
+(`state`/`logs`/`goals`/`memories`/`queue`/`thread-history`). Those are **not**
+covered yet — symlinking or copying a live SQLite file risks corruption via its
+`-wal`/`-shm` sidecar files, and deserves its own design pass. Tracked in
+[#1420](https://github.com/phaedrus1992/llmenv/issues/1420).
 
 ### The `native.codex` escape hatch
 
