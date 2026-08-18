@@ -723,7 +723,11 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::HookRun { event, engine }) => {
             tracing::debug!(engine, "hook-run invoked by engine");
-            warn_if_unknown_engine(&engine);
+            // Rejected, not warned about, unlike the read-only commands above:
+            // hook-run dispatches on the adapter, so an unrecognized id used to
+            // mean "run this hook against whatever the environment looks like"
+            // with only a `warn!` nobody sees to say so (#1386).
+            crate::adapter::require_known_engine(&engine)?;
             if crate::hook_run::run(&event, &engine)? == crate::hook_run::HookExit::Block {
                 // Exit 2 is what makes a `PreToolUse` deny actually stop the
                 // tool call — on Claude Code and, since its plugin shim reads

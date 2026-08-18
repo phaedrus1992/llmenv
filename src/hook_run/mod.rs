@@ -454,7 +454,12 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     };
     let null_payload = serde_json::Value::Null;
     let payload = stdin_json.as_ref().unwrap_or(&null_payload);
-    let adapter = crate::adapter::adapter_for_engine(engine);
+    // Not fail-soft, unlike everything below it: running a hook against the
+    // wrong engine's config is worse than not running it (#1386). The CLI
+    // boundary rejects an unknown `--engine` before this, so reaching the error
+    // arm means an internal caller passed one — surface it rather than sniffing.
+    let adapter = crate::adapter::adapter_for_engine(engine)
+        .ok_or_else(|| crate::adapter::unknown_engine_error(engine))?;
 
     // #741: the drift check runs from here rather than from its own
     // `SessionStart` hook. Both were registered unconditionally on the same

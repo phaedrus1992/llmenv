@@ -361,27 +361,59 @@ pub(crate) fn registered_adapters() -> Vec<Box<dyn AgentAdapter>> {
     ]
 }
 
-/// Resolve an adapter by its engine ID (the underscore form from `--engine` flags,
-/// e.g. `"claude_code"` or `"crush"`). Falls back to env-sniffing
-/// [`active_adapter`] when no registered adapter matches the given engine ID.
+/// Resolve an adapter by its engine ID (the underscore form from `--engine`
+/// flags, e.g. `"claude_code"` or `"crush"`), or `None` when no registered
+/// adapter answers to it.
 ///
 /// Used by hook-run to honour the caller's `--engine` flag instead of
 /// re-sniffing environment variables for adapter detection.
+///
+/// This used to fall back to env-sniffing [`active_adapter`] on no match, which
+/// meant `hook-run --engine typo` ran the hook against whatever the environment
+/// looked like, announced only by a `warn!` that llmenv's ERROR-only default
+/// `EnvFilter` swallowed (#1386). Callers reject the value instead — see
+/// [`require_known_engine`].
 #[must_use]
-pub(crate) fn adapter_for_engine(engine: &str) -> Box<dyn AgentAdapter> {
+pub(crate) fn adapter_for_engine(engine: &str) -> Option<Box<dyn AgentAdapter>> {
     registered_adapters()
         .into_iter()
         .find(|a| engine_id(a.as_ref()) == engine)
-        .unwrap_or_else(active_adapter)
+}
+
+/// Reject an `--engine` value no registered adapter answers to, naming the ones
+/// that exist (#1386).
+///
+/// Defined in terms of [`adapter_for_engine`] rather than its own comparison so
+/// validation and resolution cannot drift: a value this accepts always resolves,
+/// and one it rejects never silently resolves to something else.
+///
+/// # Errors
+/// Returns an error listing every registered engine id when `engine` matches
+/// none of them.
+pub(crate) fn require_known_engine(engine: &str) -> anyhow::Result<()> {
+    if adapter_for_engine(engine).is_some() {
+        return Ok(());
+    }
+    Err(unknown_engine_error(engine))
+}
+
+/// The error [`require_known_engine`] and hook-run's adapter resolution both
+/// report, so the two never describe the same rejection differently.
+#[must_use]
+pub(crate) fn unknown_engine_error(engine: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "unrecognized engine '{engine}' — expected one of: {}",
+        known_engine_ids().join(", ")
+    )
 }
 
 /// Resolve an adapter for `llmenv launch <target>`, matching `target` against
 /// either the adapter's binary name (what a user types on the command line,
 /// e.g. `claude`) or its engine id (the underscore form, e.g. `claude_code`).
 ///
-/// Unlike [`adapter_for_engine`], this returns `None` instead of silently
-/// falling back to env-sniffing on no match: `launch` must error loudly on an
-/// unrecognized engine rather than risk launching the wrong binary.
+/// Unlike [`adapter_for_engine`], this also accepts the binary name: `launch`'s
+/// argument is what the user types to run the engine, not the underscore-form id
+/// baked into hook commands.
 #[must_use]
 pub(crate) fn adapter_for_launch_target(target: &str) -> Option<Box<dyn AgentAdapter>> {
     registered_adapters()
