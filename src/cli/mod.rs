@@ -2442,11 +2442,7 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
     if let Err(e) = crate::materialize::inherit::capture_copied_files(state_dir, cache_path) {
         tracing::warn!("could not capture folder state into the store (non-fatal): {e:#}");
     }
-    if let Err(e) = crate::materialize::inherit::inherit_copied_files(
-        state_dir,
-        cache_path,
-        crate::materialize::inherit::COPIED_FILES,
-    ) {
+    if let Err(e) = crate::materialize::inherit::inherit_copied_files(state_dir, cache_path) {
         tracing::warn!("could not inherit prompt history (non-fatal): {e:#}");
     }
 }
@@ -2463,6 +2459,14 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
 /// session, not a failed `export`, so every failure warns instead of
 /// propagating.
 fn inherit_codex_state(state_dir: &Path, cache_path: &Path) {
+    // Harden the durable state dir before anything — including `auth.json` —
+    // is written into it. The Claude Code branch gets this from
+    // `state::ensure_state_dirs` in its own `LLMENV_STATE_DIR`-only path;
+    // Codex doesn't take that path, so it needs its own call (security-audit,
+    // #1421).
+    if let Err(e) = crate::adapter::skills::create_dir_owner_only(state_dir) {
+        tracing::warn!("could not harden Codex state dir (non-fatal): {e:#}");
+    }
     if let Err(e) = crate::materialize::inherit::link_codex_sessions_dir(state_dir, cache_path) {
         tracing::warn!("could not inherit Codex session transcripts (non-fatal): {e:#}");
     }
@@ -2478,7 +2482,15 @@ fn inherit_codex_state(state_dir: &Path, cache_path: &Path) {
         tracing::warn!("could not capture Codex folder state into the store (non-fatal): {e:#}");
     }
     if let Err(e) = crate::materialize::inherit::inherit_codex_copied_files(state_dir, cache_path) {
-        tracing::warn!("could not inherit Codex auth/history (non-fatal): {e:#}");
+        tracing::warn!("could not inherit Codex history (non-fatal): {e:#}");
+    }
+    // auth.json gets its own newest-wins contract rather than the plain
+    // "copy in only when absent" one above — see `capture_codex_auth`.
+    if let Err(e) = crate::materialize::inherit::capture_codex_auth(state_dir, cache_path) {
+        tracing::warn!("could not capture Codex auth into the store (non-fatal): {e:#}");
+    }
+    if let Err(e) = crate::materialize::inherit::inherit_codex_auth(state_dir, cache_path) {
+        tracing::warn!("could not inherit Codex auth (non-fatal): {e:#}");
     }
 }
 

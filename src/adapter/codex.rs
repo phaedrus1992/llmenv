@@ -104,6 +104,23 @@ const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
 /// modeled-with-no-escape-hatch; use `capabilities.rules`.
 const CODEX_MODELED_KEYS: &[&str] = &["mcp_servers", "model_instructions_file", "hooks"];
 
+/// Keys `apply_seeded_settings` refuses to seed even though llmenv doesn't
+/// render them itself.
+///
+/// This slice doesn't model permissions (#1102) yet, so none of Codex's
+/// approval/sandbox knobs are in [`CODEX_MODELED_KEYS`] — but leaving them
+/// seedable would let `init.seeded_settings` silently weaken the posture a
+/// user's `capabilities.permissions` establishes on every other engine, the
+/// same class of gap `warn_about_unrenderable_capabilities` already warns
+/// about for a dropped `deny` rule (security-audit, #1421).
+const CODEX_SECURITY_SENSITIVE_KEYS: &[&str] = &[
+    "approval_policy",
+    "sandbox_mode",
+    "sandbox_workspace_write",
+    "trusted_projects",
+    "shell_environment_policy",
+];
+
 impl AgentAdapter for CodexAdapter {
     fn name(&self) -> &'static str {
         "codex"
@@ -521,6 +538,16 @@ pub(crate) fn apply_seeded_settings(
     };
     let mut changed = false;
     for (k, v) in seeded {
+        if CODEX_SECURITY_SENSITIVE_KEYS.contains(&k.as_str()) {
+            eprintln!(
+                "warning: '{k}' in init.seeded_settings is a security-sensitive Codex key and \
+                 will NOT be seeded — llmenv doesn't model Codex permissions yet (#1102), so a \
+                 seeded approval_policy/sandbox_mode/etc. could silently run Codex less \
+                 restrictively than the posture capabilities.permissions establishes on every \
+                 other engine."
+            );
+            continue;
+        }
         if !CODEX_MODELED_KEYS.contains(&k.as_str()) && !obj.contains_key(k) {
             obj.insert(k.clone(), v.clone());
             changed = true;
@@ -529,6 +556,12 @@ pub(crate) fn apply_seeded_settings(
     if !changed {
         return Ok(());
     }
+    // TOML has no null, matching the adapter's own render path (`materialize`
+    // strips nulls for the same reason): an explicit null in seeded_settings
+    // must delete nothing here (there's nothing to delete — a null seeded
+    // value can only ever be newly inserted, never override an existing key)
+    // rather than reach the serializer and fail the whole write.
+    super::strip_json_nulls(&mut doc);
     let rendered = toml::to_string_pretty(&doc)
         .map_err(|e| anyhow::anyhow!("rendering seeded {}: {e}", path.display()))?;
     crate::paths::write_owner_only_atomic(&path, rendered.as_bytes())
@@ -543,6 +576,7 @@ mod tests {
     use crate::config::McpTransport;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
     use crate::merge::MergedManifest;
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
 
     fn stdio_mcp(name: &str) -> ResolvedMcp {
@@ -1090,6 +1124,91 @@ mod tests {
         super::apply_seeded_settings(dir.path(), &serde_json::Map::new()).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// A security-sensitive key (#1102 permissions are unmodeled, so these
+    /// aren't in `CODEX_MODELED_KEYS`) must never be seedable — otherwise
+    /// `init.seeded_settings` could silently run Codex less restrictively than
+    /// `capabilities.permissions` establishes on every other engine.
+    #[test]
+    fn seeded_settings_cannot_seed_a_security_sensitive_key() {
+        let manifest = MergedManifest::default();
+        let (dir, _parsed) = materialize_to_toml(&manifest);
+
+        let mut seeded = serde_json::Map::new();
+        seeded.insert("approval_policy".to_string(), serde_json::json!("never"));
+        seeded.insert(
+            "sandbox_mode".to_string(),
+            serde_json::json!("danger-full-access"),
+        );
+        super::apply_seeded_settings(dir.path(), &seeded).unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join(super::CODEX_CONFIG_FILE)).unwrap();
+        let parsed: toml::Table = raw.parse().unwrap();
+        assert!(
+            !parsed.contains_key("approval_policy"),
+            "approval_policy must never be seedable: {parsed:?}"
+        );
+        assert!(
+            !parsed.contains_key("sandbox_mode"),
+            "sandbox_mode must never be seedable: {parsed:?}"
+        );
+    }
+
+    proptest! {
+        /// `apply_seeded_settings` never crashes on an arbitrary map of
+        /// TOML-representable scalar values, always produces re-parseable
+        /// TOML, is idempotent, and never lets an arbitrary key collide with
+        /// `CODEX_MODELED_KEYS` or `CODEX_SECURITY_SENSITIVE_KEYS` (pbt-gap,
+        /// #1421).
+        #[test]
+        fn prop_apply_seeded_settings_holds_its_invariants(
+            entries in proptest::collection::vec(
+                (
+                    "[a-z][a-z0-9_]{0,12}",
+                    prop_oneof![
+                        any::<bool>().prop_map(|b| serde_json::json!(b)),
+                        any::<i32>().prop_map(|n| serde_json::json!(n)),
+                        "[a-zA-Z0-9 _.-]{0,20}".prop_map(|s| serde_json::json!(s)),
+                    ],
+                ),
+                0..8,
+            )
+        ) {
+            let manifest = MergedManifest::default();
+            let (dir, _parsed) = materialize_to_toml(&manifest);
+            let path = dir.path().join(super::CODEX_CONFIG_FILE);
+
+            let mut seeded = serde_json::Map::new();
+            for (k, v) in entries {
+                seeded.insert(k, v);
+            }
+
+            super::apply_seeded_settings(dir.path(), &seeded).unwrap();
+            let once = std::fs::read_to_string(&path).unwrap();
+            let parsed_once: toml::Table = once.parse().expect("output must always be valid TOML");
+
+            for key in super::CODEX_MODELED_KEYS {
+                prop_assert!(
+                    !seeded.contains_key(*key) || !parsed_once.contains_key(*key)
+                        || seeded.get(*key) != Some(&serde_json::json!(parsed_once[*key])),
+                    "a seeded modeled key must never override materialize's own render: {key}"
+                );
+            }
+            for key in super::CODEX_SECURITY_SENSITIVE_KEYS {
+                if seeded.contains_key(*key) {
+                    prop_assert!(
+                        !parsed_once.contains_key(*key),
+                        "a security-sensitive key must never be seeded: {key}"
+                    );
+                }
+            }
+
+            // Idempotence: applying the same settings again changes nothing.
+            super::apply_seeded_settings(dir.path(), &seeded).unwrap();
+            let twice = std::fs::read_to_string(&path).unwrap();
+            prop_assert_eq!(once, twice, "applying the same seeded settings twice must be a no-op the second time");
+        }
     }
 
     #[test]

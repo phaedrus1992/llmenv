@@ -588,6 +588,13 @@ itself wrote — it is left alone. Seeding never touches a
 [modeled key](#the-nativecodex-escape-hatch) (`mcp_servers`,
 `model_instructions_file`, `hooks`); those are llmenv's own render surface.
 
+A security-sensitive key — `approval_policy`, `sandbox_mode`,
+`sandbox_workspace_write`, `trusted_projects`, `shell_environment_policy` — is
+refused with a warning rather than seeded, even though none of them are
+modeled keys. llmenv doesn't render Codex permissions yet ([#1102](https://github.com/phaedrus1992/llmenv/issues/1102)),
+so a seeded value there could silently run Codex less restrictively than the
+posture `capabilities.permissions` establishes on every other engine.
+
 Codex needs no install-method seed the way Claude Code does: it detects its
 own install method (`brew`, `npm`, standalone, …) in-process from its own
 executable path, so there is no config key for llmenv to pre-seed.
@@ -619,11 +626,17 @@ lost on every config edit or version bump, the same problem Claude Code's
   change instead of a copy-per-hash.
 - **`history.jsonl`** — Codex's prompt-recall file, copied in when a folder
   has none and never overwritten once one exists.
-- **`auth.json`** — Codex's combined identity + OAuth token file, treated the
-  same way as `history.jsonl`. This is simpler than Claude Code's multi-folder
-  "freshest wins" auth chooser, because Codex's CLI login is a single global
-  credential — there is no scenario where two hashed folders legitimately hold
-  different logged-in accounts.
+- **`auth.json`** — Codex's combined identity + OAuth token file. Copied in
+  when a folder has none, same as `history.jsonl`, but capture uses a
+  newest-`mtime`-wins rule instead of "only when the store has none": a
+  re-login or token rotation replaces the store's copy, rather than pinning
+  the first-ever captured credential forever and serving a stale or revoked
+  token to every new folder indefinitely.
+
+Every file this relocates is copied with permissions forced to owner-only
+(`0o600`) regardless of the source's mode — `std::fs::copy` otherwise
+propagates whatever mode the source had, which would carry a looser umask
+into the durable store or a fresh folder alike.
 
 Codex also writes six SQLite databases directly into `$CODEX_HOME`
 (`state`/`logs`/`goals`/`memories`/`queue`/`thread-history`). Those are **not**
