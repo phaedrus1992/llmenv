@@ -45,7 +45,7 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 ## `launch`
 
 ```text
-llmenv launch <engine> [-- ARGS...]
+llmenv launch [--scope ID] [--tag TAG] [--compress] <engine> [-- ARGS...]
 ```
 
 (added in v4.0.0) Resolve the environment exactly the way `export` does, then
@@ -57,6 +57,22 @@ passed through to the engine binary unmodified, e.g.:
 ```text
 llmenv launch claude -- --resume
 ```
+
+`--scope`, `--tag`, and `--compress` (added in v4.0.0) mean exactly what they do
+for [`export`](#export), including the warning when a requested scope isn't
+active in the current environment. Without them, `launch` resolves the scopes the
+current directory and environment make active.
+
+They may appear before or after `<engine>`, but must come before `--`:
+
+```text
+llmenv launch --scope work claude -- --resume
+llmenv launch claude --scope work -- --resume     # same thing
+llmenv launch claude -- --scope work              # --scope goes to the engine
+```
+
+Everything after `--` belongs to the engine, so an engine with its own `--scope`
+(or `--tag`, or `--compress`) is still reachable — put it there.
 
 Unlike the shell-hook + `export` model, `launch` needs no shell integration — it
 behaves the same from an interactive shell, a script, a CI job, or an IDE task,
@@ -226,6 +242,13 @@ llmenv edit [BUNDLE-NAME]
 Open `config.yaml` (or, if `BUNDLE-NAME` is given, the matching
 `bundles/<name>.yaml` file) in `$EDITOR`. Falls back to `$VISUAL`, then `vi`.
 
+The editor is supervised the same way [`launch`](#launch) supervises an engine
+(changed in v4.0.0): a signal sent to `llmenv` alone doesn't end it, so it can't
+exit while the editor still owns the terminal, and the status it reports is the
+editor's. A terminal Ctrl-C still reaches the editor directly — the terminal
+delivers it to the whole foreground process group. The same applies to
+[`login`](#login)'s `claude auth login` and [`setup`](#setup)'s engine handoff.
+
 ## `completions`
 
 ```text
@@ -302,12 +325,19 @@ freshly-computed one and prints a restart hint on drift. Safe to run manually.
 ## `hook-run`
 
 ```text
-llmenv hook-run <event>
+llmenv hook-run [--engine ID] <event>
 ```
 
 Engine-neutral lifecycle hooks that inject ICM memory context over MCP and
 drive [`session_log:`](configuration.md#session_log). Invoked by the agent
 runtime (not by users directly).
+
+`--engine ID` names the engine the hook is running for (`claude_code`, `crush`,
+`opencode`); it decides which adapter's config the hook reads. llmenv writes it
+into the hook commands it materializes, so you rarely pass it by hand. An id no
+adapter answers to is an error listing the valid ones (changed in v4.0.0 — it
+previously fell back to guessing the engine from the environment). Omitting the
+flag defaults to `claude_code`.
 
 Lifecycle/memory events (`session_start`, `session_end` are auto-registered by
 the Claude Code adapter; `turn_start` is not yet wired in, see

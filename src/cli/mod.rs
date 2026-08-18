@@ -149,6 +149,16 @@ enum Command {
     /// see #1056. Everything after `--` is passed through to the engine
     /// unmodified.
     Launch {
+        /// Scope ID to resolve (defaults to the scopes the cwd and environment
+        /// make active, as `export` does)
+        #[arg(short, long)]
+        scope: Option<String>,
+        /// Tag filter (optional)
+        #[arg(short, long)]
+        tag: Option<String>,
+        /// Compress the materialized AGENTS.md (CLAUDE.md) to reduce token cost
+        #[arg(long)]
+        compress: bool,
         /// Engine to launch: a binary name (claude, crush, opencode) or the
         /// underscore-form engine id (claude_code)
         engine: String,
@@ -630,8 +640,22 @@ pub fn run() -> anyhow::Result<()> {
         }) => {
             run_export(scope, tag, explain, compress)?;
         }
-        Some(Command::Launch { engine, args }) => {
-            run_launch(&engine, args)?;
+        Some(Command::Launch {
+            scope,
+            tag,
+            compress,
+            engine,
+            args,
+        }) => {
+            run_launch(
+                &engine,
+                args,
+                LaunchScope {
+                    scope,
+                    tag,
+                    compress,
+                },
+            )?;
         }
         Some(Command::Regenerate) => {
             run_regenerate()?;
@@ -723,7 +747,11 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::HookRun { event, engine }) => {
             tracing::debug!(engine, "hook-run invoked by engine");
-            warn_if_unknown_engine(&engine);
+            // Rejected, not warned about, unlike the read-only commands above:
+            // hook-run dispatches on the adapter, so an unrecognized id used to
+            // mean "run this hook against whatever the environment looks like"
+            // with only a `warn!` nobody sees to say so (#1386).
+            crate::adapter::require_known_engine(&engine)?;
             if crate::hook_run::run(&event, &engine)? == crate::hook_run::HookExit::Block {
                 // Exit 2 is what makes a `PreToolUse` deny actually stop the
                 // tool call — on Claude Code and, since its plugin shim reads
@@ -846,10 +874,15 @@ fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Result<()> {
 
 fn validate_var_name(name: &str) -> anyhow::Result<()> {
     // Shell variable names must match [A-Za-z_][A-Za-z0-9_]*
-    if name.is_empty() {
+    //
+    // `chars().next()`, not `as_bytes()[0] as char`: the byte cast turned a
+    // multi-byte first character into whatever its leading byte happens to be,
+    // so the rejection message named a character that isn't in the name
+    // (#1387). Both forms reject it — only the diagnostic was wrong. It also
+    // subsumes the separate empty check.
+    let Some(first) = name.chars().next() else {
         anyhow::bail!("Variable name cannot be empty");
-    }
-    let first = name.as_bytes()[0] as char;
+    };
     if !first.is_ascii_alphabetic() && first != '_' {
         anyhow::bail!(
             "Variable name '{}' must start with letter or underscore",
@@ -973,7 +1006,7 @@ fn engine_is_active(config: &Config, engine: &str) -> bool {
     }
     crate::adapter::registered_adapters().into_iter().any(|a| {
         crate::adapter::engine_id(a.as_ref()) == engine
-            && crate::adapter::binary_on_path(a.binary_name())
+            && crate::paths::binary_on_path(a.binary_name())
     })
 }
 
@@ -1007,7 +1040,7 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
     crate::adapter::registered_adapters()
         .into_iter()
         .filter(move |adapter| {
-            let on_path = crate::adapter::binary_on_path(adapter.binary_name());
+            let on_path = crate::paths::binary_on_path(adapter.binary_name());
             if !on_path {
                 tracing::debug!(
                     adapter = adapter.name(),
@@ -1412,11 +1445,20 @@ fn run_export(
     Ok(())
 }
 
+/// The scope-narrowing flags `launch` shares with `export` (#1384), bundled so
+/// [`run_launch`] stays inside the 5-positional-param limit and so the three
+/// always travel to [`resolve_env`] together.
+struct LaunchScope {
+    scope: Option<String>,
+    tag: Option<String>,
+    compress: bool,
+}
+
 /// `llmenv launch <engine>`: resolve the environment the same way `export`
 /// does, then spawn `engine` as a supervised child process with that
 /// environment applied on top of the inherited one, inherited stdio, and the
 /// child's exit code propagated as `launch`'s own (see #1056).
-fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
+fn run_launch(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyhow::Result<()> {
     let adapter = crate::adapter::adapter_for_launch_target(engine).ok_or_else(|| {
         anyhow::anyhow!(
             "unrecognized engine '{engine}' — expected one of: {}",
@@ -1428,19 +1470,20 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
         )
     })?;
 
-    if !crate::adapter::binary_on_path(adapter.binary_name()) {
-        // `binary_on_path` resolves PATH directly, so a negative result now
-        // means the engine really isn't there — it can no longer be an
-        // artifact of `which` being unavailable (#1382).
+    // One resolution, used both as the "is it installed" gate and as the thing
+    // actually spawned — see `command_for_binary`. Resolving PATH directly means
+    // a negative result really is a missing engine, not an artifact of `which`
+    // being unavailable (#1382).
+    let Some(bin_path) = crate::paths::resolve_on_path(adapter.binary_name()) else {
         anyhow::bail!(
             "'{bin}' not found on PATH — install it before running `llmenv launch {engine}`",
             bin = adapter.binary_name()
         );
-    }
+    };
 
-    let resolved = resolve_env(None, None, false)?;
+    let resolved = resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
 
-    let mut cmd = tokio::process::Command::new(adapter.binary_name());
+    let mut cmd = command_at_path(&bin_path, adapter.binary_name());
     cmd.args(&args);
     for (key, value) in &resolved.vars {
         cmd.env(key, value);
@@ -1449,16 +1492,89 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
+    let status = run_supervised(cmd, adapter.binary_name(), None)?;
+
+    exit_with_status(status);
+}
+
+/// A `Command` for `binary`, resolved to the absolute path it has on `PATH`.
+///
+/// Spawning the resolved path rather than the bare name is the whole point.
+/// `std::process::Command` execs a name containing no `/` via `execvp`, and POSIX
+/// `execvp` runs its *own* `PATH` search that treats a zero-length entry as the
+/// working directory — so with `PATH=":/usr/local/bin"` (what `PATH="$MAYBE_UNSET:$PATH"`
+/// in a shell profile produces) `execvp` runs `./claude` even though
+/// `/usr/local/bin/claude` exists. llmenv's resolver deliberately skips those
+/// empty entries (#1382, #1390), so checking with it and then spawning a bare
+/// name meant the check and the exec could disagree, and the guard bought
+/// nothing: the child still came from the working directory, with the resolved
+/// environment — MCP endpoints, tokens — layered onto it.
+///
+/// Resolving once and spawning the result makes them agree by construction.
+///
+/// # Errors
+/// Returns an error naming `binary` when it isn't on `PATH`.
+fn command_for_binary(binary: &str) -> anyhow::Result<std::process::Command> {
+    let resolved = crate::paths::resolve_on_path(binary)
+        .ok_or_else(|| anyhow::anyhow!("'{binary}' not found on PATH"))?;
+    Ok(command_at_path(&resolved, binary))
+}
+
+/// A `Command` that execs `resolved` but presents `binary` as `argv[0]`.
+///
+/// A shell does the same — it execs the path its `PATH` search produced while
+/// passing the name the user typed — so a child that inspects `argv[0]` (to pick
+/// a mode, or to print its own usage) behaves as it did when llmenv spawned the
+/// bare name.
+fn command_at_path(resolved: &Path, binary: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(resolved);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.arg0(binary);
+    }
+    cmd
+}
+
+/// Run `cmd` as a supervised foreground child and return its exit status —
+/// the synchronous entry point to [`spawn_and_supervise`] for the call sites
+/// that aren't already inside a runtime.
+///
+/// Every place llmenv hands the terminal to a long-running interactive child
+/// goes through here (`launch`, `login`'s `claude auth login`, `setup`'s engine
+/// handoff, `edit`'s `$EDITOR`). Before #1385 only `launch` did, and the others
+/// waited under the default signal disposition: a Ctrl-C or a `kill` during that
+/// window terminated `llmenv` while the child kept running — orphaning it, and
+/// leaving the caller a signal-derived status instead of the child's own. The
+/// shell then drew a prompt on top of a still-live full-screen program.
+///
+/// `stdin_payload`, when set, is written to the child's stdin (piped) and the
+/// pipe is then closed. Written before the wait loop starts, so a payload larger
+/// than the pipe buffer relies on the child reading as it goes — true for every
+/// current caller, whose stdout and stderr are inherited and therefore never
+/// blocked on llmenv draining them.
+///
+/// # Errors
+/// Returns an error when the runtime can't be built, the spawn fails, a
+/// `stdin_payload` can't be written, or the wait fails.
+pub(crate) fn run_supervised(
+    mut cmd: std::process::Command,
+    binary: &str,
+    stdin_payload: Option<&[u8]>,
+) -> anyhow::Result<std::process::ExitStatus> {
+    if stdin_payload.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut cmd = tokio::process::Command::from(cmd);
+
     // `tokio::process::Command::spawn` registers the child with the runtime's
     // signal reactor, so it has to run inside `block_on` — spawning first and
     // entering the runtime afterwards panics with "there is no reactor running".
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("failed to build tokio runtime for launch supervision")?;
-    let status = rt.block_on(spawn_and_supervise(&mut cmd, adapter.binary_name()))?;
-
-    exit_with_status(status);
+        .context("failed to build tokio runtime for child supervision")?;
+    rt.block_on(spawn_and_supervise(&mut cmd, binary, stdin_payload))
 }
 
 /// Spawn the engine and wait for it to exit, never dying on a signal itself —
@@ -1493,6 +1609,7 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
 async fn spawn_and_supervise(
     cmd: &mut tokio::process::Command,
     binary: &str,
+    stdin_payload: Option<&[u8]>,
 ) -> anyhow::Result<std::process::ExitStatus> {
     use tokio::signal::unix::{SignalKind, signal};
 
@@ -1505,10 +1622,42 @@ async fn spawn_and_supervise(
         .spawn()
         .with_context(|| format!("failed to spawn '{binary}'"))?;
 
+    // The write runs *inside* the select below rather than before it. Installing
+    // the handlers above replaced their default disposition, so from that point
+    // on SIGINT/SIGTERM/SIGHUP are only buffered until something calls `recv()` —
+    // nothing does until the loop starts. Awaiting the write first meant that a
+    // payload larger than the pipe buffer, sent to a child that wasn't draining
+    // it, left llmenv blocked and killable by nothing but SIGKILL.
+    let mut write = std::pin::pin!(write_stdin_payload(
+        child.stdin.take(),
+        stdin_payload,
+        binary
+    ));
+    let mut writing = stdin_payload.is_some();
+
     loop {
         tokio::select! {
             status = child.wait() => {
                 return status.context("failed to wait on child engine process");
+            }
+            result = &mut write, if writing => {
+                writing = false;
+                if let Err(e) = result {
+                    // Deliberately not fatal. A failed write means the child
+                    // closed its read end, so it has either exited already or
+                    // decided not to read — and its own exit status and stderr
+                    // explain that far better than an `EPIPE` here would. Keep
+                    // waiting and let the `child.wait()` arm report the real
+                    // outcome.
+                    //
+                    // Returning instead would also drop `child` without killing
+                    // it, and a dropped `tokio::process::Child` keeps running —
+                    // so the error path of the anti-orphaning fix would orphan the
+                    // child. `error!`, not `warn!`: llmenv's default filter is
+                    // ERROR-only, and a child that silently never received its
+                    // input is not something to leave unexplained.
+                    tracing::error!("could not send input to '{binary}': {e:#}");
+                }
             }
             _ = sigint.recv() => {
                 // Deliberately not forwarded — see the doc comment above.
@@ -1522,6 +1671,57 @@ async fn spawn_and_supervise(
             }
         }
     }
+}
+
+/// Write `payload` to `stdin` and close it, or do nothing when there's no
+/// payload.
+///
+/// Takes the handle by value so the write can live in the supervision `select!`
+/// without borrowing the `Child` the same `select!` is waiting on.
+///
+/// # Errors
+/// Returns an error when a payload was requested but no stdin pipe was opened for
+/// it, or when the write fails — including the `EPIPE` a child that exited before
+/// reading produces.
+async fn write_stdin_payload(
+    stdin: Option<tokio::process::ChildStdin>,
+    payload: Option<&[u8]>,
+    binary: &str,
+) -> anyhow::Result<()> {
+    let Some(payload) = payload else {
+        return Ok(());
+    };
+    let Some(stdin) = stdin else {
+        anyhow::bail!("'{binary}' was spawned without a stdin pipe to write to");
+    };
+    write_child_stdin(stdin, payload, binary).await
+}
+
+/// Write `payload` to the child's stdin and close the pipe.
+///
+/// Closing it is the point: `setup`'s crush handoff feeds the skill text on
+/// stdin, and crush reads until EOF — leaving the handle open would hang.
+///
+/// # Errors
+/// Returns an error when the write or the close fails. A child that exited before
+/// reading its input surfaces here as `EPIPE`, so the message says so rather than
+/// reporting a bare "broken pipe".
+async fn write_child_stdin(
+    mut stdin: tokio::process::ChildStdin,
+    payload: &[u8],
+    binary: &str,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    stdin.write_all(payload).await.with_context(|| {
+        format!("writing to '{binary}' stdin — it may have exited before reading its input")
+    })?;
+    // `shutdown` flushes and closes; the `stdin` handle is then dropped, so
+    // nothing is left holding the write end open.
+    stdin
+        .shutdown()
+        .await
+        .with_context(|| format!("closing '{binary}' stdin"))
 }
 
 /// Send `signal` to the supervised engine, best-effort.
@@ -4006,19 +4206,22 @@ fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyh
     let tmp = tempfile::TempDir::new()
         .map_err(|e| anyhow::anyhow!("creating temp dir for login: {e}"))?;
 
-    let status = std::process::Command::new("claude")
-        .args(["auth", "login"])
+    let mut cmd = command_for_binary("claude")?;
+    cmd.args(["auth", "login"])
         .env("CLAUDE_CONFIG_DIR", tmp.path())
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "running `claude auth login` failed: {e}. \
+        .stderr(std::process::Stdio::inherit());
+    // Supervised (#1385): `claude auth login` is a full-screen interactive flow,
+    // and an unsupervised wait let a Ctrl-C kill llmenv while the login kept
+    // running — writing its credential into a `TempDir` whose cleanup no longer
+    // ran, with no `llmenv` left to capture the result.
+    let status = run_supervised(cmd, "claude", None).map_err(|e| {
+        anyhow::anyhow!(
+            "running `claude auth login` failed: {e:#}. \
              Is the Claude Code CLI installed and on PATH?"
-            )
-        })?;
+        )
+    })?;
 
     if !status.success() {
         anyhow::bail!("`claude auth login` exited with status {status}");
@@ -4704,10 +4907,15 @@ fn run_edit(bundle: Option<String>) -> anyhow::Result<()> {
         .copied()
         .ok_or_else(|| anyhow::anyhow!("$EDITOR / $VISUAL is set but empty"))?;
     let extra_args = parts.get(1..).unwrap_or_default();
-    let status = std::process::Command::new(bin)
-        .args(extra_args)
-        .arg(&path)
-        .status()
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(extra_args).arg(&path);
+    // Supervised (#1385) despite the editor being the one thing that arguably
+    // wants Ctrl-C for itself. It still gets it: the terminal generates SIGINT
+    // for the whole foreground process group, so the editor receives its own
+    // copy and handles it however it likes. What supervision changes is only
+    // llmenv's half — it stops dying first and handing the shell a prompt to
+    // draw over a still-running full-screen editor.
+    let status = run_supervised(cmd, bin, None)
         .with_context(|| format!("failed to launch editor: {editor}"))?;
     if !status.success() {
         anyhow::bail!("editor exited with {status}");
@@ -5977,7 +6185,7 @@ mod tests {
         // and must not print confusing "unknown engine" warnings.
         let on_path_count = crate::adapter::registered_adapters()
             .iter()
-            .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
+            .filter(|a| crate::paths::binary_on_path(a.binary_name()))
             .count();
         let config = Config {
             disabled_engines: vec!["".to_string(), "  ".to_string(), "\t".to_string()],
@@ -6640,6 +6848,259 @@ mod exit_code_tests {
         fn never_panics_on_arbitrary_raw_status(raw in any::<i32>()) {
             let _ = exit_code_for_status(ExitStatus::from_raw(raw));
         }
+    }
+}
+
+/// Property tests for the three functions that decide what an engine's
+/// environment may contain and how it is written out (#1387).
+///
+/// These were covered only by hand-picked examples, which is the wrong shape for
+/// a validate/escape trio: #1056 made `resolve_env`'s output land in a real child
+/// process environment via `llmenv launch`, not just in shell text a user evals,
+/// so a gap that used to produce malformed output now sets a variable.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
+mod var_validation_props {
+    use super::{shell_escape, validate_var_name, validate_var_value};
+    use proptest::prelude::*;
+
+    /// The documented charset, spelled out independently of the implementation:
+    /// `[A-Za-z_][A-Za-z0-9_]*`.
+    fn is_shell_identifier(name: &str) -> bool {
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !first.is_ascii_alphabetic() && first != '_' {
+            return false;
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// True when `escaped` is a well-formed single-quoted shell word: quoted at
+    /// both ends, with every interior `'` appearing only as the `'\''`
+    /// close-escape-reopen sequence. Anything else means a metacharacter escaped
+    /// the quotes and would be interpreted by the shell.
+    fn is_single_quoted_word(escaped: &str) -> bool {
+        let Some(inner) = escaped
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+        else {
+            return false;
+        };
+        // Remove the legitimate sequences, then no bare quote may remain.
+        !inner.replace("'\\''", "").contains('\'')
+    }
+
+    proptest! {
+        /// Never panics, and accepts exactly the documented charset — no more
+        /// (a name the shell can't hold) and no less (a name llmenv itself
+        /// emits, e.g. `CLAUDE_CONFIG_DIR`).
+        #[test]
+        fn validate_var_name_accepts_exactly_shell_identifiers(name in any::<String>()) {
+            prop_assert_eq!(
+                validate_var_name(&name).is_ok(),
+                is_shell_identifier(&name),
+                "disagreement on {:?}",
+                name
+            );
+        }
+
+        /// Only a NUL is rejected: it can't survive in a C-string environment
+        /// value and would truncate it. Newlines, CR, and quotes are all
+        /// legitimate (`LLMENV_ICM_CONTEXT` is multiline by design, #469).
+        #[test]
+        fn validate_var_value_rejects_exactly_embedded_nuls(value in any::<String>()) {
+            prop_assert_eq!(
+                validate_var_value(&value).is_err(),
+                value.contains('\0'),
+                "disagreement on {:?}",
+                value
+            );
+        }
+
+        /// Whatever goes in, the result is a single-quoted word — so no
+        /// metacharacter (`$`, backtick, `;`, newline, a bare quote) is ever
+        /// left where the shell would act on it.
+        #[test]
+        fn shell_escape_always_yields_a_single_quoted_word(value in any::<String>()) {
+            let escaped = shell_escape(&value);
+            prop_assert!(
+                is_single_quoted_word(&escaped),
+                "escaping {:?} produced {:?}, which is not a well-formed single-quoted word",
+                value,
+                escaped
+            );
+        }
+    }
+
+    proptest! {
+        // Each case forks a shell, so this runs fewer of them than the pure
+        // properties above — enough to cover the metacharacter space without
+        // adding seconds to every test run.
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// The property that actually matters: a real shell, asked to print the
+        /// escaped form, gives back the original bytes. Covers the quoting rules
+        /// end to end instead of asserting a shape the shell might read
+        /// differently.
+        ///
+        /// NUL is excluded because it cannot be carried in an argv at all —
+        /// `validate_var_value` rejects it before anything reaches this.
+        #[test]
+        fn shell_escape_round_trips_through_a_real_shell(value in "[^\0]*") {
+            let script = format!("printf %s {}", shell_escape(&value));
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("run sh");
+            prop_assert!(
+                out.status.success(),
+                "sh rejected {:?} (script {:?}): {}",
+                value,
+                script,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+            prop_assert_eq!(printed, value, "round-trip changed the value");
+        }
+    }
+}
+
+/// #1385: the shared supervised-spawn helper every foreground call site now uses
+/// (`launch`, `login`, `setup`'s handoff, `edit`).
+#[cfg(test)]
+#[cfg(unix)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
+mod run_supervised_tests {
+    use super::{exit_code_for_status, run_supervised};
+
+    #[test]
+    fn returns_the_childs_own_exit_code() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exit 7"]);
+        let status = run_supervised(cmd, "sh", None).unwrap();
+        assert_eq!(
+            status.code(),
+            Some(7),
+            "the child's real exit code must survive supervision; got {status:?}"
+        );
+    }
+
+    /// A child that dies by signal must be reported as such, not collapsed into
+    /// a generic failure — `exit_code_for_status` turns it into the `128+signum`
+    /// a shell would show.
+    #[test]
+    fn signal_killed_child_maps_to_128_plus_signum() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "kill -TERM $$"]);
+        let status = run_supervised(cmd, "sh", None).unwrap();
+        assert_eq!(
+            exit_code_for_status(status),
+            128 + 15,
+            "a SIGTERM'd child should report 143; got {status:?}"
+        );
+    }
+
+    /// `setup`'s crush handoff feeds the skill text on stdin and crush reads to
+    /// EOF, so the payload must arrive *and* the pipe must be closed afterwards
+    /// — a still-open write end would hang the child instead of ending it.
+    #[test]
+    fn stdin_payload_is_delivered_and_the_pipe_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("stdin.txt");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "cat > \"$OUT\""]).env("OUT", &out);
+
+        let status = run_supervised(cmd, "sh", Some(b"skill body\n")).unwrap();
+        assert!(
+            status.success(),
+            "`cat` should have seen EOF and exited cleanly; got {status:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "skill body\n");
+    }
+
+    /// Nothing is written when no payload is requested, and the child still sees
+    /// a usable (inherited) stdin rather than a dangling pipe.
+    #[test]
+    fn no_payload_leaves_stdin_alone() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        assert!(run_supervised(cmd, "sh", None).unwrap().success());
+    }
+
+    /// A stdin-write failure must not end the call early. Returning there would
+    /// drop the `Child` handle, and a dropped `tokio::process::Child` keeps
+    /// executing by default — the same orphaning `run_supervised` exists to
+    /// prevent, on its own error path. It would also replace the child's real
+    /// outcome with an `EPIPE` that explains much less.
+    ///
+    /// The stub closes its stdin so the write fails, then exits with a status only
+    /// a still-running wait loop can observe.
+    #[test]
+    fn a_child_that_rejects_its_stdin_payload_is_still_waited_for() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exec 0<&-; sleep 1; exit 4"]);
+
+        // Comfortably larger than any platform's pipe buffer (64 KiB on Linux,
+        // 16-64 KiB on macOS): a payload that fits is absorbed by the buffer
+        // before the child closes its read end, and the write then succeeds.
+        let payload = vec![b'x'; 1024 * 1024];
+        let status = run_supervised(cmd, "sh", Some(&payload))
+            .expect("a failed write must not turn into a failed run");
+
+        assert_eq!(
+            status.code(),
+            Some(4),
+            "expected the child's own exit code — reaching it proves llmenv kept \
+             waiting instead of bailing out and orphaning the child; got {status:?}"
+        );
+    }
+
+    /// A payload larger than the pipe buffer, sent to a child that isn't draining
+    /// it, blocks the write. The supervision loop has to keep running anyway.
+    ///
+    /// This is what makes the signal handlers effective: they're installed before
+    /// the spawn, so from then on SIGINT/SIGTERM/SIGHUP no longer terminate llmenv
+    /// on their own and only take effect when the loop polls for them. Awaiting the
+    /// write *ahead* of the loop meant a blocked write left llmenv killable by
+    /// nothing but SIGKILL.
+    ///
+    /// Asserted without signals — sending one would hit the whole test process and
+    /// disturb sibling tests. The child's exit status standing in for the loop's
+    /// liveness is equivalent and deterministic: reaching it at all proves
+    /// `child.wait()` was being polled while the write was still pending, and it
+    /// can only be observed if the write didn't own the thread. Before the fix the
+    /// blocked write ran to its `EPIPE` instead and the call returned that error.
+    #[test]
+    fn the_supervision_loop_runs_while_a_large_stdin_payload_is_still_being_written() {
+        let mut cmd = std::process::Command::new("sh");
+        // Never reads stdin — so the write fills the pipe buffer and blocks — then
+        // exits on its own with a status only the wait loop can observe.
+        cmd.args(["-c", "sleep 1; exit 3"]);
+
+        // Several times any pipe buffer, so the write cannot complete on its own.
+        let payload = vec![b'x'; 4 * 1024 * 1024];
+        let status = run_supervised(cmd, "sh", Some(&payload))
+            .expect("the wait loop should have reported the child's status");
+
+        assert_eq!(
+            status.code(),
+            Some(3),
+            "expected the child's own exit code, which is only reachable if the \
+             blocked write didn't stall the supervision loop; got {status:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_failure_names_the_binary() {
+        let cmd = std::process::Command::new("__llmenv_no_such_binary_xyzzy__");
+        let err = run_supervised(cmd, "__llmenv_no_such_binary_xyzzy__", None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("__llmenv_no_such_binary_xyzzy__"),
+            "spawn failure must name the binary, got: {err:#}"
+        );
     }
 }
 

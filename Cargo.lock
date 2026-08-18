@@ -1365,6 +1365,7 @@ dependencies = [
  "anyhow",
  "proptest",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

@@ -3,9 +3,16 @@
 //!
 //! Lifecycle hooks run on the agent's hot path — session start and every prompt
 //! turn. The dispatcher's hard guarantee is: **it never blocks the agent.** No
-//! matter what goes wrong (bad event name, no backend, malformed/SSRF-rejected
-//! URL, unreachable host), the command must exit 0, emit nothing on stdout, and
-//! degrade to a single `llmenv:`-prefixed warning on stderr.
+//! matter what goes wrong at run time (bad event name, no backend,
+//! malformed/SSRF-rejected URL, unreachable host), the command must exit 0, emit
+//! nothing on stdout, and degrade to a single `llmenv:`-prefixed warning on
+//! stderr.
+//!
+//! The one exception is a malformed *invocation* rather than a runtime failure:
+//! an `--engine` value no adapter answers to exits non-zero (#1386). llmenv
+//! generates the hook command — including that flag — itself, so such a value
+//! means the wiring is wrong, and the alternative was running the hook against
+//! an env-sniffed adapter's config.
 //!
 //! These tests drive the compiled binary (via `assert_cmd`) so they exercise the
 //! real `run()` entry point end to end, including config resolution and the SSRF
@@ -168,6 +175,51 @@ fn assert_fail_soft(mut cmd: Command, stderr_needle: &str) {
         .success()
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains(stderr_needle));
+}
+
+/// #1386: an unrecognized `--engine` is the one hook-run input that is *not*
+/// fail-soft. It is not a runtime hiccup — llmenv bakes the flag into the hook
+/// command it materializes itself, so a value no adapter answers to means the
+/// invocation is wrong, and the old behavior was to env-sniff an adapter and run
+/// the hook against whatever the environment happened to look like. Failing here
+/// is strictly safer than guessing, and cannot fire in a correctly generated
+/// setup.
+#[test]
+fn unrecognized_engine_exits_non_zero_listing_valid_ids() {
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yaml");
+    fs::write(&config_path, "adapter:\n  engine: claude-code\n").unwrap();
+
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
+    cmd.env("LLMENV_CONFIG", &config_path)
+        .arg("hook-run")
+        .arg("--engine")
+        .arg("__llmenv_no_such_engine_xyzzy__")
+        .arg("session_start");
+    cmd.timeout(Duration::from_secs(10))
+        .assert()
+        // Pinned to 1, not just "non-zero": exit 2 is what Claude Code and
+        // opencode read as "deny this tool call", so a refactor that drifted a
+        // wiring error into a 2 would turn a misconfiguration into a block.
+        .code(1)
+        .stderr(predicate::str::contains("unrecognized engine"))
+        .stderr(predicate::str::contains("claude_code"));
+}
+
+/// The other half of #1386: validation must not turn the *omitted* case into a
+/// failure. `--engine` defaults to `claude_code` (llmenv's own hook commands
+/// pass it explicitly), so an invocation without the flag reaches the fail-soft
+/// dispatcher exactly as before and never mentions engine validation.
+#[test]
+fn omitted_engine_reaches_the_fail_soft_dispatcher() {
+    let (dir, config_path) = setup_config(&config_no_backend());
+
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("no memory backend active"))
+        .stderr(predicate::str::contains("unrecognized engine").not());
 }
 
 #[test]

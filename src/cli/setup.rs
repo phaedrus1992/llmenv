@@ -220,37 +220,35 @@ fn engine_handoff_prompt(
     eprintln!("(The AI will guide you through the rest of the setup.)");
     eprintln!();
 
+    // Both arms go through `run_supervised` (#1385): this hands the terminal to
+    // an interactive agent session that can run for minutes, and an unsupervised
+    // wait let a Ctrl-C kill `llmenv setup` while the agent kept running — the
+    // user's setup then continued with nothing left to report its outcome.
     match engine_id.as_str() {
         "claude_code" => {
-            let status = std::process::Command::new("claude")
-                .arg("-p")
+            let mut cmd = crate::cli::command_for_binary("claude")?;
+            cmd.arg("-p")
                 .arg(&skill_content)
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status()
-                .context("launching claude")?;
+                .stderr(std::process::Stdio::inherit());
+            let status =
+                crate::cli::run_supervised(cmd, "claude", None).context("launching claude")?;
             if !status.success() {
                 anyhow::bail!("claude exited with status {status}");
             }
         }
         "crush" => {
-            use std::io::Write;
-            let mut child = std::process::Command::new("crush")
-                .arg("run")
+            let mut cmd = crate::cli::command_for_binary("crush")?;
+            cmd.arg("run")
                 .arg("--quiet")
                 .arg("Execute the setup-llmenv skill")
-                .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .spawn()
+                .stderr(std::process::Stdio::inherit());
+            // crush takes the skill text on stdin; `run_supervised` pipes it,
+            // writes it, and closes the pipe so crush sees EOF.
+            let status = crate::cli::run_supervised(cmd, "crush", Some(skill_content.as_bytes()))
                 .context("launching crush")?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(skill_content.as_bytes())
-                    .context("writing skill to crush stdin")?;
-            }
-            let status = child.wait().context("waiting for crush")?;
             if !status.success() {
                 anyhow::bail!("crush exited with status {status}");
             }
@@ -267,7 +265,7 @@ fn engine_handoff_prompt(
 fn probe_engines() -> Vec<String> {
     crate::adapter::registered_adapters()
         .iter()
-        .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
+        .filter(|a| crate::paths::binary_on_path(a.binary_name()))
         .map(|a| crate::adapter::engine_id(a.as_ref()))
         .collect()
 }
