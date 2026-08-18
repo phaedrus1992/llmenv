@@ -38,10 +38,24 @@ pub struct CodexAdapter;
 /// Codex reads `$CODEX_HOME/config.toml`.
 const CODEX_CONFIG_FILE: &str = "config.toml";
 
-/// No lifecycle hooks are wired yet (#1108). Declared empty rather than
-/// optimistically listing Codex's event names: claiming support llmenv doesn't
-/// render would silently drop every hook a bundle declares.
-const SUPPORTED_HOOK_EVENTS: &[&str] = &[];
+/// Lifecycle events Codex accepts, from `HookEventsToml`'s serde renames
+/// (`codex-rs/config/src/hook_config.rs`).
+///
+/// Claude Code's `Notification` has no entry there, so a bundle declaring it
+/// gets a warning rather than a hook Codex would ignore.
+const SUPPORTED_HOOK_EVENTS: &[&str] = &[
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+];
 
 /// Keys this adapter renders itself, and which a `native.codex` catch-all
 /// fragment must therefore not overwrite.
@@ -53,7 +67,7 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[];
 /// choosing, silently — `overlay_native_json` runs after the render, so the
 /// override simply wins. The framework already classifies this concept as
 /// modeled-with-no-escape-hatch; use `capabilities.rules`.
-const CODEX_MODELED_KEYS: &[&str] = &["mcp_servers", "model_instructions_file"];
+const CODEX_MODELED_KEYS: &[&str] = &["mcp_servers", "model_instructions_file", "hooks"];
 
 impl AgentAdapter for CodexAdapter {
     fn name(&self) -> &'static str {
@@ -93,7 +107,7 @@ impl AgentAdapter for CodexAdapter {
     /// that genuinely does nothing for Codex.
     fn native_maps(&self) -> &'static [&'static str] {
         use crate::adapter::native_keys as nk;
-        &[nk::NATIVE_MCP, nk::NATIVE]
+        &[nk::NATIVE_MCP, nk::NATIVE_HOOKS, nk::NATIVE]
     }
 
     fn supported_hook_events(&self) -> &'static [&'static str] {
@@ -157,6 +171,17 @@ impl AgentAdapter for CodexAdapter {
             }
         }
 
+        let hooks = render_hooks(manifest);
+        if !hooks.is_empty() || manifest.capabilities.native_hooks.contains_key("codex") {
+            let mut value = serde_json::json!({ "events": hooks });
+            super::overlay_native_json(
+                &mut value,
+                manifest.capabilities.native_hooks.get("codex"),
+                "native_hooks.codex",
+            )?;
+            doc.insert("hooks".into(), value);
+        }
+
         if let Some(native) = manifest.native.get("codex") {
             super::reject_modeled_native_keys(native, CODEX_MODELED_KEYS, "codex")?;
         }
@@ -181,30 +206,19 @@ impl AgentAdapter for CodexAdapter {
     }
 }
 
-/// Warn about capabilities this slice can't render yet, rather than failing the
+/// Warn about capabilities this slice can't render, rather than failing the
 /// whole render.
 ///
-/// A bundle shared across engines commonly declares hooks and permissions for
-/// Claude Code. That is a cross-engine gap, not an authoring mistake, and
-/// failing here would also drop the MCP servers and AGENTS.md that Codex *can*
-/// use — the same reasoning the Crush adapter applies to its own unsupported
-/// events.
+/// A bundle shared across engines commonly declares capabilities for Claude
+/// Code. That is a cross-engine gap, not an authoring mistake, and failing here
+/// would also drop the MCP servers and AGENTS.md that Codex *can* use — the same
+/// reasoning the Crush adapter applies to its own unsupported events.
 ///
-/// Permissions get a warning for a stronger reason than the hooks do: a `deny`
-/// rule that evaporates leaves Codex running under its own default
+/// Permissions get a warning for a stronger reason than hooks do: a `deny` rule
+/// that evaporates leaves Codex running under its own default
 /// `approval_policy`/`sandbox_mode`, so the posture is silently weaker on this
-/// engine than on the one the bundle was tested against. Being quiet about that
-/// is worse than being quiet about a hook that didn't fire.
+/// engine than on the one the bundle was tested against.
 fn warn_about_unrenderable_capabilities(manifest: &MergedManifest) {
-    for hook in &manifest.capabilities.hooks {
-        eprintln!(
-            "warning: the Codex adapter does not wire lifecycle hooks yet \
-             (hook event '{}') — skipping it. Tracking issue: \
-             https://github.com/phaedrus1992/llmenv/issues/1108",
-            hook.event
-        );
-    }
-
     let perms = &manifest.capabilities.permissions;
     let rule_count = perms.allow.len() + perms.ask.len() + perms.deny.len();
     if rule_count > 0 {
@@ -216,6 +230,85 @@ fn warn_about_unrenderable_capabilities(manifest: &MergedManifest) {
             perms.deny.len()
         );
     }
+}
+
+/// Render `manifest.capabilities.hooks` into Codex's `hooks.events` table.
+///
+/// Codex uses the same nested shape as Claude Code — a list of matcher groups
+/// per event, each carrying `hooks: [{ type = "command", command = … }]` — and
+/// the event names match too (`hook_config.rs`'s serde renames). So llmenv's
+/// engine-neutral hooks map across without a translation layer.
+///
+/// Two kinds of hook are skipped with a warning rather than rendered:
+///
+/// - an event Codex has no field for. `Notification` is the live case: Claude
+///   Code has it, `HookEventsToml` doesn't, and an unknown key would be ignored
+///   silently (Codex tolerates unknown fields), so the hook would look wired
+///   while never firing.
+/// - an `mcp_tool` handler. Codex's handler enum is tagged `type` with a
+///   `command` variant only.
+fn render_hooks(manifest: &MergedManifest) -> serde_json::Map<String, serde_json::Value> {
+    let mut by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+
+    for hook in &manifest.capabilities.hooks {
+        if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
+            eprintln!(
+                "warning: Codex has no '{}' lifecycle event — skipping this hook. \
+                 Supported events: {}. Move it to a claude_code-only bundle to \
+                 silence this warning.",
+                hook.event,
+                SUPPORTED_HOOK_EVENTS.join(", ")
+            );
+            continue;
+        }
+        if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
+            eprintln!(
+                "warning: Codex hooks run commands only, so the mcp_tool hook on '{}' \
+                 (tool '{}') is skipped. Use a command hook instead.",
+                hook.event,
+                hook.handler.tool.as_deref().unwrap_or("<unnamed>")
+            );
+            continue;
+        }
+        let Some(command) = hook.handler.command.as_ref() else {
+            eprintln!(
+                "warning: the command hook on '{}' has no command — skipping it.",
+                hook.event
+            );
+            continue;
+        };
+        // Bundle-relative script paths are authored once and materialized per
+        // engine, so they have to be resolved against the bundle they came from.
+        let resolved = match &hook.bundle_origin {
+            Some(bundle_dir) => super::resolve_bundle_relative_paths(command, bundle_dir)
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "failed to resolve bundle-relative path for command in {bundle_dir:?}: {command:?}"
+                    );
+                    command.clone()
+                }),
+            None => command.clone(),
+        };
+
+        let mut group = serde_json::Map::new();
+        if let Some(matcher) = &hook.matcher {
+            group.insert("matcher".into(), json!(matcher));
+        }
+        group.insert(
+            "hooks".into(),
+            json!([{ "type": "command", "command": resolved }]),
+        );
+        by_event
+            .entry(hook.event.clone())
+            .or_default()
+            .push(serde_json::Value::Object(group));
+    }
+
+    by_event
+        .into_iter()
+        .map(|(event, groups)| (event, json!(groups)))
+        .collect()
 }
 
 /// Render `manifest.mcps` into Codex's `mcp_servers` table.
@@ -528,6 +621,99 @@ mod tests {
             !parsed.contains_key("review_model"),
             "an explicit null must remove the key rather than emit a TOML value"
         );
+    }
+
+    fn command_hook(event: &str, matcher: Option<&str>, command: &str) -> crate::config::Hook {
+        crate::config::Hook {
+            event: event.into(),
+            matcher: matcher.map(Into::into),
+            handler: crate::config::HookHandler {
+                kind: crate::config::HookHandlerKind::Command,
+                command: Some(command.into()),
+                tool: None,
+            },
+            bundle_origin: None,
+        }
+    }
+
+    /// Codex takes the same nested matcher-group shape as Claude Code, under
+    /// `hooks.events.<Event>`, and its event names match — so the neutral hooks
+    /// map across without translation.
+    #[test]
+    fn hooks_render_into_codex_matcher_groups() {
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .hooks
+            .push(command_hook("PreToolUse", Some("Bash"), "echo guard"));
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        let groups = parsed["hooks"]["events"]["PreToolUse"].as_array().unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["matcher"].as_str(), Some("Bash"));
+        let handlers = groups[0]["hooks"].as_array().unwrap();
+        assert_eq!(handlers[0]["type"].as_str(), Some("command"));
+        assert_eq!(handlers[0]["command"].as_str(), Some("echo guard"));
+    }
+
+    /// `Notification` is Claude-only — `HookEventsToml` has no field for it. An
+    /// unknown key would be ignored silently, so the hook would look wired and
+    /// never fire; skipping it with a warning is the honest outcome.
+    #[test]
+    fn an_event_codex_lacks_is_skipped_not_emitted() {
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .hooks
+            .push(command_hook("Notification", None, "echo hi"));
+        manifest
+            .capabilities
+            .hooks
+            .push(command_hook("SessionStart", None, "echo start"));
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        let events = parsed["hooks"]["events"].as_table().unwrap();
+
+        assert!(
+            !events.contains_key("Notification"),
+            "Codex has no Notification event: {events:?}"
+        );
+        assert!(events.contains_key("SessionStart"), "{events:?}");
+    }
+
+    /// Codex's handler enum is tagged `type` with a `command` variant only.
+    #[test]
+    fn mcp_tool_hooks_are_skipped() {
+        let mut manifest = MergedManifest::default();
+        let mut hook = command_hook("PreToolUse", None, "unused");
+        hook.handler.kind = crate::config::HookHandlerKind::McpTool;
+        hook.handler.command = None;
+        hook.handler.tool = Some("some_tool".into());
+        manifest.capabilities.hooks.push(hook);
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(
+            !parsed.contains_key("hooks"),
+            "an mcp_tool-only hook set must render no hooks block: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn native_codex_cannot_clobber_the_rendered_hooks() {
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .hooks
+            .push(command_hook("SessionStart", None, "echo start"));
+        manifest.native.insert(
+            "codex".into(),
+            serde_yaml::from_str("hooks:\n  events: {}\n").unwrap(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = CodexAdapter.materialize(&manifest, dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("hooks"), "{err:#}");
     }
 
     /// A `deny` rule that silently evaporates leaves Codex running under its own
