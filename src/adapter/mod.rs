@@ -425,19 +425,35 @@ pub(crate) fn known_engine_ids() -> Vec<String> {
 /// they cannot be plain binary names.
 #[must_use]
 pub(crate) fn binary_on_path(name: &str) -> bool {
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    binary_in_path_list(name, &path_var)
+    resolve_on_path(name).is_some()
 }
 
-/// [`binary_on_path`] against an explicit `PATH` value.
+/// The full path `name` resolves to on `PATH`, or `None` when it isn't there.
+///
+/// Callers that only need a yes/no answer should use [`binary_on_path`]; this
+/// exists for the ones that need the location itself (claude-code's
+/// install-method detection inspects the resolved path).
+#[must_use]
+fn resolve_on_path(name: &str) -> Option<PathBuf> {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        // Distinguished from "PATH is set but has no match" only in the log:
+        // both mean the binary is unusable, but an absent PATH points at a
+        // stripped environment rather than a missing install.
+        tracing::debug!("PATH is unset; cannot resolve '{name}'");
+        return None;
+    };
+    resolve_in_path_list(name, &path_var)
+}
+
+/// [`resolve_on_path`] against an explicit `PATH` value.
 ///
 /// Split out so the lookup is testable without mutating the process
 /// environment: `std::env::set_var` is `unsafe` as of Rust 2024 and this
 /// workspace sets `unsafe_code = "forbid"`, so a test cannot legally point the
 /// real `PATH` somewhere else.
-fn binary_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> bool {
+fn resolve_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
     if name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace) {
-        return false;
+        return None;
     }
     std::env::split_paths(path_var)
         // A literal empty `PATH` entry means "the current directory" to a POSIX
@@ -445,7 +461,8 @@ fn binary_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> bool {
         // the working directory is a hijack vector, and no adapter binary
         // legitimately lives there.
         .filter(|dir| !dir.as_os_str().is_empty())
-        .any(|dir| is_executable_file(&dir.join(name)))
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
 }
 
 /// True when `path` is a regular file carrying an execute bit — what a shell's
@@ -456,8 +473,19 @@ fn binary_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> bool {
 /// can't stat) simply means "not usable here", which is the same conclusion a
 /// shell reaches.
 fn is_executable_file(path: &Path) -> bool {
-    let Ok(md) = std::fs::metadata(path) else {
-        return false;
+    let md = match std::fs::metadata(path) {
+        Ok(md) => md,
+        Err(e) => {
+            // A missing entry is the overwhelmingly common case and not worth
+            // reporting. Anything else (an unreadable directory, a stalled
+            // network mount, fd exhaustion) also resolves to "not usable
+            // here", but it can make an installed engine look absent — so
+            // leave a breadcrumb rather than discarding it entirely.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("PATH probe could not stat {}: {e}", path.display());
+            }
+            return false;
+        }
     };
     if !md.is_file() {
         return false;
@@ -469,7 +497,10 @@ fn is_executable_file(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        true
+        // Fail closed. There is no shipped non-unix target (release builds are
+        // linux-musl and apple-darwin), and treating every regular file as
+        // executable would be weaker than the `which` call this replaced.
+        false
     }
 }
 
@@ -675,10 +706,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, active_adapter_from, adapter_for_launch_target, binary_in_path_list,
-        binary_on_path, emit_hook_context, engine_id, known_engine_ids, modeled_key_redirect,
-        overlay_native_json, registered_adapters, remote_transport_type_str,
-        resolve_bundle_relative_paths, resolve_command_paths_against_files, strip_json_nulls,
+        AgentAdapter, active_adapter_from, adapter_for_launch_target, binary_on_path,
+        emit_hook_context, engine_id, known_engine_ids, modeled_key_redirect, overlay_native_json,
+        registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
+        resolve_command_paths_against_files, resolve_in_path_list, strip_json_nulls,
     };
     use crate::merge::MergedManifest;
 
@@ -1032,9 +1063,11 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert!(
-            binary_in_path_list("some-engine", dir.path().as_os_str()),
-            "an executable in the only PATH entry must resolve"
+        let found = resolve_in_path_list("some-engine", dir.path().as_os_str());
+        assert_eq!(
+            found.as_deref(),
+            Some(bin.as_path()),
+            "an executable in the only PATH entry must resolve to its full path"
         );
     }
 
@@ -1048,13 +1081,13 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(
-                !binary_in_path_list("not-executable", dir.path().as_os_str()),
+                resolve_in_path_list("not-executable", dir.path().as_os_str()).is_none(),
                 "a file without an execute bit is not runnable"
             );
         }
         std::fs::create_dir(dir.path().join("a-directory")).unwrap();
         assert!(
-            !binary_in_path_list("a-directory", dir.path().as_os_str()),
+            resolve_in_path_list("a-directory", dir.path().as_os_str()).is_none(),
             "a directory is not an executable even though it has the exec bit"
         );
     }
@@ -1065,11 +1098,11 @@ mod tests {
     #[test]
     fn binary_in_path_list_ignores_empty_entries() {
         assert!(
-            !binary_in_path_list("some-engine", std::ffi::OsStr::new("")),
+            resolve_in_path_list("some-engine", std::ffi::OsStr::new("")).is_none(),
             "an empty PATH must resolve nothing"
         );
         assert!(
-            !binary_in_path_list("some-engine", std::ffi::OsStr::new(":")),
+            resolve_in_path_list("some-engine", std::ffi::OsStr::new(":")).is_none(),
             "empty PATH entries must not be treated as the cwd"
         );
     }
@@ -1078,7 +1111,7 @@ mod tests {
     fn binary_in_path_list_rejects_empty_name() {
         let dir = tempfile::TempDir::new().unwrap();
         assert!(
-            !binary_in_path_list("", dir.path().as_os_str()),
+            resolve_in_path_list("", dir.path().as_os_str()).is_none(),
             "an empty name must not resolve to the PATH directory itself"
         );
     }

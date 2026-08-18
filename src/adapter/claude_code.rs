@@ -2143,15 +2143,12 @@ fn classify_claude_path(path: &str) -> &'static str {
 }
 
 fn find_claude_binary() -> Option<String> {
-    let out = std::process::Command::new("which")
-        .arg("claude")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() { None } else { Some(path) }
+    // Resolves PATH in-process rather than running `which` (#1382): the
+    // subprocess returned "not found" both when claude was absent and when
+    // `which` itself couldn't run, so on an image without `which` — routine
+    // for distroless and minimal containers — this reported no binary and the
+    // caller silently seeded `installMethod` as if claude were unmanaged.
+    super::resolve_on_path("claude").map(|p| p.display().to_string())
 }
 
 /// Seed `installMethod` into `out/settings.json` if absent (#346).

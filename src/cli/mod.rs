@@ -1536,32 +1536,53 @@ async fn spawn_and_supervise(
 /// the `select!` arm that races it), so the child is unreaped and its pid is at
 /// worst a zombie's.
 ///
-/// Failure is logged, not propagated: the engine may have exited between the
-/// signal arriving and this call, and the `child.wait()` arm is about to report
-/// its real status either way.
+/// Failure is not propagated — the `child.wait()` arm is about to report the
+/// engine's real status either way — but anything other than a lost race is
+/// logged at `error!`. It has to be `error!` specifically: llmenv's default
+/// `EnvFilter` is ERROR-only, so a `warn!` here would be invisible in exactly
+/// the situation the user needs it (they ran `docker stop`, forwarding failed,
+/// and the engine is still running with no explanation anywhere).
 #[cfg(unix)]
 fn forward_signal(child: &tokio::process::Child, signal: rustix::process::Signal, name: &str) {
     let Some(raw) = child.id() else {
         tracing::debug!("launch: {name} arrived after the engine exited; nothing to forward");
         return;
     };
+    // The remaining guards are should-never-happen: tokio reports a real child
+    // pid, which is positive and fits a pid_t. If one ever fires, pid handling
+    // upstream is corrupt — a different class of problem from losing a race,
+    // and worth surfacing rather than dropping.
     let Ok(raw) = i32::try_from(raw) else {
-        tracing::warn!("launch: engine pid {raw} does not fit in a pid_t; not forwarding {name}");
+        tracing::error!("launch: engine pid {raw} does not fit in a pid_t; not forwarding {name}");
         return;
     };
-    // Same guard as `consolidation::is_safe_kill_target`: a non-positive pid
+    // Same rule as `consolidation::is_safe_kill_target`: a non-positive pid
     // would mean "my whole process group" or "every process I may signal".
+    // `Pid::from_raw` only rejects 0, which this already excludes.
     if raw <= 1 {
-        tracing::warn!("launch: refusing to forward {name} to pid {raw}");
+        tracing::error!("launch: refusing to forward {name} to pid {raw}");
         return;
     }
     let Some(pid) = rustix::process::Pid::from_raw(raw) else {
-        tracing::warn!("launch: engine pid {raw} is not a valid pid; not forwarding {name}");
+        tracing::error!("launch: engine pid {raw} is not a valid pid; not forwarding {name}");
         return;
     };
     match rustix::process::kill_process(pid, signal) {
         Ok(()) => tracing::debug!("launch: forwarded {name} to the engine"),
-        Err(e) => tracing::warn!("launch: could not forward {name} to the engine: {e}"),
+        // The engine exited between the pid check above and this syscall —
+        // the same benign race as the `child.id()` arm, not worth alarming.
+        Err(rustix::io::Errno::SRCH) => {
+            tracing::debug!("launch: engine exited before {name} could be forwarded");
+        }
+        // EPERM here means something (a container security profile, a seccomp
+        // filter) is blocking the signal outright, so every later forward will
+        // fail too and the engine will never shut down on request.
+        Err(e) => {
+            tracing::error!(
+                "launch: could not forward {name} to the engine: {e}. \
+                 The engine may keep running until it is killed directly."
+            );
+        }
     }
 }
 
