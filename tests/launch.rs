@@ -331,6 +331,28 @@ fn launch_rejects_unrecognized_engine() {
         .stderr(predicates::str::contains("unrecognized engine"));
 }
 
+/// #1382: the PATH probe must not depend on a `which` binary being present.
+/// Distroless and minimal container images routinely ship without it, and
+/// `launch` is the first caller that turns a negative probe into a hard error —
+/// so a missing `which` there produced "'claude' not found on PATH — install
+/// it" for an engine that was installed and runnable.
+///
+/// PATH here contains *only* the fake engine's directory: no `which`, no
+/// coreutils. The engine must still be found and launched.
+#[test]
+fn launch_finds_the_engine_without_which_on_path() {
+    let (dir, config_path) = setup_config();
+    let bin_dir = install_fake_engine(dir.path(), "claude");
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
+    cmd.env("LLMENV_CONFIG", &config_path);
+    cmd.env("PATH", &bin_dir);
+    cmd.env("FAKE_ENGINE_EXIT_CODE", "3");
+    cmd.arg("launch").arg("claude");
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .code(3);
+}
+
 #[test]
 fn launch_errors_when_binary_not_on_path() {
     let (dir, config_path) = setup_config();

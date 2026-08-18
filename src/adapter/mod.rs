@@ -412,20 +412,65 @@ pub(crate) fn known_engine_ids() -> Vec<String> {
 
 /// Returns `true` when `name` resolves to an executable on the current `PATH`.
 ///
-/// Uses the platform `which` command so the result matches what a shell would
-/// find. Returns `false` on any I/O error or when `which` exits non-zero.
+/// Walks `PATH` directly rather than shelling out to `which` (#1382). The
+/// subprocess returned the same `false` for "the binary isn't installed" and
+/// "`which` itself couldn't be run", so on an image without `which` — routine
+/// for distroless and minimal containers — an installed engine looked missing.
+/// That was harmless while every caller was advisory, but `run_launch` turns a
+/// negative result into a hard error, which made the ambiguity user-visible as
+/// a false "not installed". Resolving `PATH` in-process has no such failure
+/// mode, and skips a fork+exec on a hot path.
 ///
 /// Names containing `/` or ASCII whitespace are unconditionally rejected;
-/// they cannot be plain binary names and would produce confusing `which` behaviour.
+/// they cannot be plain binary names.
 #[must_use]
 pub(crate) fn binary_on_path(name: &str) -> bool {
-    if name.contains('/') || name.chars().any(char::is_whitespace) {
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    binary_in_path_list(name, &path_var)
+}
+
+/// [`binary_on_path`] against an explicit `PATH` value.
+///
+/// Split out so the lookup is testable without mutating the process
+/// environment: `std::env::set_var` is `unsafe` as of Rust 2024 and this
+/// workspace sets `unsafe_code = "forbid"`, so a test cannot legally point the
+/// real `PATH` somewhere else.
+fn binary_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> bool {
+    if name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace) {
         return false;
     }
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .is_ok_and(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+    std::env::split_paths(path_var)
+        // A literal empty `PATH` entry means "the current directory" to a POSIX
+        // shell. Deliberately not honoured: resolving an engine binary out of
+        // the working directory is a hijack vector, and no adapter binary
+        // legitimately lives there.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .any(|dir| is_executable_file(&dir.join(name)))
+}
+
+/// True when `path` is a regular file carrying an execute bit — what a shell's
+/// `PATH` search accepts.
+///
+/// `metadata` follows symlinks, so a symlinked binary resolves the way a shell
+/// would. Any I/O error (a `PATH` entry that doesn't exist, or one the user
+/// can't stat) simply means "not usable here", which is the same conclusion a
+/// shell reaches.
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(md) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !md.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        md.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Resolve bundle-relative paths in a hook command string.
@@ -630,10 +675,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, active_adapter_from, adapter_for_launch_target, binary_on_path,
-        emit_hook_context, engine_id, known_engine_ids, modeled_key_redirect, overlay_native_json,
-        registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
-        resolve_command_paths_against_files, strip_json_nulls,
+        AgentAdapter, active_adapter_from, adapter_for_launch_target, binary_in_path_list,
+        binary_on_path, emit_hook_context, engine_id, known_engine_ids, modeled_key_redirect,
+        overlay_native_json, registered_adapters, remote_transport_type_str,
+        resolve_bundle_relative_paths, resolve_command_paths_against_files, strip_json_nulls,
     };
     use crate::merge::MergedManifest;
 
@@ -970,6 +1015,71 @@ mod tests {
         assert!(
             !binary_on_path("__llmenv_no_such_binary_xyzzy__"),
             "bogus binary must not be found on PATH"
+        );
+    }
+
+    /// #1382: resolution must not need a `which` binary anywhere. A `PATH`
+    /// holding nothing but the directory containing the target still resolves
+    /// it — the case that produced a false "not installed" on distroless
+    /// images, where `run_launch` turned it into a hard error.
+    #[test]
+    fn binary_in_path_list_resolves_without_any_helper_binaries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("some-engine");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            binary_in_path_list("some-engine", dir.path().as_os_str()),
+            "an executable in the only PATH entry must resolve"
+        );
+    }
+
+    #[test]
+    fn binary_in_path_list_rejects_non_executable_and_directories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plain = dir.path().join("not-executable");
+        std::fs::write(&plain, "data").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(
+                !binary_in_path_list("not-executable", dir.path().as_os_str()),
+                "a file without an execute bit is not runnable"
+            );
+        }
+        std::fs::create_dir(dir.path().join("a-directory")).unwrap();
+        assert!(
+            !binary_in_path_list("a-directory", dir.path().as_os_str()),
+            "a directory is not an executable even though it has the exec bit"
+        );
+    }
+
+    /// An empty `PATH` element means "current directory" to a POSIX shell.
+    /// Honouring it would let a binary in the working directory shadow a real
+    /// engine, so it is skipped deliberately.
+    #[test]
+    fn binary_in_path_list_ignores_empty_entries() {
+        assert!(
+            !binary_in_path_list("some-engine", std::ffi::OsStr::new("")),
+            "an empty PATH must resolve nothing"
+        );
+        assert!(
+            !binary_in_path_list("some-engine", std::ffi::OsStr::new(":")),
+            "empty PATH entries must not be treated as the cwd"
+        );
+    }
+
+    #[test]
+    fn binary_in_path_list_rejects_empty_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(
+            !binary_in_path_list("", dir.path().as_os_str()),
+            "an empty name must not resolve to the PATH directory itself"
         );
     }
 

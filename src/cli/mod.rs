@@ -1429,12 +1429,11 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
     })?;
 
     if !crate::adapter::binary_on_path(adapter.binary_name()) {
-        // `binary_on_path` reports false both when the engine is genuinely
-        // absent and when it couldn't run `which` to find out (#1382), so the
-        // message names both rather than asserting the engine isn't installed.
+        // `binary_on_path` resolves PATH directly, so a negative result now
+        // means the engine really isn't there — it can no longer be an
+        // artifact of `which` being unavailable (#1382).
         anyhow::bail!(
-            "'{bin}' not found on PATH — install it before running `llmenv launch {engine}`. \
-             If '{bin}' is installed, check that `which` is available and PATH is set correctly.",
+            "'{bin}' not found on PATH — install it before running `llmenv launch {engine}`",
             bin = adapter.binary_name()
         );
     }
