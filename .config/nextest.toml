@@ -29,5 +29,6 @@ filter = '''
     + binary(shell_hook)
     + binary(hook_run_failsoft)
     + binary(statusline_smoke)
+    + binary(launch)
 '''
 test-group = 'cli-subprocess'
