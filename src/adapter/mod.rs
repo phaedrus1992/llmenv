@@ -902,8 +902,12 @@ mod tests {
         assert!(!x.supports_plugins(), "Codex plugin parity is #1106");
         assert!(!x.supports_lsp(), "Codex has no LSP config block");
         assert!(
-            x.supported_hook_events().is_empty(),
-            "Codex hook wiring is #1108 — claiming support would silently drop hooks"
+            x.supported_hook_events().contains(&"PreToolUse"),
+            "Codex renders hooks now (#233)"
+        );
+        assert!(
+            !x.supported_hook_events().contains(&"Notification"),
+            "Codex has no Notification event — claiming it would silently drop the hook"
         );
 
         // CrushAdapter
@@ -1001,11 +1005,14 @@ mod tests {
                         nk::NATIVE,
                     ]
                 ),
-                // Codex renders only MCP so far (#233 slice 1). The absent maps
-                // are the tracked parity gaps — permissions (#1102) and hooks
-                // (#1108) — and must stay absent until those render, so
-                // `doctor` keeps reporting those keys as dead for Codex.
-                ("codex".to_string(), vec![nk::NATIVE_MCP, nk::NATIVE]),
+                // Codex renders MCP and hooks (#233). `native_permissions` stays
+                // absent until #1102 lands, so `doctor` keeps reporting that key
+                // as dead for Codex rather than blessing config that does
+                // nothing.
+                (
+                    "codex".to_string(),
+                    vec![nk::NATIVE_MCP, nk::NATIVE_HOOKS, nk::NATIVE]
+                ),
                 (
                     "crush".to_string(),
                     vec![

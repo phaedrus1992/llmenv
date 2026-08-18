@@ -59,7 +59,7 @@ The current matrix of which adapter reads which map:
 | Map                      | `claude_code` | `codex` | `crush` | `opencode` |
 |--------------------------|---------------|---------|---------|------------|
 | `native_permissions`     | yes           | no      | yes     | yes        |
-| `native_hooks`           | yes           | no      | yes     | no         |
+| `native_hooks`           | yes           | yes     | yes     | no         |
 | `native_plugins`         | yes           | no      | no      | no         |
 | `native_mcp`             | yes           | yes     | yes     | yes        |
 | `native_model_providers` | no            | no      | yes     | yes        |
@@ -527,6 +527,34 @@ MCP server declared with `transport: sse` is skipped for Codex with a warning
 rather than rendered as a `url` — which Codex would read as streamable HTTP and
 then fail to talk to. Other engines still receive the server.
 
+### Hooks
+
+Codex takes the same nested matcher-group shape as Claude Code, under
+`hooks.events.<Event>`, and its event names match — so llmenv's engine-neutral
+hooks map across without a translation layer:
+
+```toml
+[[hooks.events.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.events.PreToolUse.hooks]]
+type = "command"
+command = "…"
+```
+
+Two things are skipped with a warning rather than rendered:
+
+- **An event Codex doesn't have.** `Notification` is the live case — Claude Code
+  has it, Codex doesn't. Codex ignores unknown keys, so emitting it anyway would
+  leave a hook that looks wired and never fires.
+- **`mcp_tool` handlers.** Codex hooks run commands only.
+
+What llmenv does *not* yet do is auto-emit its own lifecycle hooks for Codex the
+way it does for Claude Code (`check-stale`, `config-context`, `config-guard`,
+throttle, session-log) — that's
+[#1108](https://github.com/phaedrus1992/llmenv/issues/1108). Hooks you declare in
+`capabilities.hooks` are rendered today.
+
 ### Capability map
 
 | Capability                    | Status                                                                                                                                                                                                            |
@@ -534,7 +562,7 @@ then fail to talk to. Other engines still receive the server.
 | MCP servers                   | rendered                                                                                                                                                                                                          |
 | Merged `AGENTS.md`            | rendered, via `model_instructions_file`                                                                                                                                                                           |
 | Permissions                   | not yet ([#1102](https://github.com/phaedrus1992/llmenv/issues/1102)) — Codex uses named profiles under `permissions.entries` plus `approval_policy`/`sandbox_mode`, which does not map onto `allow`/`ask`/`deny` |
-| Lifecycle hooks               | not yet ([#1108](https://github.com/phaedrus1992/llmenv/issues/1108)) — declared hooks are skipped with a warning                                                                                                 |
+| Lifecycle hooks               | rendered into `hooks.events.<Event>`; llmenv's own auto-emitted hooks are [#1108](https://github.com/phaedrus1992/llmenv/issues/1108)                                                                             |
 | Statusline                    | not yet ([#1104](https://github.com/phaedrus1992/llmenv/issues/1104))                                                                                                                                             |
 | Auth inheritance              | not yet ([#1105](https://github.com/phaedrus1992/llmenv/issues/1105))                                                                                                                                             |
 | Plugins / skills              | not yet ([#1106](https://github.com/phaedrus1992/llmenv/issues/1106))                                                                                                                                             |
