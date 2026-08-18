@@ -68,10 +68,19 @@ Supervision details:
   transparently (no pty layer, the same way `env` or `time` wrap a command).
 - **The resolved environment is layered on top of the inherited one**, so the
   engine sees llmenv's variables even if the calling shell never ran the hook.
-- **SIGINT/SIGTERM/SIGHUP are ignored by `llmenv` itself.** The terminal already
-  delivers them to the engine directly (same process group), so `launch` stays
-  alive and keeps waiting rather than exiting ahead of the engine and orphaning
-  it mid-shutdown.
+- **Signals never terminate `llmenv` itself** — it keeps waiting so the exit
+  code you get is always the engine's. How each is handled differs (changed in
+  v4.0.0):
+  - **SIGINT** (Ctrl-C) is not forwarded. The terminal already delivers it to
+    the whole foreground process group, so the engine has its own copy; sending
+    a second one would read as a double Ctrl-C, which many agents treat as
+    "force quit".
+  - **SIGTERM and SIGHUP are forwarded to the engine.** A terminal never
+    generates SIGTERM, so one that arrives came from a supervisor targeting
+    `llmenv`'s process — `docker stop`, systemd `KillMode=mixed`, a CI runner or
+    IDE task doing `kill <pid>`. Without forwarding, the engine would never
+    learn to shut down and nothing would exit until that caller's SIGKILL
+    deadline.
 - **The exit code mirrors the engine's** — its own status on a normal exit, or
   `128 + signum` if it was killed by a signal, matching what a shell's `$?`
   reports.

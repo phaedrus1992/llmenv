@@ -126,11 +126,33 @@ functions are callable as plain library calls rather than being entangled with
 
 `launch` installs handlers for SIGINT/SIGTERM/SIGHUP using tokio's `signal` feature
 (already a dependency — enabling one more Cargo feature, no new crate). On receipt,
-`launch` does not exit itself; it ignores the signal and keeps waiting on the child,
-because the terminal already delivers the same signal directly to the child (same
-process group by default, standard `Command::spawn` behavior). Once the child exits:
-normal exit → propagate its exit code; killed by signal → exit with `128 + signum`
-(POSIX convention), so `$?` in a calling script/CI job sees the expected value.
+`launch` never exits on its own account; it keeps waiting on the child so the
+reported status is always the engine's. Once the child exits: normal exit →
+propagate its exit code; killed by signal → exit with `128 + signum` (POSIX
+convention), so `$?` in a calling script/CI job sees the expected value.
+
+**Amended by #1383.** This section originally specified ignoring *all three*
+signals, on the reasoning that the terminal already delivers the same signal
+directly to the child (same process group by default, standard `Command::spawn`
+behavior). That reasoning holds only when the signal is group-delivered. It
+does not hold for the non-interactive contexts this design explicitly targets —
+`docker stop` signals PID 1, systemd `KillMode=mixed` signals the main pid, a CI
+runner or IDE task does `kill <pid>` — where the engine never receives a copy
+and ignoring the signal meant nothing shut down until the caller's SIGKILL
+deadline. The shipped behavior is therefore asymmetric:
+
+- **SIGINT is not forwarded.** The terminal generates it for the whole
+  foreground process group, so the engine already has it, and an agent TUI
+  commonly reads a second interrupt as "force quit" — forwarding would turn one
+  Ctrl-C into two.
+- **SIGTERM and SIGHUP are forwarded** to the child, after which `launch` keeps
+  waiting as before. A terminal never generates SIGTERM, so one arriving here
+  came from a supervisor targeting this pid. Both mean "terminate", so the
+  duplicate a rare group-directed kill produces is harmless.
+
+Forwarding goes through `rustix::process::kill_process`, not the `kill` binary:
+the workspace forbids `unsafe` (ruling out `libc::kill`), and shelling out would
+fail on exactly the minimal container images this fix exists to serve (#1382).
 
 ### Teardown
 
