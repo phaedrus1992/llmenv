@@ -255,25 +255,44 @@ fn get_api_base_url() -> String {
 /// The expected SHA-256 for `asset_name`, parsed out of a `sha256sum`-format
 /// listing (`<64 hex chars>  <filename>` per line, two spaces for binary mode).
 ///
-/// Returns `None` when the file has no line for that asset, which the caller
-/// treats as a hard failure rather than a reason to skip verification.
-///
 /// Tolerant about the separator (`sha256sum` writes two spaces, ` *name` in
 /// binary mode) and about the hash's case, but not about its shape: a line whose
-/// first field isn't 64 hex characters is ignored rather than trusted.
-fn expected_sha256_for(checksums: &str, asset_name: &str) -> Option<String> {
-    checksums.lines().find_map(|line| {
-        let (hash, name) = line.split_once(char::is_whitespace)?;
-        if name.trim().trim_start_matches('*') != asset_name {
-            return None;
-        }
-        let hash = hash.trim();
-        if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            Some(hash.to_ascii_lowercase())
-        } else {
-            None
-        }
-    })
+/// first field isn't 64 hex characters is not a checksum and is ignored.
+///
+/// # Errors
+/// Returns an error when the listing has no entry for `asset_name`, or more than
+/// one that disagree. Disagreeing duplicates are a hard failure rather than a
+/// first-one-wins pick: this file arrives over the network, and quietly choosing
+/// between two contradictory claims about the same file is exactly the ambiguity
+/// verification exists to remove.
+fn expected_sha256_for(checksums: &str, asset_name: &str) -> Result<String> {
+    // An empty name would otherwise match a line with an empty filename field.
+    // Unreachable from `platform_asset_name`, which returns a fixed non-empty
+    // string — but the parser shouldn't rely on its caller for that.
+    anyhow::ensure!(
+        !asset_name.is_empty(),
+        "cannot look up a checksum for an empty asset name"
+    );
+
+    let mut matches = checksums
+        .lines()
+        .filter_map(|line| {
+            let (hash, name) = line.split_once(char::is_whitespace)?;
+            if name.trim().trim_start_matches('*') != asset_name {
+                return None;
+            }
+            let hash = hash.trim();
+            (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| hash.to_ascii_lowercase())
+        })
+        .collect::<Vec<_>>();
+    matches.dedup();
+
+    match matches.len() {
+        1 => Ok(matches.swap_remove(0)),
+        0 => anyhow::bail!("no checksum entry for `{asset_name}`"),
+        n => anyhow::bail!("{n} conflicting checksum entries for `{asset_name}`"),
+    }
 }
 
 /// Verify `data` hashes to `expected`.
@@ -331,7 +350,7 @@ fn fetch_expected_sha256(
         .with_context(|| format!("failed to read `{CHECKSUMS_ASSET}`"))?;
 
     expected_sha256_for(&body, asset_name).with_context(|| {
-        format!("`{CHECKSUMS_ASSET}` has no entry for `{asset_name}`; refusing to install an unverified binary")
+        format!("cannot verify `{asset_name}` against `{CHECKSUMS_ASSET}`; refusing to install an unverified binary")
     })
 }
 
@@ -675,43 +694,87 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
     #[test]
     fn expected_sha256_picks_the_line_for_this_platform() {
         assert_eq!(
-            expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-macos-aarch64").as_deref(),
-            Some("fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d")
+            expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-macos-aarch64").unwrap(),
+            "fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d"
         );
         assert_eq!(
-            expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-linux-x86_64").as_deref(),
-            Some("e4b16291a02ff3029b6250758a0e0a1141d4dec181e5f619f10662da1520234d")
+            expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-linux-x86_64").unwrap(),
+            "e4b16291a02ff3029b6250758a0e0a1141d4dec181e5f619f10662da1520234d"
         );
     }
 
-    /// A name that isn't listed must yield nothing, so the caller fails closed
-    /// rather than installing an unverified binary. Also guards against a
-    /// prefix/substring match: `llmenv-macos` is not `llmenv-macos-aarch64`.
+    /// A name that isn't listed must fail, so the caller can't install an
+    /// unverified binary. Also guards against a prefix/substring match:
+    /// `llmenv-macos` is not `llmenv-macos-aarch64`.
     #[test]
-    fn expected_sha256_returns_none_for_an_unlisted_asset() {
-        assert!(expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-freebsd-x86_64").is_none());
-        assert!(expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-macos").is_none());
-        assert!(expected_sha256_for("", "llmenv-macos-aarch64").is_none());
+    fn expected_sha256_errors_for_an_unlisted_asset() {
+        for name in ["llmenv-freebsd-x86_64", "llmenv-macos"] {
+            let err = expected_sha256_for(SAMPLE_CHECKSUMS, name).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("no checksum entry"),
+                "for {name}: {err:#}"
+            );
+        }
+        assert!(expected_sha256_for("", "llmenv-macos-aarch64").is_err());
+    }
+
+    /// An empty name would otherwise match a line whose filename field is empty.
+    /// Unreachable from `platform_asset_name`, but the parser owns the guard.
+    #[test]
+    fn expected_sha256_rejects_an_empty_asset_name() {
+        let hash = "a".repeat(64);
+        let err = expected_sha256_for(&format!("{hash}  \n"), "").unwrap_err();
+        assert!(format!("{err:#}").contains("empty asset name"), "{err:#}");
+    }
+
+    /// Two entries disagreeing about the same file mean the listing is malformed
+    /// or tampered with. Picking one silently would be choosing which claim to
+    /// believe — the thing verification exists to avoid.
+    #[test]
+    fn expected_sha256_errors_on_conflicting_duplicate_entries() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let text = format!("{a}  llmenv-macos-aarch64\n{b}  llmenv-macos-aarch64\n");
+        let err = expected_sha256_for(&text, "llmenv-macos-aarch64").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("conflicting checksum entries"),
+            "{err:#}"
+        );
+    }
+
+    /// A repeated *identical* line is not a conflict — nothing to choose between.
+    #[test]
+    fn expected_sha256_accepts_an_exactly_repeated_entry() {
+        let a = "a".repeat(64);
+        let text = format!("{a}  llmenv-macos-aarch64\n{a}  llmenv-macos-aarch64\n");
+        assert_eq!(
+            expected_sha256_for(&text, "llmenv-macos-aarch64").unwrap(),
+            a
+        );
     }
 
     /// `sha256sum` writes ` *name` in binary mode, and some tools emit a single
-    /// space or uppercase hex. All are the same statement about the same file.
+    /// space, uppercase hex, or CRLF line endings. All are the same statement
+    /// about the same file.
     #[test]
     fn expected_sha256_tolerates_format_variants() {
         let binary_mode = "fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d *llmenv-macos-aarch64";
         let upper = "FDA0D9803CC9A10F82BAA07DC77ACFC6C25A8B715B339660B1A45381D739F31D  llmenv-macos-aarch64";
-        for text in [binary_mode, upper] {
+        let crlf = "fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d  llmenv-macos-aarch64\r\n";
+        let tab = "fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d\tllmenv-macos-aarch64";
+        for text in [binary_mode, upper, crlf, tab] {
             assert_eq!(
-                expected_sha256_for(text, "llmenv-macos-aarch64").as_deref(),
-                Some("fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d"),
+                expected_sha256_for(text, "llmenv-macos-aarch64").unwrap(),
+                "fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d",
                 "failed on {text:?}"
             );
         }
     }
 
-    /// A malformed first field is ignored rather than trusted — otherwise a
-    /// truncated or garbage line would become an "expected hash" that nothing
-    /// could ever match, or worse, a short prefix that something could.
+    /// A malformed first field is not a checksum, so the line is ignored rather
+    /// than trusted — otherwise a truncated or garbage value would become an
+    /// "expected hash" that nothing could match, or a short prefix that could.
+    /// A later well-formed line for the same name still wins.
     #[test]
     fn expected_sha256_ignores_lines_whose_hash_is_not_64_hex_chars() {
         for bad in [
@@ -720,10 +783,18 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
             "zzza0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d  llmenv-macos-aarch64",
         ] {
             assert!(
-                expected_sha256_for(bad, "llmenv-macos-aarch64").is_none(),
+                expected_sha256_for(bad, "llmenv-macos-aarch64").is_err(),
                 "should have rejected {bad:?}"
             );
         }
+
+        let good = "d".repeat(64);
+        let mixed = format!("deadbeef  llmenv-macos-aarch64\n{good}  llmenv-macos-aarch64\n");
+        assert_eq!(
+            expected_sha256_for(&mixed, "llmenv-macos-aarch64").unwrap(),
+            good,
+            "a malformed line must not shadow a valid entry"
+        );
     }
 
     #[test]
@@ -760,9 +831,10 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
             text in ".*",
             name in ".*",
         ) {
-            if let Some(h) = expected_sha256_for(&text, &name) {
+            if let Ok(h) = expected_sha256_for(&text, &name) {
                 prop_assert_eq!(h.len(), 64);
                 prop_assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+                prop_assert!(!name.is_empty(), "an empty name must never resolve");
             }
         }
     }
@@ -818,9 +890,14 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
         .await
         .unwrap()
         .unwrap_err();
+        let msg = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("no entry for `llmenv-freebsd-x86_64`"),
-            "got: {err:#}"
+            msg.contains("no checksum entry for `llmenv-freebsd-x86_64`"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("refusing to install an unverified binary"),
+            "the caller's context must survive: {msg}"
         );
     }
 
