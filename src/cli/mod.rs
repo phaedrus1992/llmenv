@@ -1190,8 +1190,28 @@ fn resolve_env(
                     "warning: scope '{scope_id}' not active in current environment \
                      — no bundles will fire for this scope"
                 );
-                let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
-                (firing, active.clone())
+                // Resolve the empty scope set, which is what the warning has
+                // always said happens (#1399). It used to fall back to every
+                // active scope instead — the opposite of narrowing, and silent to
+                // anyone who didn't catch the warning. That mattered more once
+                // `launch` gained `--scope` (#1384): under `export` the warning
+                // sits next to the output being read, but `launch` injects the
+                // result straight into an agent whose TUI clears the screen a
+                // moment later, so a typo'd scope handed it every active scope's
+                // endpoints and credentials with nothing visible to say so.
+                //
+                // Still a warning, not an error: the two commands stay at parity
+                // and keep exiting 0, they just no longer resolve more than was
+                // asked for.
+                //
+                // Fully empty, including `extra_tags`. Carrying those over would
+                // produce a shape the matched branch never does — it folds
+                // `extra_tags` into `tags`, so everything downstream sees them as
+                // a subset — and "nothing fired" is easier to reason about than
+                // "nothing except the tags that aren't attached to a scope".
+                let empty = ActiveScopes::default();
+                let firing = firing_bundles(&config.bundle, &empty, tag.as_deref());
+                (firing, empty)
             } else {
                 let mut filtered_tags: BTreeSet<String> = filtered_scopes
                     .iter()
