@@ -163,8 +163,7 @@ fn install_binary(data: &[u8]) -> Result<()> {
 
     // Backup lives next to the current binary (same filesystem for atomic rename)
     let backup = current_dir.join(".llmenv-upgrade.bak");
-    std::fs::copy(&current_exe, &backup)
-        .with_context(|| format!("failed to backup current binary to {}", backup.display()))?;
+    backup_current_binary(&current_exe, &backup)?;
 
     // Write new binary to a temp file in the same directory
     let temp = current_dir.join(".llmenv-upgrade.new");
@@ -238,6 +237,20 @@ fn install_binary(data: &[u8]) -> Result<()> {
 
 fn restore_backup(target: &Path, backup: &Path) -> Result<()> {
     std::fs::rename(backup, target).context("failed to restore backup binary")
+}
+
+/// Copy `current_exe` to `backup` before installing the new binary over it.
+///
+/// `copy_replacing_symlink`, not `std::fs::copy`: `backup` is a fixed,
+/// predictable filename (`.llmenv-upgrade.bak`) in the binary's own install
+/// directory, so a plain copy would write through a pre-existing symlink
+/// planted there instead of replacing it — the same TOCTOU class
+/// `src/materialize/inherit.rs` was hardened against for #1341, and
+/// `src/materialize/mod.rs`'s `write_in_place`/`claude_code`'s `materialize`
+/// were fixed for in #1422/#1423.
+fn backup_current_binary(current_exe: &Path, backup: &Path) -> Result<()> {
+    crate::paths::copy_replacing_symlink(current_exe, backup)
+        .with_context(|| format!("failed to backup current binary to {}", backup.display()))
 }
 
 /// Find the matching platform asset in a release.
@@ -450,6 +463,52 @@ mod tests {
     use proptest::prelude::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // -- backup_current_binary
+
+    /// `.llmenv-upgrade.bak` is a fixed, predictable path in the binary's own
+    /// install directory. If it's a pre-existing symlink, `backup_current_binary`
+    /// must replace it rather than writing the current binary's bytes through
+    /// it to wherever it points (#1341-class TOCTOU).
+    #[cfg(unix)]
+    #[test]
+    fn backup_current_binary_does_not_write_through_a_symlinked_destination() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let current_exe = tmp.path().join("llmenv");
+        std::fs::write(&current_exe, b"binary-bytes").unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"must-not-be-touched").unwrap();
+        let backup = tmp.path().join(".llmenv-upgrade.bak");
+        std::os::unix::fs::symlink(&victim, &backup).unwrap();
+
+        backup_current_binary(&current_exe, &backup).unwrap();
+
+        assert!(
+            !std::fs::symlink_metadata(&backup)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted symlink must be replaced, not written through"
+        );
+        assert_eq!(std::fs::read(&backup).unwrap(), b"binary-bytes");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"must-not-be-touched",
+            "the symlink's target must be untouched"
+        );
+    }
+
+    #[test]
+    fn backup_current_binary_copies_content() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let current_exe = tmp.path().join("llmenv");
+        std::fs::write(&current_exe, b"binary-bytes").unwrap();
+        let backup = tmp.path().join(".llmenv-upgrade.bak");
+
+        backup_current_binary(&current_exe, &backup).unwrap();
+
+        assert_eq!(std::fs::read(&backup).unwrap(), b"binary-bytes");
+    }
 
     // -- Platform detection
 
