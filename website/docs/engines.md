@@ -508,9 +508,11 @@ issue, so nothing here is a silent gap.
 
 - **`mcp_servers`** — one table per resolved MCP server. A stdio server renders
   `command`/`args`/`env`; a streamable-HTTP server renders `url` (plus
-  `http_headers`). There is deliberately **no `type` key**: Codex's transport
-  enum is untagged and rejects unknown fields, so the transport is implied by
-  which key is present. A per-server `timeout` maps to `tool_timeout_sec`, since
+  `http_headers`). There is deliberately **no `type` key**: Codex reads the
+  transport from which key is present, and has no `type` field at all. (It would
+  be ignored rather than rejected — Codex tolerates unknown keys — but writing a
+  key the engine never reads is how a config drifts out of sync with reality.) A
+  per-server `timeout` maps to `tool_timeout_sec`, since
   llmenv's timeout is a request timeout and Codex's `startup_timeout_sec` covers
   initialization instead.
 - **`model_instructions_file`** — an absolute path to the merged `AGENTS.md`,
