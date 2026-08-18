@@ -6972,7 +6972,7 @@ mod var_validation_props {
 /// (`launch`, `login`, `setup`'s handoff, `edit`).
 #[cfg(test)]
 #[cfg(unix)]
-#[allow(clippy::unwrap_used, reason = "test code")]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod run_supervised_tests {
     use super::{exit_code_for_status, run_supervised};
 
