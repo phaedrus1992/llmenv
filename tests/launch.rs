@@ -357,6 +357,66 @@ fn launch_warns_about_an_inactive_scope_like_export() {
         .stderr(predicates::str::contains(NEEDLE));
 }
 
+/// #1399: the warning above says "no bundles will fire for this scope", and the
+/// resolution now matches it. It used to fall back to *every* active scope — so a
+/// typo'd `--scope` handed the engine the full environment, with only a warning
+/// the agent's TUI was about to scroll away.
+///
+/// Checked on the child's own environment, since that's what the fail-open
+/// actually leaked: the engine must see no active tags rather than the config's.
+#[test]
+fn launch_with_an_inactive_scope_resolves_no_tags() {
+    let (dir, config_path) = setup_config();
+    let dump_path = dir.path().join("env_dump.txt");
+
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    cmd.env("FAKE_ENGINE_ENV_DUMP", &dump_path);
+    cmd.args(["--scope", "__no_such_scope__"]);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+
+    let dumped = fs::read_to_string(&dump_path).unwrap();
+    let tags = dumped
+        .lines()
+        .find_map(|l| l.strip_prefix("LLMENV_ACTIVE_TAGS="))
+        .expect("child env should carry LLMENV_ACTIVE_TAGS");
+    assert!(
+        tags.is_empty(),
+        "an unmatched --scope must resolve nothing, not fall back to every active \
+         scope; the engine saw tags {tags:?}"
+    );
+}
+
+/// The same narrowing under `export`, so the two commands stay at parity — the
+/// fail-open was shared, and so is the fix.
+#[test]
+fn export_with_an_inactive_scope_resolves_no_tags() {
+    let (dir, config_path) = setup_config();
+
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
+    cmd.env("LLMENV_CONFIG", &config_path);
+    cmd.args(["export", "--scope", "__no_such_scope__"]);
+    let out = cmd
+        .timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).unwrap();
+    let tags = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("export LLMENV_ACTIVE_TAGS="))
+        .expect("export should emit LLMENV_ACTIVE_TAGS");
+    assert_eq!(
+        tags.trim_matches('\''),
+        "",
+        "an unmatched --scope must resolve no tags under `export` too"
+    );
+}
+
 /// `--tag` and `--compress` reach `resolve_env` too, held to `export`'s resolved
 /// variable set for the same flags rather than to a hardcoded list.
 #[test]

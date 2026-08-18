@@ -142,11 +142,18 @@ pub fn resolve_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> Option<Pa
         return None;
     }
     std::env::split_paths(path_var)
-        // A literal empty `PATH` entry means "the current directory" to a POSIX
-        // shell. Deliberately not honoured: resolving a binary out of the
-        // working directory is a hijack vector, and nothing llmenv looks up
-        // legitimately lives there.
-        .filter(|dir| !dir.as_os_str().is_empty())
+        // Absolute entries only (#1400). A shell resolves every relative entry
+        // against the working directory — a literal empty one (`PATH="$UNSET:…"`
+        // leaves one behind), and equally an explicit `.` or `bin`. Resolving a
+        // binary out of the working directory is a hijack vector, and nothing
+        // llmenv looks up — `claude`, `crush`, `opencode`, `mcp-proxy`, `uvx`,
+        // `icm` — legitimately lives at a relative path. Skipping only the empty
+        // spelling, as this did until #1400, left `PATH=".:/usr/local/bin"`
+        // resolving `./claude` in preference to the installed one.
+        //
+        // `is_absolute` covers the empty entry too: `Path::new("").is_absolute()`
+        // is false.
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable_file(candidate))
 }
@@ -522,6 +529,60 @@ mod tests {
         assert!(
             found.is_none(),
             "an executable in the working directory must not satisfy an empty PATH entry"
+        );
+    }
+
+    /// #1400: an explicit relative `PATH` entry is the same cwd hijack as the
+    /// empty one, one character apart — a shell resolves both against the working
+    /// directory. The executable is really there behind each relative spelling,
+    /// so a guardless resolver would find it; only the absolute entry may match.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_ignores_relative_entries_that_would_otherwise_resolve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("some-engine");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        // Every relative spelling of "look in the working directory", plus a
+        // relative subdirectory — a project-local `bin/` is the realistic case.
+        // These are shape assertions; the companion test below is the one that
+        // proves the guard, with the executable really reachable through `.`.
+        for entry in ["", ".", "./", "bin", "./bin", "../bin"] {
+            assert!(
+                resolve_in_path_list("some-engine", std::ffi::OsStr::new(entry)).is_none(),
+                "relative PATH entry {entry:?} must not resolve"
+            );
+        }
+
+        // The same lookup against an absolute entry still works, so this narrows
+        // the resolver rather than breaking it.
+        assert_eq!(
+            resolve_in_path_list("some-engine", dir.path().as_os_str()).as_deref(),
+            Some(bin.as_path()),
+            "an absolute PATH entry must still resolve"
+        );
+    }
+
+    /// The relative-entry guard has to hold when the file really is reachable
+    /// through that entry, not just when it's absent — the trap the slash and
+    /// whitespace tests fell into. Runs from a working directory the test owns,
+    /// with the executable inside it, so `PATH="."` would resolve without the
+    /// guard.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_ignores_a_dot_entry_with_the_binary_really_in_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let bin = cwd.join("__llmenv_relative_entry_probe__");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        let found =
+            resolve_in_path_list("__llmenv_relative_entry_probe__", std::ffi::OsStr::new("."));
+        std::fs::remove_file(&bin).unwrap();
+        assert!(
+            found.is_none(),
+            "a `.` PATH entry must not resolve a binary sitting in the working directory"
         );
     }
 
