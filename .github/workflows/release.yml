@@ -20,6 +20,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+      # Required by actions/attest-build-provenance: `id-token` to get the OIDC
+      # token Sigstore signs against, `attestations` to store the result.
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         include:
@@ -120,71 +124,15 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}-sha256
           path: assets/${{ matrix.asset_name }}.sha256
-      - name: Generate SLSA provenance
-        id: slsa
-        env:
-          ARTIFACT_NAME: ${{ matrix.asset_name }}
-          GH_REF: ${{ github.ref }}
-          GH_REPO: ${{ github.repository }}
-          GH_SHA: ${{ github.sha }}
-          GH_RUN_ID: ${{ github.run_id }}
-        run: |
-          ARTIFACT_HASH=$(sha256sum assets/"${ARTIFACT_NAME}" | awk '{print $1}')
-          export ARTIFACT_HASH
-          PROVENANCE_FILE="${ARTIFACT_NAME}.intoto.jsonl"
-          export PROVENANCE_FILE
-
-          python3 << 'PYTHON_EOF'
-          import json
-          import datetime
-          import os
-
-          artifact_hash = os.environ['ARTIFACT_HASH']
-          artifact_name = os.environ['ARTIFACT_NAME']
-          gh_ref = os.environ['GH_REF']
-          gh_repo = os.environ['GH_REPO']
-          gh_sha = os.environ['GH_SHA']
-          gh_run_id = os.environ['GH_RUN_ID']
-
-          provenance = {
-            '_type': 'https://slsa.dev/provenance/v1',
-            'subject': [{'name': artifact_name, 'digest': {'sha256': artifact_hash}}],
-            'predicateType': 'https://slsa.dev/provenance/v1',
-            'predicate': {
-              'buildDefinition': {
-                'buildType': 'https://github.com/slsa-framework/slsa-github-generator/blob/main/internal/builders/docker/v1',
-                'externalParameters': {
-                  'workflow': {
-                    'path': '.github/workflows/release.yml',
-                    'ref': gh_ref,
-                    'repository': gh_repo
-                  }
-                },
-                'internalParameters': {'source-commit': gh_sha},
-                'resolvedDependencies': []
-              },
-              'runDetails': {
-                'builder': {'id': 'https://github.com/slsa-framework/slsa-github-generator/releases/tag/v2.0.0'},
-                'buildMetadata': {
-                  'invocationId': gh_run_id,
-                  'startedOn': datetime.datetime.utcnow().isoformat() + 'Z',
-                  'completedOn': datetime.datetime.utcnow().isoformat() + 'Z'
-                },
-                'byproducts': []
-              }
-            }
-          }
-          with open(os.environ['PROVENANCE_FILE'], 'w') as f:
-            json.dump(provenance, f)
-          PYTHON_EOF
-
-          echo "provenance_file=${PROVENANCE_FILE}" >> "$GITHUB_OUTPUT"
-          echo "ARTIFACT_HASH=${ARTIFACT_HASH}" >> "$GITHUB_ENV"
-      - name: Upload provenance artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      # Real, signed build provenance. This replaces a hand-rolled
+      # `.intoto.jsonl` that was written by an inline python heredoc: it carried
+      # no signature at all, and asserted a `slsa-github-generator` builder id
+      # for a generator that was never invoked, so nothing could verify it and
+      # anyone able to write a release could rewrite it (#1412).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
-          name: ${{ matrix.asset_name }}-provenance
-          path: ${{ steps.slsa.outputs.provenance_file }}
+          subject-path: assets/${{ matrix.asset_name }}
 
   publish-crate:
     name: Publish to crates.io
@@ -324,11 +272,14 @@ jobs:
           path: assets
       - name: Prepare release assets
         run: |
-          mkdir -p release-assets checksums provenance
-          find assets -type f -name 'llmenv-*' ! -name '*.sha256' ! -name '*.intoto.jsonl' \
+          # Provenance is no longer a release asset: `attest-build-provenance`
+          # publishes a signed attestation to GitHub's attestation store, which
+          # `gh attestation verify` reads. The `.intoto.jsonl` files this used to
+          # collect were unsigned and unverifiable (#1412).
+          mkdir -p release-assets checksums
+          find assets -type f -name 'llmenv-*' ! -name '*.sha256' \
             -exec mv {} release-assets/ \;
           find assets -type f -name '*.sha256' -exec mv {} checksums/ \;
-          find assets -type f -name '*.intoto.jsonl' -exec mv {} provenance/ \;
           cd checksums && cat -- *.sha256 > checksums.txt && cd ..
       - name: Extract version from tag
         id: extract_version
@@ -408,9 +359,15 @@ jobs:
             echo ""
             echo "## Supply Chain Security"
             echo ""
-            echo "SLSA v1.0 provenance attestations included. Verify:"
+            echo "Each binary carries a signed SLSA build provenance attestation."
+            echo "Verify the one you downloaded:"
             echo '```bash'
-            echo "slsa-verifier verify-artifact --artifact-path=<binary> --provenance=<provenance.intoto.jsonl> --source-uri=github.com/phaedrus1992/llmenv"
+            echo "gh attestation verify <binary> --repo phaedrus1992/llmenv"
+            echo '```'
+            echo ""
+            echo "And check its SHA-256 against \`checksums.txt\`:"
+            echo '```bash'
+            echo "sha256sum -c checksums.txt"
             echo '```'
           } > release-body.md
       - name: Create Release
@@ -443,13 +400,11 @@ jobs:
             gh release edit "${TAG}" --notes-file release-body.md "${flags[@]}"
             gh release upload "${TAG}" --clobber \
               release-assets/llmenv-* \
-              checksums/checksums.txt \
-              provenance/*.intoto.jsonl
+              checksums/checksums.txt
           else
             gh release create "${TAG}" \
               release-assets/llmenv-* \
               checksums/checksums.txt \
-              provenance/*.intoto.jsonl \
               --title "${TAG}" \
               --notes-file release-body.md \
               --verify-tag \

@@ -726,13 +726,24 @@ release was published. It does not prove the release pipeline was honest: an
 attacker able to replace the binary in a release could also replace the checksum
 beside it.
 
-Releases also publish a `<asset>.intoto.jsonl` provenance file, but it is
-currently **unsigned** — it carries no signature or certificate chain, so it can
-be rewritten by anyone who can write the release, and it closes nothing the
-checksum doesn't. `upgrade` does not verify it. Signed build provenance, which
-would close the pipeline case, is tracked in
-[#1411](https://github.com/phaedrus1992/llmenv/issues/1411) and
-[#1412](https://github.com/phaedrus1992/llmenv/issues/1412).
+Each binary also carries a signed SLSA build provenance attestation (changed in
+v4.0.0), which you can check yourself:
+
+```bash
+gh attestation verify llmenv-macos-aarch64 --repo phaedrus1992/llmenv
+```
+
+That does close the pipeline case — the attestation is signed via Sigstore
+against the workflow's OIDC identity, so it can't be forged by someone who can
+merely write release assets. `upgrade` does not verify it yet
+([#1411](https://github.com/phaedrus1992/llmenv/issues/1411)); until it does,
+the automatic check is the checksum and the attestation is a manual step.
+
+Releases up to and including v3.11.0 instead carry an unsigned
+`<asset>.intoto.jsonl` file and release notes pointing at `slsa-verifier`. That
+file was never signed and that command never worked against it
+([#1412](https://github.com/phaedrus1992/llmenv/issues/1412)); ignore both on
+those releases.
 
 - `--check` compares the current version against the latest release and
   prints the result. Exits 1 if an update is available.
