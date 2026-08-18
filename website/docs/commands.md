@@ -34,8 +34,10 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
 - `--tag TAG` filters to bundles carrying that tag.
 - `--scope ID` narrows the export to that scope's tags (plus OS/extra tags)
   when the scope is active in the current environment. If the requested scope
-  isn't active, a warning is printed and all matching tags are exported
-  instead.
+  isn't active, a warning is printed and nothing fires for it — no tags, no
+  bundles (changed in v4.0.0; it previously fell back to exporting every active
+  scope's tags, which is the opposite of narrowing). The command still exits 0.
+  Same behavior under [`launch`](#launch).
 - `--explain` annotates each exported variable with a `# source:` comment line
   showing whether it comes from the adapter (with the firing bundle names) or
   from llmenv introspection.
@@ -59,9 +61,9 @@ llmenv launch claude -- --resume
 ```
 
 `--scope`, `--tag`, and `--compress` (added in v4.0.0) mean exactly what they do
-for [`export`](#export), including the warning when a requested scope isn't
-active in the current environment. Without them, `launch` resolves the scopes the
-current directory and environment make active.
+for [`export`](#export), including the warning — and the empty result — when a
+requested scope isn't active in the current environment. Without them, `launch`
+resolves the scopes the current directory and environment make active.
 
 They may appear before or after `<engine>`, but must come before `--`:
 
