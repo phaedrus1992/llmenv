@@ -52,7 +52,8 @@ llmenv launch [--scope ID] [--tag TAG] [--compress] <engine> [-- ARGS...]
 
 (added in v4.0.0) Resolve the environment exactly the way `export` does, then
 run `<engine>` as a supervised child process. `<engine>` is either a binary name
-(`claude`, `crush`, `opencode`) or the underscore-form engine id (`claude_code`);
+(`claude`, `codex`, `crush`, `opencode`) or the underscore-form engine id
+(`claude_code`);
 an unrecognized name errors and lists the supported ones. Anything after `--` is
 passed through to the engine binary unmodified, e.g.:
 
