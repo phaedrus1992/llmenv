@@ -13,6 +13,10 @@ anyhow = "=1.0.104"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
+# Codex's config is TOML (#233). A hand-rolled emitter would have to quote
+# table keys correctly, and MCP server names come from user config — a name
+# containing a dot would silently become nested tables.
+toml = "=1.1.4"
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
 proptest = "=1.11.0"
@@ -59,6 +63,7 @@ clap_complete = "=4.6.9"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
+toml = { workspace = true }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }

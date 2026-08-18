@@ -880,7 +880,7 @@ Used by:
 ## ISC License (ISC)
 
 Used by:
-- [rustls-webpki 0.103.13](https://github.com/rustls/webpki)
+- [rustls-webpki 0.103.14](https://github.com/rustls/webpki)
 
 ```
 Except as otherwise noted, this project is licensed under the following
@@ -1127,15 +1127,15 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [cc 1.4.2](https://github.com/rust-lang/cc-rs)
+- [cc 1.4.3](https://github.com/rust-lang/cc-rs)
 - [cfg-if 1.0.4](https://github.com/rust-lang/cfg-if)
 - [cmake 0.1.58](https://github.com/rust-lang/cmake-rs)
 - [filetime 0.2.29](https://github.com/alexcrichton/filetime)
-- [find-msvc-tools 0.1.10](https://github.com/rust-lang/cc-rs)
+- [find-msvc-tools 0.1.11](https://github.com/rust-lang/cc-rs)
 - [jobserver 0.1.35](https://github.com/rust-lang/jobserver-rs)
 - [js-sys 0.3.104](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys)
 - [openssl-probe 0.2.1](https://github.com/rustls/openssl-probe)
-- [pkg-config 0.3.33](https://github.com/rust-lang/pkg-config-rs)
+- [pkg-config 0.3.34](https://github.com/rust-lang/pkg-config-rs)
 - [socket2 0.6.5](https://github.com/rust-lang/socket2)
 - [wait-timeout 0.2.1](https://github.com/alexcrichton/wait-timeout)
 - [wasm-bindgen-futures 0.4.77](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures)
@@ -1701,15 +1701,15 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [futures-channel 0.3.33](https://github.com/rust-lang/futures-rs)
-- [futures-core 0.3.33](https://github.com/rust-lang/futures-rs)
-- [futures-executor 0.3.33](https://github.com/rust-lang/futures-rs)
-- [futures-io 0.3.33](https://github.com/rust-lang/futures-rs)
-- [futures-macro 0.3.33](https://github.com/rust-lang/futures-rs)
-- [futures-sink 0.3.33](https://github.com/rust-lang/futures-rs)
-- [futures-task 0.3.33](https://github.com/rust-lang/futures-rs)
-- [futures-util 0.3.33](https://github.com/rust-lang/futures-rs)
-- [futures 0.3.33](https://github.com/rust-lang/futures-rs)
+- [futures-channel 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-core 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-executor 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-io 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-macro 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-sink 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-task 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-util 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures 0.3.34](https://github.com/rust-lang/futures-rs)
 
 ```
 Copyright (c) 2016 Alex Crichton
@@ -2216,7 +2216,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [h2 0.4.15](https://github.com/hyperium/h2)
+- [h2 0.4.16](https://github.com/hyperium/h2)
 
 ```
 Copyright (c) 2017 h2 authors
@@ -3094,7 +3094,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [http-body-util 0.1.4](https://github.com/hyperium/http-body)
+- [http-body-util 0.1.5](https://github.com/hyperium/http-body)
 - [http-body 1.1.0](https://github.com/hyperium/http-body)
 
 ```
@@ -3362,7 +3362,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 3.8.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3407,7 +3407,12 @@ Used by:
 - [predicates-core 1.0.10](https://github.com/assert-rs/predicates-rs)
 - [predicates-tree 1.0.13](https://github.com/assert-rs/predicates-rs)
 - [predicates 3.1.4](https://github.com/assert-rs/predicates-rs)
+- [serde_spanned 1.1.1](https://github.com/toml-rs/toml)
 - [termtree 0.5.1](https://github.com/rust-cli/termtree)
+- [toml 1.1.4+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml_datetime 1.1.1+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml_parser 1.1.3+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml_writer 1.1.2+spec-1.1.0](https://github.com/toml-rs/toml)
 
 ```
 Copyright (c) Individual contributors
@@ -3795,7 +3800,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [libredox 0.1.19](https://gitlab.redox-os.org/redox-os/libredox.git)
+- [libredox 0.1.20](https://gitlab.redox-os.org/redox-os/libredox.git)
 
 ```
 MIT License
@@ -3825,10 +3830,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 3.8.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 3.8.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 3.8.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 3.8.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
@@ -4013,8 +4018,8 @@ Used by:
 - [simd_cesu8 1.2.0](https://github.com/seancroach/simd_cesu8)
 - [syn 2.0.119](https://github.com/dtolnay/syn)
 - [syn 3.0.3](https://github.com/dtolnay/syn)
-- [thiserror-impl 2.0.19](https://github.com/dtolnay/thiserror)
-- [thiserror 2.0.19](https://github.com/dtolnay/thiserror)
+- [thiserror-impl 2.0.20](https://github.com/dtolnay/thiserror)
+- [thiserror 2.0.20](https://github.com/dtolnay/thiserror)
 - [unicode-ident 1.0.24](https://github.com/dtolnay/unicode-ident)
 - [unsafe-libyaml 0.2.11](https://github.com/dtolnay/unsafe-libyaml)
 - [wasi 0.11.1+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi)
@@ -4047,6 +4052,33 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+```
+
+## MIT License (MIT)
+
+Used by:
+- [winnow 1.0.4](https://github.com/winnow-rs/winnow)
+
+```
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
@@ -5097,24 +5129,24 @@ authorization of the copyright holder.
 ## Unicode License v3 (Unicode-3.0)
 
 Used by:
-- [icu_collections 2.2.0](https://github.com/unicode-org/icu4x)
-- [icu_locale_core 2.2.0](https://github.com/unicode-org/icu4x)
-- [icu_normalizer 2.2.0](https://github.com/unicode-org/icu4x)
-- [icu_normalizer_data 2.2.0](https://github.com/unicode-org/icu4x)
-- [icu_properties 2.2.0](https://github.com/unicode-org/icu4x)
-- [icu_properties_data 2.2.0](https://github.com/unicode-org/icu4x)
-- [icu_provider 2.2.0](https://github.com/unicode-org/icu4x)
-- [litemap 0.8.2](https://github.com/unicode-org/icu4x)
-- [potential_utf 0.1.5](https://github.com/unicode-org/icu4x)
-- [tinystr 0.8.3](https://github.com/unicode-org/icu4x)
-- [writeable 0.6.3](https://github.com/unicode-org/icu4x)
+- [icu_collections 2.3.0](https://github.com/unicode-org/icu4x)
+- [icu_locale_core 2.3.0](https://github.com/unicode-org/icu4x)
+- [icu_normalizer 2.3.0](https://github.com/unicode-org/icu4x)
+- [icu_normalizer_data 2.3.0](https://github.com/unicode-org/icu4x)
+- [icu_properties 2.3.0](https://github.com/unicode-org/icu4x)
+- [icu_properties_data 2.3.0](https://github.com/unicode-org/icu4x)
+- [icu_provider 2.3.0](https://github.com/unicode-org/icu4x)
+- [litemap 0.8.3](https://github.com/unicode-org/icu4x)
+- [potential_utf 0.1.6](https://github.com/unicode-org/icu4x)
+- [tinystr 0.8.4](https://github.com/unicode-org/icu4x)
+- [writeable 0.6.4](https://github.com/unicode-org/icu4x)
 - [yoke-derive 0.8.2](https://github.com/unicode-org/icu4x)
 - [yoke 0.8.3](https://github.com/unicode-org/icu4x)
 - [zerofrom-derive 0.1.7](https://github.com/unicode-org/icu4x)
 - [zerofrom 0.1.8](https://github.com/unicode-org/icu4x)
-- [zerotrie 0.2.4](https://github.com/unicode-org/icu4x)
-- [zerovec-derive 0.11.3](https://github.com/unicode-org/icu4x)
-- [zerovec 0.11.6](https://github.com/unicode-org/icu4x)
+- [zerotrie 0.2.5](https://github.com/unicode-org/icu4x)
+- [zerovec-derive 0.11.4](https://github.com/unicode-org/icu4x)
+- [zerovec 0.11.7](https://github.com/unicode-org/icu4x)
 
 ```
 UNICODE LICENSE V3
