@@ -1461,11 +1461,26 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
     exit_with_status(status);
 }
 
-/// Spawn the engine and wait for it to exit, ignoring SIGINT/SIGTERM/SIGHUP
-/// delivered to this process: the terminal already delivers the same signal
-/// directly to the child (same process group, standard `Command::spawn`
-/// behavior), so `launch` doesn't need to forward it — it needs to *not die
-/// first*, and instead keep waiting until the child's own exit status is known.
+/// Spawn the engine and wait for it to exit, never dying on a signal itself —
+/// `launch`'s exit status must always be the engine's, not a signal it happened
+/// to receive first.
+///
+/// SIGINT and SIGTERM/SIGHUP are treated differently on purpose (#1383):
+///
+/// - **SIGINT is not forwarded.** The terminal generates it for the entire
+///   foreground process group, so the engine already has its own copy, and an
+///   agent TUI commonly reads a second interrupt as "force quit" — forwarding
+///   would turn one Ctrl-C into two.
+/// - **SIGTERM and SIGHUP are forwarded.** A terminal never generates SIGTERM,
+///   so one that arrives here came from a supervisor targeting this process by
+///   pid — `docker stop` signalling PID 1, systemd `KillMode=mixed`, a CI
+///   runner doing `kill <pid>`. The engine would otherwise never learn it
+///   should shut down, and nothing would exit until the caller's SIGKILL
+///   deadline. Both signals mean "terminate", so the duplicate a rare
+///   group-directed kill produces is harmless.
+///
+/// Either way `launch` keeps waiting afterwards rather than exiting, so the
+/// engine gets to shut down and report its own status.
 ///
 /// The handlers are installed *before* the spawn on purpose. Installing them
 /// afterwards leaves a window in which a signal kills `launch` under its
@@ -1496,15 +1511,57 @@ async fn spawn_and_supervise(
                 return status.context("failed to wait on child engine process");
             }
             _ = sigint.recv() => {
+                // Deliberately not forwarded — see the doc comment above.
                 tracing::debug!("launch: received SIGINT, still waiting on child");
             }
             _ = sigterm.recv() => {
-                tracing::debug!("launch: received SIGTERM, still waiting on child");
+                forward_signal(&child, rustix::process::Signal::TERM, "SIGTERM");
             }
             _ = sighup.recv() => {
-                tracing::debug!("launch: received SIGHUP, still waiting on child");
+                forward_signal(&child, rustix::process::Signal::HUP, "SIGHUP");
             }
         }
+    }
+}
+
+/// Send `signal` to the supervised engine, best-effort.
+///
+/// Goes through `rustix::process::kill_process` (a direct syscall) rather than
+/// fork+exec'ing `kill`, mirroring `consolidation::kill_process_group`. Using
+/// the `kill` binary here would reintroduce #1382's failure mode in exactly the
+/// distroless-container case this forwarding exists to fix — no `kill` on the
+/// image means no shutdown.
+///
+/// The pid can't have been recycled: `wait` has not completed (this runs from
+/// the `select!` arm that races it), so the child is unreaped and its pid is at
+/// worst a zombie's.
+///
+/// Failure is logged, not propagated: the engine may have exited between the
+/// signal arriving and this call, and the `child.wait()` arm is about to report
+/// its real status either way.
+#[cfg(unix)]
+fn forward_signal(child: &tokio::process::Child, signal: rustix::process::Signal, name: &str) {
+    let Some(raw) = child.id() else {
+        tracing::debug!("launch: {name} arrived after the engine exited; nothing to forward");
+        return;
+    };
+    let Ok(raw) = i32::try_from(raw) else {
+        tracing::warn!("launch: engine pid {raw} does not fit in a pid_t; not forwarding {name}");
+        return;
+    };
+    // Same guard as `consolidation::is_safe_kill_target`: a non-positive pid
+    // would mean "my whole process group" or "every process I may signal".
+    if raw <= 1 {
+        tracing::warn!("launch: refusing to forward {name} to pid {raw}");
+        return;
+    }
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        tracing::warn!("launch: engine pid {raw} is not a valid pid; not forwarding {name}");
+        return;
+    };
+    match rustix::process::kill_process(pid, signal) {
+        Ok(()) => tracing::debug!("launch: forwarded {name} to the engine"),
+        Err(e) => tracing::warn!("launch: could not forward {name} to the engine: {e}"),
     }
 }
 

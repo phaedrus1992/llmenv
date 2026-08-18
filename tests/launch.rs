@@ -259,10 +259,116 @@ fn launch_std_cmd(
 }
 
 /// `launch` must not die on a signal its child is also receiving: the terminal
+/// Spawn `launch` with a sleeping engine and block until the engine is
+/// actually running, returning the `launch` child and the elapsed-time origin.
+///
+/// Waits on a marker the fake engine writes *before* it sleeps rather than a
+/// fixed delay: signalling on a timer raced env resolution, which can outlast
+/// any delay short enough to keep the test quick, and killing `launch` before
+/// it has spawned anything tests the default signal disposition instead of the
+/// supervisor.
+#[cfg(unix)]
+fn launch_sleeping_engine(
+    dir: &std::path::Path,
+    config_path: &std::path::Path,
+    exit_code: &str,
+) -> std::process::Child {
+    let ready_marker = dir.join("engine_started.txt");
+    let mut cmd = launch_std_cmd(dir, config_path);
+    cmd.env("FAKE_ENGINE_ENV_DUMP", &ready_marker);
+    cmd.env("FAKE_ENGINE_SLEEP_SECS", "2");
+    cmd.env("FAKE_ENGINE_EXIT_CODE", exit_code);
+
+    let child = cmd.spawn().expect("spawn llmenv launch");
+
+    let wait_started = std::time::Instant::now();
+    while !ready_marker.exists() {
+        assert!(
+            wait_started.elapsed() < Duration::from_secs(LAUNCH_TIMEOUT_SECS),
+            "fake engine never started under `llmenv launch`"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child
+}
+
+/// Send `signal` (a `kill(1)` name like `TERM`) to `pid`.
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: &str) {
+    let status = std::process::Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .status()
+        .expect("send signal to llmenv launch");
+    assert!(status.success(), "kill -{signal} should have succeeded");
+}
+
+/// SIGTERM reaches `launch` alone in every non-interactive context the docs
+/// advertise — `docker stop` signals PID 1, systemd `KillMode=mixed` signals
+/// the main pid, a supervisor or CI runner does `kill <pid>`. The terminal
+/// never generates SIGTERM, so nothing else delivers it to the engine: unless
+/// `launch` forwards it, the engine keeps running and nothing shuts down until
+/// the caller's SIGKILL deadline (#1383).
+#[test]
+#[cfg(unix)]
+fn launch_forwards_sigterm_to_the_engine() {
+    let (dir, config_path) = setup_config();
+    let mut child = launch_sleeping_engine(dir.path(), &config_path, "5");
+
+    let start = std::time::Instant::now();
+    send_signal(child.id(), "TERM");
+    let status = child.wait().expect("wait on llmenv launch");
+    let elapsed = start.elapsed();
+
+    // The engine sleeps 2s and would exit 5 on its own. Dying by SIGTERM well
+    // before that is the proof it actually received the forwarded signal.
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "launch should have forwarded SIGTERM and exited promptly, not waited \
+         out the engine's 2s sleep; took {elapsed:?} with {status:?}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(128 + 15),
+        "engine died by SIGTERM, so launch should report 128+15; got {status:?}"
+    );
+}
+
+/// SIGHUP has the same pid-targeted delivery problem as SIGTERM when it comes
+/// from a supervisor rather than a terminal hangup.
+#[test]
+#[cfg(unix)]
+fn launch_forwards_sighup_to_the_engine() {
+    let (dir, config_path) = setup_config();
+    let mut child = launch_sleeping_engine(dir.path(), &config_path, "5");
+
+    let start = std::time::Instant::now();
+    send_signal(child.id(), "HUP");
+    let status = child.wait().expect("wait on llmenv launch");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "launch should have forwarded SIGHUP and exited promptly; took {elapsed:?}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(128 + 1),
+        "engine died by SIGHUP, so launch should report 128+1; got {status:?}"
+    );
+}
+
 /// delivers SIGINT to the whole process group, and if `launch` exits on it the
 /// caller sees a signal-derived status while the engine is still shutting down.
 /// Signalling `launch`'s own pid and then asserting it waited the child out and
 /// reported the child's real exit code proves the handler is doing its job.
+///
+/// This also guards the deliberate asymmetry with SIGTERM/SIGHUP: SIGINT must
+/// *not* be forwarded. The terminal already delivers it to the whole foreground
+/// process group, and an agent TUI typically reads a second interrupt as "force
+/// quit" — so forwarding would turn one Ctrl-C into two. If SIGINT were
+/// forwarded here the engine would die by signal and this would see 130 rather
+/// than its real exit code.
 #[test]
 #[cfg(unix)]
 fn launch_survives_sigint_and_propagates_child_exit_code() {
