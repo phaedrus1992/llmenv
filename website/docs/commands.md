@@ -242,6 +242,13 @@ llmenv edit [BUNDLE-NAME]
 Open `config.yaml` (or, if `BUNDLE-NAME` is given, the matching
 `bundles/<name>.yaml` file) in `$EDITOR`. Falls back to `$VISUAL`, then `vi`.
 
+The editor is supervised the same way [`launch`](#launch) supervises an engine
+(changed in v4.0.0): a signal sent to `llmenv` alone doesn't end it, so it can't
+exit while the editor still owns the terminal, and the status it reports is the
+editor's. A terminal Ctrl-C still reaches the editor directly — the terminal
+delivers it to the whole foreground process group. The same applies to
+[`login`](#login)'s `claude auth login` and [`setup`](#setup)'s engine handoff.
+
 ## `completions`
 
 ```text
@@ -318,12 +325,19 @@ freshly-computed one and prints a restart hint on drift. Safe to run manually.
 ## `hook-run`
 
 ```text
-llmenv hook-run <event>
+llmenv hook-run [--engine ID] <event>
 ```
 
 Engine-neutral lifecycle hooks that inject ICM memory context over MCP and
 drive [`session_log:`](configuration.md#session_log). Invoked by the agent
 runtime (not by users directly).
+
+`--engine ID` names the engine the hook is running for (`claude_code`, `crush`,
+`opencode`); it decides which adapter's config the hook reads. llmenv writes it
+into the hook commands it materializes, so you rarely pass it by hand. An id no
+adapter answers to is an error listing the valid ones (changed in v4.0.0 — it
+previously fell back to guessing the engine from the environment). Omitting the
+flag defaults to `claude_code`.
 
 Lifecycle/memory events (`session_start`, `session_end` are auto-registered by
 the Claude Code adapter; `turn_start` is not yet wired in, see
