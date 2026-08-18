@@ -453,6 +453,58 @@ fn launch_sleeping_engine(
     child
 }
 
+/// The guard `binary_on_path` applies has to hold at *exec* time, not just at
+/// check time. `std::process::Command` execs a bare name via `execvp`, which runs
+/// its own `PATH` search and — per POSIX — treats a zero-length entry as the
+/// working directory. So with `PATH=":<real bin dir>"`, the check found the real
+/// engine while `execvp` ran `./claude` from the cwd, and `launch` layered the
+/// resolved environment (MCP endpoints, tokens) onto it.
+///
+/// `launch` resolves once and spawns the absolute path, so the decoy is ignored.
+#[test]
+#[cfg(unix)]
+fn launch_ignores_an_engine_decoy_in_the_working_directory() {
+    let (dir, config_path) = setup_config();
+    let bin_dir = install_fake_engine(dir.path(), "claude");
+    let argv_path = dir.path().join("argv.txt");
+
+    // The decoy: a `claude` in the process working directory that would report
+    // itself if run. `cwd` is the test's own temp dir, set on the command below.
+    let cwd = dir.path().join("run-from-here");
+    fs::create_dir_all(&cwd).unwrap();
+    let decoy = cwd.join("claude");
+    fs::write(
+        &decoy,
+        "#!/bin/sh\nprintf 'DECOY' > \"$FAKE_ENGINE_ARGV_DUMP\"\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&decoy, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut cmd = support::isolated_llmenv_cmd(dir.path());
+    cmd.env("LLMENV_CONFIG", &config_path);
+    cmd.current_dir(&cwd);
+    // The leading `:` is the empty entry — what `PATH="$MAYBE_UNSET:$PATH"` in a
+    // shell profile produces. The real engine is present, later in the list.
+    cmd.env("PATH", format!(":{}", bin_dir.display()));
+    cmd.env("FAKE_ENGINE_ARGV_DUMP", &argv_path);
+    cmd.arg("launch").arg("claude");
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+
+    // `install_fake_engine`'s stub writes one line per argument, so an empty file
+    // is the real engine having run with no args. "DECOY" means the cwd copy ran.
+    let dumped = fs::read_to_string(&argv_path).unwrap();
+    assert!(
+        !dumped.contains("DECOY"),
+        "launch executed the `claude` in its working directory via the empty PATH \
+         entry instead of the real one on PATH"
+    );
+}
+
 /// Send `signal` (a `kill(1)` name like `TERM`) to `pid`.
 #[cfg(unix)]
 fn send_signal(pid: u32, signal: &str) {

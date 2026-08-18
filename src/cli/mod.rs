@@ -1470,19 +1470,20 @@ fn run_launch(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyhow::R
         )
     })?;
 
-    if !crate::paths::binary_on_path(adapter.binary_name()) {
-        // `binary_on_path` resolves PATH directly, so a negative result now
-        // means the engine really isn't there — it can no longer be an
-        // artifact of `which` being unavailable (#1382).
+    // One resolution, used both as the "is it installed" gate and as the thing
+    // actually spawned — see `command_for_binary`. Resolving PATH directly means
+    // a negative result really is a missing engine, not an artifact of `which`
+    // being unavailable (#1382).
+    let Some(bin_path) = crate::paths::resolve_on_path(adapter.binary_name()) else {
         anyhow::bail!(
             "'{bin}' not found on PATH — install it before running `llmenv launch {engine}`",
             bin = adapter.binary_name()
         );
-    }
+    };
 
     let resolved = resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
 
-    let mut cmd = std::process::Command::new(adapter.binary_name());
+    let mut cmd = command_at_path(&bin_path, adapter.binary_name());
     cmd.args(&args);
     for (key, value) in &resolved.vars {
         cmd.env(key, value);
@@ -1494,6 +1495,45 @@ fn run_launch(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyhow::R
     let status = run_supervised(cmd, adapter.binary_name(), None)?;
 
     exit_with_status(status);
+}
+
+/// A `Command` for `binary`, resolved to the absolute path it has on `PATH`.
+///
+/// Spawning the resolved path rather than the bare name is the whole point.
+/// `std::process::Command` execs a name containing no `/` via `execvp`, and POSIX
+/// `execvp` runs its *own* `PATH` search that treats a zero-length entry as the
+/// working directory — so with `PATH=":/usr/local/bin"` (what `PATH="$MAYBE_UNSET:$PATH"`
+/// in a shell profile produces) `execvp` runs `./claude` even though
+/// `/usr/local/bin/claude` exists. llmenv's resolver deliberately skips those
+/// empty entries (#1382, #1390), so checking with it and then spawning a bare
+/// name meant the check and the exec could disagree, and the guard bought
+/// nothing: the child still came from the working directory, with the resolved
+/// environment — MCP endpoints, tokens — layered onto it.
+///
+/// Resolving once and spawning the result makes them agree by construction.
+///
+/// # Errors
+/// Returns an error naming `binary` when it isn't on `PATH`.
+fn command_for_binary(binary: &str) -> anyhow::Result<std::process::Command> {
+    let resolved = crate::paths::resolve_on_path(binary)
+        .ok_or_else(|| anyhow::anyhow!("'{binary}' not found on PATH"))?;
+    Ok(command_at_path(&resolved, binary))
+}
+
+/// A `Command` that execs `resolved` but presents `binary` as `argv[0]`.
+///
+/// A shell does the same — it execs the path its `PATH` search produced while
+/// passing the name the user typed — so a child that inspects `argv[0]` (to pick
+/// a mode, or to print its own usage) behaves as it did when llmenv spawned the
+/// bare name.
+fn command_at_path(resolved: &Path, binary: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(resolved);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.arg0(binary);
+    }
+    cmd
 }
 
 /// Run `cmd` as a supervised foreground child and return its exit status —
@@ -1582,22 +1622,42 @@ async fn spawn_and_supervise(
         .spawn()
         .with_context(|| format!("failed to spawn '{binary}'"))?;
 
-    if let Some(payload) = stdin_payload {
-        if let Err(e) = write_child_stdin(&mut child, payload, binary).await {
-            // Returning here would drop `child` without killing it, and a
-            // dropped `tokio::process::Child` keeps running by default — the
-            // exact orphaning this function exists to prevent, on its own error
-            // path. The child can't do anything useful without the input it was
-            // spawned to read, so end it and reap it before reporting.
-            kill_and_reap(&mut child, binary).await;
-            return Err(e);
-        }
-    }
+    // The write runs *inside* the select below rather than before it. Installing
+    // the handlers above replaced their default disposition, so from that point
+    // on SIGINT/SIGTERM/SIGHUP are only buffered until something calls `recv()` —
+    // nothing does until the loop starts. Awaiting the write first meant that a
+    // payload larger than the pipe buffer, sent to a child that wasn't draining
+    // it, left llmenv blocked and killable by nothing but SIGKILL.
+    let mut write = std::pin::pin!(write_stdin_payload(
+        child.stdin.take(),
+        stdin_payload,
+        binary
+    ));
+    let mut writing = stdin_payload.is_some();
 
     loop {
         tokio::select! {
             status = child.wait() => {
                 return status.context("failed to wait on child engine process");
+            }
+            result = &mut write, if writing => {
+                writing = false;
+                if let Err(e) = result {
+                    // Deliberately not fatal. A failed write means the child
+                    // closed its read end, so it has either exited already or
+                    // decided not to read — and its own exit status and stderr
+                    // explain that far better than an `EPIPE` here would. Keep
+                    // waiting and let the `child.wait()` arm report the real
+                    // outcome.
+                    //
+                    // Returning instead would also drop `child` without killing
+                    // it, and a dropped `tokio::process::Child` keeps running —
+                    // so the error path of the anti-orphaning fix would orphan the
+                    // child. `error!`, not `warn!`: llmenv's default filter is
+                    // ERROR-only, and a child that silently never received its
+                    // input is not something to leave unexplained.
+                    tracing::error!("could not send input to '{binary}': {e:#}");
+                }
             }
             _ = sigint.recv() => {
                 // Deliberately not forwarded — see the doc comment above.
@@ -1613,43 +1673,49 @@ async fn spawn_and_supervise(
     }
 }
 
-/// Kill `child` and wait for it, best-effort, so an error path can't leave a
-/// process running with nothing waiting on it.
+/// Write `payload` to `stdin` and close it, or do nothing when there's no
+/// payload.
 ///
-/// Failures are logged rather than propagated: the caller is already returning an
-/// error that explains what actually went wrong, and a kill that fails because
-/// the child had already exited is the common case, not a problem.
-async fn kill_and_reap(child: &mut tokio::process::Child, binary: &str) {
-    if let Err(e) = child.kill().await {
-        // `kill` here also reaps, so a failure means the child may still be
-        // running — worth `error!`, since llmenv's default filter is ERROR-only
-        // and the user would otherwise have no explanation for a stray process.
-        tracing::error!("could not terminate '{binary}' after a startup failure: {e}");
-    }
+/// Takes the handle by value so the write can live in the supervision `select!`
+/// without borrowing the `Child` the same `select!` is waiting on.
+///
+/// # Errors
+/// Returns an error when a payload was requested but no stdin pipe was opened for
+/// it, or when the write fails — including the `EPIPE` a child that exited before
+/// reading produces.
+async fn write_stdin_payload(
+    stdin: Option<tokio::process::ChildStdin>,
+    payload: Option<&[u8]>,
+    binary: &str,
+) -> anyhow::Result<()> {
+    let Some(payload) = payload else {
+        return Ok(());
+    };
+    let Some(stdin) = stdin else {
+        anyhow::bail!("'{binary}' was spawned without a stdin pipe to write to");
+    };
+    write_child_stdin(stdin, payload, binary).await
 }
 
-/// Write `payload` to the freshly spawned child's stdin and close the pipe.
+/// Write `payload` to the child's stdin and close the pipe.
 ///
 /// Closing it is the point: `setup`'s crush handoff feeds the skill text on
 /// stdin, and crush reads until EOF — leaving the handle open would hang.
 ///
 /// # Errors
-/// Returns an error when the child has no stdin pipe (the caller didn't ask for
-/// one) or the write fails.
+/// Returns an error when the write or the close fails. A child that exited before
+/// reading its input surfaces here as `EPIPE`, so the message says so rather than
+/// reporting a bare "broken pipe".
 async fn write_child_stdin(
-    child: &mut tokio::process::Child,
+    mut stdin: tokio::process::ChildStdin,
     payload: &[u8],
     binary: &str,
 ) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;
 
-    let Some(mut stdin) = child.stdin.take() else {
-        anyhow::bail!("'{binary}' was spawned without a stdin pipe to write to");
-    };
-    stdin
-        .write_all(payload)
-        .await
-        .with_context(|| format!("writing to '{binary}' stdin"))?;
+    stdin.write_all(payload).await.with_context(|| {
+        format!("writing to '{binary}' stdin — it may have exited before reading its input")
+    })?;
     // `shutdown` flushes and closes; the `stdin` handle is then dropped, so
     // nothing is left holding the write end open.
     stdin
@@ -4140,7 +4206,7 @@ fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyh
     let tmp = tempfile::TempDir::new()
         .map_err(|e| anyhow::anyhow!("creating temp dir for login: {e}"))?;
 
-    let mut cmd = std::process::Command::new("claude");
+    let mut cmd = command_for_binary("claude")?;
     cmd.args(["auth", "login"])
         .env("CLAUDE_CONFIG_DIR", tmp.path())
         .stdin(std::process::Stdio::inherit())
@@ -6964,50 +7030,66 @@ mod run_supervised_tests {
         assert!(run_supervised(cmd, "sh", None).unwrap().success());
     }
 
-    /// A stdin-write failure must not leave the child running. Returning the
-    /// error without killing it drops the `Child` handle, and a dropped
-    /// `tokio::process::Child` keeps executing by default — the same orphaning
-    /// `run_supervised` exists to prevent, on its own error path.
+    /// A stdin-write failure must not end the call early. Returning there would
+    /// drop the `Child` handle, and a dropped `tokio::process::Child` keeps
+    /// executing by default — the same orphaning `run_supervised` exists to
+    /// prevent, on its own error path. It would also replace the child's real
+    /// outcome with an `EPIPE` that explains much less.
     ///
-    /// Asserted by watching the child rather than by timing: the stub closes its
-    /// stdin (so the write fails), records that it started, sleeps briefly, and
-    /// only then writes a second marker. The error comes back promptly either
-    /// way, so the second marker's *absence* after the sleep would have elapsed
-    /// is the only thing that distinguishes "killed" from "orphaned".
+    /// The stub closes its stdin so the write fails, then exits with a status only
+    /// a still-running wait loop can observe.
     #[test]
-    fn a_child_that_rejects_its_stdin_payload_is_not_left_running() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let started = tmp.path().join("started.txt");
-        let survived = tmp.path().join("survived.txt");
+    fn a_child_that_rejects_its_stdin_payload_is_still_waited_for() {
         let mut cmd = std::process::Command::new("sh");
-        cmd.args([
-            "-c",
-            "exec 0<&-; : > \"$STARTED\"; sleep 1; : > \"$SURVIVED\"",
-        ])
-        .env("STARTED", &started)
-        .env("SURVIVED", &survived);
+        cmd.args(["-c", "exec 0<&-; sleep 1; exit 4"]);
 
         // Comfortably larger than any platform's pipe buffer (64 KiB on Linux,
         // 16-64 KiB on macOS): a payload that fits is absorbed by the buffer
         // before the child closes its read end, and the write then succeeds.
         let payload = vec![b'x'; 1024 * 1024];
-        let result = run_supervised(cmd, "sh", Some(&payload));
+        let status = run_supervised(cmd, "sh", Some(&payload))
+            .expect("a failed write must not turn into a failed run");
 
-        assert!(
-            result.is_err(),
-            "writing to a closed stdin should have failed; got {result:?}"
+        assert_eq!(
+            status.code(),
+            Some(4),
+            "expected the child's own exit code — reaching it proves llmenv kept \
+             waiting instead of bailing out and orphaning the child; got {status:?}"
         );
-        assert!(
-            started.exists(),
-            "the stub never ran, so this exercised a spawn failure rather than a \
-             stdin-write failure"
-        );
+    }
 
-        // Twice the stub's sleep, so a surviving child has had time to finish it.
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        assert!(
-            !survived.exists(),
-            "the child outlived the failed write — it was orphaned instead of killed"
+    /// A payload larger than the pipe buffer, sent to a child that isn't draining
+    /// it, blocks the write. The supervision loop has to keep running anyway.
+    ///
+    /// This is what makes the signal handlers effective: they're installed before
+    /// the spawn, so from then on SIGINT/SIGTERM/SIGHUP no longer terminate llmenv
+    /// on their own and only take effect when the loop polls for them. Awaiting the
+    /// write *ahead* of the loop meant a blocked write left llmenv killable by
+    /// nothing but SIGKILL.
+    ///
+    /// Asserted without signals — sending one would hit the whole test process and
+    /// disturb sibling tests. The child's exit status standing in for the loop's
+    /// liveness is equivalent and deterministic: reaching it at all proves
+    /// `child.wait()` was being polled while the write was still pending, and it
+    /// can only be observed if the write didn't own the thread. Before the fix the
+    /// blocked write ran to its `EPIPE` instead and the call returned that error.
+    #[test]
+    fn the_supervision_loop_runs_while_a_large_stdin_payload_is_still_being_written() {
+        let mut cmd = std::process::Command::new("sh");
+        // Never reads stdin — so the write fills the pipe buffer and blocks — then
+        // exits on its own with a status only the wait loop can observe.
+        cmd.args(["-c", "sleep 1; exit 3"]);
+
+        // Several times any pipe buffer, so the write cannot complete on its own.
+        let payload = vec![b'x'; 4 * 1024 * 1024];
+        let status = run_supervised(cmd, "sh", Some(&payload))
+            .expect("the wait loop should have reported the child's status");
+
+        assert_eq!(
+            status.code(),
+            Some(3),
+            "expected the child's own exit code, which is only reachable if the \
+             blocked write didn't stall the supervision loop; got {status:?}"
         );
     }
 

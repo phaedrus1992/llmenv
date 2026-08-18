@@ -226,7 +226,7 @@ fn engine_handoff_prompt(
     // user's setup then continued with nothing left to report its outcome.
     match engine_id.as_str() {
         "claude_code" => {
-            let mut cmd = std::process::Command::new("claude");
+            let mut cmd = crate::cli::command_for_binary("claude")?;
             cmd.arg("-p")
                 .arg(&skill_content)
                 .stdin(std::process::Stdio::inherit())
@@ -239,7 +239,7 @@ fn engine_handoff_prompt(
             }
         }
         "crush" => {
-            let mut cmd = std::process::Command::new("crush");
+            let mut cmd = crate::cli::command_for_binary("crush")?;
             cmd.arg("run")
                 .arg("--quiet")
                 .arg("Execute the setup-llmenv skill")

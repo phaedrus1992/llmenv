@@ -702,12 +702,18 @@ fn sanitize_log_line(line: &str) -> String {
 
 /// Builds the `mcp-proxy` invocation, preferring a `mcp-proxy` already on
 /// `PATH` and falling back to `uvx mcp-proxy` when it isn't installed. Returns
-/// the program plus its leading args; the caller appends `--port`/target.
+/// the program's **resolved absolute path** plus its leading args; the caller
+/// appends `--port`/target.
+///
+/// The path, not the bare name, because `execvp` would otherwise redo the `PATH`
+/// search with its own rules — and POSIX `execvp` honours an empty `PATH` entry
+/// as the working directory, which this lookup deliberately does not (#1390). A
+/// bare name would hand back the hijack the lookup just refused.
 ///
 /// # Errors
 /// Returns an error when neither `mcp-proxy` nor `uvx` is on `PATH` — the
 /// memory backend can't be exposed on the network without one of them.
-fn mcp_proxy_command() -> anyhow::Result<(&'static str, Vec<&'static str>)> {
+fn mcp_proxy_command() -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
     // An unset PATH resolves nothing, which is the same conclusion the lookup
     // reaches for a PATH with no match — but they mean different things (a
     // stripped environment vs. nothing installed) and the error below can't tell
@@ -730,11 +736,11 @@ fn mcp_proxy_command() -> anyhow::Result<(&'static str, Vec<&'static str>)> {
 /// whatever directory llmenv was run from could be executed.
 fn mcp_proxy_command_in(
     path_var: &std::ffi::OsStr,
-) -> anyhow::Result<(&'static str, Vec<&'static str>)> {
-    if crate::paths::resolve_in_path_list("mcp-proxy", path_var).is_some() {
-        Ok(("mcp-proxy", vec![]))
-    } else if crate::paths::resolve_in_path_list("uvx", path_var).is_some() {
-        Ok(("uvx", vec!["mcp-proxy"]))
+) -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
+    if let Some(proxy) = crate::paths::resolve_in_path_list("mcp-proxy", path_var) {
+        Ok((proxy, vec![]))
+    } else if let Some(uvx) = crate::paths::resolve_in_path_list("uvx", path_var) {
+        Ok((uvx, vec!["mcp-proxy"]))
     } else {
         Err(anyhow::anyhow!(
             "neither `mcp-proxy` nor `uvx` found on PATH; install one to run the \
@@ -788,7 +794,7 @@ fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
 pub(crate) fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
     let addr = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
-    let mut cmd = Command::new(program);
+    let mut cmd = Command::new(&program);
     cmd.args(leading)
         // `--host` takes a bare address; `ip()` drops the brackets an IPv6
         // SocketAddr renders with, which mcp-proxy would reject.
@@ -817,8 +823,12 @@ pub(crate) fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
         }
     };
     configure_detached(&mut cmd, stderr);
-    cmd.spawn()
-        .with_context(|| format!("spawning `{program}` to run mcp-proxy (resolved from PATH)"))
+    cmd.spawn().with_context(|| {
+        format!(
+            "spawning `{}` to run mcp-proxy (resolved from PATH)",
+            program.display()
+        )
+    })
 }
 
 /// Configures `cmd` to run as a detached background daemon rather than a
@@ -1011,7 +1021,11 @@ mod tests {
         stub_binary(dir.path(), "uvx");
 
         let (program, args) = mcp_proxy_command_in(dir.path().as_os_str()).expect("resolves");
-        assert_eq!(program, "mcp-proxy");
+        assert_eq!(
+            program,
+            dir.path().join("mcp-proxy"),
+            "must return the resolved absolute path, not a bare name for execvp to re-search"
+        );
         assert!(args.is_empty(), "a direct mcp-proxy needs no leading args");
     }
 
@@ -1021,7 +1035,7 @@ mod tests {
         stub_binary(dir.path(), "uvx");
 
         let (program, args) = mcp_proxy_command_in(dir.path().as_os_str()).expect("resolves");
-        assert_eq!(program, "uvx");
+        assert_eq!(program, dir.path().join("uvx"));
         assert_eq!(args, vec!["mcp-proxy"]);
     }
 

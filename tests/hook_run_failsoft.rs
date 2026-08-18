@@ -198,7 +198,10 @@ fn unrecognized_engine_exits_non_zero_listing_valid_ids() {
         .arg("session_start");
     cmd.timeout(Duration::from_secs(10))
         .assert()
-        .failure()
+        // Pinned to 1, not just "non-zero": exit 2 is what Claude Code and
+        // opencode read as "deny this tool call", so a refactor that drifted a
+        // wiring error into a 2 would turn a misconfiguration into a block.
+        .code(1)
         .stderr(predicate::str::contains("unrecognized engine"))
         .stderr(predicate::str::contains("claude_code"));
 }
