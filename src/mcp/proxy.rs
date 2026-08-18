@@ -708,9 +708,27 @@ fn sanitize_log_line(line: &str) -> String {
 /// Returns an error when neither `mcp-proxy` nor `uvx` is on `PATH` — the
 /// memory backend can't be exposed on the network without one of them.
 fn mcp_proxy_command() -> anyhow::Result<(&'static str, Vec<&'static str>)> {
-    if on_path("mcp-proxy") {
+    // An unset PATH resolves nothing, which is the same conclusion the lookup
+    // reaches for a PATH with no match — `resolve_in_path_list` on an empty
+    // value covers it without a second code path.
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    mcp_proxy_command_in(&path_var)
+}
+
+/// [`mcp_proxy_command`] against an explicit `PATH` value, so the preference
+/// order is testable without mutating the process environment.
+///
+/// Uses [`crate::paths::resolve_in_path_list`] rather than a local resolver:
+/// until #1390 this module carried its own copy, which never picked up the
+/// empty-`PATH`-entry guard #1382 added, so `doctor`'s "is mcp-proxy available"
+/// and this function's answer could disagree — and a `mcp-proxy` or `uvx` in
+/// whatever directory llmenv was run from could be executed.
+fn mcp_proxy_command_in(
+    path_var: &std::ffi::OsStr,
+) -> anyhow::Result<(&'static str, Vec<&'static str>)> {
+    if crate::paths::resolve_in_path_list("mcp-proxy", path_var).is_some() {
         Ok(("mcp-proxy", vec![]))
-    } else if on_path("uvx") {
+    } else if crate::paths::resolve_in_path_list("uvx", path_var).is_some() {
         Ok(("uvx", vec!["mcp-proxy"]))
     } else {
         Err(anyhow::anyhow!(
@@ -718,32 +736,6 @@ fn mcp_proxy_command() -> anyhow::Result<(&'static str, Vec<&'static str>)> {
              memory server, or disable the `memory` config block"
         ))
     }
-}
-
-/// True when `program` resolves to an executable on `PATH`. Scans `$PATH`
-/// entries directly rather than shelling out, so it works without a shell and
-/// is unaffected by `command`/`which` availability.
-fn on_path(program: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join(program);
-        is_executable(&candidate)
-    })
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
 }
 
 /// Parses a `host:port` bind string into a socket address.
@@ -997,34 +989,70 @@ pub fn is_alive(pid: u32) -> Option<bool> {
     reason = "test scaffolding"
 )]
 mod tests {
-    use super::{Command, Path, Stdio, is_executable};
+    use super::{Command, Path, Stdio, mcp_proxy_command_in};
     use std::os::unix::fs::PermissionsExt;
 
+    /// Writes an executable stub named `name` into `dir`.
+    fn stub_binary(dir: &Path, name: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, b"#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
     #[test]
-    fn is_executable_true_only_for_executable_files() {
+    fn mcp_proxy_command_prefers_an_installed_mcp_proxy() {
         let dir = tempfile::tempdir().expect("tempdir");
+        stub_binary(dir.path(), "mcp-proxy");
+        stub_binary(dir.path(), "uvx");
 
-        let exe = dir.path().join("tool");
-        std::fs::write(&exe, b"#!/bin/sh\n").expect("write");
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        assert!(is_executable(&exe), "0o755 file should be executable");
+        let (program, args) = mcp_proxy_command_in(dir.path().as_os_str()).expect("resolves");
+        assert_eq!(program, "mcp-proxy");
+        assert!(args.is_empty(), "a direct mcp-proxy needs no leading args");
+    }
 
-        let plain = dir.path().join("data");
+    #[test]
+    fn mcp_proxy_command_falls_back_to_uvx() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        stub_binary(dir.path(), "uvx");
+
+        let (program, args) = mcp_proxy_command_in(dir.path().as_os_str()).expect("resolves");
+        assert_eq!(program, "uvx");
+        assert_eq!(args, vec!["mcp-proxy"]);
+    }
+
+    #[test]
+    fn mcp_proxy_command_errors_when_neither_is_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A non-executable file with the right name must not satisfy the lookup.
+        let plain = dir.path().join("mcp-proxy");
         std::fs::write(&plain, b"x").expect("write");
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        assert!(
-            !is_executable(&plain),
-            "0o644 file should not be executable"
-        );
 
+        let err = mcp_proxy_command_in(dir.path().as_os_str()).expect_err("must not resolve");
         assert!(
-            !is_executable(&dir.path().join("missing")),
-            "missing path should not be executable"
+            err.to_string().contains("neither `mcp-proxy` nor `uvx`"),
+            "error must name both candidates, got: {err}"
         );
+    }
 
+    /// #1390: this lookup used to carry its own resolver that honoured an empty
+    /// `PATH` entry as "the current directory", so an `mcp-proxy` in whatever
+    /// directory llmenv was run from could be executed. The shared resolver
+    /// skips empty entries, so an all-empty `PATH` resolves nothing even with a
+    /// matching executable sitting in the working directory.
+    #[test]
+    fn mcp_proxy_command_ignores_empty_path_entries() {
+        let cwd = std::env::current_dir().expect("cwd");
         assert!(
-            !is_executable(dir.path()),
-            "a directory should not count as an executable file"
+            !cwd.join("mcp-proxy").exists(),
+            "refusing to clobber an existing ./mcp-proxy"
+        );
+        stub_binary(&cwd, "mcp-proxy");
+        let result = mcp_proxy_command_in(std::ffi::OsStr::new("::"));
+        std::fs::remove_file(cwd.join("mcp-proxy")).expect("cleanup");
+        assert!(
+            result.is_err(),
+            "an mcp-proxy in the working directory must not satisfy an empty PATH entry"
         );
     }
 

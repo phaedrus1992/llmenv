@@ -973,7 +973,7 @@ fn engine_is_active(config: &Config, engine: &str) -> bool {
     }
     crate::adapter::registered_adapters().into_iter().any(|a| {
         crate::adapter::engine_id(a.as_ref()) == engine
-            && crate::adapter::binary_on_path(a.binary_name())
+            && crate::paths::binary_on_path(a.binary_name())
     })
 }
 
@@ -1007,7 +1007,7 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
     crate::adapter::registered_adapters()
         .into_iter()
         .filter(move |adapter| {
-            let on_path = crate::adapter::binary_on_path(adapter.binary_name());
+            let on_path = crate::paths::binary_on_path(adapter.binary_name());
             if !on_path {
                 tracing::debug!(
                     adapter = adapter.name(),
@@ -1428,7 +1428,7 @@ fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
         )
     })?;
 
-    if !crate::adapter::binary_on_path(adapter.binary_name()) {
+    if !crate::paths::binary_on_path(adapter.binary_name()) {
         // `binary_on_path` resolves PATH directly, so a negative result now
         // means the engine really isn't there — it can no longer be an
         // artifact of `which` being unavailable (#1382).
@@ -5977,7 +5977,7 @@ mod tests {
         // and must not print confusing "unknown engine" warnings.
         let on_path_count = crate::adapter::registered_adapters()
             .iter()
-            .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
+            .filter(|a| crate::paths::binary_on_path(a.binary_name()))
             .count();
         let config = Config {
             disabled_engines: vec!["".to_string(), "  ".to_string(), "\t".to_string()],

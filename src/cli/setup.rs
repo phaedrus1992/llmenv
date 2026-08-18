@@ -267,7 +267,7 @@ fn engine_handoff_prompt(
 fn probe_engines() -> Vec<String> {
     crate::adapter::registered_adapters()
         .iter()
-        .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
+        .filter(|a| crate::paths::binary_on_path(a.binary_name()))
         .map(|a| crate::adapter::engine_id(a.as_ref()))
         .collect()
 }
