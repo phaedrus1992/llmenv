@@ -525,6 +525,50 @@ mod tests {
         );
     }
 
+    /// The name guard has to bite even when the joined path would really resolve.
+    /// `binary_on_path_rejects_slash`/`_whitespace` only show that *absent* files
+    /// aren't found, which holds with the guard deleted — so they don't actually
+    /// pin it. Here the target exists: without the guard, `dir.join("sub/tool")`
+    /// finds it and a caller could reach outside the `PATH` entry it named.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_rejects_a_traversing_name_that_would_otherwise_resolve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let bin = sub.join("tool");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        // Sanity: the guardless join would have found it.
+        assert!(is_executable_file(&dir.path().join("sub/tool")));
+
+        assert!(
+            resolve_in_path_list("sub/tool", dir.path().as_os_str()).is_none(),
+            "a name containing '/' must be rejected outright, not resolved relative \
+             to a PATH entry"
+        );
+    }
+
+    /// Same shape for the whitespace guard: a file whose name really does contain
+    /// a space is present, and must still not resolve — a `PATH` lookup takes a
+    /// plain binary name, and accepting one with whitespace would let a value like
+    /// `sh -c echo` look installed.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_rejects_a_whitespace_name_that_would_otherwise_resolve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("two words");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        assert!(is_executable_file(&bin));
+        assert!(
+            resolve_in_path_list("two words", dir.path().as_os_str()).is_none(),
+            "a name containing whitespace must be rejected outright"
+        );
+    }
+
     #[test]
     fn binary_in_path_list_rejects_empty_name() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1049,6 +1093,50 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        /// A `PATH` of nothing but empty entries resolves nothing, for any name —
+        /// the cwd-hijack guard (#1382, #1390) generalised past the `""` and `":"`
+        /// the example tests pin.
+        #[test]
+        fn resolve_in_path_list_never_resolves_from_an_all_empty_path(
+            name in "[a-zA-Z0-9_.-]{1,12}",
+            separators in 0usize..8,
+        ) {
+            let path_var = ":".repeat(separators);
+            prop_assert!(
+                resolve_in_path_list(&name, std::ffi::OsStr::new(&path_var)).is_none(),
+                "name {:?} resolved against an all-empty PATH {:?}",
+                name,
+                path_var
+            );
+        }
+
+        /// Never panics, whatever arbitrary text arrives as either argument, and
+        /// anything it does return is the name joined onto one of the `PATH`
+        /// entries — never a path it invented.
+        #[test]
+        fn resolve_in_path_list_returns_only_a_path_var_entry_join(
+            name in ".*",
+            path_var in ".*",
+        ) {
+            let os_path = std::ffi::OsStr::new(&path_var);
+            if let Some(found) = resolve_in_path_list(&name, os_path) {
+                prop_assert_eq!(
+                    found.file_name(),
+                    Some(std::ffi::OsStr::new(&name)),
+                    "resolved {:?} for name {:?}",
+                    found,
+                    name
+                );
+                let parent = found.parent().map(std::path::Path::to_path_buf);
+                prop_assert!(
+                    std::env::split_paths(os_path).any(|dir| Some(&dir) == parent.as_ref()),
+                    "resolved {:?}, whose parent is not a PATH entry of {:?}",
+                    found,
+                    path_var
+                );
+            }
+        }
+
         #[test]
         fn has_parent_component_no_panic(s in ".*") {
             let _ = has_parent_component(&s);
