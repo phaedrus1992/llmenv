@@ -450,6 +450,19 @@ fn write_owner_only_atomic_in_dir(
 /// owner-only — this is for arbitrary file content (bundle assets, which may
 /// need to stay executable), not credentials.
 ///
+/// Retried on a temp-name collision (`AlreadyExists`) up to this many times,
+/// mirroring [`write_owner_only_atomic_in_dir`]'s retry bound — the
+/// process-local counter below makes a collision within one process
+/// essentially impossible, but the bound still guards a stale leftover from a
+/// prior crashed process at the same pid+nanos slice.
+const COPY_REPLACING_SYMLINK_MAX_RETRIES: u32 = 8;
+
+/// Process-local counter disambiguating [`copy_replacing_symlink`]'s temp
+/// filenames when multiple calls land in the same nanosecond — shares the
+/// reasoning [`TMP_COUNTER`] documents for [`write_owner_only_atomic`], kept
+/// separate since the two functions' temp-file lifetimes don't overlap.
+static COPY_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// # Errors
 /// Propagates the copy or rename failure. Removes the temp file on error.
 pub fn copy_replacing_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -470,16 +483,48 @@ pub fn copy_replacing_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let mut tmp_name = file_name.to_os_string();
-    tmp_name.push(format!(".{pid}.{nanos}.tmp"));
-    let tmp_path = parent.join(&tmp_name);
 
-    std::fs::copy(src, &tmp_path)?;
-    if let Err(e) = std::fs::rename(&tmp_path, dst) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
+    let mut last_err: Option<std::io::Error> = None;
+    for _ in 0..COPY_REPLACING_SYMLINK_MAX_RETRIES {
+        let counter = COPY_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut tmp_name = file_name.to_os_string();
+        tmp_name.push(format!(".{pid}.{nanos}.{counter}.tmp"));
+        let tmp_path = parent.join(&tmp_name);
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+        if let Err(e) = std::fs::copy(src, &tmp_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, dst) {
+            if let Err(cleanup_err) = std::fs::remove_file(&tmp_path) {
+                tracing::warn!(
+                    "copy_replacing_symlink: failed to remove temp file {} after failed \
+                     rename (rename error: {e}): {cleanup_err}",
+                    tmp_path.display()
+                );
+            }
+            return Err(e);
+        }
+        return Ok(());
     }
-    Ok(())
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "exhausted temp-file collision retries",
+        )
+    }))
 }
 
 #[cfg(test)]
