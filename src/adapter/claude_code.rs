@@ -420,28 +420,34 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Copy all files from the manifest. JSON hook templates get
         // `{{ICM_MCP}}` substituted so bundle hooks can reference the MCP
         // server by name without hard-coding it.
+        //
+        // `write_file_through_dirs`, not a path-based `create_dir_all` +
+        // `write_owner_only`/`copy_replacing_symlink`: `out` is the agent's
+        // live config dir and persists across renders, so a prior render's
+        // output could have been replaced by a symlink anywhere along
+        // `rel` — a directory component included, which `create_dir_all`
+        // would follow — between calls (#1341-class TOCTOU, #1422/#1427).
         for (rel, abs) in &manifest.files {
             if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
                 anyhow::bail!("path traversal in bundle file: {}", rel.display());
             }
-            let dest = out.join(rel);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
             if is_hook_json(rel) {
                 let raw = std::fs::read_to_string(abs)?;
                 let rendered = raw.replace("{{ICM_MCP}}", MEMORY_MCP_NAME);
-                crate::paths::write_owner_only(&dest, rendered.as_bytes())?;
+                // 0o600, matching `write_owner_only`'s own contract for this
+                // branch: this is llmenv's rendered content, not a pass-through
+                // of `abs`'s original mode.
+                crate::paths::dirfd::write_file_through_dirs(
+                    out,
+                    rel,
+                    rendered.as_bytes(),
+                    rustix::fs::Mode::from(0o600),
+                )?;
             } else {
-                // `copy_replacing_symlink`, not `std::fs::copy`: `out` is the
-                // agent's live config dir and persists across renders, so a
-                // prior render's output at `dest` could have been replaced
-                // by a symlink between calls — a plain copy would write
-                // through it (#1341-class TOCTOU, #1422). Only `dest`'s
-                // final component is protected this way — a symlinked
-                // *directory* anywhere in its parent is not, since the
-                // `create_dir_all` above follows one. Tracked in #1427.
-                crate::paths::copy_replacing_symlink(abs, &dest)?;
+                let bytes =
+                    std::fs::read(abs).with_context(|| format!("reading {}", abs.display()))?;
+                let mode = crate::materialize::bundle_file_mode(abs)?;
+                crate::paths::dirfd::write_file_through_dirs(out, rel, &bytes, mode)?;
             }
             owned.push(rel.clone());
         }
@@ -2728,6 +2734,85 @@ mod tests {
             std::fs::read(&victim).unwrap(),
             b"must-not-be-touched",
             "the symlink's target must be untouched"
+        );
+    }
+
+    /// The stronger case #1427 closes: a symlinked *directory* component
+    /// anywhere in a bundle file's relative path must not be followed
+    /// either — `create_dir_all` on a path containing one would resolve
+    /// through it, landing the write inside the symlink's target instead of
+    /// under the materialized folder.
+    #[cfg(unix)]
+    #[test]
+    fn materialize_does_not_follow_a_symlinked_directory_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_src = tmp.path().join("bundle-file.txt");
+        std::fs::write(&bundle_src, b"bundle-content").unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let mut manifest = MergedManifest {
+            files: std::collections::BTreeMap::new(),
+            ..MergedManifest::default()
+        };
+        manifest
+            .files
+            .insert(PathBuf::from("hooks/out.txt"), bundle_src.clone());
+
+        ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+        let hooks_dir = tmp.path().join("hooks");
+        std::fs::remove_dir_all(&hooks_dir).unwrap();
+        std::os::unix::fs::symlink(&outside, &hooks_dir).unwrap();
+
+        let err = ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        let _ = err;
+
+        assert!(
+            !outside.join("out.txt").exists(),
+            "the write must not land inside the symlinked directory's target"
+        );
+    }
+
+    /// The hook-JSON render branch (`{{ICM_MCP}}` substitution) must get the
+    /// same directory-component protection as the raw-copy branch — it isn't
+    /// exempt just because the content comes from `write_owner_only` instead
+    /// of a file copy (#1427).
+    #[cfg(unix)]
+    #[test]
+    fn materialize_does_not_follow_a_symlinked_directory_component_for_hook_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hook_src = tmp.path().join("hook-src.json");
+        std::fs::write(&hook_src, br#"{"command": "{{ICM_MCP}}"}"#).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let mut manifest = MergedManifest {
+            files: std::collections::BTreeMap::new(),
+            ..MergedManifest::default()
+        };
+        manifest
+            .files
+            .insert(PathBuf::from("hooks/hook.json"), hook_src);
+
+        ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap();
+        let hooks_dir = tmp.path().join("hooks");
+        std::fs::remove_dir_all(&hooks_dir).unwrap();
+        std::os::unix::fs::symlink(&outside, &hooks_dir).unwrap();
+
+        let err = ClaudeCodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        let _ = err;
+
+        assert!(
+            !outside.join("hook.json").exists(),
+            "the write must not land inside the symlinked directory's target"
         );
     }
 

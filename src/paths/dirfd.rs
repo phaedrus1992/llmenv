@@ -213,6 +213,79 @@ pub(crate) fn write_file_at(
     std::fs::File::from(fd).write_all(bytes)
 }
 
+/// Open `name` as a directory relative to `dir`, creating it (as `mode`) if
+/// it doesn't exist yet, without ever following a symlink at `name`.
+///
+/// Used to walk a multi-component relative path one directory at a time
+/// (#1427) — the fd-relative analogue of `create_dir_all`, which resolves
+/// every intermediate component by path and so follows a symlink planted at
+/// any of them.
+///
+/// # Errors
+///
+/// `InvalidInput` for anything but a single component (see [`open_dir_at`]).
+/// Fails, rather than following it, when `name` exists as a symlink (or any
+/// non-directory). A race where another process creates `name` between the
+/// initial open attempt and `mkdirat` is resolved by retrying the open once —
+/// `mkdirat`'s own `EEXIST` in that case is not itself an error here.
+fn open_or_create_dir_at(dir: BorrowedFd<'_>, name: &OsStr, mode: Mode) -> io::Result<OwnedFd> {
+    reject_traversal(name)?;
+    match openat(dir, name, DIR_FLAGS, Mode::empty()) {
+        Ok(fd) => return Ok(fd),
+        Err(e) if e != rustix::io::Errno::NOENT => return Err(e.into()),
+        Err(_) => {}
+    }
+    if let Err(e) = rustix::fs::mkdirat(dir, name, mode)
+        && e != rustix::io::Errno::EXIST
+    {
+        return Err(e.into());
+    }
+    Ok(openat(dir, name, DIR_FLAGS, Mode::empty())?)
+}
+
+/// Write `bytes` to `root.join(rel)`, descending through every directory
+/// component of `rel` via [`open_or_create_dir_at`] (creating missing ones
+/// owner-only) rather than a path-based `create_dir_all`, then replacing the
+/// leaf the way [`write_file_at`] does.
+///
+/// Closes the gap a leaf-only fix (a `write_file_at`/`copy_replacing_symlink`
+/// call preceded by `create_dir_all`) leaves open: `create_dir_all` resolves
+/// every intermediate component by path and so follows a symlink planted at
+/// any of them, landing the write inside the symlink's target — a strictly
+/// stronger primitive than writing through the leaf alone (#1427).
+///
+/// `rel` must be a relative path with no `..` components — validate with
+/// [`super::is_unsafe_join_target`] before calling; this function does not
+/// re-check.
+///
+/// # Errors
+///
+/// `InvalidInput` when `rel` has no components. Otherwise propagates any
+/// open, `mkdir`, or write failure — including a symlinked directory
+/// component, which fails the walk rather than being followed.
+pub(crate) fn write_file_through_dirs(
+    root: &Path,
+    rel: &Path,
+    bytes: &[u8],
+    mode: Mode,
+) -> io::Result<()> {
+    use std::os::fd::AsFd as _;
+
+    let mut components: Vec<&OsStr> = rel.iter().collect();
+    let Some(file_name) = components.pop() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{}: empty relative path", rel.display()),
+        ));
+    };
+
+    let mut dir = open_dir_nofollow(root)?;
+    for component in components {
+        dir = open_or_create_dir_at(dir.as_fd(), component, Mode::from(0o700))?;
+    }
+    write_file_at(dir.as_fd(), file_name, bytes, mode)
+}
+
 /// Remove the empty directory `name` from `dir`. A symlink is never followed:
 /// `AT_REMOVEDIR` on one fails rather than removing its target.
 ///
@@ -427,6 +500,140 @@ mod tests {
         std::fs::write(tmp.path().join("here"), b"x").unwrap();
         assert!(mtime_at(dir.as_fd(), OsStr::new("here")).is_some());
     }
+    // ---- open_or_create_dir_at / write_file_through_dirs (#1427) ----
+
+    #[test]
+    fn open_or_create_dir_at_creates_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = open_dir_nofollow(tmp.path()).unwrap();
+
+        let child =
+            open_or_create_dir_at(root.as_fd(), OsStr::new("child"), Mode::from(0o700)).unwrap();
+
+        assert!(tmp.path().join("child").is_dir());
+        assert_eq!(read_dir_entries(child.as_fd()).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn open_or_create_dir_at_opens_an_existing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("child")).unwrap();
+        std::fs::write(tmp.path().join("child/marker"), b"x").unwrap();
+        let root = open_dir_nofollow(tmp.path()).unwrap();
+
+        let child =
+            open_or_create_dir_at(root.as_fd(), OsStr::new("child"), Mode::from(0o700)).unwrap();
+
+        let names: Vec<_> = read_dir_entries(child.as_fd())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["marker"],
+            "must open the existing dir, not recreate it"
+        );
+    }
+
+    /// The whole point: a symlinked directory component must never be
+    /// followed, even to create a missing child underneath what looks like
+    /// it from a path-based stat (#1427).
+    #[test]
+    fn open_or_create_dir_at_refuses_a_symlinked_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, tmp.path().join("link")).unwrap();
+        let root = open_dir_nofollow(tmp.path()).unwrap();
+
+        assert!(
+            open_or_create_dir_at(root.as_fd(), OsStr::new("link"), Mode::from(0o700)).is_err(),
+            "a symlinked directory component must not be opened as the directory it points at"
+        );
+    }
+
+    #[test]
+    fn write_file_through_dirs_creates_missing_intermediate_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_file_through_dirs(
+            tmp.path(),
+            Path::new("a/b/c.txt"),
+            b"payload",
+            Mode::from(0o600),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(tmp.path().join("a/b/c.txt")).unwrap(),
+            b"payload"
+        );
+    }
+
+    #[test]
+    fn write_file_through_dirs_writes_a_single_component_path() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_file_through_dirs(tmp.path(), Path::new("leaf.txt"), b"x", Mode::from(0o600))
+            .unwrap();
+
+        assert_eq!(std::fs::read(tmp.path().join("leaf.txt")).unwrap(), b"x");
+    }
+
+    /// The leaf write must replace a pre-existing symlink rather than write
+    /// through it — `write_file_at`'s existing contract, exercised here
+    /// through the multi-component wrapper (#1427).
+    #[test]
+    fn write_file_through_dirs_does_not_write_through_a_symlinked_leaf() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("a")).unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"must-not-be-touched").unwrap();
+        std::os::unix::fs::symlink(&victim, tmp.path().join("a/leaf.txt")).unwrap();
+
+        write_file_through_dirs(
+            tmp.path(),
+            Path::new("a/leaf.txt"),
+            b"new-content",
+            Mode::from(0o600),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(tmp.path().join("a/leaf.txt")).unwrap(),
+            b"new-content"
+        );
+        assert_eq!(std::fs::read(&victim).unwrap(), b"must-not-be-touched");
+    }
+
+    /// The core property this issue exists for: a symlinked *intermediate*
+    /// directory component must not be followed, however ordinary it looks
+    /// from a path-based stat. Planting one where a bundle file's directory
+    /// would go must make the write fail rather than land inside the
+    /// symlink's target (#1427).
+    #[test]
+    fn write_file_through_dirs_refuses_a_symlinked_intermediate_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, tmp.path().join("a")).unwrap();
+
+        let err = write_file_through_dirs(
+            tmp.path(),
+            Path::new("a/b/leaf.txt"),
+            b"attacker-controlled",
+            Mode::from(0o600),
+        )
+        .unwrap_err();
+        let _ = err;
+
+        assert!(
+            !outside.join("b/leaf.txt").exists(),
+            "the write must not land inside the symlinked directory's target"
+        );
+    }
+
     #[test]
     fn removes_an_empty_directory_but_not_a_symlink_to_one() {
         let tmp = tempfile::tempdir().unwrap();

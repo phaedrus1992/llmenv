@@ -11,6 +11,8 @@ pub(crate) use status_data::{ConfigStaleInputs, collect_status_data};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
+
 use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
@@ -159,21 +161,56 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
         if crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()) {
             anyhow::bail!("path traversal in bundle file: {}", rel.display());
         }
-        let out = dest.join(rel);
-        if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // `copy_replacing_symlink`, not `std::fs::copy`: `dest` persists
-        // across renders (the agent's live config dir), so a prior render's
-        // output at `out` could have been replaced by a symlink between
-        // calls — a plain copy would write through it (#1341-class TOCTOU,
-        // #1423). Only `out`'s final component is protected this way — a
-        // symlinked *directory* anywhere in `parent` is not, since
-        // `create_dir_all` above follows one. Tracked separately in #1427.
-        crate::paths::copy_replacing_symlink(abs, &out)?;
+        write_bundle_file(dest, rel, abs)
+            .with_context(|| format!("writing bundle file {}", rel.display()))?;
     }
     prune_empty_dirs(dest)?;
     Ok(())
+}
+
+/// Write one `m.files` entry into `dest`, replacing whatever is at the
+/// destination — including a symlinked leaf or a symlinked *directory*
+/// anywhere along `rel` — rather than writing through it.
+///
+/// `dest` persists across renders (the agent's live config dir), so a prior
+/// render's output could have been replaced by a symlink between calls.
+/// `create_dir_all` plus a leaf-only guard (`copy_replacing_symlink`) closes
+/// that for the final component but still resolves every *directory*
+/// component of `rel` by path, following a symlink planted at any of them —
+/// a strictly stronger primitive than the leaf case (#1341-class TOCTOU,
+/// #1423, extended to directory components in #1427).
+/// `write_file_through_dirs` walks each component via `openat`-relative
+/// descent instead, so no intermediate symlink is ever followed.
+fn write_bundle_file(dest: &Path, rel: &Path, abs: &Path) -> anyhow::Result<()> {
+    let bytes = std::fs::read(abs).with_context(|| format!("reading {}", abs.display()))?;
+    let mode = bundle_file_mode(abs)?;
+    crate::paths::dirfd::write_file_through_dirs(dest, rel, &bytes, mode)
+        .map_err(anyhow::Error::from)
+}
+
+/// The mode to write a copied bundle file with: the source's mode with
+/// group/other write and setuid/setgid masked off (`& 0o755`) — full mode
+/// propagation would let a bundle file sourced from a permissive local path
+/// or tarball land group/world-writable inside a directory the agent
+/// executes code from, the same reasoning `copy_replacing_symlink` masks for
+/// (security-audit, #1426).
+#[cfg(unix)]
+pub(crate) fn bundle_file_mode(abs: &Path) -> anyhow::Result<rustix::fs::Mode> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(abs)
+        .with_context(|| format!("reading metadata for {}", abs.display()))?
+        .permissions()
+        .mode();
+    // `mode & 0o755` is bounded well within u16's range, so this never
+    // truncates real bits — `from_bits_truncate` still guards against a
+    // stray high bit `Mode` doesn't model rather than panicking on one.
+    let masked = u16::try_from(mode & 0o755).unwrap_or(0o644);
+    Ok(rustix::fs::Mode::from_bits_truncate(masked))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn bundle_file_mode(_abs: &Path) -> anyhow::Result<rustix::fs::Mode> {
+    Ok(rustix::fs::Mode::from(0o644))
 }
 
 /// Remove empty directories under `root` (excluding `root` itself), walking
@@ -345,6 +382,46 @@ mod tests {
             std::fs::read(&victim).expect("read victim"),
             b"must-not-be-touched",
             "the symlink's target must be untouched"
+        );
+    }
+
+    /// The stronger case #1427 closes: a symlinked *directory* component
+    /// anywhere in a bundle file's relative path must not be followed either
+    /// — `create_dir_all` on a path containing one would happily resolve
+    /// through it, landing the write inside the symlink's target instead of
+    /// under `dest`.
+    #[cfg(unix)]
+    #[test]
+    fn write_in_place_does_not_follow_a_symlinked_directory_component() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("bundle-file.txt");
+        std::fs::write(&src, b"bundle-content").expect("write src");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("create cache");
+
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("create outside");
+
+        let mut files = BTreeMap::new();
+        files.insert(PathBuf::from("hooks/out.txt"), src);
+        let m = MergedManifest {
+            files,
+            ..Default::default()
+        };
+
+        // First render creates `hooks/` for real; swap it for a symlink to a
+        // directory outside `dest` before the next render.
+        let rendered = materialize(&m, &cache).expect("first render");
+        let hooks_dir = rendered.path.join("hooks");
+        std::fs::remove_dir_all(&hooks_dir).expect("remove first render's hooks dir");
+        std::os::unix::fs::symlink(&outside, &hooks_dir).expect("plant symlinked directory");
+
+        let err = materialize(&m, &cache).expect_err("must refuse to follow the symlinked dir");
+        let _ = err;
+
+        assert!(
+            !outside.join("out.txt").exists(),
+            "the write must not land inside the symlinked directory's target"
         );
     }
 
