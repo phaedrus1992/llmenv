@@ -167,7 +167,9 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
         // across renders (the agent's live config dir), so a prior render's
         // output at `out` could have been replaced by a symlink between
         // calls — a plain copy would write through it (#1341-class TOCTOU,
-        // #1423).
+        // #1423). Only `out`'s final component is protected this way — a
+        // symlinked *directory* anywhere in `parent` is not, since
+        // `create_dir_all` above follows one. Tracked separately in #1427.
         crate::paths::copy_replacing_symlink(abs, &out)?;
     }
     prune_empty_dirs(dest)?;

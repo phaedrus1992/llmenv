@@ -440,21 +440,36 @@ fn write_owner_only_atomic_in_dir(
 /// follows a symlink there and truncates/overwrites its target instead of
 /// replacing the link itself — the same class of gap `write_owner_only_atomic`
 /// closes for in-memory content, applied here to copying from another file.
-/// Copies to a same-directory temp file first (so the copy itself can't land
-/// on a planted symlink — the name is unique per call), then `rename`s over
-/// `dst`, which POSIX guarantees replaces the destination directory entry
-/// atomically without following it.
 ///
-/// Preserves `src`'s permission mode (`std::fs::copy` does this for the temp
-/// file), unlike [`write_owner_only`]/[`write_owner_only_atomic`] which force
-/// owner-only — this is for arbitrary file content (bundle assets, which may
-/// need to stay executable), not credentials.
+/// The temp file is opened with `create_new` (`O_EXCL`, never follows a
+/// final-component symlink and fails if the name is already taken) and
+/// written to **through that same file handle** — never a second path-based
+/// open, which `std::fs::copy(src, &tmp_path)` would be. An `O_EXCL` open
+/// followed by a second, non-exclusive open of the same path is exactly the
+/// TOCTOU window this function exists to close: a planted or raced symlink
+/// between those two opens would still get written through on the second one
+/// (security-audit, #1426). Only after the content and permissions are fully
+/// written does `rename` move the temp file over `dst`, which POSIX
+/// guarantees replaces the destination directory entry atomically without
+/// following it — and does not follow a symlink at the *source* of the
+/// rename either, so a swapped `tmp_path` still moves as an entry, never as
+/// its target's content.
+///
+/// Preserves `src`'s permission mode with group/other write and setuid/setgid
+/// masked off (`& 0o755 & !0o022`, i.e. `& 0o755`) — full mode propagation
+/// would let a bundle file sourced from a permissive local path or tarball
+/// land group/world-writable inside a directory the agent can execute code
+/// from. Every other file llmenv writes into that directory goes through
+/// [`write_owner_only`] (0o600); this is deliberately looser only to let a
+/// legitimately executable bundle asset (a hook script) keep its exec bit,
+/// never group/other write or setuid/setgid.
 ///
 /// Retried on a temp-name collision (`AlreadyExists`) up to this many times,
 /// mirroring [`write_owner_only_atomic_in_dir`]'s retry bound — the
-/// process-local counter below makes a collision within one process
-/// essentially impossible, but the bound still guards a stale leftover from a
-/// prior crashed process at the same pid+nanos slice.
+/// process-local counter below makes a same-process collision unlikely but
+/// not provably impossible (`SystemTime` granularity varies by platform), and
+/// the bound also covers a stale leftover from a prior crashed process at the
+/// same pid+nanos slice.
 const COPY_REPLACING_SYMLINK_MAX_RETRIES: u32 = 8;
 
 /// Process-local counter disambiguating [`copy_replacing_symlink`]'s temp
@@ -464,8 +479,11 @@ const COPY_REPLACING_SYMLINK_MAX_RETRIES: u32 = 8;
 static COPY_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// # Errors
-/// Propagates the copy or rename failure. Removes the temp file on error.
+/// Propagates the read, copy, permission, or rename failure. Removes the
+/// temp file on error.
 pub fn copy_replacing_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::Seek as _;
+
     let parent = dst.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -478,6 +496,13 @@ pub fn copy_replacing_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
             format!("path has no file name: {}", dst.display()),
         )
     })?;
+    let mut src_file = std::fs::File::open(src)?;
+    // Read the mode from the already-open fd, not a second path-based stat.
+    #[cfg(unix)]
+    let src_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        src_file.metadata()?.permissions().mode()
+    };
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -485,25 +510,44 @@ pub fn copy_replacing_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
         .unwrap_or(0);
 
     let mut last_err: Option<std::io::Error> = None;
-    for _ in 0..COPY_REPLACING_SYMLINK_MAX_RETRIES {
+    for attempt in 0..COPY_REPLACING_SYMLINK_MAX_RETRIES {
         let counter = COPY_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut tmp_name = file_name.to_os_string();
         tmp_name.push(format!(".{pid}.{nanos}.{counter}.tmp"));
         let tmp_path = parent.join(&tmp_name);
 
-        match std::fs::OpenOptions::new()
+        let mut tmp_file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp_path)
         {
-            Ok(_) => {}
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 last_err = Some(e);
                 continue;
             }
             Err(e) => return Err(e),
+        };
+
+        // A retried attempt reuses `src_file`, whose read cursor is at EOF
+        // from the prior try — rewind before streaming again.
+        if attempt > 0 {
+            src_file.seek(std::io::SeekFrom::Start(0))?;
         }
-        if let Err(e) = std::fs::copy(src, &tmp_path) {
+        let copy_result = (|| -> std::io::Result<()> {
+            std::io::copy(&mut src_file, &mut tmp_file)?;
+            tmp_file.sync_all()?;
+            // Set permissions on the held fd, not by path — immune to a
+            // symlink swapped in at `tmp_path` after this point.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                tmp_file.set_permissions(std::fs::Permissions::from_mode(src_mode & 0o755))?;
+            }
+            Ok(())
+        })();
+        drop(tmp_file);
+        if let Err(e) = copy_result {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e);
         }
@@ -1220,6 +1264,79 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o755, "the executable bit must survive the copy");
+    }
+
+    /// Group/other write and setuid/setgid must never survive the copy — a
+    /// bundle file sourced from a permissive local path or tarball must not
+    /// land group/world-writable inside a directory the agent executes code
+    /// from (security-audit, #1426).
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_symlink_masks_group_other_write_and_setid_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"payload").expect("write src");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o6777))
+            .expect("chmod 6777");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        let mode = std::fs::metadata(&dst)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, 0o755,
+            "group/other write and setuid/setgid must be masked off: got {mode:o}"
+        );
+    }
+
+    /// The temp file itself must be opened exclusively (`O_EXCL`), not
+    /// written to through a second, non-exclusive open the way
+    /// `std::fs::copy(src, &tmp_path)` would — otherwise a symlink planted at
+    /// the exact predictable temp name between the exclusive-open check and a
+    /// second open gets written through, which is the residual TOCTOU
+    /// security-audit found in the first cut of this function (#1426). A
+    /// symlink already sitting at the counter-derived temp name must make
+    /// this attempt collide and retry onto the next name, not follow it.
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_symlink_does_not_follow_a_symlink_planted_at_the_temp_name() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let victim = tmp.path().join("victim");
+        std::fs::write(&src, b"payload").expect("write src");
+        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
+
+        let pid = std::process::id();
+        let now = std::time::SystemTime::now();
+        let nanos = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        // Plant a symlink at every temp name the counter could plausibly
+        // produce next, forcing at least one `create_new` collision before a
+        // fresh (non-symlinked) name is found.
+        let next = COPY_TMP_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
+        for counter in next..next + 4 {
+            let name = format!("dst.{pid}.{nanos}.{counter}.tmp");
+            std::os::unix::fs::symlink(&victim, tmp.path().join(name))
+                .expect("plant symlink at candidate temp name");
+        }
+
+        copy_replacing_symlink(&src, &dst).expect("copy despite planted symlinks");
+
+        assert_eq!(std::fs::read(&dst).expect("read dst"), b"payload");
+        assert_eq!(
+            std::fs::read(&victim).expect("read victim"),
+            b"must-not-be-touched",
+            "a symlink planted at a candidate temp name must never be written through"
+        );
     }
 
     #[test]

@@ -437,7 +437,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 // agent's live config dir and persists across renders, so a
                 // prior render's output at `dest` could have been replaced
                 // by a symlink between calls — a plain copy would write
-                // through it (#1341-class TOCTOU, #1422).
+                // through it (#1341-class TOCTOU, #1422). Only `dest`'s
+                // final component is protected this way — a symlinked
+                // *directory* anywhere in its parent is not, since the
+                // `create_dir_all` above follows one. Tracked in #1427.
                 crate::paths::copy_replacing_symlink(abs, &dest)?;
             }
             owned.push(rel.clone());
