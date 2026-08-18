@@ -145,6 +145,17 @@ enum Command {
         #[arg(long)]
         compress: bool,
     },
+    /// Resolve the environment and run `engine` as a supervised child process —
+    /// see #1056. Everything after `--` is passed through to the engine
+    /// unmodified.
+    Launch {
+        /// Engine to launch: a binary name (claude, crush, opencode) or the
+        /// underscore-form engine id (claude_code)
+        engine: String,
+        /// Arguments passed through to the engine binary unmodified
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Regenerate the materialized config without exporting shell variables
     Regenerate,
     /// Render the statusline (reads engine session JSON from stdin)
@@ -619,6 +630,9 @@ pub fn run() -> anyhow::Result<()> {
         }) => {
             run_export(scope, tag, explain, compress)?;
         }
+        Some(Command::Launch { engine, args }) => {
+            run_launch(&engine, args)?;
+        }
         Some(Command::Regenerate) => {
             run_regenerate()?;
         }
@@ -1019,12 +1033,31 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
         })
 }
 
-fn run_export(
+/// The result of resolving the environment for the active scope, before it's
+/// either printed as `export` lines (`run_export`) or applied to a supervised
+/// child process (`run_launch`). Shared by both so there is exactly one
+/// resolution code path (#1056).
+struct ResolvedEnv {
+    /// Every variable llmenv would export, in deterministic (`BTreeMap`) order.
+    vars: std::collections::BTreeMap<String, String>,
+    /// Names of the bundles that fired, for `export --explain`'s
+    /// `# source: adapter (bundles: ...)` annotation.
+    firing_bundle_names: Vec<String>,
+}
+
+/// Resolve the environment for the active scope: load config, evaluate scopes
+/// and tags, merge bundles, resolve MCPs, and materialize the adapter config —
+/// the full pipeline `export` has always run, factored out so `launch` shares
+/// it verbatim rather than growing a second resolution behavior (#1056).
+///
+/// Every variable is validated before any is returned, so a validation failure
+/// yields zero output instead of the partial output the previous inline
+/// per-print validation could leave behind.
+fn resolve_env(
     scope: Option<String>,
     tag: Option<String>,
-    explain: bool,
     compress: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ResolvedEnv> {
     let config_path = paths::config_path()?;
     let config = crate::hook_run::load_cached_config(&config_path)?;
     let config_dir = paths::config_dir()?;
@@ -1338,16 +1371,31 @@ fn run_export(
     // Auto-prune: TTL-based memory retention pass after materialization (#270)
     crate::memory::prune::auto_prune_if_enabled(&config);
 
+    // Validate every variable before returning any of them — a failure here
+    // must produce zero output, not the partial output the old inline
+    // per-print validation could leave behind.
+    for (key, value) in &vars {
+        validate_var_name(key).with_context(|| format!("variable '{key}'"))?;
+        validate_var_value(value).with_context(|| format!("variable '{key}': invalid value"))?;
+    }
+
+    Ok(ResolvedEnv {
+        vars,
+        firing_bundle_names: bundles_for_icm,
+    })
+}
+
+fn run_export(
+    scope: Option<String>,
+    tag: Option<String>,
+    explain: bool,
+    compress: bool,
+) -> anyhow::Result<()> {
+    let resolved = resolve_env(scope, tag, compress)?;
+
     if explain {
-        let bundle_list = firing
-            .iter()
-            .map(|b| b.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        for (key, value) in vars {
-            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_var_value(&value)
-                .with_context(|| format!("variable '{key}': invalid value"))?;
+        let bundle_list = resolved.firing_bundle_names.join(", ");
+        for (key, value) in resolved.vars {
             if key.starts_with("LLMENV_") {
                 println!("# source: llmenv introspection");
             } else {
@@ -1356,15 +1404,143 @@ fn run_export(
             println!("export {}={}", key, shell_escape(&value));
         }
     } else {
-        for (key, value) in vars {
-            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_var_value(&value)
-                .with_context(|| format!("variable '{key}': invalid value"))?;
+        for (key, value) in resolved.vars {
             println!("export {}={}", key, shell_escape(&value));
         }
     }
 
     Ok(())
+}
+
+/// `llmenv launch <engine>`: resolve the environment the same way `export`
+/// does, then spawn `engine` as a supervised child process with that
+/// environment applied on top of the inherited one, inherited stdio, and the
+/// child's exit code propagated as `launch`'s own (see #1056).
+fn run_launch(engine: &str, args: Vec<String>) -> anyhow::Result<()> {
+    let adapter = crate::adapter::adapter_for_launch_target(engine).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unrecognized engine '{engine}' — expected one of: {}",
+            crate::adapter::registered_adapters()
+                .iter()
+                .map(|a| a.binary_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+
+    if !crate::adapter::binary_on_path(adapter.binary_name()) {
+        // `binary_on_path` reports false both when the engine is genuinely
+        // absent and when it couldn't run `which` to find out (#1382), so the
+        // message names both rather than asserting the engine isn't installed.
+        anyhow::bail!(
+            "'{bin}' not found on PATH — install it before running `llmenv launch {engine}`. \
+             If '{bin}' is installed, check that `which` is available and PATH is set correctly.",
+            bin = adapter.binary_name()
+        );
+    }
+
+    let resolved = resolve_env(None, None, false)?;
+
+    let mut cmd = tokio::process::Command::new(adapter.binary_name());
+    cmd.args(&args);
+    for (key, value) in &resolved.vars {
+        cmd.env(key, value);
+    }
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    // `tokio::process::Command::spawn` registers the child with the runtime's
+    // signal reactor, so it has to run inside `block_on` — spawning first and
+    // entering the runtime afterwards panics with "there is no reactor running".
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for launch supervision")?;
+    let status = rt.block_on(spawn_and_supervise(&mut cmd, adapter.binary_name()))?;
+
+    exit_with_status(status);
+}
+
+/// Spawn the engine and wait for it to exit, ignoring SIGINT/SIGTERM/SIGHUP
+/// delivered to this process: the terminal already delivers the same signal
+/// directly to the child (same process group, standard `Command::spawn`
+/// behavior), so `launch` doesn't need to forward it — it needs to *not die
+/// first*, and instead keep waiting until the child's own exit status is known.
+///
+/// The handlers are installed *before* the spawn on purpose. Installing them
+/// afterwards leaves a window in which a signal kills `launch` under its
+/// default disposition while the engine it just started keeps running,
+/// orphaning the child and returning a signal-derived status the caller has to
+/// interpret as the engine's.
+///
+/// Unix-only, like `launch` itself — the shipped targets are linux-musl and
+/// apple-darwin, and the whole design rests on process-group signal semantics.
+async fn spawn_and_supervise(
+    cmd: &mut tokio::process::Command,
+    binary: &str,
+) -> anyhow::Result<std::process::ExitStatus> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigint = signal(SignalKind::interrupt()).context("failed to install SIGINT handler")?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("failed to install SIGTERM handler")?;
+    let mut sighup = signal(SignalKind::hangup()).context("failed to install SIGHUP handler")?;
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn '{binary}'"))?;
+
+    loop {
+        tokio::select! {
+            status = child.wait() => {
+                return status.context("failed to wait on child engine process");
+            }
+            _ = sigint.recv() => {
+                tracing::debug!("launch: received SIGINT, still waiting on child");
+            }
+            _ = sigterm.recv() => {
+                tracing::debug!("launch: received SIGTERM, still waiting on child");
+            }
+            _ = sighup.recv() => {
+                tracing::debug!("launch: received SIGHUP, still waiting on child");
+            }
+        }
+    }
+}
+
+/// The exit code `launch` should exit with to mirror `status`: the child's own
+/// code on a normal exit, or `128 + signum` (POSIX convention — what a shell's
+/// `$?` shows for a signal-killed process) if it died by signal.
+///
+/// Split out from [`exit_with_status`] so the mapping is testable: the caller
+/// diverges via `process::exit`, which can't be asserted on in-process.
+fn exit_code_for_status(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    // `wait` only yields terminated statuses, so a status with neither an exit
+    // code nor a termination signal shouldn't be reachable. Say so rather than
+    // exiting 1 mutely, which would be indistinguishable from the engine
+    // legitimately exiting 1.
+    tracing::error!(
+        ?status,
+        "launch: child exited with neither an exit code nor a signal; reporting exit 1"
+    );
+    1
+}
+
+/// Exit the current process mirroring the child's status — see
+/// [`exit_code_for_status`].
+fn exit_with_status(status: std::process::ExitStatus) -> ! {
+    std::process::exit(exit_code_for_status(status))
 }
 
 /// `llmenv statusline`: read the engine's session JSON from stdin, load the
@@ -6343,6 +6519,51 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
 fn is_within_cache(cache_root: &std::path::Path, expanded_path: &str) -> bool {
     let path = normalize_path(std::path::Path::new(expanded_path));
     path.starts_with(cache_root)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test code")]
+mod exit_code_tests {
+    use super::exit_code_for_status;
+    use proptest::prelude::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    #[test]
+    fn normal_exit_reports_the_childs_own_code() {
+        assert_eq!(exit_code_for_status(ExitStatus::from_raw(7 << 8)), 7);
+        assert_eq!(exit_code_for_status(ExitStatus::from_raw(0)), 0);
+    }
+
+    #[test]
+    fn signal_death_reports_128_plus_signum() {
+        // SIGINT (2) is what a Ctrl-C'd engine dies from; a shell reports 130.
+        assert_eq!(exit_code_for_status(ExitStatus::from_raw(2)), 130);
+    }
+
+    proptest! {
+        /// A normally-exited child's code passes through unchanged, for every
+        /// code a POSIX wait status can carry.
+        #[test]
+        fn exit_code_passes_through_for_every_normal_exit(code in 0i32..=255) {
+            let status = ExitStatus::from_raw(code << 8);
+            prop_assert_eq!(exit_code_for_status(status), code);
+        }
+
+        /// A signal-killed child maps to `128 + signum`, the value a shell's
+        /// `$?` reports — so a caller's exit-code checks keep working.
+        #[test]
+        fn signal_death_maps_to_128_plus_signum(sig in 1i32..=31) {
+            let status = ExitStatus::from_raw(sig);
+            prop_assert_eq!(exit_code_for_status(status), 128 + sig);
+        }
+
+        /// Never panics, whatever raw wait status the OS hands back.
+        #[test]
+        fn never_panics_on_arbitrary_raw_status(raw in any::<i32>()) {
+            let _ = exit_code_for_status(ExitStatus::from_raw(raw));
+        }
+    }
 }
 
 #[cfg(test)]
