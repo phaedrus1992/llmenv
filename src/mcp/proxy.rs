@@ -709,9 +709,14 @@ fn sanitize_log_line(line: &str) -> String {
 /// memory backend can't be exposed on the network without one of them.
 fn mcp_proxy_command() -> anyhow::Result<(&'static str, Vec<&'static str>)> {
     // An unset PATH resolves nothing, which is the same conclusion the lookup
-    // reaches for a PATH with no match — `resolve_in_path_list` on an empty
-    // value covers it without a second code path.
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    // reaches for a PATH with no match — but they mean different things (a
+    // stripped environment vs. nothing installed) and the error below can't tell
+    // them apart, so leave the distinction in the log the way the shared
+    // resolver's `resolve_on_path` does.
+    let path_var = std::env::var_os("PATH").unwrap_or_else(|| {
+        tracing::debug!("PATH is unset; cannot resolve `mcp-proxy` or `uvx`");
+        std::ffi::OsString::new()
+    });
     mcp_proxy_command_in(&path_var)
 }
 

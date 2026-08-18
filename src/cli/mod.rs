@@ -1583,7 +1583,15 @@ async fn spawn_and_supervise(
         .with_context(|| format!("failed to spawn '{binary}'"))?;
 
     if let Some(payload) = stdin_payload {
-        write_child_stdin(&mut child, payload, binary).await?;
+        if let Err(e) = write_child_stdin(&mut child, payload, binary).await {
+            // Returning here would drop `child` without killing it, and a
+            // dropped `tokio::process::Child` keeps running by default — the
+            // exact orphaning this function exists to prevent, on its own error
+            // path. The child can't do anything useful without the input it was
+            // spawned to read, so end it and reap it before reporting.
+            kill_and_reap(&mut child, binary).await;
+            return Err(e);
+        }
     }
 
     loop {
@@ -1602,6 +1610,21 @@ async fn spawn_and_supervise(
                 forward_signal(&child, rustix::process::Signal::HUP, "SIGHUP");
             }
         }
+    }
+}
+
+/// Kill `child` and wait for it, best-effort, so an error path can't leave a
+/// process running with nothing waiting on it.
+///
+/// Failures are logged rather than propagated: the caller is already returning an
+/// error that explains what actually went wrong, and a kill that fails because
+/// the child had already exited is the common case, not a problem.
+async fn kill_and_reap(child: &mut tokio::process::Child, binary: &str) {
+    if let Err(e) = child.kill().await {
+        // `kill` here also reaps, so a failure means the child may still be
+        // running — worth `error!`, since llmenv's default filter is ERROR-only
+        // and the user would otherwise have no explanation for a stray process.
+        tracing::error!("could not terminate '{binary}' after a startup failure: {e}");
     }
 }
 
@@ -6939,6 +6962,53 @@ mod run_supervised_tests {
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "exit 0"]);
         assert!(run_supervised(cmd, "sh", None).unwrap().success());
+    }
+
+    /// A stdin-write failure must not leave the child running. Returning the
+    /// error without killing it drops the `Child` handle, and a dropped
+    /// `tokio::process::Child` keeps executing by default — the same orphaning
+    /// `run_supervised` exists to prevent, on its own error path.
+    ///
+    /// Asserted by watching the child rather than by timing: the stub closes its
+    /// stdin (so the write fails), records that it started, sleeps briefly, and
+    /// only then writes a second marker. The error comes back promptly either
+    /// way, so the second marker's *absence* after the sleep would have elapsed
+    /// is the only thing that distinguishes "killed" from "orphaned".
+    #[test]
+    fn a_child_that_rejects_its_stdin_payload_is_not_left_running() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let started = tmp.path().join("started.txt");
+        let survived = tmp.path().join("survived.txt");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "exec 0<&-; : > \"$STARTED\"; sleep 1; : > \"$SURVIVED\"",
+        ])
+        .env("STARTED", &started)
+        .env("SURVIVED", &survived);
+
+        // Comfortably larger than any platform's pipe buffer (64 KiB on Linux,
+        // 16-64 KiB on macOS): a payload that fits is absorbed by the buffer
+        // before the child closes its read end, and the write then succeeds.
+        let payload = vec![b'x'; 1024 * 1024];
+        let result = run_supervised(cmd, "sh", Some(&payload));
+
+        assert!(
+            result.is_err(),
+            "writing to a closed stdin should have failed; got {result:?}"
+        );
+        assert!(
+            started.exists(),
+            "the stub never ran, so this exercised a spawn failure rather than a \
+             stdin-write failure"
+        );
+
+        // Twice the stub's sleep, so a surviving child has had time to finish it.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert!(
+            !survived.exists(),
+            "the child outlived the failed write — it was orphaned instead of killed"
+        );
     }
 
     #[test]
