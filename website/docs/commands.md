@@ -704,9 +704,30 @@ llmenv upgrade [--check] [--track beta|release]
 ```
 
 Upgrade llmenv to the latest version from GitHub releases. Downloads the
-platform-appropriate pre-built binary, performs a safe install cycle
-(backup → write temp → sync → rename → verify → remove backup), and
-restores the original binary on failure.
+platform-appropriate pre-built binary, checks it against the release's published
+SHA-256, performs a safe install cycle (backup → write temp → sync → rename →
+verify → remove backup), and restores the original binary on failure.
+
+### Checksum verification
+
+(added in v4.0.0)
+
+Every release publishes a `checksums.txt` asset listing a SHA-256 for each
+binary. `upgrade` fetches it before downloading, and refuses to install if the
+downloaded bytes don't hash to the published value.
+
+It fails closed: a release with no `checksums.txt`, or one whose `checksums.txt`
+has no line for this platform's asset, aborts the upgrade rather than installing
+an unverified binary. Nothing is written to disk in that case — the check runs
+before the install cycle begins.
+
+This catches a corrupted or truncated download, and an asset swapped after the
+release was published. It does not by itself prove the release pipeline was
+honest: an attacker able to replace the binary in a release could also replace
+the checksum beside it. Releases also carry [SLSA
+provenance](https://slsa.dev/) (`<asset>.intoto.jsonl`) for that stronger claim,
+which `upgrade` does not yet verify — see
+[#1411](https://github.com/phaedrus1992/llmenv/issues/1411).
 
 - `--check` compares the current version against the latest release and
   prints the result. Exits 1 if an update is available.

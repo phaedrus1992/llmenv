@@ -244,8 +244,95 @@ fn find_asset(release: &GhRelease) -> Result<&GhAsset> {
         .with_context(|| format!("no release asset for platform: {asset_name}"))
 }
 
+/// Release asset holding one `sha256sum`-format line per binary, produced by
+/// the release workflow's checksum step.
+const CHECKSUMS_ASSET: &str = "checksums.txt";
+
 fn get_api_base_url() -> String {
     env::var("LLMENV_UPGRADE_GITHUB_API").unwrap_or_else(|_| "https://api.github.com".to_string())
+}
+
+/// The expected SHA-256 for `asset_name`, parsed out of a `sha256sum`-format
+/// listing (`<64 hex chars>  <filename>` per line, two spaces for binary mode).
+///
+/// Returns `None` when the file has no line for that asset, which the caller
+/// treats as a hard failure rather than a reason to skip verification.
+///
+/// Tolerant about the separator (`sha256sum` writes two spaces, ` *name` in
+/// binary mode) and about the hash's case, but not about its shape: a line whose
+/// first field isn't 64 hex characters is ignored rather than trusted.
+fn expected_sha256_for(checksums: &str, asset_name: &str) -> Option<String> {
+    checksums.lines().find_map(|line| {
+        let (hash, name) = line.split_once(char::is_whitespace)?;
+        if name.trim().trim_start_matches('*') != asset_name {
+            return None;
+        }
+        let hash = hash.trim();
+        if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            Some(hash.to_ascii_lowercase())
+        } else {
+            None
+        }
+    })
+}
+
+/// Verify `data` hashes to `expected`.
+///
+/// # Errors
+/// Returns an error naming both hashes when they differ.
+fn verify_sha256(data: &[u8], expected: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let actual = hex::encode(Sha256::digest(data));
+    anyhow::ensure!(
+        actual == expected.to_ascii_lowercase(),
+        "checksum mismatch: expected {expected}, got {actual}. \
+         The download does not match the checksum published with the release; \
+         refusing to install it."
+    );
+    Ok(())
+}
+
+/// Download the release's `checksums.txt` and return the expected hash for
+/// `asset_name`.
+///
+/// Fails closed at every step (asset absent, download failed, no line for this
+/// platform). Every release the upgrade path can move *to* publishes this file —
+/// it has been in the release workflow since well before the oldest release
+/// llmenv would upgrade from — so a missing one means the release is malformed
+/// or the response isn't what it claims to be, and installing anyway would make
+/// the check decorative.
+fn fetch_expected_sha256(
+    client: &reqwest::blocking::Client,
+    release: &GhRelease,
+    asset_name: &str,
+) -> Result<String> {
+    let checksums_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == CHECKSUMS_ASSET)
+        .with_context(|| {
+            format!(
+                "release has no `{CHECKSUMS_ASSET}` asset; refusing to install an unverified binary"
+            )
+        })?;
+
+    let resp = client
+        .get(&checksums_asset.browser_download_url)
+        .send()
+        .with_context(|| format!("failed to download `{CHECKSUMS_ASSET}`"))?;
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "downloading `{CHECKSUMS_ASSET}` failed with HTTP {}",
+        resp.status()
+    );
+    let body = resp
+        .text()
+        .with_context(|| format!("failed to read `{CHECKSUMS_ASSET}`"))?;
+
+    expected_sha256_for(&body, asset_name).with_context(|| {
+        format!("`{CHECKSUMS_ASSET}` has no entry for `{asset_name}`; refusing to install an unverified binary")
+    })
 }
 
 pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()> {
@@ -290,10 +377,17 @@ pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()>
     }
 
     let asset = find_asset(&release)?;
+    // Resolved before the download so a release without usable checksums fails
+    // before spending the transfer, and so there is no path where a downloaded
+    // binary exists with nothing to check it against.
+    let expected_sha256 = fetch_expected_sha256(&client, &release, &asset.name)?;
+
     eprint!("Downloading llmenv {}... ", release_version);
     let binary_data = download_binary(&client, &asset.browser_download_url)?;
     let mb = binary_data.len() as f64 / 1_048_576.0;
     eprintln!("{:.1} MB", mb);
+
+    verify_sha256(&binary_data, &expected_sha256)?;
 
     install_binary(&binary_data)?;
     println!("Successfully upgraded to llmenv {}", release_version);
@@ -566,6 +660,198 @@ mod tests {
         .await
         .unwrap();
         assert!(result.is_err());
+    }
+
+    // -- Checksum verification (#1040)
+
+    /// The exact format the release workflow's `sha256sum` step produces.
+    const SAMPLE_CHECKSUMS: &str = "\
+f43d876bddddb89cb8423278203967e41be62153c1ec562009c0cc293e185d9c  llmenv-linux-aarch64
+e4b16291a02ff3029b6250758a0e0a1141d4dec181e5f619f10662da1520234d  llmenv-linux-x86_64
+fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d  llmenv-macos-aarch64
+d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x86_64
+";
+
+    #[test]
+    fn expected_sha256_picks_the_line_for_this_platform() {
+        assert_eq!(
+            expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-macos-aarch64").as_deref(),
+            Some("fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d")
+        );
+        assert_eq!(
+            expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-linux-x86_64").as_deref(),
+            Some("e4b16291a02ff3029b6250758a0e0a1141d4dec181e5f619f10662da1520234d")
+        );
+    }
+
+    /// A name that isn't listed must yield nothing, so the caller fails closed
+    /// rather than installing an unverified binary. Also guards against a
+    /// prefix/substring match: `llmenv-macos` is not `llmenv-macos-aarch64`.
+    #[test]
+    fn expected_sha256_returns_none_for_an_unlisted_asset() {
+        assert!(expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-freebsd-x86_64").is_none());
+        assert!(expected_sha256_for(SAMPLE_CHECKSUMS, "llmenv-macos").is_none());
+        assert!(expected_sha256_for("", "llmenv-macos-aarch64").is_none());
+    }
+
+    /// `sha256sum` writes ` *name` in binary mode, and some tools emit a single
+    /// space or uppercase hex. All are the same statement about the same file.
+    #[test]
+    fn expected_sha256_tolerates_format_variants() {
+        let binary_mode = "fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d *llmenv-macos-aarch64";
+        let upper = "FDA0D9803CC9A10F82BAA07DC77ACFC6C25A8B715B339660B1A45381D739F31D  llmenv-macos-aarch64";
+        for text in [binary_mode, upper] {
+            assert_eq!(
+                expected_sha256_for(text, "llmenv-macos-aarch64").as_deref(),
+                Some("fda0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d"),
+                "failed on {text:?}"
+            );
+        }
+    }
+
+    /// A malformed first field is ignored rather than trusted — otherwise a
+    /// truncated or garbage line would become an "expected hash" that nothing
+    /// could ever match, or worse, a short prefix that something could.
+    #[test]
+    fn expected_sha256_ignores_lines_whose_hash_is_not_64_hex_chars() {
+        for bad in [
+            "deadbeef  llmenv-macos-aarch64",
+            "not-a-hash-at-all  llmenv-macos-aarch64",
+            "zzza0d9803cc9a10f82baa07dc77acfc6c25a8b715b339660b1a45381d739f31d  llmenv-macos-aarch64",
+        ] {
+            assert!(
+                expected_sha256_for(bad, "llmenv-macos-aarch64").is_none(),
+                "should have rejected {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_sha256_accepts_the_matching_digest() {
+        // sha256("llmenv")
+        let data = b"llmenv";
+        let expected = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(data));
+        assert!(verify_sha256(data, &expected).is_ok());
+        assert!(
+            verify_sha256(data, &expected.to_ascii_uppercase()).is_ok(),
+            "hash comparison must not be case-sensitive"
+        );
+    }
+
+    /// The point of the whole feature: bytes that don't match the published
+    /// checksum are refused, and the error says both hashes.
+    #[test]
+    fn verify_sha256_rejects_tampered_bytes() {
+        let expected = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"llmenv"));
+        let err = verify_sha256(b"llmenv-but-tampered", &expected).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("checksum mismatch"), "got: {msg}");
+        assert!(
+            msg.contains(&expected),
+            "error should name the expected hash: {msg}"
+        );
+    }
+
+    proptest! {
+        /// Never panics, and never invents a hash, whatever text arrives — the
+        /// file is fetched over the network, so it is untrusted input.
+        #[test]
+        fn expected_sha256_never_panics_on_arbitrary_input(
+            text in ".*",
+            name in ".*",
+        ) {
+            if let Some(h) = expected_sha256_for(&text, &name) {
+                prop_assert_eq!(h.len(), 64);
+                prop_assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_expected_sha256_errors_when_the_release_has_no_checksums_asset() {
+        let release = GhRelease {
+            tag_name: "v9.9.9".into(),
+            prerelease: false,
+            draft: false,
+            assets: vec![GhAsset {
+                name: "llmenv-macos-aarch64".into(),
+                browser_download_url: "https://example.com/llmenv-macos-aarch64".into(),
+            }],
+        };
+        let err = tokio::task::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::new();
+            fetch_expected_sha256(&client, &release, "llmenv-macos-aarch64")
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no `checksums.txt` asset"),
+            "got: {err:#}"
+        );
+    }
+
+    /// A release that publishes checksums but omits this platform's line is a
+    /// hard failure too — the alternative is skipping verification exactly when
+    /// there is nothing to verify against.
+    #[tokio::test]
+    async fn fetch_expected_sha256_errors_when_the_platform_is_not_listed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SAMPLE_CHECKSUMS))
+            .mount(&server)
+            .await;
+
+        let release = GhRelease {
+            tag_name: "v9.9.9".into(),
+            prerelease: false,
+            draft: false,
+            assets: vec![GhAsset {
+                name: CHECKSUMS_ASSET.into(),
+                browser_download_url: format!("{}/checksums.txt", server.uri()),
+            }],
+        };
+        let err = tokio::task::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::new();
+            fetch_expected_sha256(&client, &release, "llmenv-freebsd-x86_64")
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no entry for `llmenv-freebsd-x86_64`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_expected_sha256_returns_the_published_hash() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SAMPLE_CHECKSUMS))
+            .mount(&server)
+            .await;
+
+        let release = GhRelease {
+            tag_name: "v9.9.9".into(),
+            prerelease: false,
+            draft: false,
+            assets: vec![GhAsset {
+                name: CHECKSUMS_ASSET.into(),
+                browser_download_url: format!("{}/checksums.txt", server.uri()),
+            }],
+        };
+        let hash = tokio::task::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::new();
+            fetch_expected_sha256(&client, &release, "llmenv-linux-aarch64")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            hash,
+            "f43d876bddddb89cb8423278203967e41be62153c1ec562009c0cc293e185d9c"
+        );
     }
 
     // -- Asset matching
