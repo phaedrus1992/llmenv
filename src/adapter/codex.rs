@@ -45,7 +45,15 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[];
 
 /// Keys this adapter renders itself, and which a `native.codex` catch-all
 /// fragment must therefore not overwrite.
-const CODEX_MODELED_KEYS: &[&str] = &["mcp_servers"];
+///
+/// `model_instructions_file` is here for the same reason opencode guards its
+/// `instructions`: it points at the bundle-merged rules pipeline, which is where
+/// org and security policy lives. Letting the catch-all replace that scalar
+/// would redirect every rule llmenv merged to a file of the fragment author's
+/// choosing, silently — `overlay_native_json` runs after the render, so the
+/// override simply wins. The framework already classifies this concept as
+/// modeled-with-no-escape-hatch; use `capabilities.rules`.
+const CODEX_MODELED_KEYS: &[&str] = &["mcp_servers", "model_instructions_file"];
 
 impl AgentAdapter for CodexAdapter {
     fn name(&self) -> &'static str {
@@ -108,7 +116,7 @@ impl AgentAdapter for CodexAdapter {
         super::skills::create_dir_owner_only(out)?;
         let mut owned: Vec<PathBuf> = Vec::new();
 
-        warn_about_unrenderable_hooks(manifest);
+        warn_about_unrenderable_capabilities(manifest);
 
         let mut doc = serde_json::Map::new();
 
@@ -127,7 +135,13 @@ impl AgentAdapter for CodexAdapter {
                 )
             })?;
             doc.insert("model_instructions_file".into(), json!(as_str));
-            owned.push(agents_path);
+            // Relative, per the trait contract: `CacheManifest::new` filters the
+            // owned set through `is_unsafe_join_target`, which rejects absolute
+            // paths (#196). An absolute entry here is silently dropped, and a
+            // file llmenv doesn't own is never ghost-reconciled — a stale
+            // AGENTS.md would sit in CODEX_HOME feeding revoked instructions to
+            // the model, since that is also Codex's own user-instructions path.
+            owned.push(PathBuf::from("AGENTS.md"));
         }
 
         let mcp_servers = render_mcp_servers(manifest);
@@ -154,10 +168,10 @@ impl AgentAdapter for CodexAdapter {
         super::strip_json_nulls(&mut doc_value);
 
         let rendered = toml::to_string_pretty(&doc_value)
-            .context_for_codex("failed to render Codex config.toml")?;
+            .map_err(|e| anyhow::anyhow!("failed to render Codex config.toml: {e}"))?;
         let out_path = out.join(CODEX_CONFIG_FILE);
         crate::paths::write_owner_only(&out_path, rendered.as_bytes())?;
-        owned.push(out_path);
+        owned.push(PathBuf::from(CODEX_CONFIG_FILE));
 
         Ok(owned)
     }
@@ -167,35 +181,39 @@ impl AgentAdapter for CodexAdapter {
     }
 }
 
-/// Adds context to a `toml` serialization error.
-///
-/// A local trait rather than `anyhow::Context` directly because `toml`'s error
-/// type is not `std::error::Error + Send + Sync` in every configuration, and the
-/// message matters more than the chain here.
-trait CodexTomlContext<T> {
-    fn context_for_codex(self, msg: &'static str) -> anyhow::Result<T>;
-}
-
-impl<T> CodexTomlContext<T> for Result<T, toml::ser::Error> {
-    fn context_for_codex(self, msg: &'static str) -> anyhow::Result<T> {
-        self.map_err(|e| anyhow::anyhow!("{msg}: {e}"))
-    }
-}
-
-/// Warn once per hook that Codex can't express yet, rather than failing the
+/// Warn about capabilities this slice can't render yet, rather than failing the
 /// whole render.
 ///
-/// A bundle shared across engines commonly declares hooks for Claude Code. That
-/// is a cross-engine gap, not an authoring mistake, and failing here would also
-/// drop the MCP servers and AGENTS.md that Codex *can* use — the same reasoning
-/// the Crush adapter applies to its own unsupported events.
-fn warn_about_unrenderable_hooks(manifest: &MergedManifest) {
+/// A bundle shared across engines commonly declares hooks and permissions for
+/// Claude Code. That is a cross-engine gap, not an authoring mistake, and
+/// failing here would also drop the MCP servers and AGENTS.md that Codex *can*
+/// use — the same reasoning the Crush adapter applies to its own unsupported
+/// events.
+///
+/// Permissions get a warning for a stronger reason than the hooks do: a `deny`
+/// rule that evaporates leaves Codex running under its own default
+/// `approval_policy`/`sandbox_mode`, so the posture is silently weaker on this
+/// engine than on the one the bundle was tested against. Being quiet about that
+/// is worse than being quiet about a hook that didn't fire.
+fn warn_about_unrenderable_capabilities(manifest: &MergedManifest) {
     for hook in &manifest.capabilities.hooks {
         eprintln!(
             "warning: the Codex adapter does not wire lifecycle hooks yet \
              (hook event '{}') — skipping it. Tracking issue: \
              https://github.com/phaedrus1992/llmenv/issues/1108",
             hook.event
+        );
+    }
+
+    let perms = &manifest.capabilities.permissions;
+    let rule_count = perms.allow.len() + perms.ask.len() + perms.deny.len();
+    if rule_count > 0 {
+        eprintln!(
+            "warning: the Codex adapter does not render permissions yet — {rule_count} rule(s), \
+             including {} deny rule(s), will NOT constrain Codex, which runs under its own \
+             default approval policy and sandbox mode. Tracking issue: \
+             https://github.com/phaedrus1992/llmenv/issues/1102",
+            perms.deny.len()
         );
     }
 }
@@ -411,6 +429,34 @@ mod tests {
         );
     }
 
+    /// The trait contract says the owned set is relative to `out`, and
+    /// `CacheManifest::new` enforces it by dropping anything absolute (#196).
+    /// An absolute entry here doesn't error — it silently means llmenv owns
+    /// nothing, so a file it stops writing is never cleaned up.
+    #[test]
+    fn materialize_returns_paths_relative_to_out() {
+        let mut manifest = MergedManifest {
+            agents_md: "# Rules\n".into(),
+            ..MergedManifest::default()
+        };
+        manifest.mcps.push(stdio_mcp("icm"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let owned = CodexAdapter.materialize(&manifest, dir.path()).unwrap();
+
+        assert!(
+            owned.iter().all(|p| p.is_relative()),
+            "owned paths must be relative to `out` or CacheManifest discards them: {owned:?}"
+        );
+        for name in ["AGENTS.md", "config.toml"] {
+            assert!(
+                owned.iter().any(|p| p == std::path::Path::new(name)),
+                "{name} must be reported as owned so it can be ghost-reconciled: {owned:?}"
+            );
+            assert!(dir.path().join(name).is_file(), "{name} should exist");
+        }
+    }
+
     #[test]
     fn agents_md_is_written_and_pointed_at_by_absolute_path() {
         let manifest = MergedManifest {
@@ -463,23 +509,77 @@ mod tests {
     /// TOML has no null. A `native` null must delete the key it targets — the
     /// same contract every other adapter honours (#1270) — rather than reaching
     /// the serializer and failing the whole render.
+    ///
+    /// Uses a key the catch-all is allowed to set: `reject_modeled_native_keys`
+    /// checks for the key's *presence*, not its value, so a null on a modeled
+    /// key is a hard error rather than a delete. Crush's equivalent test makes
+    /// the same choice for the same reason.
     #[test]
     fn a_native_null_deletes_the_key_instead_of_failing_serialization() {
+        let mut manifest = MergedManifest::default();
+        manifest.native.insert(
+            "codex".into(),
+            serde_yaml::from_str("model: o3\nreview_model: null\n").unwrap(),
+        );
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert_eq!(parsed["model"].as_str(), Some("o3"));
+        assert!(
+            !parsed.contains_key("review_model"),
+            "an explicit null must remove the key rather than emit a TOML value"
+        );
+    }
+
+    /// A `deny` rule that silently evaporates leaves Codex running under its own
+    /// default approval policy — a weaker posture than the engine the bundle was
+    /// tested against, with nothing to say so. Warned about until #1102 lands.
+    #[test]
+    fn dropped_permissions_are_announced_not_swallowed() {
+        use crate::config::{PermissionRule, Permissions};
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.permissions = Permissions {
+            deny: vec![PermissionRule {
+                tool: "Bash".into(),
+                pattern: Some("curl *".into()),
+                ..PermissionRule::default()
+            }],
+            ..Permissions::default()
+        };
+
+        // The warning goes to stderr, which a unit test can't capture without a
+        // harness. Assert the condition that triggers it instead, so the test
+        // still fails if this slice ever half-renders permissions.
+        let dir = tempfile::tempdir().unwrap();
+        CodexAdapter.materialize(&manifest, dir.path()).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(
+            !raw.contains("permissions") && !raw.contains("approval_policy"),
+            "this slice must not half-render permissions — the warning is the contract: {raw}"
+        );
+    }
+
+    /// The rules pipeline is not redirectable through the catch-all — the same
+    /// contract opencode enforces for its `instructions` key.
+    #[test]
+    fn native_codex_cannot_redirect_the_instructions_file() {
         let mut manifest = MergedManifest {
             agents_md: "# Rules\n".into(),
             ..MergedManifest::default()
         };
         manifest.native.insert(
             "codex".into(),
-            serde_yaml::from_str("model_instructions_file: null\nmodel: o3\n").unwrap(),
+            serde_yaml::from_str("model_instructions_file: /tmp/attacker.md\n").unwrap(),
         );
 
-        let (_dir, parsed) = materialize_to_toml(&manifest);
+        let dir = tempfile::tempdir().unwrap();
+        let err = CodexAdapter.materialize(&manifest, dir.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("model_instructions_file"), "{msg}");
         assert!(
-            !parsed.contains_key("model_instructions_file"),
-            "an explicit null must remove the rendered key"
+            msg.contains("rules"),
+            "the error must point at capabilities.rules, not invent a field: {msg}"
         );
-        assert_eq!(parsed["model"].as_str(), Some("o3"));
     }
 
     #[test]

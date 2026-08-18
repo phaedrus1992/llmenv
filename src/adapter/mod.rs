@@ -74,8 +74,8 @@ pub(crate) fn strip_json_nulls(value: &mut serde_json::Value) {
 ///
 /// Bailing past depth 64 leaves the remaining subtree's nulls unstripped,
 /// which can now reach persistent files this function's callers write to
-/// directly (`.claude.json`, `settings.json`, `crush.json`, `opencode.json`)
-/// — not just rebuildable cache output. Fail-closed (propagating an error
+/// directly (`.claude.json`, `settings.json`, `crush.json`, `opencode.json`,
+/// `config.toml`) — not just rebuildable cache output. Fail-closed (propagating an error
 /// instead of bailing) was considered and rejected — not because every
 /// caller would need reworking (four of this function's six call sites
 /// already return `anyhow::Result` and use `?`: `merge_mcp_into_claude_json`,
@@ -92,6 +92,13 @@ pub(crate) fn strip_json_nulls(value: &mut serde_json::Value) {
 /// `reject_modeled_keys_in_catch_all`, not by null-stripping. Realistic worst
 /// case stays what #1274 found it to be: a cosmetically wrong config, never
 /// a panic or crash.
+///
+/// One caller differs (#233): the Codex adapter serializes to TOML, which has
+/// no null representation at all — `toml` returns `UnsupportedType` at every
+/// depth tested rather than omitting the value. So a null surviving past the
+/// guard makes that one render *fail* instead of being cosmetically wrong. Still
+/// not a panic, and still unreachable without 64 levels of nesting, but it is a
+/// louder failure than the JSON callers'.
 fn strip_json_nulls_depth(value: &mut serde_json::Value, depth: usize) {
     if depth > 64 {
         tracing::error!(
@@ -170,7 +177,9 @@ fn modeled_key_redirect(key: &str, engine: &str) -> String {
         "mcp" => "native_mcp",
         "provider" | "providers" => "native_model_providers",
         "model" | "models" | "small_model" => return no_hatch(key, engine, "default_models"),
-        "instructions" => return no_hatch(key, engine, "rules"),
+        // Codex spells the same concept `model_instructions_file`; both point
+        // at the merged rules pipeline, which has no per-engine escape hatch.
+        "instructions" | "model_instructions_file" => return no_hatch(key, engine, "rules"),
         _ => return no_hatch(key, engine, key),
     };
     format!("Use `{hatch}.{engine}` instead, which merges in the safe direction.")
@@ -913,6 +922,41 @@ mod tests {
             c.supported_hook_events().contains(&"PreToolUse"),
             "CrushAdapter must support PreToolUse"
         );
+    }
+
+    /// Every adapter's `materialize` must report its owned paths **relative to
+    /// `out`** — the trait says so, and `CacheManifest::new` enforces it by
+    /// filtering absolute paths through `is_unsafe_join_target` (#196). An
+    /// adapter that returns absolute paths doesn't fail: its owned set silently
+    /// becomes empty, so files it later stops writing are never ghost-reconciled
+    /// and stale config lingers in the engine's config dir.
+    ///
+    /// Nothing enforced this until the Codex adapter got it wrong (#233), so the
+    /// check lives here, over the whole registry, rather than in one adapter's
+    /// tests.
+    #[test]
+    fn every_adapter_reports_owned_paths_relative_to_out() {
+        let manifest = MergedManifest {
+            agents_md: "# Rules\n".into(),
+            ..MergedManifest::default()
+        };
+        for adapter in registered_adapters() {
+            let dir = tempfile::tempdir().unwrap();
+            let Ok(owned) = adapter.materialize(&manifest, dir.path()) else {
+                // An adapter that declines to render this minimal manifest has
+                // nothing to say about path shape.
+                continue;
+            };
+            for path in &owned {
+                assert!(
+                    path.is_relative(),
+                    "{} returned the absolute owned path {} — CacheManifest would \
+                     discard it, leaving the file unowned and never cleaned up",
+                    adapter.name(),
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]
