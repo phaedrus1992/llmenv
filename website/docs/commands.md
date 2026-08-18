@@ -722,12 +722,17 @@ an unverified binary. Nothing is written to disk in that case — the check runs
 before the install cycle begins.
 
 This catches a corrupted or truncated download, and an asset swapped after the
-release was published. It does not by itself prove the release pipeline was
-honest: an attacker able to replace the binary in a release could also replace
-the checksum beside it. Releases also carry [SLSA
-provenance](https://slsa.dev/) (`<asset>.intoto.jsonl`) for that stronger claim,
-which `upgrade` does not yet verify — see
-[#1411](https://github.com/phaedrus1992/llmenv/issues/1411).
+release was published. It does not prove the release pipeline was honest: an
+attacker able to replace the binary in a release could also replace the checksum
+beside it.
+
+Releases also publish a `<asset>.intoto.jsonl` provenance file, but it is
+currently **unsigned** — it carries no signature or certificate chain, so it can
+be rewritten by anyone who can write the release, and it closes nothing the
+checksum doesn't. `upgrade` does not verify it. Signed build provenance, which
+would close the pipeline case, is tracked in
+[#1411](https://github.com/phaedrus1992/llmenv/issues/1411) and
+[#1412](https://github.com/phaedrus1992/llmenv/issues/1412).
 
 - `--check` compares the current version against the latest release and
   prints the result. Exits 1 if an update is available.

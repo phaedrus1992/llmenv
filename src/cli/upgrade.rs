@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::env;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -131,6 +131,12 @@ fn fetch_beta(client: &reqwest::blocking::Client, base_url: &str) -> Result<GhRe
 fn build_http_client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("llmenv-upgrade/", env!("CARGO_PKG_VERSION")))
+        // TLS to github.com is the root of trust for the whole upgrade path — it
+        // is what makes the release metadata, and therefore the checksum, worth
+        // anything. reqwest follows up to 10 redirects and permits an
+        // https -> http downgrade by default, which would let anyone on a
+        // downgraded hop serve a matched binary and checksum pair.
+        .https_only(true)
         .build()
         .context("failed to build HTTP client")
 }
@@ -248,9 +254,22 @@ fn find_asset(release: &GhRelease) -> Result<&GhAsset> {
 /// the release workflow's checksum step.
 const CHECKSUMS_ASSET: &str = "checksums.txt";
 
-fn get_api_base_url() -> String {
-    env::var("LLMENV_UPGRADE_GITHUB_API").unwrap_or_else(|_| "https://api.github.com".to_string())
-}
+/// Ceiling on the `checksums.txt` read. One `sha256sum` line per released asset
+/// is a few hundred bytes; 64 KiB leaves room for many more platforms while
+/// still bounding what a hostile endpoint can make llmenv allocate.
+const MAX_CHECKSUMS_BYTES: u64 = 64 * 1024;
+
+/// The GitHub API llmenv upgrades from.
+///
+/// A constant, not an override. This used to be settable via
+/// `LLMENV_UPGRADE_GITHUB_API`, which nothing read — the tests pass `base_url`
+/// explicitly and it was documented nowhere — but which anyone able to set an
+/// environment variable could use to redirect the release lookup. Both the
+/// binary URL and the `checksums.txt` URL come from that one response, so a
+/// redirected lookup serves a matched pair and checksum verification proves
+/// nothing. An unused env var that voids the auto-updater's trust anchor is pure
+/// attack surface (#1040).
+const GITHUB_API_BASE: &str = "https://api.github.com";
 
 /// The expected SHA-256 for `asset_name`, parsed out of a `sha256sum`-format
 /// listing (`<64 hex chars>  <filename>` per line, two spaces for binary mode).
@@ -345,8 +364,18 @@ fn fetch_expected_sha256(
         "downloading `{CHECKSUMS_ASSET}` failed with HTTP {}",
         resp.status()
     );
-    let body = resp
-        .text()
+    // Capped: the real file is a few hundred bytes (one line per asset), and
+    // reading a body of unbounded length from the network into memory to look up
+    // 64 characters is a needless way to be OOM-killed.
+    if let Some(len) = resp.content_length() {
+        anyhow::ensure!(
+            len <= MAX_CHECKSUMS_BYTES,
+            "`{CHECKSUMS_ASSET}` is {len} bytes, over the {MAX_CHECKSUMS_BYTES}-byte limit"
+        );
+    }
+    let mut body = String::new();
+    resp.take(MAX_CHECKSUMS_BYTES)
+        .read_to_string(&mut body)
         .with_context(|| format!("failed to read `{CHECKSUMS_ASSET}`"))?;
 
     expected_sha256_for(&body, asset_name).with_context(|| {
@@ -359,12 +388,12 @@ pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()>
     let current_version = env!("CARGO_PKG_VERSION");
 
     let client = build_http_client()?;
-    let base_url = get_api_base_url();
+    let base_url = GITHUB_API_BASE;
 
     let release = if is_beta {
-        fetch_beta(&client, &base_url)?
+        fetch_beta(&client, base_url)?
     } else {
-        fetch_latest(&client, &base_url)?
+        fetch_latest(&client, base_url)?
     };
 
     let release_version = release
@@ -837,6 +866,53 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
                 prop_assert!(!name.is_empty(), "an empty name must never resolve");
             }
         }
+
+        /// The positive counterpart to the property above, which only says the
+        /// parser never invents a hash: a real entry, rendered the way
+        /// `sha256sum` renders it, parses back to exactly that hash. Catches a
+        /// parser that split the fields wrongly or mangled the hash for some
+        /// name shape the example tests don't happen to use.
+        ///
+        /// Names are drawn from the alphabet release assets actually use. A
+        /// wider generator immediately finds that a name containing *any*
+        /// Unicode whitespace — a vertical tab, say — doesn't round-trip, since
+        /// `split_once(char::is_whitespace)` and `str::trim` are both
+        /// Unicode-aware and would treat it as a field separator. That's correct
+        /// behavior for a `sha256sum` listing (such a "name" isn't one field),
+        /// not a defect, so the property states what's true rather than being
+        /// weakened to accommodate it.
+        #[test]
+        fn expected_sha256_round_trips_a_rendered_entry(
+            hash in "[a-fA-F0-9]{64}",
+            name in "[A-Za-z0-9][A-Za-z0-9._-]{0,40}",
+        ) {
+            let rendered = format!("{hash}  {name}");
+            prop_assert_eq!(
+                expected_sha256_for(&rendered, &name).ok(),
+                Some(hash.to_ascii_lowercase())
+            );
+        }
+
+        /// Unrelated entries never change the answer for a name — the lookup is
+        /// keyed on the name, not on position in the file.
+        #[test]
+        fn unrelated_entries_do_not_affect_the_lookup(
+            hash in "[a-f0-9]{64}",
+            name in "[A-Za-z0-9][A-Za-z0-9._-]{0,40}",
+            noise in proptest::collection::vec("[a-f0-9]{64}", 0..4),
+        ) {
+            let mut lines: Vec<String> = noise
+                .iter()
+                .enumerate()
+                // Names that cannot collide with `name`, which has no space.
+                .map(|(i, h)| format!("{h}  unrelated asset {i}"))
+                .collect();
+            lines.push(format!("{hash}  {name}"));
+            prop_assert_eq!(
+                expected_sha256_for(&lines.join("\n"), &name).ok(),
+                Some(hash)
+            );
+        }
     }
 
     #[tokio::test]
@@ -898,6 +974,42 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
         assert!(
             msg.contains("refusing to install an unverified binary"),
             "the caller's context must survive: {msg}"
+        );
+    }
+
+    /// A hostile endpoint must not be able to make llmenv allocate an unbounded
+    /// body while looking up 64 characters. The declared length is refused
+    /// outright; a server that lies about it is bounded by the capped read,
+    /// which then can't produce a valid entry.
+    #[tokio::test]
+    async fn fetch_expected_sha256_refuses_an_oversized_checksums_file() {
+        let server = MockServer::start().await;
+        let huge = "x".repeat(usize::try_from(MAX_CHECKSUMS_BYTES).unwrap() + 1);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(huge))
+            .mount(&server)
+            .await;
+
+        let release = GhRelease {
+            tag_name: "v9.9.9".into(),
+            prerelease: false,
+            draft: false,
+            assets: vec![GhAsset {
+                name: CHECKSUMS_ASSET.into(),
+                browser_download_url: format!("{}/checksums.txt", server.uri()),
+            }],
+        };
+        let err = tokio::task::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::new();
+            fetch_expected_sha256(&client, &release, "llmenv-macos-aarch64")
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("over the") || msg.contains("no checksum entry"),
+            "oversized body should have been refused or truncated to nothing: {msg}"
         );
     }
 
