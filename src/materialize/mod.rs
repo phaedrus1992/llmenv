@@ -163,7 +163,14 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(abs, &out)?;
+        // `copy_replacing_symlink`, not `std::fs::copy`: `dest` persists
+        // across renders (the agent's live config dir), so a prior render's
+        // output at `out` could have been replaced by a symlink between
+        // calls — a plain copy would write through it (#1341-class TOCTOU,
+        // #1423). Only `out`'s final component is protected this way — a
+        // symlinked *directory* anywhere in `parent` is not, since
+        // `create_dir_all` above follows one. Tracked separately in #1427.
+        crate::paths::copy_replacing_symlink(abs, &out)?;
     }
     prune_empty_dirs(dest)?;
     Ok(())
@@ -287,6 +294,57 @@ mod tests {
         assert!(
             err.to_string().contains("traversal"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// `write_in_place` (loose/normal mode) re-renders `m.files` into a
+    /// folder that persists across calls — the agent's live config dir. If a
+    /// prior render's destination entry gets replaced by a symlink (e.g. a
+    /// malicious or misbehaving plugin), the next render must replace the
+    /// symlink rather than write through it, matching the hardening
+    /// `src/materialize/inherit.rs` already applies for the same class of
+    /// TOCTOU bug (#1341, extended here per #1423).
+    #[cfg(unix)]
+    #[test]
+    fn write_in_place_does_not_write_through_a_symlinked_destination() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("bundle-file.txt");
+        std::fs::write(&src, b"bundle-content").expect("write src");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("create cache");
+
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
+
+        let mut files = BTreeMap::new();
+        files.insert(PathBuf::from("out.txt"), src);
+        let m = MergedManifest {
+            files,
+            ..Default::default()
+        };
+
+        let rendered = materialize(&m, &cache).expect("first render");
+        let dest_file = rendered.path.join("out.txt");
+        std::fs::remove_file(&dest_file).expect("remove first render's output");
+        std::os::unix::fs::symlink(&victim, &dest_file).expect("plant symlink");
+
+        materialize(&m, &cache).expect("second render");
+
+        assert!(
+            !std::fs::symlink_metadata(&dest_file)
+                .expect("stat dest")
+                .file_type()
+                .is_symlink(),
+            "the planted symlink must be replaced, not written through"
+        );
+        assert_eq!(
+            std::fs::read(&dest_file).expect("read dest"),
+            b"bundle-content"
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("read victim"),
+            b"must-not-be-touched",
+            "the symlink's target must be untouched"
         );
     }
 
