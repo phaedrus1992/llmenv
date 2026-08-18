@@ -874,10 +874,15 @@ fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Result<()> {
 
 fn validate_var_name(name: &str) -> anyhow::Result<()> {
     // Shell variable names must match [A-Za-z_][A-Za-z0-9_]*
-    if name.is_empty() {
+    //
+    // `chars().next()`, not `as_bytes()[0] as char`: the byte cast turned a
+    // multi-byte first character into whatever its leading byte happens to be,
+    // so the rejection message named a character that isn't in the name
+    // (#1387). Both forms reject it — only the diagnostic was wrong. It also
+    // subsumes the separate empty check.
+    let Some(first) = name.chars().next() else {
         anyhow::bail!("Variable name cannot be empty");
-    }
-    let first = name.as_bytes()[0] as char;
+    };
     if !first.is_ascii_alphabetic() && first != '_' {
         anyhow::bail!(
             "Variable name '{}' must start with letter or underscore",
@@ -6753,6 +6758,123 @@ mod exit_code_tests {
         #[test]
         fn never_panics_on_arbitrary_raw_status(raw in any::<i32>()) {
             let _ = exit_code_for_status(ExitStatus::from_raw(raw));
+        }
+    }
+}
+
+/// Property tests for the three functions that decide what an engine's
+/// environment may contain and how it is written out (#1387).
+///
+/// These were covered only by hand-picked examples, which is the wrong shape for
+/// a validate/escape trio: #1056 made `resolve_env`'s output land in a real child
+/// process environment via `llmenv launch`, not just in shell text a user evals,
+/// so a gap that used to produce malformed output now sets a variable.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
+mod var_validation_props {
+    use super::{shell_escape, validate_var_name, validate_var_value};
+    use proptest::prelude::*;
+
+    /// The documented charset, spelled out independently of the implementation:
+    /// `[A-Za-z_][A-Za-z0-9_]*`.
+    fn is_shell_identifier(name: &str) -> bool {
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !first.is_ascii_alphabetic() && first != '_' {
+            return false;
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// True when `escaped` is a well-formed single-quoted shell word: quoted at
+    /// both ends, with every interior `'` appearing only as the `'\''`
+    /// close-escape-reopen sequence. Anything else means a metacharacter escaped
+    /// the quotes and would be interpreted by the shell.
+    fn is_single_quoted_word(escaped: &str) -> bool {
+        let Some(inner) = escaped
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+        else {
+            return false;
+        };
+        // Remove the legitimate sequences, then no bare quote may remain.
+        !inner.replace("'\\''", "").contains('\'')
+    }
+
+    proptest! {
+        /// Never panics, and accepts exactly the documented charset — no more
+        /// (a name the shell can't hold) and no less (a name llmenv itself
+        /// emits, e.g. `CLAUDE_CONFIG_DIR`).
+        #[test]
+        fn validate_var_name_accepts_exactly_shell_identifiers(name in any::<String>()) {
+            prop_assert_eq!(
+                validate_var_name(&name).is_ok(),
+                is_shell_identifier(&name),
+                "disagreement on {:?}",
+                name
+            );
+        }
+
+        /// Only a NUL is rejected: it can't survive in a C-string environment
+        /// value and would truncate it. Newlines, CR, and quotes are all
+        /// legitimate (`LLMENV_ICM_CONTEXT` is multiline by design, #469).
+        #[test]
+        fn validate_var_value_rejects_exactly_embedded_nuls(value in any::<String>()) {
+            prop_assert_eq!(
+                validate_var_value(&value).is_err(),
+                value.contains('\0'),
+                "disagreement on {:?}",
+                value
+            );
+        }
+
+        /// Whatever goes in, the result is a single-quoted word — so no
+        /// metacharacter (`$`, backtick, `;`, newline, a bare quote) is ever
+        /// left where the shell would act on it.
+        #[test]
+        fn shell_escape_always_yields_a_single_quoted_word(value in any::<String>()) {
+            let escaped = shell_escape(&value);
+            prop_assert!(
+                is_single_quoted_word(&escaped),
+                "escaping {:?} produced {:?}, which is not a well-formed single-quoted word",
+                value,
+                escaped
+            );
+        }
+    }
+
+    proptest! {
+        // Each case forks a shell, so this runs fewer of them than the pure
+        // properties above — enough to cover the metacharacter space without
+        // adding seconds to every test run.
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// The property that actually matters: a real shell, asked to print the
+        /// escaped form, gives back the original bytes. Covers the quoting rules
+        /// end to end instead of asserting a shape the shell might read
+        /// differently.
+        ///
+        /// NUL is excluded because it cannot be carried in an argv at all —
+        /// `validate_var_value` rejects it before anything reaches this.
+        #[test]
+        fn shell_escape_round_trips_through_a_real_shell(value in "[^\0]*") {
+            let script = format!("printf %s {}", shell_escape(&value));
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("run sh");
+            prop_assert!(
+                out.status.success(),
+                "sh rejected {:?} (script {:?}): {}",
+                value,
+                script,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+            prop_assert_eq!(printed, value, "round-trip changed the value");
         }
     }
 }
