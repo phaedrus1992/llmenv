@@ -13,11 +13,23 @@
 //!   `permissions.entries` plus `approval_policy`/`sandbox_mode`, which does not
 //!   map onto llmenv's `allow`/`ask`/`deny` lists. Needs a design decision, not
 //!   a translation.
-//! - lifecycle hooks (#1108) — Codex's `hooks.events.*` takes the same
-//!   matcher-group shape as Claude Code and its event names match, so this is
-//!   smaller than it looks, but it is not wired yet.
-//! - statusline (#1104), auth (#1105), plugins/skills (#1106), rules beyond the
-//!   merged AGENTS.md (#1103), doctor diagnostics (#1100).
+//! - lifecycle hooks (#1108) — landed; see [`render_hooks`].
+//! - seeded settings (#1107) — landed; see [`apply_seeded_settings`]. Codex has
+//!   no install-method seed to write (it self-detects in-process from its own
+//!   exe path) and no external-command status-line hook to seed (#1104):
+//!   `tui.status_line` is a fixed list of built-in item identifiers, not a
+//!   "run a command" surface like Claude Code's `statusLine` — both are
+//!   documented gaps, not missed work.
+//! - session/history/auth inheritance across hash changes (#1105) — landed;
+//!   see [`crate::materialize::inherit::link_codex_sessions_dir`] and sibling
+//!   functions. The six SQLite state databases Codex also writes into
+//!   `$CODEX_HOME` (state/logs/goals/memories/queue/thread-history) are **not**
+//!   covered: naively symlinking or copying a live SQLite file risks
+//!   corruption via its WAL/shm sidecars, and deserves its own design pass
+//!   rather than reusing the single-file-copy contract that only fits
+//!   `auth.json`/`history.jsonl`.
+//! - plugins/skills (#1106), rules beyond the merged AGENTS.md (#1103), doctor
+//!   diagnostics (#1100).
 //!
 //! Field names come from Codex's own deserialization structs
 //! (`codex-rs/config/src/config_toml.rs`, `mcp_types.rs`) rather than its docs,
@@ -459,6 +471,68 @@ fn render_mcp_servers(manifest: &MergedManifest) -> serde_json::Map<String, serd
         servers.insert(mcp.name.clone(), serde_json::Value::Object(entry));
     }
     servers
+}
+
+/// Merge user-elected seeded keys into `out/config.toml` after the adapter has
+/// already written the file (#1107) — the Codex analogue of
+/// `claude_code::apply_seeded_settings`.
+///
+/// Unlike Claude Code's `settings.json`, this adapter re-renders `config.toml`
+/// from scratch every call rather than reconciling against the prior file, so
+/// this always re-reads whatever `materialize` just wrote. A no-op once every
+/// seeded key is already present. Never touches [`CODEX_MODELED_KEYS`] —
+/// those are llmenv's own render surface, not a user default.
+///
+/// # Errors
+/// Returns an error if the file cannot be read, parsed, re-serialized, or
+/// written.
+pub(crate) fn apply_seeded_settings(
+    out: &Path,
+    seeded: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    if seeded.is_empty() {
+        return Ok(());
+    }
+    let path = out.join(CODEX_CONFIG_FILE);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "reading {} for seeding: {e}",
+                path.display()
+            ));
+        }
+    };
+    // `toml::Table`, not `toml::Value` — parsing straight to `Value` chokes on
+    // array-of-tables headers like `[[hooks.events.PreToolUse]]` (the same
+    // type this module's own `materialize_to_toml` test helper parses into).
+    let toml_val: toml::Table = raw
+        .parse()
+        .map_err(|e| anyhow::anyhow!("parsing {} for seeding: {e}", path.display()))?;
+    // Round-trip through `serde_json::Value` (guaranteed via `Serialize`,
+    // rather than relying on the less-certain toml-Deserializer-into-Value
+    // direction) so the merge logic matches `claude_code::apply_seeded_settings`
+    // exactly.
+    let mut doc = serde_json::to_value(&toml_val)
+        .map_err(|e| anyhow::anyhow!("converting {} for seeding: {e}", path.display()))?;
+    let Some(obj) = doc.as_object_mut() else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for (k, v) in seeded {
+        if !CODEX_MODELED_KEYS.contains(&k.as_str()) && !obj.contains_key(k) {
+            obj.insert(k.clone(), v.clone());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let rendered = toml::to_string_pretty(&doc)
+        .map_err(|e| anyhow::anyhow!("rendering seeded {}: {e}", path.display()))?;
+    crate::paths::write_owner_only_atomic(&path, rendered.as_bytes())
+        .map_err(|e| anyhow::anyhow!("writing seeded {}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -924,6 +998,98 @@ mod tests {
             format!("{err:#}").contains("mcp_servers"),
             "the catch-all must be rejected by name: {err:#}"
         );
+    }
+
+    // ---- apply_seeded_settings (#1107) ----
+
+    #[test]
+    fn seeded_settings_are_merged_into_config_toml_when_absent() {
+        let mut manifest = MergedManifest::default();
+        manifest.mcps.push(stdio_mcp("icm"));
+        let (dir, _parsed) = materialize_to_toml(&manifest);
+
+        let mut seeded = serde_json::Map::new();
+        seeded.insert("model".to_string(), serde_json::json!("o3"));
+        super::apply_seeded_settings(dir.path(), &seeded).unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        let parsed: toml::Table = raw.parse().unwrap();
+        assert_eq!(parsed["model"].as_str(), Some("o3"));
+        assert!(
+            parsed.contains_key("mcp_servers"),
+            "seeding must not drop what materialize already rendered"
+        );
+    }
+
+    #[test]
+    fn seeded_settings_never_overwrite_an_existing_value() {
+        let manifest = MergedManifest::default();
+        let (dir, _parsed) = materialize_to_toml(&manifest);
+        let path = dir.path().join(super::CODEX_CONFIG_FILE);
+        std::fs::write(&path, "model = \"already-set\"\n").unwrap();
+
+        let mut seeded = serde_json::Map::new();
+        seeded.insert("model".to_string(), serde_json::json!("o3"));
+        super::apply_seeded_settings(dir.path(), &seeded).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Table = raw.parse().unwrap();
+        assert_eq!(
+            parsed["model"].as_str(),
+            Some("already-set"),
+            "must not clobber a value the folder already has"
+        );
+    }
+
+    /// The rules pipeline is not seedable through `init.seeded_settings` any
+    /// more than it is overridable through `native.codex` — both are llmenv's
+    /// own render surface.
+    #[test]
+    fn seeded_settings_cannot_redirect_a_modeled_key() {
+        let mut manifest = MergedManifest {
+            agents_md: "# Rules\n".into(),
+            ..MergedManifest::default()
+        };
+        let (dir, parsed_before) = materialize_to_toml(&manifest);
+        manifest.mcps.push(stdio_mcp("icm"));
+
+        let mut seeded = serde_json::Map::new();
+        seeded.insert(
+            "model_instructions_file".to_string(),
+            serde_json::json!("/tmp/attacker.md"),
+        );
+        super::apply_seeded_settings(dir.path(), &seeded).unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join(super::CODEX_CONFIG_FILE)).unwrap();
+        let parsed_after: toml::Table = raw.parse().unwrap();
+        assert_eq!(
+            parsed_after["model_instructions_file"].as_str(),
+            parsed_before["model_instructions_file"].as_str(),
+            "a modeled key must not be seedable"
+        );
+    }
+
+    #[test]
+    fn seeded_settings_noop_when_config_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seeded = serde_json::Map::new();
+        seeded.insert("model".to_string(), serde_json::json!("o3"));
+
+        super::apply_seeded_settings(dir.path(), &seeded).unwrap();
+
+        assert!(!dir.path().join(super::CODEX_CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn seeded_settings_empty_map_is_a_noop() {
+        let manifest = MergedManifest::default();
+        let (dir, _parsed) = materialize_to_toml(&manifest);
+        let path = dir.path().join(super::CODEX_CONFIG_FILE);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        super::apply_seeded_settings(dir.path(), &serde_json::Map::new()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

@@ -42,7 +42,26 @@ const MCP_NEEDS_AUTH_FILE: &str = "mcp-needs-auth-cache.json";
 /// Copies rather than links: each is a single file that a write-temp-then-rename
 /// would replace, turning a symlink back into a regular file. A folder's own copy
 /// is never overwritten.
-const COPIED_FILES: &[&str] = &[HISTORY_FILE, MCP_NEEDS_AUTH_FILE];
+pub(crate) const COPIED_FILES: &[&str] = &[HISTORY_FILE, MCP_NEEDS_AUTH_FILE];
+
+/// Subdirectory of the durable state dir holding Codex's transcripts —
+/// `sessions/`, the direct analogue of Claude Code's `projects/` (#1105).
+const CODEX_SESSIONS_DIR: &str = "sessions";
+/// Subdirectory holding Codex's archived sessions, alongside `sessions/`.
+const CODEX_ARCHIVED_SESSIONS_DIR: &str = "archived_sessions";
+/// Codex's prompt-recall history file — same name and role as Claude Code's.
+const CODEX_HISTORY_FILE: &str = "history.jsonl";
+/// Codex's combined identity + OAuth token store (`$CODEX_HOME/auth.json`).
+///
+/// Treated like [`MCP_NEEDS_AUTH_FILE`]: copied in only when the folder has
+/// none, never overwritten. Simpler than Claude Code's multi-folder
+/// "freshest wins" auth chooser (`auth::choose_auth_for_inheritance`) because
+/// Codex's CLI login is a single global credential — there is no scenario
+/// where two hashed folders legitimately hold different logged-in accounts,
+/// so there is nothing to choose between.
+const CODEX_AUTH_FILE: &str = "auth.json";
+/// Codex's [`COPIED_FILES`] equivalent.
+const CODEX_COPIED_FILES: &[&str] = &[CODEX_HISTORY_FILE, CODEX_AUTH_FILE];
 
 /// Point `<config_dir>/<name>` at `<state_dir>/<name>`, folding in a
 /// pre-existing real directory first so its contents survive.
@@ -96,13 +115,40 @@ pub(crate) fn link_session_logs_dir(state_dir: &Path, config_dir: &Path) -> anyh
     link_durable_dir(SESSION_LOGS_DIR, state_dir, config_dir)
 }
 
-/// Copy each [`COPIED_FILES`] entry from the durable store into a folder that
-/// has none of its own.
+/// Point `<config_dir>/sessions` at `<state_dir>/sessions` (#1105) — the Codex
+/// analogue of [`link_projects_dir`].
+///
+/// # Errors
+/// Returns an error when the durable dir cannot be created, an existing tree
+/// cannot be folded in, or the link cannot be created.
+pub(crate) fn link_codex_sessions_dir(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    link_durable_dir(CODEX_SESSIONS_DIR, state_dir, config_dir)
+}
+
+/// Point `<config_dir>/archived_sessions` at `<state_dir>/archived_sessions`
+/// (#1105), alongside [`link_codex_sessions_dir`].
+///
+/// # Errors
+/// Returns an error when the durable dir cannot be created, an existing tree
+/// cannot be folded in, or the link cannot be created.
+pub(crate) fn link_codex_archived_sessions_dir(
+    state_dir: &Path,
+    config_dir: &Path,
+) -> anyhow::Result<()> {
+    link_durable_dir(CODEX_ARCHIVED_SESSIONS_DIR, state_dir, config_dir)
+}
+
+/// Copy each entry in `files` from the durable store into a folder that has
+/// none of its own.
 ///
 /// # Errors
 /// Returns an error when a copy fails. A file absent from the store is a no-op.
-pub(crate) fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
-    for name in COPIED_FILES {
+pub(crate) fn inherit_copied_files(
+    state_dir: &Path,
+    config_dir: &Path,
+    files: &[&str],
+) -> anyhow::Result<()> {
+    for name in files {
         let src = state_dir.join(name);
         let dst = config_dir.join(name);
         if dest_already_present(&dst) || !is_real_file(&src) {
@@ -112,6 +158,17 @@ pub(crate) fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyho
             .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
     Ok(())
+}
+
+/// [`inherit_copied_files`] over Codex's [`CODEX_COPIED_FILES`].
+///
+/// # Errors
+/// Returns an error when a copy fails. A file absent from the store is a no-op.
+pub(crate) fn inherit_codex_copied_files(
+    state_dir: &Path,
+    config_dir: &Path,
+) -> anyhow::Result<()> {
+    inherit_copied_files(state_dir, config_dir, CODEX_COPIED_FILES)
 }
 
 /// True when `path` is a regular file (`symlink_metadata`, not `is_file()`
@@ -169,7 +226,26 @@ fn dest_already_present(path: &Path) -> bool {
 /// # Errors
 /// Returns an error when a copy fails.
 pub(crate) fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
-    for name in COPIED_FILES {
+    capture_copied_files_named(state_dir, config_dir, COPIED_FILES)
+}
+
+/// [`capture_copied_files`] over Codex's [`CODEX_COPIED_FILES`].
+///
+/// # Errors
+/// Returns an error when a copy fails.
+pub(crate) fn capture_codex_copied_files(
+    state_dir: &Path,
+    config_dir: &Path,
+) -> anyhow::Result<()> {
+    capture_copied_files_named(state_dir, config_dir, CODEX_COPIED_FILES)
+}
+
+fn capture_copied_files_named(
+    state_dir: &Path,
+    config_dir: &Path,
+    files: &[&str],
+) -> anyhow::Result<()> {
+    for name in files {
         let src = config_dir.join(name);
         let dst = state_dir.join(name);
         if dest_already_present(&dst) || !is_real_file(&src) {
@@ -561,14 +637,14 @@ mod tests {
         std::fs::create_dir_all(&cfg).unwrap();
         write(&state.join(HISTORY_FILE), "cached");
 
-        inherit_copied_files(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg, COPIED_FILES).unwrap();
         assert_eq!(
             std::fs::read_to_string(cfg.join(HISTORY_FILE)).unwrap(),
             "cached"
         );
 
         write(&cfg.join(HISTORY_FILE), "folder-own");
-        inherit_copied_files(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg, COPIED_FILES).unwrap();
         assert_eq!(
             std::fs::read_to_string(cfg.join(HISTORY_FILE)).unwrap(),
             "folder-own",
@@ -584,7 +660,7 @@ mod tests {
         let cfg = tmp.path().join("TAG-hash");
         std::fs::create_dir_all(&cfg).unwrap();
 
-        inherit_copied_files(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg, COPIED_FILES).unwrap();
         assert!(!cfg.join(HISTORY_FILE).exists());
     }
 
@@ -602,7 +678,7 @@ mod tests {
         write(&elsewhere, "secret");
         std::os::unix::fs::symlink(&elsewhere, state.join(HISTORY_FILE)).unwrap();
 
-        inherit_copied_files(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg, COPIED_FILES).unwrap();
         assert!(!cfg.join(HISTORY_FILE).exists());
     }
 
@@ -622,7 +698,7 @@ mod tests {
         let victim = tmp.path().join("does-not-exist-yet.jsonl");
         std::os::unix::fs::symlink(&victim, cfg.join(HISTORY_FILE)).unwrap();
 
-        inherit_copied_files(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg, COPIED_FILES).unwrap();
         assert!(
             !victim.exists(),
             "must not create the dangling symlink's target"
@@ -811,7 +887,7 @@ mod tests {
             r#"{"notion":{"timestamp":1}}"#,
         );
 
-        inherit_copied_files(&state, &cfg).unwrap();
+        inherit_copied_files(&state, &cfg, COPIED_FILES).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(cfg.join(MCP_NEEDS_AUTH_FILE)).unwrap(),
@@ -839,6 +915,172 @@ mod tests {
         capture_copied_files(&state, &cfg).unwrap();
         assert_eq!(
             std::fs::read_to_string(state.join(HISTORY_FILE)).unwrap(),
+            "from-folder",
+            "the store's copy is authoritative once it exists"
+        );
+    }
+
+    // ---- Codex durable-state inheritance (#1105) ----
+
+    /// First run: a fresh folder's `sessions/` becomes a symlink into the
+    /// state dir, same as Claude Code's `projects/` (#1105).
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sessions_creates_symlink_into_state_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        link_codex_sessions_dir(&state, &cfg).unwrap();
+
+        let link = cfg.join(CODEX_SESSIONS_DIR);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            state.join(CODEX_SESSIONS_DIR)
+        );
+    }
+
+    /// A pre-existing real `sessions/` dir is folded into the state dir, then
+    /// replaced by the symlink — its transcripts must survive.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sessions_folds_existing_real_dir_then_links() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        write(
+            &cfg.join(CODEX_SESSIONS_DIR).join("-proj").join("a.jsonl"),
+            "old",
+        );
+
+        link_codex_sessions_dir(&state, &cfg).unwrap();
+
+        let link = cfg.join(CODEX_SESSIONS_DIR);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let moved = state.join(CODEX_SESSIONS_DIR).join("-proj").join("a.jsonl");
+        assert_eq!(std::fs::read_to_string(moved).unwrap(), "old");
+    }
+
+    /// Re-render: a correct `sessions/` symlink is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sessions_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        link_codex_sessions_dir(&state, &cfg).unwrap();
+        link_codex_sessions_dir(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(cfg.join(CODEX_SESSIONS_DIR)).unwrap(),
+            state.join(CODEX_SESSIONS_DIR)
+        );
+    }
+
+    /// `archived_sessions/` gets the same fold-then-link treatment as
+    /// `sessions/`.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_archived_sessions_creates_symlink_into_state_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        link_codex_archived_sessions_dir(&state, &cfg).unwrap();
+
+        let link = cfg.join(CODEX_ARCHIVED_SESSIONS_DIR);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            state.join(CODEX_ARCHIVED_SESSIONS_DIR)
+        );
+    }
+
+    /// First run: `auth.json` and `history.jsonl` are copied in from the store
+    /// when the folder has neither.
+    #[test]
+    fn codex_copied_files_are_inherited_on_first_run() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+        write(&state.join(CODEX_AUTH_FILE), r#"{"OPENAI_API_KEY":"sk-x"}"#);
+        write(&state.join(CODEX_HISTORY_FILE), "prompt-one\n");
+
+        inherit_codex_copied_files(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cfg.join(CODEX_AUTH_FILE)).unwrap(),
+            r#"{"OPENAI_API_KEY":"sk-x"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(cfg.join(CODEX_HISTORY_FILE)).unwrap(),
+            "prompt-one\n"
+        );
+    }
+
+    /// Re-render: an existing folder's own `auth.json` is never clobbered by
+    /// the store's copy.
+    #[test]
+    fn codex_auth_is_never_overwritten_by_the_store() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&cfg).unwrap();
+        write(&state.join(CODEX_AUTH_FILE), "stale-store-copy");
+        write(&cfg.join(CODEX_AUTH_FILE), "folder-own-current-auth");
+
+        inherit_codex_copied_files(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cfg.join(CODEX_AUTH_FILE)).unwrap(),
+            "folder-own-current-auth",
+            "must not clobber the folder's own auth.json"
+        );
+    }
+
+    /// Existing state: capture seeds the store from a folder that logged in
+    /// directly, so the *next* folder can inherit it — without this the store
+    /// never gains a copy, since Codex only writes `auth.json` into
+    /// `$CODEX_HOME`.
+    #[test]
+    fn codex_auth_capture_seeds_the_store_and_never_clobbers_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&cfg.join(CODEX_AUTH_FILE), "from-folder");
+
+        capture_codex_copied_files(&state, &cfg).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(state.join(CODEX_AUTH_FILE)).unwrap(),
+            "from-folder"
+        );
+
+        write(&cfg.join(CODEX_AUTH_FILE), "newer-folder-copy");
+        capture_codex_copied_files(&state, &cfg).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(state.join(CODEX_AUTH_FILE)).unwrap(),
             "from-folder",
             "the store's copy is authoritative once it exists"
         );

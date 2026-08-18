@@ -1,5 +1,6 @@
 use crate::adapter::AgentAdapter;
 use crate::adapter::claude_code::ClaudeCodeAdapter;
+use crate::adapter::codex::CodexAdapter;
 use crate::config::{Bundle, Config};
 use crate::git;
 use crate::merge::{BundleRef, MergedManifest};
@@ -2113,6 +2114,32 @@ fn claude_code_only_post_materialize(
     Ok(inject_cached_auth_if_available(adapter_root, cache_path))
 }
 
+/// Run the Codex-specific steps that have no equivalent in other adapters yet:
+/// merging seeded settings into `config.toml` (#1107).
+///
+/// Codex has no install-method seed to write — it self-detects install method
+/// in-process from its own exe path (`codex_install_context::InstallMethod`),
+/// unlike Claude Code which needs `installMethod` pre-seeded into
+/// `settings.json` to suppress its update-nag warning. And no
+/// external-command status-line hook to seed (#1104): Codex's `tui.status_line`
+/// is an ordered list of built-in item identifiers (`model-with-reasoning`,
+/// `git-branch`, `context-remaining`, ...), not a "run a command and capture
+/// its output" surface the way Claude Code's `statusLine` is, so there is no
+/// `llmenv statusline` equivalent to wire up. Both are documented gaps, not
+/// missed work.
+///
+/// No-op for any other adapter.
+fn codex_only_post_materialize(
+    adapter: &dyn AgentAdapter,
+    config: &Config,
+    cache_path: &Path,
+) -> anyhow::Result<()> {
+    if adapter.name() != CodexAdapter.name() {
+        return Ok(());
+    }
+    crate::adapter::codex::apply_seeded_settings(cache_path, &config.init.seeded_settings)
+}
+
 /// Materialize a pre-built manifest through `adapter`, returning the cache path
 /// and env vars the adapter wants exported.
 ///
@@ -2263,6 +2290,7 @@ fn materialize_from_manifest(
 
     let auth_status =
         claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;
+    codex_only_post_materialize(adapter, config, &cache_path)?;
 
     // Write llmenv-status.json (#836 Task 11) before the manifest is written so
     // the file exists on disk by the time write_cache_manifest's reconciliation
@@ -2334,6 +2362,8 @@ fn materialize_from_manifest(
             &state_cfg, &state_dir,
         ));
         inherit_claude_state(&adapter_root, &state_dir, &cache_path);
+    } else if adapter.name() == CodexAdapter.name() {
+        inherit_codex_state(&state_dir, &cache_path);
     }
 
     // Defense-in-depth (#67): validate var names at the source, not only at the
@@ -2412,8 +2442,43 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
     if let Err(e) = crate::materialize::inherit::capture_copied_files(state_dir, cache_path) {
         tracing::warn!("could not capture folder state into the store (non-fatal): {e:#}");
     }
-    if let Err(e) = crate::materialize::inherit::inherit_copied_files(state_dir, cache_path) {
+    if let Err(e) = crate::materialize::inherit::inherit_copied_files(
+        state_dir,
+        cache_path,
+        crate::materialize::inherit::COPIED_FILES,
+    ) {
         tracing::warn!("could not inherit prompt history (non-fatal): {e:#}");
+    }
+}
+
+/// Inherit the Codex durable state that has no env var to relocate it: session
+/// transcripts and prompt history (mirrors [`inherit_claude_state`]), plus the
+/// cached `auth.json` credential (#1105).
+///
+/// No stranded-folder migration here: Codex materialization is new enough
+/// that there is no pre-existing legacy data to fold in the way
+/// [`migrate_stranded_transcripts_once`] does for Claude Code.
+///
+/// Best-effort — a folder that can't inherit its transcripts is a degraded
+/// session, not a failed `export`, so every failure warns instead of
+/// propagating.
+fn inherit_codex_state(state_dir: &Path, cache_path: &Path) {
+    if let Err(e) = crate::materialize::inherit::link_codex_sessions_dir(state_dir, cache_path) {
+        tracing::warn!("could not inherit Codex session transcripts (non-fatal): {e:#}");
+    }
+    if let Err(e) =
+        crate::materialize::inherit::link_codex_archived_sessions_dir(state_dir, cache_path)
+    {
+        tracing::warn!("could not inherit Codex archived sessions (non-fatal): {e:#}");
+    }
+    // Capture before inherit: Codex only ever writes these into the config
+    // dir, so without this the durable store would never gain a copy to hand
+    // to the next folder.
+    if let Err(e) = crate::materialize::inherit::capture_codex_copied_files(state_dir, cache_path) {
+        tracing::warn!("could not capture Codex folder state into the store (non-fatal): {e:#}");
+    }
+    if let Err(e) = crate::materialize::inherit::inherit_codex_copied_files(state_dir, cache_path) {
+        tracing::warn!("could not inherit Codex auth/history (non-fatal): {e:#}");
     }
 }
 
