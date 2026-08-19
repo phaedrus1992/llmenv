@@ -46,7 +46,10 @@
 //!   uncapped read path in Codex's own config loader.
 //! - doctor diagnostics (#1100) — landed; see
 //!   [`crate::cli::doctor`]'s Codex-specific section.
-//! - plugins/skills (#1106).
+//! - plugins/skills/LSP (#1106) — landed for skills; see
+//!   [`render_skills_config`]. Plugin-installation metadata and LSP are
+//!   verified-absent from Codex (`supports_plugins`/`supports_lsp` doc
+//!   comments), not deferred work.
 //!
 //! Field names come from Codex's own deserialization structs
 //! (`codex-rs/config/src/config_toml.rs`, `mcp_types.rs`) rather than its docs,
@@ -125,6 +128,7 @@ const CODEX_MODELED_KEYS: &[&str] = &[
     "hooks",
     "permissions",
     "default_permissions",
+    "skills",
 ];
 
 /// Name of the `[permissions.<name>]` profile llmenv writes and, when
@@ -163,12 +167,18 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn supports_plugins(&self) -> bool {
-        // #1106.
+        // #1106: verified against `openai/codex`'s own source — there is no
+        // plugin-installation-metadata concept at all (no analogue of
+        // `installed_plugins.json`), so there is nothing for this adapter to
+        // model. Skills (a separate llmenv concept from plugins) are handled
+        // unconditionally in `materialize`/`render_skills_config` regardless
+        // of this flag.
         false
     }
 
     fn supports_lsp(&self) -> bool {
-        // Codex has no LSP config block.
+        // #1106: verified against `openai/codex`'s own source — no `Lsp`
+        // config struct, no `[lsp]` table anywhere in `config_toml.rs`.
         false
     }
 
@@ -266,6 +276,30 @@ impl AgentAdapter for CodexAdapter {
             // AGENTS.md would sit in CODEX_HOME feeding revoked instructions to
             // the model, since that is also Codex's own user-instructions path.
             owned.push(PathBuf::from("AGENTS.md"));
+        }
+
+        // #1106: first-class skills + the built-in `llmenv` skill, reusing the
+        // same SKILL.md convention Claude Code uses
+        // (`docs/reference/codex/skills.md`). Unlike Claude Code's
+        // auto-discovery, Codex requires each skill folder to be explicitly
+        // registered via `[[skills.config]]` — `render_skills_config` scans
+        // `out/skills/` afterward rather than tracking each skill by name
+        // through the several code paths below that can write one, so a
+        // skill can never go unregistered just because a future writer
+        // forgot to also update a registration list.
+        owned.extend(super::skills::write_first_class_skills(
+            out,
+            &manifest.capabilities.skills,
+        )?);
+        let features = manifest.capabilities.features.clone().unwrap_or_default();
+        owned.extend(super::llmenv_skill::materialize_llmenv_skill(
+            out, &features,
+        )?);
+        super::skills::validate_skills(out)?;
+
+        let skills_config = render_skills_config(out)?;
+        if !skills_config.is_empty() {
+            doc.insert("skills".into(), json!({ "config": skills_config }));
         }
 
         let mcp_servers = render_mcp_servers(manifest);
@@ -628,6 +662,42 @@ fn emit_baseline_hooks(
 /// `untagged`, so there is **no** `type` key — a `command` means stdio and a
 /// `url` means streamable HTTP. Emitting a `type` field would be rejected
 /// outright, since the transport enum is `deny_unknown_fields`.
+/// Build Codex's `[[skills.config]]` entries by scanning the skills llmenv
+/// just wrote under `out/skills/` (#1106).
+///
+/// Codex has no auto-discovery like Claude Code's `skills/` convention — each
+/// skill folder needs an explicit registration entry naming its absolute
+/// `path` (`docs/reference/codex/skills.md`). Scanning the materialized
+/// directory rather than threading a name list through every code path that
+/// can write a skill (first-class skills, the built-in `llmenv` skill, and
+/// any future source) means a skill can never go unregistered just because a
+/// future writer forgot to also update a registration list.
+fn render_skills_config(out: &Path) -> anyhow::Result<Vec<serde_json::Value>> {
+    let skills_dir = out.join("skills");
+    let Some(entries) = crate::paths::read_dir_optional(&skills_dir)? else {
+        return Ok(Vec::new());
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.path().is_dir() {
+            names.push(entry.file_name());
+        }
+    }
+    names.sort();
+
+    names
+        .into_iter()
+        .map(|name| {
+            let path = skills_dir.join(&name);
+            let as_str = path.to_str().ok_or_else(|| {
+                anyhow::anyhow!("skill path is not valid UTF-8: {}", path.display())
+            })?;
+            Ok(json!({ "path": as_str, "enabled": true }))
+        })
+        .collect()
+}
+
 fn render_mcp_servers(manifest: &MergedManifest) -> serde_json::Map<String, serde_json::Value> {
     use crate::mcp::resolve::ResolvedKind;
 
@@ -1690,5 +1760,103 @@ mod tests {
         let (_dir, parsed) = materialize_to_toml(&manifest);
         assert!(parsed.contains_key("model_instructions_file"));
         assert_eq!(parsed["mcp_servers"].as_table().unwrap().len(), 2);
+    }
+
+    // ---- skills registration (#1106) ----
+
+    const VALID_SKILL_FRONTMATTER: &str = "---\nname: x\ndescription: y\n---\nbody\n";
+
+    /// Codex has no auto-discovery for skills — a first-class skill must be
+    /// both written under `out/skills/` and explicitly registered via
+    /// `[[skills.config]]`, naming its absolute materialized path.
+    #[test]
+    fn first_class_skill_is_written_and_registered() {
+        let src_tmp = tempfile::tempdir().unwrap();
+        let skill_src = src_tmp.path().join("my-skill");
+        std::fs::create_dir_all(&skill_src).unwrap();
+        std::fs::write(skill_src.join("SKILL.md"), VALID_SKILL_FRONTMATTER).unwrap();
+
+        let mut manifest = MergedManifest::default();
+        manifest
+            .capabilities
+            .skills
+            .push(crate::config::SkillSource {
+                name: "my-skill".into(),
+                path: skill_src.to_str().unwrap().into(),
+                when: Vec::new(),
+            });
+
+        let (dir, parsed) = materialize_to_toml(&manifest);
+        assert!(dir.path().join("skills/my-skill/SKILL.md").exists());
+
+        let entries = parsed["skills"]["config"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        let expected_path = dir.path().join("skills/my-skill");
+        assert_eq!(
+            entries[0]["path"].as_str(),
+            expected_path.to_str(),
+            "{entries:?}"
+        );
+        assert_eq!(entries[0]["enabled"].as_bool(), Some(true));
+    }
+
+    /// The built-in `llmenv` skill materializes and registers the same way a
+    /// first-class skill does, once a first-party feature is enabled.
+    #[test]
+    fn builtin_llmenv_skill_is_written_and_registered_when_a_feature_is_enabled() {
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.features = Some(crate::config::Features {
+            context_mode: Some(crate::config::ContextMode {
+                enabled: true,
+                ..crate::config::ContextMode::default()
+            }),
+            ..crate::config::Features::default()
+        });
+
+        let (dir, parsed) = materialize_to_toml(&manifest);
+        assert!(dir.path().join("skills/llmenv/SKILL.md").exists());
+
+        let entries = parsed["skills"]["config"].as_array().unwrap();
+        assert!(
+            entries.iter().any(|e| e["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("skills/llmenv"))),
+            "{entries:?}"
+        );
+    }
+
+    /// No skills at all (no first-class sources, no first-party feature
+    /// enabled) must omit the `skills` key entirely, not emit an empty
+    /// `[[skills.config]]` array.
+    #[test]
+    fn no_skills_omits_the_skills_key() {
+        let manifest = MergedManifest::default();
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(!parsed.contains_key("skills"), "{parsed:?}");
+    }
+
+    /// `native.codex` cannot redirect the rendered skills registration any
+    /// more than it can redirect `mcp_servers`/`hooks`/`permissions`.
+    #[test]
+    fn native_codex_cannot_clobber_the_rendered_skills() {
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.features = Some(crate::config::Features {
+            context_mode: Some(crate::config::ContextMode {
+                enabled: true,
+                ..crate::config::ContextMode::default()
+            }),
+            ..crate::config::Features::default()
+        });
+        manifest.native.insert(
+            "codex".into(),
+            serde_yaml::from_str("skills:\n  config: []\n").unwrap(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = CodexAdapter.materialize(&manifest, dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("skills"),
+            "the catch-all must be rejected by name: {err:#}"
+        );
     }
 }
