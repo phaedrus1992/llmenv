@@ -53,7 +53,7 @@ use crate::merge::MergedManifest;
 pub struct CodexAdapter;
 
 /// Codex reads `$CODEX_HOME/config.toml`.
-const CODEX_CONFIG_FILE: &str = "config.toml";
+pub(crate) const CODEX_CONFIG_FILE: &str = "config.toml";
 
 /// Lifecycle events Codex accepts, from `HookEventsToml`'s serde renames
 /// (`codex-rs/config/src/hook_config.rs`).
@@ -329,7 +329,7 @@ fn warn_about_unrenderable_capabilities(decision: &PermissionProfileDecision) {
 /// write, write beats read — so `Ord::max` picks the right value when the
 /// same path appears under more than one neutral rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum CodexFsAccess {
+pub(crate) enum CodexFsAccess {
     Read,
     Write,
     Deny,
@@ -348,7 +348,7 @@ impl CodexFsAccess {
 /// Why the Codex `[permissions.<name>]` profile was or wasn't rendered
 /// (#1102).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PermissionProfileDecision {
+pub(crate) enum PermissionProfileDecision {
     /// No neutral permission rules at all — nothing to render, nothing to warn
     /// about.
     Empty,
@@ -402,7 +402,7 @@ fn mappable_fs_access(tool: &str) -> Option<CodexFsAccess> {
 /// has no way to say "prompt about this one path" — only a global posture —
 /// so an `ask` rule can never be represented at the per-rule granularity the
 /// user wrote it at.
-pub(super) fn classify_permission_profile(
+pub(crate) fn classify_permission_profile(
     perms: &crate::config::Permissions,
 ) -> PermissionProfileDecision {
     use std::collections::BTreeMap;

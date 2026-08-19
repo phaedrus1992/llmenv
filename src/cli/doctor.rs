@@ -399,6 +399,105 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
     }
 }
 
+/// Codex-specific doctor coverage, parallel to the `claude_code` lifecycle-hooks
+/// section above (#1100). Gated on Codex being installed so a user who never
+/// runs Codex sees no Codex-specific noise.
+fn run_doctor_codex(
+    use_color: bool,
+    config: &Config,
+    cache_dir: &Path,
+    doctor_manifest: Option<&(crate::merge::MergedManifest, PathBuf)>,
+) {
+    use crate::adapter::AgentAdapter;
+    use crate::adapter::codex::{
+        CodexAdapter, PermissionProfileDecision, classify_permission_profile,
+    };
+
+    if !super::installed_adapters(config).any(|a| a.name() == "codex") {
+        return;
+    }
+
+    let pass = super::doctor_pass(use_color);
+    let warn = super::doctor_warning(use_color);
+    let info = super::doctor_info(use_color);
+
+    eprintln!();
+    eprintln!("Codex adapter:");
+
+    // #1102: proactively surface whether the permission profile will render
+    // or be refused, without requiring an `export`/`regenerate` run — the
+    // stderr warning at materialize time is easy to miss in a script.
+    let caps = doctor_manifest.map_or(&config.capabilities, |(m, _)| &m.capabilities);
+    match classify_permission_profile(&caps.permissions) {
+        PermissionProfileDecision::Empty => {}
+        PermissionProfileDecision::Rendered(entries) => {
+            eprintln!(
+                "{pass} permission profile: {} filesystem path rule(s) will render (activated \
+                 via default_permissions)",
+                entries.len()
+            );
+        }
+        PermissionProfileDecision::Refused {
+            unmappable_rule_count,
+            mappable_rule_count,
+        } => {
+            eprintln!(
+                "{warn} permission profile: refused to render — {unmappable_rule_count} rule(s) \
+                 have no Codex equivalent (Bash, WebFetch/network, or ask-tier), which also \
+                 drops {mappable_rule_count} otherwise-renderable path rule(s) (#1102's \
+                 all-or-nothing rule). Codex runs under its own default approval policy and \
+                 sandbox mode instead."
+            );
+        }
+    }
+
+    // MCP servers Codex cannot speak to at all (SSE transport, #233's
+    // render_mcp_servers skips these with a stderr warning at materialize
+    // time) — surfaced here too so `doctor` catches it without a render.
+    if let Some((manifest, _)) = doctor_manifest {
+        for mcp in &manifest.mcps {
+            if let crate::mcp::resolve::ResolvedKind::Remote {
+                transport: crate::config::McpTransport::Sse,
+                ..
+            } = &mcp.kind
+            {
+                eprintln!(
+                    "{warn} MCP server '{}' uses the SSE transport, which Codex does not \
+                     support (stdio and streamable HTTP only) — it will be skipped for Codex \
+                     only",
+                    mcp.name
+                );
+            }
+        }
+    }
+
+    // Detect a materialized config.toml that exists but fails to parse — a
+    // hand-edit or a bug in a future change to this adapter, not a config
+    // llmenv itself would ever intentionally write.
+    let config_path = cache_dir
+        .join(CodexAdapter.name())
+        .join(crate::adapter::codex::CODEX_CONFIG_FILE);
+    match std::fs::read_to_string(&config_path) {
+        Ok(raw) => match raw.parse::<toml::Table>() {
+            Ok(_) => eprintln!("{pass} materialized config.toml is valid TOML"),
+            Err(e) => eprintln!(
+                "{warn} materialized config.toml at {} is not valid TOML: {e}",
+                config_path.display()
+            ),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "{info} config.toml not yet materialized at {}",
+                config_path.display()
+            );
+        }
+        Err(e) => eprintln!(
+            "{warn} could not read materialized config.toml at {}: {e}",
+            config_path.display()
+        ),
+    }
+}
+
 /// Claude Code field-prefix patterns: a bare `<field>:<value>` filter, as
 /// opposed to a command-prefix pattern. `WebFetch(domain:example.com)` is the
 /// common one.
@@ -985,6 +1084,9 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             }
         }
     }
+
+    run_doctor_codex(use_color, &config, &cache_dir, doctor_manifest.as_ref());
+
     // Resolved native.claude_code.env, for the token-efficiency checks below
     // to treat as equally "set" alongside the process environment (#543 follow-up).
     let native_claude_env = doctor_manifest
