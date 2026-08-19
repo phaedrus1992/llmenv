@@ -155,6 +155,8 @@ fn cached_version_folders(adapter_cache: &Path) -> anyhow::Result<Option<Vec<Str
                 );
             }
         }
+        // llmenv writes ASCII version tags, so a non-UTF-8 name is not a cache
+        // folder it created and can't carry a version to compare against.
         let Some(dir_name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -1460,13 +1462,18 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     if cm_enabled {
         let mkt_name = crate::config::CONTEXT_MODE_MARKETPLACE;
         let mkt_path = crate::plugins::cache::marketplace_path(&cache_dir, mkt_name);
-        if !mkt_path.exists() {
-            eprintln!(
+        // #1436 variant: `exists()` would report an unreadable clone as
+        // unsynced, sending the user to `plugin-sync` for a permissions problem.
+        match mkt_path.try_exists() {
+            Ok(true) => eprintln!("{pass} context-mode marketplace '{mkt_name}' synced and ready"),
+            Ok(false) => eprintln!(
                 "{warn} context-mode marketplace '{mkt_name}' not synced — \
                  run `llmenv plugin-sync` so the auto-wire can find it"
-            );
-        } else {
-            eprintln!("{pass} context-mode marketplace '{mkt_name}' synced and ready");
+            ),
+            Err(e) => eprintln!(
+                "{warn} context-mode marketplace '{mkt_name}' could not be checked at {}: {e}",
+                mkt_path.display(),
+            ),
         }
     }
 
@@ -1479,8 +1486,19 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             continue;
         };
         let mkt_path = cache::marketplace_path(&cache_dir, &m.name);
-        if !mkt_path.join(".git").exists() {
-            continue;
+        // #1436 variant: an unstattable clone must not silently skip the pin
+        // check — that reads as "pin verified" in the output.
+        match mkt_path.join(".git").try_exists() {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                eprintln!(
+                    "{warn} marketplace '{}' pin not verified — cannot check its clone at {}: {e}",
+                    m.name,
+                    mkt_path.display(),
+                );
+                continue;
+            }
         }
         let Some(head) = cache::git_head(&mkt_path) else {
             // Clone exists but HEAD can't be resolved — let the `plugin-sync`
@@ -2157,6 +2175,50 @@ mod tests {
     }
 
     proptest! {
+        /// A strict cache folder is `{version}-{64 hex}`, so whatever version
+        /// tag llmenv stamped, scanning recovers it exactly — including tags
+        /// that themselves contain `-`, which `rsplit_once` has to get right.
+        #[test]
+        fn cached_version_folders_recovers_any_version_tag(
+            version in "[A-Za-z0-9][-.A-Za-z0-9]{0,20}",
+            hash in "[0-9a-f]{64}",
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache = tmp.path().join("engine");
+            std::fs::create_dir_all(cache.join(format!("{version}-{hash}"))).unwrap();
+            prop_assert_eq!(
+                cached_version_folders(&cache).unwrap(),
+                Some(vec![version])
+            );
+        }
+
+        /// A folder name that is not `{something}-{64 hex}` is the version tag
+        /// itself, so it survives the scan untouched.
+        #[test]
+        fn cached_version_folders_keeps_a_plain_version_folder_verbatim(
+            version in "[A-Za-z0-9][.A-Za-z0-9]{0,20}",
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache = tmp.path().join("engine");
+            std::fs::create_dir_all(cache.join(&version)).unwrap();
+            prop_assert_eq!(
+                cached_version_folders(&cache).unwrap(),
+                Some(vec![version])
+            );
+        }
+
+        /// `.tmp` folders are half-written builds, never a version to compare
+        /// the running binary against.
+        #[test]
+        fn cached_version_folders_always_skips_tmp_folders(
+            version in "[A-Za-z0-9][.A-Za-z0-9]{0,20}",
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache = tmp.path().join("engine");
+            std::fs::create_dir_all(cache.join(format!("{version}.tmp"))).unwrap();
+            prop_assert_eq!(cached_version_folders(&cache).unwrap(), Some(vec![]));
+        }
+
         /// Never panics, whatever a config author writes — patterns are
         /// arbitrary user strings, including non-ASCII and lone colons.
         #[test]
