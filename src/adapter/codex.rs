@@ -668,7 +668,10 @@ fn emit_baseline_hooks(
     // emitting both made a `Read` reach the hook twice, halving
     // `repeat_detect`'s effective threshold and making `read_once` see its own
     // first entry.
-    if !super::unmatched_pre_tool_use_registered(manifest) {
+    let session_log_includes_pre_tool_use = SESSION_LOG_HOOK_EVENTS
+        .iter()
+        .any(|(neutral, _)| *neutral == "pre_tool_use");
+    if !super::unmatched_pre_tool_use_registered(manifest, session_log_includes_pre_tool_use) {
         by_event
             .entry("PreToolUse".into())
             .or_default()
@@ -1620,6 +1623,16 @@ mod tests {
                 "{label}: an every-tool registration already covers {matched:?}, \
                  so those tools fire pre_tool_use twice: {parsed:?}"
             );
+            // Lower bound (#1442 P2): an upper bound alone passes at zero
+            // registrations too. The session-log-off case is covered by
+            // `read_once_matcher_survives_when_session_logging_is_off`.
+            if session_log {
+                assert_eq!(
+                    unmatched, 1,
+                    "{label}: session logging is on but no every-tool \
+                     pre_tool_use registration exists: {parsed:?}"
+                );
+            }
             for (i, a) in matched.iter().enumerate() {
                 for b in &matched[i + 1..] {
                     let overlap: Vec<&String> = a.iter().filter(|t| b.contains(t)).collect();

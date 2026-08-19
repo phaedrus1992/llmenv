@@ -1513,7 +1513,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // name — `hook-run` dispatches on `tool_name` itself. Emitting both made a
     // `Read` reach the hook twice, halving `repeat_detect`'s effective
     // threshold and making `read_once` see its own first entry.
-    if !super::unmatched_pre_tool_use_registered(manifest) {
+    let session_log_includes_pre_tool_use = SESSION_LOG_HOOK_EVENTS
+        .iter()
+        .any(|(neutral, _)| *neutral == "pre_tool_use");
+    if !super::unmatched_pre_tool_use_registered(manifest, session_log_includes_pre_tool_use) {
         for matcher in pre_tool_use_matchers {
             hooks_by_event
                 .entry("PreToolUse".to_string())
@@ -6318,6 +6321,22 @@ mod tests {
                 "{label}: an every-tool registration already covers {matched:?}, \
                  so those tools fire pre_tool_use twice: {settings:?}"
             );
+            // Lower bound (#1442 P2): an upper bound alone passes at zero
+            // registrations too — exactly the silently-dropped-guard shape a
+            // future change to the gate could produce with no test failure.
+            if session_log {
+                assert_eq!(
+                    unmatched, 1,
+                    "{label}: session logging is on but no every-tool \
+                     pre_tool_use registration exists: {settings:?}"
+                );
+            } else if read_before_edit || answer_before_act || cbm || task_tools {
+                assert!(
+                    !matched.is_empty(),
+                    "{label}: a guard that needs pre_tool_use is enabled but no \
+                     matcher-scoped registration exists: {settings:?}"
+                );
+            }
             for (i, a) in matched.iter().enumerate() {
                 for b in &matched[i + 1..] {
                     let overlap: Vec<&String> = a.iter().filter(|t| b.contains(t)).collect();

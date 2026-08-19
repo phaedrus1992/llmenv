@@ -1639,8 +1639,11 @@ fn generate_shim_js(
         .as_ref()
         .and_then(|f| f.task_tracker.as_ref())
         .is_some_and(|t| t.enabled && t.block_engine_task_tools);
+    let session_log_includes_pre_tool_use = SESSION_LOG_HOOK_EVENTS
+        .iter()
+        .any(|(neutral, _)| *neutral == "pre_tool_use");
     if (guards_index_repository || redirects_todowrite)
-        && !super::unmatched_pre_tool_use_registered(manifest)
+        && !super::unmatched_pre_tool_use_registered(manifest, session_log_includes_pre_tool_use)
     {
         push("PreToolUse", hook_run_command("pre_tool_use"));
     }
@@ -4510,9 +4513,16 @@ mod tests {
                 .iter()
                 .filter(|c| c.contains("hook-run pre_tool_use"))
                 .count();
-            assert!(
-                count <= 1,
-                "{label}: {count} pre_tool_use registrations: {js}"
+            // `<= 1` alone would pass at 0 too — a silently dropped guard
+            // registration (the #1442 P2 finding) is exactly what an upper
+            // bound alone can't catch. Any of the three reasons to route a
+            // tool call to `hook-run pre_tool_use` (session-log capture, the
+            // index_repository clobber deny, the task-tool redirect) must
+            // produce exactly one registration; none of them must produce zero.
+            let expected = usize::from(session_log || task_tools || cbm);
+            assert_eq!(
+                count, expected,
+                "{label}: {count} pre_tool_use registrations, expected {expected}: {js}"
             );
         }
     }
