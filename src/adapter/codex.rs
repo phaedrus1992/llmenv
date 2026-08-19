@@ -1820,6 +1820,101 @@ mod tests {
             let twice = std::fs::read_to_string(&path).unwrap();
             prop_assert_eq!(once, twice, "applying the same seeded settings twice must be a no-op the second time");
         }
+
+        /// `classify_permission_profile` never panics on an arbitrary rule
+        /// set, and the all-or-nothing gate never leaks a partial result: it
+        /// is `Refused` iff some rule is `ask`-tier, uses `pattern` instead of
+        /// `paths`, or names a tool with no filesystem equivalent — the same
+        /// invariant `warn_about_unrenderable_capabilities`'s reported counts
+        /// depend on being exact (pbt-gap, #1106).
+        #[test]
+        fn prop_classify_permission_profile_holds_its_invariants(
+            rules in proptest::collection::vec(
+                (
+                    prop_oneof![Just("allow"), Just("ask"), Just("deny")],
+                    prop_oneof![
+                        Just("Read"), Just("Edit"), Just("Write"), Just("MultiEdit"),
+                        Just("Bash"), Just("WebFetch"),
+                    ],
+                    proptest::collection::vec("[a-z/]{1,10}", 0..3),
+                    proptest::option::of("[a-z*]{1,10}"),
+                ),
+                0..8,
+            )
+        ) {
+            use crate::config::{PermissionRule, Permissions};
+
+            let mut perms = Permissions::default();
+            let mut expect_refused = false;
+            for (tier, tool, paths, pattern) in &rules {
+                let rule = PermissionRule {
+                    tool: (*tool).to_string(),
+                    pattern: pattern.clone(),
+                    paths: paths.clone(),
+                };
+                let mappable_tool = matches!(*tool, "Read" | "Edit" | "Write" | "MultiEdit");
+                let clean = mappable_tool && !paths.is_empty() && pattern.is_none();
+                if *tier == "ask" || !clean {
+                    expect_refused = true;
+                }
+                match *tier {
+                    "allow" => perms.allow.push(rule),
+                    "ask" => perms.ask.push(rule),
+                    _ => perms.deny.push(rule),
+                }
+            }
+            let total = perms.allow.len() + perms.ask.len() + perms.deny.len();
+
+            let decision = super::classify_permission_profile(&perms);
+
+            if total == 0 {
+                prop_assert_eq!(decision, super::PermissionProfileDecision::Empty);
+            } else if expect_refused {
+                match decision {
+                    super::PermissionProfileDecision::Refused { unmappable_rule_count, mappable_rule_count } => {
+                        prop_assert_eq!(
+                            unmappable_rule_count + mappable_rule_count,
+                            total,
+                            "reported counts must always sum to the total rule count"
+                        );
+                    }
+                    other => prop_assert!(
+                        false,
+                        "expected Refused for a rule set with an ask/pattern/unmappable rule, got {:?}",
+                        other
+                    ),
+                }
+            } else {
+                match decision {
+                    super::PermissionProfileDecision::Rendered(entries) => {
+                        // Deny always wins: any path a deny rule touches must
+                        // resolve to Deny in the rendered map, regardless of
+                        // what else also touched that path.
+                        for (tier, _tool, paths, _pattern) in &rules {
+                            if *tier != "deny" {
+                                continue;
+                            }
+                            for path in paths {
+                                let key = super::normalize_permission_path(path);
+                                if let Some(access) = entries.get(&key) {
+                                    prop_assert_eq!(
+                                        *access,
+                                        super::CodexFsAccess::Deny,
+                                        "a deny rule touching {} must win",
+                                        key
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    other => prop_assert!(
+                        false,
+                        "expected Rendered for an all-clean rule set, got {:?}",
+                        other
+                    ),
+                }
+            }
+        }
     }
 
     #[test]
@@ -1910,6 +2005,57 @@ mod tests {
         let manifest = MergedManifest::default();
         let (_dir, parsed) = materialize_to_toml(&manifest);
         assert!(!parsed.contains_key("skills"), "{parsed:?}");
+    }
+
+    proptest! {
+        /// `render_skills_config` returns exactly one entry per directory
+        /// under `out/skills/` (files excluded), in sorted order, and is
+        /// deterministic across repeated calls on the same directory
+        /// (pbt-gap, #1106).
+        #[test]
+        fn prop_render_skills_config_counts_and_sorts_directories(
+            names in proptest::collection::hash_set("[a-z][a-z0-9_-]{0,8}", 0..8),
+            is_dir_flags in proptest::collection::vec(any::<bool>(), 0..8),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let skills_dir = dir.path().join("skills");
+            std::fs::create_dir_all(&skills_dir).unwrap();
+
+            let mut expected_dir_names: Vec<String> = Vec::new();
+            for (name, is_dir) in names.iter().zip(is_dir_flags.iter().cycle()) {
+                let entry_path = skills_dir.join(name);
+                if *is_dir {
+                    std::fs::create_dir(&entry_path).unwrap();
+                    expected_dir_names.push(name.clone());
+                } else {
+                    std::fs::write(&entry_path, b"not a directory").unwrap();
+                }
+            }
+            expected_dir_names.sort();
+
+            let once = super::render_skills_config(dir.path()).unwrap();
+            prop_assert_eq!(
+                once.len(),
+                expected_dir_names.len(),
+                "must return exactly one entry per directory, excluding files"
+            );
+
+            let paths: Vec<String> = once
+                .iter()
+                .map(|e| e["path"].as_str().unwrap().to_string())
+                .collect();
+            let mut sorted_paths = paths.clone();
+            sorted_paths.sort();
+            prop_assert_eq!(&paths, &sorted_paths, "entries must be sorted");
+
+            for entry in &once {
+                prop_assert_eq!(entry["enabled"].as_bool(), Some(true));
+            }
+
+            // Determinism: calling it again on the same directory is identical.
+            let twice = super::render_skills_config(dir.path()).unwrap();
+            prop_assert_eq!(once, twice, "must be deterministic across repeated calls");
+        }
     }
 
     /// `native.codex` cannot redirect the rendered skills registration any

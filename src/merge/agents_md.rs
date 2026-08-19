@@ -52,6 +52,7 @@ pub(crate) fn append_rules(base: &str, rules: &[super::rules::RuleFile]) -> Stri
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn empty_input_yields_empty_string() {
@@ -95,5 +96,60 @@ mod tests {
         assert!(s.contains("<!-- # from bundle: rust -->"));
         // Trailing newline added when body lacks one:
         assert!(s.ends_with('\n'));
+    }
+
+    proptest! {
+        /// `append_rules` never truncates or mutates `base`, and every rule's
+        /// body and provenance marker survive in the output, for an arbitrary
+        /// base string and an arbitrary set of rules (pbt-gap, #1103).
+        #[test]
+        fn prop_append_rules_preserves_base_and_every_rule_body(
+            base in "[a-zA-Z0-9 \n#.-]{0,40}",
+            rule_data in proptest::collection::vec(
+                (
+                    "[a-z][a-z0-9_]{0,8}",
+                    "[a-z0-9/_.-]{1,12}",
+                    "[a-zA-Z0-9 \n]{0,20}",
+                ),
+                0..5,
+            )
+        ) {
+            use super::super::rules::RuleFile;
+            use std::path::PathBuf;
+
+            let rules: Vec<RuleFile> = rule_data
+                .into_iter()
+                .map(|(bundle, rel, body)| RuleFile {
+                    bundle,
+                    rel: PathBuf::from(rel),
+                    frontmatter: None,
+                    body,
+                    raw: String::new(),
+                })
+                .collect();
+
+            let out = append_rules(&base, &rules);
+
+            prop_assert!(
+                out.starts_with(&base),
+                "append_rules must never mutate or truncate the caller's base content"
+            );
+
+            for rule in &rules {
+                prop_assert!(
+                    out.contains(&rule.body),
+                    "every rule's body must survive verbatim in the output"
+                );
+                let marker = format!("<!-- # from bundle: {} {} -->", rule.bundle, rule.rel.display());
+                prop_assert!(
+                    out.contains(&marker),
+                    "every rule's provenance marker must appear in the output"
+                );
+            }
+
+            if rules.is_empty() {
+                prop_assert_eq!(out, base, "no rules must leave the base exactly as-is");
+            }
+        }
     }
 }
