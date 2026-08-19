@@ -33,8 +33,20 @@
 //!   corruption via its WAL/shm sidecars, and deserves its own design pass
 //!   rather than reusing the single-file-copy contract that only fits
 //!   `auth.json`/`history.jsonl`.
-//! - plugins/skills (#1106), rules beyond the merged AGENTS.md (#1103), doctor
-//!   diagnostics (#1100).
+//! - rules beyond the merged AGENTS.md (#1103) — landed; Codex has no
+//!   `rules/*.md`-with-glob-frontmatter convention
+//!   (`docs/reference/codex/agents-md.md`), so `manifest.rules` folds into
+//!   the same instructions file via
+//!   [`crate::merge::agents_md::append_rules`] rather than being written out
+//!   separately the way Claude Code and opencode do — lossy (path-scoped,
+//!   conditional rules become unconditional prose), but the only target
+//!   Codex has. `project_doc_max_bytes` (Codex's cap on its own AGENTS.md
+//!   directory-walk discovery) does not apply here: this adapter always
+//!   points `model_instructions_file` at an explicit path, a different,
+//!   uncapped read path in Codex's own config loader.
+//! - doctor diagnostics (#1100) — landed; see
+//!   [`crate::cli::doctor`]'s Codex-specific section.
+//! - plugins/skills (#1106).
 //!
 //! Field names come from Codex's own deserialization structs
 //! (`codex-rs/config/src/config_toml.rs`, `mcp_types.rs`) rather than its docs,
@@ -224,10 +236,22 @@ impl AgentAdapter for CodexAdapter {
         // AGENTS.md on its own, but this one is llmenv's merged output living in
         // the cache dir, which is not a project root — `model_instructions_file`
         // is the field that takes an absolute path to it.
+        //
+        // #1103: Codex has no `rules/*.md`-with-glob-frontmatter convention
+        // (`docs/reference/codex/agents-md.md`), so `manifest.rules` folds into
+        // this same file instead of being written out as separate files the
+        // way Claude Code and opencode do — a lossy transform (path-scoped,
+        // conditional rules become unconditional prose), but the only target
+        // Codex has.
         super::skills::reject_hardcoded_config_path(&manifest.agents_md, "AGENTS.md")?;
-        if !manifest.agents_md.trim().is_empty() {
+        for r in &manifest.rules {
+            super::skills::reject_hardcoded_config_path(&r.raw, &r.rel.to_string_lossy())?;
+        }
+        let instructions_content =
+            crate::merge::agents_md::append_rules(&manifest.agents_md, &manifest.rules);
+        if !instructions_content.trim().is_empty() {
             let agents_path = out.join("AGENTS.md");
-            crate::paths::write_owner_only(&agents_path, manifest.agents_md.as_bytes())?;
+            crate::paths::write_owner_only(&agents_path, instructions_content.as_bytes())?;
             let as_str = agents_path.to_str().ok_or_else(|| {
                 anyhow::anyhow!(
                     "materialized AGENTS.md path is not valid UTF-8: {}",
@@ -945,6 +969,102 @@ mod tests {
 
         assert!(!dir.path().join("AGENTS.md").exists());
         assert!(!parsed.contains_key("model_instructions_file"));
+    }
+
+    // ---- rules folded into AGENTS.md (#1103) ----
+
+    fn rule_file(
+        bundle: &str,
+        rel: &str,
+        body: &str,
+        frontmatter: Option<&str>,
+    ) -> crate::merge::rules::RuleFile {
+        let raw = match frontmatter {
+            Some(fm) => format!("---\n{fm}\n---\n{body}"),
+            None => body.to_string(),
+        };
+        crate::merge::rules::RuleFile {
+            bundle: bundle.into(),
+            rel: std::path::PathBuf::from(rel),
+            frontmatter: frontmatter.map(String::from),
+            body: body.into(),
+            raw,
+        }
+    }
+
+    /// Codex has no `rules/*.md` convention (#1103) — a declared rule must
+    /// fold into `AGENTS.md`/`model_instructions_file` rather than being
+    /// silently dropped, and no `rules/` directory is ever written.
+    #[test]
+    fn rules_fold_into_agents_md_with_frontmatter_stripped() {
+        let mut manifest = MergedManifest {
+            agents_md: "# Base rules\n".into(),
+            ..MergedManifest::default()
+        };
+        manifest.rules.push(rule_file(
+            "base",
+            "rules/rust.md",
+            "# Rust rules\nUse `?` not `unwrap`.\n",
+            Some("scope: rust"),
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let owned = CodexAdapter.materialize(&manifest, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+
+        assert!(content.contains("# Base rules"));
+        assert!(content.contains("# Rust rules"));
+        assert!(content.contains("Use `?` not `unwrap`."));
+        assert!(
+            !content.contains("scope: rust"),
+            "frontmatter must not leak into AGENTS.md: {content}"
+        );
+        assert!(
+            !dir.path().join("rules").exists(),
+            "Codex has no rules/ convention — nothing should be written there"
+        );
+        assert!(
+            owned.iter().all(|p| p != std::path::Path::new("rules")),
+            "no rules/ path should be reported as owned: {owned:?}"
+        );
+    }
+
+    /// A rule with no `agents_md` content at all must still render — folding
+    /// must not depend on there being a non-empty base.
+    #[test]
+    fn a_rule_alone_with_empty_agents_md_still_renders() {
+        let mut manifest = MergedManifest::default();
+        manifest
+            .rules
+            .push(rule_file("base", "rules/only.md", "# Only a rule\n", None));
+
+        let (dir, parsed) = materialize_to_toml(&manifest);
+        let content = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(content.contains("# Only a rule"));
+        assert_eq!(
+            parsed["model_instructions_file"].as_str(),
+            Some(dir.path().join("AGENTS.md").to_str().unwrap())
+        );
+    }
+
+    /// A hardcoded cache-dir path in a rule body must be rejected the same
+    /// way one in `agents_md` itself already is (#289).
+    #[test]
+    fn a_hardcoded_config_path_in_a_rule_body_is_rejected() {
+        let mut manifest = MergedManifest::default();
+        manifest.rules.push(rule_file(
+            "base",
+            "rules/bad.md",
+            "Edit ~/.claude/settings.json directly.\n",
+            None,
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = CodexAdapter.materialize(&manifest, dir.path());
+        assert!(
+            err.is_err(),
+            "a hardcoded config path in a rule body must be rejected: {err:?}"
+        );
     }
 
     /// A server name with a dot would silently become nested tables if the

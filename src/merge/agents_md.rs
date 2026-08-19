@@ -19,26 +19,19 @@ pub(crate) fn concat(parts: &[(String, String)]) -> String {
     out
 }
 
-/// Concatenate AGENTS.md with rules-file bodies appended after, frontmatter
-/// stripped. For adapters that don't have a native rules-directory convention
-/// and must inline everything into a single rules file.
+/// Append rules-file bodies to `base` (an already-concatenated AGENTS.md, as
+/// [`concat`] produces), frontmatter stripped. For adapters with no native
+/// rules-directory convention that must inline everything into a single
+/// instructions file — Codex's `CodexAdapter` (#1103): Codex has no per-file
+/// rule mechanism with glob frontmatter, so a rule's path-scoped, conditional
+/// application becomes unconditional prose once folded in here.
 ///
 /// The rules section is preceded by an HTML comment naming the source rule
 /// file (e.g. `<!-- # from bundle: base rules/rust.md -->`) so provenance is
 /// preserved.
-/// Not called by either shipped adapter today — both inline rule bodies
-/// themselves. Kept because `merge::rules`' module docs define this as the
-/// AGENTS.md-only path, and it stays covered by its own test (#1314).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "documented AGENTS.md adapter contract, not yet consumed"
-    )
-)]
-fn concat_with_rules(parts: &[(String, String)], rules: &[super::rules::RuleFile]) -> String {
-    let mut out = concat(parts);
+pub(crate) fn append_rules(base: &str, rules: &[super::rules::RuleFile]) -> String {
+    let mut out = base.to_string();
     for r in rules {
         let _ = writeln!(out);
         let _ = writeln!(
@@ -66,7 +59,7 @@ mod tests {
     }
 
     #[test]
-    fn concat_with_rules_appends_bodies() {
+    fn append_rules_appends_bodies_to_the_concatenated_base() {
         use super::super::rules::RuleFile;
         use std::path::PathBuf;
         let parts = vec![("base".into(), "# base\n".into())];
@@ -77,12 +70,19 @@ mod tests {
             body: "# rust rules\n".into(),
             raw: "---\nscope: rust\n---\n# rust rules\n".into(),
         }];
-        let s = concat_with_rules(&parts, &rules);
+        let s = append_rules(&concat(&parts), &rules);
         assert!(s.contains("<!-- # from bundle: base -->"));
         assert!(s.contains("<!-- # from bundle: base rules/rust.md -->"));
         assert!(s.contains("# rust rules"));
         // Frontmatter must NOT leak into the concatenated output.
         assert!(!s.contains("scope: rust"));
+    }
+
+    /// A base with no rules at all must round-trip unchanged.
+    #[test]
+    fn append_rules_is_a_noop_with_no_rules() {
+        let base = concat(&[("base".into(), "# base\n".into())]);
+        assert_eq!(append_rules(&base, &[]), base);
     }
 
     #[test]
