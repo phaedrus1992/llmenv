@@ -463,11 +463,33 @@ pub(crate) fn link_codex_sqlite_dbs(state_dir: &Path, config_dir: &Path) -> anyh
 /// Not exhaustive — a `-shm` left behind by an ungraceful exit reads as
 /// "live" too — but a false positive only defers this one-time migration to
 /// a later `export`; it never loses or corrupts data.
+///
+/// A stat failure other than "not found" (permission denied, transient I/O)
+/// on either check is treated as live rather than absent — this function
+/// exists purely to avoid a data-losing race, so an inconclusive answer must
+/// err toward skipping the fold, not toward proceeding with one it can no
+/// longer rule out (mirrors [`is_real_file`]'s NotFound-vs-other-error split,
+/// #1341).
 fn sqlite_fold_would_race_a_live_db(name: &str, config_dir: &Path) -> bool {
-    let link = config_dir.join(name);
-    let is_unmigrated_file =
-        matches!(std::fs::symlink_metadata(&link), Ok(md) if md.file_type().is_file());
-    is_unmigrated_file && std::fs::symlink_metadata(config_dir.join(format!("{name}-shm"))).is_ok()
+    let is_unmigrated_file = match std::fs::symlink_metadata(config_dir.join(name)) {
+        Ok(md) => md.file_type().is_file(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            tracing::warn!(db = name, error = %e, "inherit: could not stat Codex SQLite file, treating as live to be safe");
+            return true;
+        }
+    };
+    if !is_unmigrated_file {
+        return false;
+    }
+    match std::fs::symlink_metadata(config_dir.join(format!("{name}-shm"))) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            tracing::warn!(db = name, error = %e, "inherit: could not stat -shm sidecar, treating as live to be safe");
+            true
+        }
+    }
 }
 
 /// Whether `config_dir`'s copy of the base `.sqlite` file should win the fold
@@ -1569,6 +1591,49 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(state.join(CODEX_GOALS_DB)).is_err(),
             "nothing should land in the durable store while the DB looks live"
+        );
+    }
+
+    /// A stat failure other than "not found" (simulated here with an
+    /// unreadable config dir) must be treated as live and skip the fold,
+    /// never as absent — an inconclusive answer from the liveness check must
+    /// never silently fall through to an unguarded fold (#1448).
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sqlite_dbs_treats_a_stat_error_as_live_not_absent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&cfg).unwrap();
+        write(&cfg.join(CODEX_GOALS_DB), "goals-content");
+        // Deny search permission on `cfg` so stat on its children fails with
+        // EACCES rather than NotFound.
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let readable_anyway = std::fs::symlink_metadata(cfg.join(CODEX_GOALS_DB)).is_ok();
+        let result = link_codex_sqlite_dbs(&state, &cfg);
+
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_ok(),
+            "a stat error must be handled, not propagated: {result:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(cfg.join(CODEX_GOALS_DB))
+                .unwrap()
+                .file_type()
+                .is_file(),
+            "an unstattable DB must not be folded into a symlink"
+        );
+        assert!(
+            std::fs::symlink_metadata(state.join(CODEX_GOALS_DB)).is_err(),
+            "nothing should land in the durable store when liveness can't be determined"
         );
     }
 
