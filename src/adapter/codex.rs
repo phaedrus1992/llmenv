@@ -9,10 +9,15 @@
 //! `AGENTS.md`. The remaining parity work has its own issues, and each is a
 //! deliberate gap rather than an oversight:
 //!
-//! - permissions (#1102) — Codex models these as named profiles under
-//!   `permissions.entries` plus `approval_policy`/`sandbox_mode`, which does not
-//!   map onto llmenv's `allow`/`ask`/`deny` lists. Needs a design decision, not
-//!   a translation.
+//! - permissions (#1102) — landed, filesystem-only; see
+//!   [`classify_permission_profile`]. Codex's `[permissions.<name>]` profiles
+//!   also cover `network.domains`, but rendering that meaningfully requires
+//!   also modeling `network.enabled`/`network.mode` (Codex's network proxy is
+//!   off by default under `workspace-write`, so a domain entry alone can be
+//!   dead config) — a bigger, separate sandbox/network-vocabulary gap
+//!   (`docs/reference/codex/sandbox-and-approvals.md`) that this slice does
+//!   not take on. `approval_policy`/`sandbox_mode` remain unmodeled too;
+//!   Codex's permission profiles intersect with (never replace) those.
 //! - lifecycle hooks (#1108) — landed; see [`render_hooks`].
 //! - seeded settings (#1107) — landed; see [`apply_seeded_settings`]. Codex has
 //!   no install-method seed to write (it self-detects in-process from its own
@@ -102,17 +107,28 @@ const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
 /// choosing, silently — `overlay_native_json` runs after the render, so the
 /// override simply wins. The framework already classifies this concept as
 /// modeled-with-no-escape-hatch; use `capabilities.rules`.
-const CODEX_MODELED_KEYS: &[&str] = &["mcp_servers", "model_instructions_file", "hooks"];
+const CODEX_MODELED_KEYS: &[&str] = &[
+    "mcp_servers",
+    "model_instructions_file",
+    "hooks",
+    "permissions",
+    "default_permissions",
+];
+
+/// Name of the `[permissions.<name>]` profile llmenv writes and, when
+/// rendered, activates via `default_permissions` (#1102).
+const PERMISSION_PROFILE_NAME: &str = "llmenv";
 
 /// Keys `apply_seeded_settings` refuses to seed even though llmenv doesn't
 /// render them itself.
 ///
-/// This slice doesn't model permissions (#1102) yet, so none of Codex's
-/// approval/sandbox knobs are in [`CODEX_MODELED_KEYS`] — but leaving them
-/// seedable would let `init.seeded_settings` silently weaken the posture a
-/// user's `capabilities.permissions` establishes on every other engine, the
-/// same class of gap `warn_about_unrenderable_capabilities` already warns
-/// about for a dropped `deny` rule (security-audit, #1421).
+/// #1102 models `capabilities.permissions` as far as filesystem access goes,
+/// but `approval_policy`/`sandbox_mode`/etc. remain unmodeled and out of
+/// [`CODEX_MODELED_KEYS`] — leaving them seedable would let
+/// `init.seeded_settings` silently weaken the posture a user's
+/// `capabilities.permissions` establishes on every other engine, the same
+/// class of gap `warn_about_unrenderable_capabilities` already warns about
+/// for a rule the rendered profile can't represent (security-audit, #1421).
 const CODEX_SECURITY_SENSITIVE_KEYS: &[&str] = &[
     "approval_policy",
     "sandbox_mode",
@@ -182,9 +198,27 @@ impl AgentAdapter for CodexAdapter {
         super::skills::create_dir_owner_only(out)?;
         let mut owned: Vec<PathBuf> = Vec::new();
 
-        warn_about_unrenderable_capabilities(manifest);
+        let permission_decision = classify_permission_profile(&manifest.capabilities.permissions);
+        warn_about_unrenderable_capabilities(&permission_decision);
 
         let mut doc = serde_json::Map::new();
+
+        if let PermissionProfileDecision::Rendered(entries) = &permission_decision {
+            let filesystem: serde_json::Map<String, serde_json::Value> = entries
+                .iter()
+                .map(|(path, access)| (path.clone(), json!(access.as_str())))
+                .collect();
+            let mut profile = serde_json::Map::new();
+            profile.insert("description".into(), json!(PERMISSION_PROFILE_DESCRIPTION));
+            profile.insert("filesystem".into(), serde_json::Value::Object(filesystem));
+            let mut profiles = serde_json::Map::new();
+            profiles.insert(
+                PERMISSION_PROFILE_NAME.into(),
+                serde_json::Value::Object(profile),
+            );
+            doc.insert("permissions".into(), serde_json::Value::Object(profiles));
+            doc.insert("default_permissions".into(), json!(PERMISSION_PROFILE_NAME));
+        }
 
         // AGENTS.md, pointed at explicitly. Codex discovers a project's
         // AGENTS.md on its own, but this one is llmenv's merged output living in
@@ -267,22 +301,157 @@ impl AgentAdapter for CodexAdapter {
 /// Code. That is a cross-engine gap, not an authoring mistake, and failing here
 /// would also drop the MCP servers and AGENTS.md that Codex *can* use — the same
 /// reasoning the Crush adapter applies to its own unsupported events.
-///
-/// Permissions get a warning for a stronger reason than hooks do: a `deny` rule
-/// that evaporates leaves Codex running under its own default
-/// `approval_policy`/`sandbox_mode`, so the posture is silently weaker on this
-/// engine than on the one the bundle was tested against.
-fn warn_about_unrenderable_capabilities(manifest: &MergedManifest) {
-    let perms = &manifest.capabilities.permissions;
-    let rule_count = perms.allow.len() + perms.ask.len() + perms.deny.len();
-    if rule_count > 0 {
+fn warn_about_unrenderable_capabilities(decision: &PermissionProfileDecision) {
+    if let PermissionProfileDecision::Refused {
+        unmappable_rule_count,
+        mappable_rule_count,
+    } = decision
+    {
         eprintln!(
-            "warning: the Codex adapter does not render permissions yet — {rule_count} rule(s), \
-             including {} deny rule(s), will NOT constrain Codex, which runs under its own \
-             default approval policy and sandbox mode. Tracking issue: \
-             https://github.com/phaedrus1992/llmenv/issues/1102",
-            perms.deny.len()
+            "warning: the Codex adapter cannot render capabilities.permissions as a Codex \
+             permission profile — {unmappable_rule_count} rule(s) have no Codex equivalent \
+             (Bash/other command rules, WebFetch/domain rules, or `ask`-tier rules — Codex's \
+             permission profiles model filesystem access only, and `ask` has no per-rule \
+             posture at all). Per #1102's all-or-nothing rule, this also drops {mappable_rule_count} \
+             otherwise-renderable Read/Edit/Write/MultiEdit path rule(s) rather than emit a \
+             profile that looks more complete than it is. Codex runs under its own default \
+             approval policy and sandbox mode instead. Tracking issue: \
+             https://github.com/phaedrus1992/llmenv/issues/1102"
         );
+    }
+}
+
+/// The Codex filesystem access mode a rendered path entry gets (#1102).
+///
+/// Mirrors Codex's own `FileSystemAccessMode` (`codex-rs/protocol/src/permissions.rs`)
+/// so the variants serialize as its documented lowercase strings, and the
+/// declaration order matches its stated conflict precedence — deny beats
+/// write, write beats read — so `Ord::max` picks the right value when the
+/// same path appears under more than one neutral rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum CodexFsAccess {
+    Read,
+    Write,
+    Deny,
+}
+
+impl CodexFsAccess {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+/// Why the Codex `[permissions.<name>]` profile was or wasn't rendered
+/// (#1102).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PermissionProfileDecision {
+    /// No neutral permission rules at all — nothing to render, nothing to warn
+    /// about.
+    Empty,
+    /// Every rule maps cleanly onto Codex's filesystem permission entries.
+    Rendered(std::collections::BTreeMap<String, CodexFsAccess>),
+    /// At least one rule has no Codex equivalent (or is `ask`-tier, which
+    /// Codex's permission profile has no per-rule concept of at all), so
+    /// nothing renders — a partial profile would look like enforcement for
+    /// rules it can't actually represent.
+    Refused {
+        unmappable_rule_count: usize,
+        mappable_rule_count: usize,
+    },
+}
+
+/// Explains what a rendered `[permissions.llmenv]` profile covers, so a human
+/// reading `config.toml` (or a bundle author debugging a dropped rule) knows
+/// its scope without cross-referencing the issue tracker. Since the profile
+/// only ever renders when every declared rule mapped cleanly (#1102's
+/// all-or-nothing rule), this never has to say what was dropped — check the
+/// stderr warning for that.
+const PERMISSION_PROFILE_DESCRIPTION: &str = "Generated by llmenv from capabilities.permissions. \
+     Covers Read/Edit/Write/MultiEdit path rules only — llmenv renders nothing here at all if \
+     the config also has a rule with no Codex equivalent (Bash, WebFetch, `ask`-tier, etc.); see \
+     https://github.com/phaedrus1992/llmenv/issues/1102.";
+
+/// The Codex filesystem access a neutral tool implies, or `None` for a tool
+/// with no Codex permission-profile equivalent (#1102).
+fn mappable_fs_access(tool: &str) -> Option<CodexFsAccess> {
+    match tool {
+        "Read" => Some(CodexFsAccess::Read),
+        "Edit" | "Write" | "MultiEdit" => Some(CodexFsAccess::Write),
+        _ => None,
+    }
+}
+
+/// Classify `perms` into what a Codex `[permissions.<name>]` profile can
+/// faithfully represent (#1102).
+///
+/// All-or-nothing per config, deliberately: Codex's permission profiles model
+/// filesystem (and, unmodeled here, network) access only — there is no
+/// per-command allowlist and no per-rule `ask` posture, only the global
+/// `approval_policy`/`sandbox_mode`. Rendering the mappable subset while
+/// silently dropping the rest would produce a profile that *looks* like it
+/// enforces a user's full rule set when it enforces only part of it — worse
+/// than the status quo of rendering nothing. So a single unmappable rule
+/// anywhere in `allow`/`ask`/`deny` refuses the whole profile, not just that
+/// rule.
+///
+/// `ask`-tier rules are unconditionally unmappable, regardless of tool: Codex
+/// has no way to say "prompt about this one path" — only a global posture —
+/// so an `ask` rule can never be represented at the per-rule granularity the
+/// user wrote it at.
+pub(super) fn classify_permission_profile(
+    perms: &crate::config::Permissions,
+) -> PermissionProfileDecision {
+    use std::collections::BTreeMap;
+
+    let total = perms.allow.len() + perms.ask.len() + perms.deny.len();
+    if total == 0 {
+        return PermissionProfileDecision::Empty;
+    }
+
+    let mut entries: BTreeMap<String, CodexFsAccess> = BTreeMap::new();
+    // `ask` has no per-rule Codex equivalent at all (see doc comment above),
+    // so every `ask` rule is unmappable regardless of its tool.
+    let mut unmappable = perms.ask.len();
+    let mut mappable = 0usize;
+
+    let allow_rules = perms.allow.iter().map(|rule| (rule, None));
+    let deny_rules = perms
+        .deny
+        .iter()
+        .map(|rule| (rule, Some(CodexFsAccess::Deny)));
+    for (rule, forced_access) in allow_rules.chain(deny_rules) {
+        let clean_paths_rule = !rule.paths.is_empty() && rule.pattern.is_none();
+        let Some(fs_kind) = clean_paths_rule
+            .then(|| mappable_fs_access(&rule.tool))
+            .flatten()
+        else {
+            unmappable += 1;
+            continue;
+        };
+        mappable += 1;
+        // `forced_access` (deny) always wins over the tool-implied access —
+        // a `deny` rule blocks the path outright regardless of whether it was
+        // declared against `Read` or `Write`/`Edit`/`MultiEdit`.
+        let access = forced_access.unwrap_or(fs_kind);
+        for path in &rule.paths {
+            entries
+                .entry(path.clone())
+                .and_modify(|existing| *existing = (*existing).max(access))
+                .or_insert(access);
+        }
+    }
+
+    if unmappable > 0 {
+        PermissionProfileDecision::Refused {
+            unmappable_rule_count: unmappable,
+            mappable_rule_count: mappable,
+        }
+    } else {
+        PermissionProfileDecision::Rendered(entries)
     }
 }
 
@@ -541,10 +710,10 @@ pub(crate) fn apply_seeded_settings(
         if CODEX_SECURITY_SENSITIVE_KEYS.contains(&k.as_str()) {
             eprintln!(
                 "warning: '{k}' in init.seeded_settings is a security-sensitive Codex key and \
-                 will NOT be seeded — llmenv doesn't model Codex permissions yet (#1102), so a \
-                 seeded approval_policy/sandbox_mode/etc. could silently run Codex less \
-                 restrictively than the posture capabilities.permissions establishes on every \
-                 other engine."
+                 will NOT be seeded — llmenv only models Codex permissions as far as filesystem \
+                 access (#1102), so a seeded approval_policy/sandbox_mode/etc. could silently \
+                 run Codex less restrictively than the posture capabilities.permissions \
+                 establishes on every other engine."
             );
             continue;
         }
@@ -965,9 +1134,9 @@ mod tests {
         assert!(format!("{err:#}").contains("hooks"), "{err:#}");
     }
 
-    /// A `deny` rule that silently evaporates leaves Codex running under its own
-    /// default approval policy — a weaker posture than the engine the bundle was
-    /// tested against, with nothing to say so. Warned about until #1102 lands.
+    /// A `deny Bash` rule has no Codex permission-profile equivalent at all
+    /// (#1102's `mappable_fs_access` returns `None` for it), so it must not
+    /// silently evaporate into an empty render — it's warned about instead.
     #[test]
     fn dropped_permissions_are_announced_not_swallowed() {
         use crate::config::{PermissionRule, Permissions};
@@ -991,6 +1160,181 @@ mod tests {
         assert!(
             !raw.contains("permissions") && !raw.contains("approval_policy"),
             "this slice must not half-render permissions — the warning is the contract: {raw}"
+        );
+    }
+
+    // ---- classify_permission_profile / permission-profile rendering (#1102) ----
+
+    fn fs_rule(tool: &str, paths: &[&str]) -> crate::config::PermissionRule {
+        crate::config::PermissionRule {
+            tool: tool.into(),
+            paths: paths.iter().map(|p| (*p).to_string()).collect(),
+            ..crate::config::PermissionRule::default()
+        }
+    }
+
+    /// Every declared rule maps cleanly onto a filesystem entry, so the
+    /// profile renders and is activated via `default_permissions`.
+    #[test]
+    fn clean_filesystem_rules_render_and_activate_a_profile() {
+        use crate::config::Permissions;
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.permissions = Permissions {
+            allow: vec![
+                fs_rule("Read", &["/repo/docs"]),
+                fs_rule("Write", &["/repo/src"]),
+            ],
+            ..Permissions::default()
+        };
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        let profile = parsed["permissions"]["llmenv"].as_table().unwrap();
+        let filesystem = profile["filesystem"].as_table().unwrap();
+
+        assert_eq!(filesystem["/repo/docs"].as_str(), Some("read"));
+        assert_eq!(filesystem["/repo/src"].as_str(), Some("write"));
+        assert!(profile.contains_key("description"), "{profile:?}");
+        assert_eq!(parsed["default_permissions"].as_str(), Some("llmenv"));
+    }
+
+    /// `Edit`/`MultiEdit` both imply write access, same as `Write`.
+    #[test]
+    fn edit_and_multiedit_rules_render_as_write_access() {
+        use crate::config::Permissions;
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.permissions = Permissions {
+            allow: vec![
+                fs_rule("Edit", &["/repo/a"]),
+                fs_rule("MultiEdit", &["/repo/b"]),
+            ],
+            ..Permissions::default()
+        };
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        let filesystem = parsed["permissions"]["llmenv"]["filesystem"]
+            .as_table()
+            .unwrap();
+        assert_eq!(filesystem["/repo/a"].as_str(), Some("write"));
+        assert_eq!(filesystem["/repo/b"].as_str(), Some("write"));
+    }
+
+    /// Codex's own stated precedence (deny beats write beats read): a `deny`
+    /// rule on a path already granted `allow` must win.
+    #[test]
+    fn deny_wins_over_allow_at_the_same_path() {
+        use crate::config::Permissions;
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.permissions = Permissions {
+            allow: vec![fs_rule("Write", &["/repo/secret"])],
+            deny: vec![fs_rule("Read", &["/repo/secret"])],
+            ..Permissions::default()
+        };
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        let filesystem = parsed["permissions"]["llmenv"]["filesystem"]
+            .as_table()
+            .unwrap();
+        assert_eq!(
+            filesystem["/repo/secret"].as_str(),
+            Some("deny"),
+            "deny must win regardless of which tool declared it: {filesystem:?}"
+        );
+    }
+
+    /// An `ask`-tier rule has no per-rule Codex equivalent at all, so it
+    /// disqualifies the whole profile even though it names a normally
+    /// mappable tool.
+    #[test]
+    fn ask_tier_rule_refuses_the_whole_profile() {
+        use crate::config::Permissions;
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.permissions = Permissions {
+            allow: vec![fs_rule("Read", &["/repo/docs"])],
+            ask: vec![fs_rule("Write", &["/repo/src"])],
+            ..Permissions::default()
+        };
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(
+            !parsed.contains_key("permissions"),
+            "an ask-tier rule must refuse the entire profile, including the otherwise-mappable \
+             allow rule: {parsed:?}"
+        );
+        assert!(!parsed.contains_key("default_permissions"));
+    }
+
+    /// A `WebFetch` rule has no Codex equivalent in this slice (network
+    /// domains are deliberately unmodeled — see the module doc), so it
+    /// refuses the whole profile per the all-or-nothing rule, even alongside
+    /// an otherwise-mappable filesystem rule.
+    #[test]
+    fn webfetch_rule_refuses_the_whole_profile() {
+        use crate::config::{PermissionRule, Permissions};
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.permissions = Permissions {
+            allow: vec![
+                fs_rule("Read", &["/repo/docs"]),
+                PermissionRule {
+                    tool: "WebFetch".into(),
+                    pattern: Some("example.com".into()),
+                    ..PermissionRule::default()
+                },
+            ],
+            ..Permissions::default()
+        };
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(!parsed.contains_key("permissions"), "{parsed:?}");
+    }
+
+    /// A `Read`/`Edit`/`Write`/`MultiEdit` rule using `pattern` instead of
+    /// `paths` doesn't fit this slice's path-based rendering, so it must not
+    /// be silently ignored or half-rendered — it refuses the profile.
+    #[test]
+    fn filesystem_tool_with_pattern_instead_of_paths_refuses_the_profile() {
+        use crate::config::{PermissionRule, Permissions};
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.permissions = Permissions {
+            allow: vec![PermissionRule {
+                tool: "Read".into(),
+                pattern: Some("*.rs".into()),
+                ..PermissionRule::default()
+            }],
+            ..Permissions::default()
+        };
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(!parsed.contains_key("permissions"), "{parsed:?}");
+    }
+
+    /// `native.codex` cannot redirect the rendered permission-profile keys any
+    /// more than it can redirect `mcp_servers`/`hooks`/`model_instructions_file`
+    /// — both are llmenv's own render surface once #1102 models them.
+    #[test]
+    fn native_codex_cannot_clobber_the_rendered_permissions() {
+        use crate::config::Permissions;
+
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.permissions = Permissions {
+            allow: vec![fs_rule("Read", &["/repo/docs"])],
+            ..Permissions::default()
+        };
+        manifest.native.insert(
+            "codex".into(),
+            serde_yaml::from_str("default_permissions: \"attacker-profile\"\n").unwrap(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = CodexAdapter.materialize(&manifest, dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("default_permissions"),
+            "the catch-all must be rejected by name: {err:#}"
         );
     }
 
