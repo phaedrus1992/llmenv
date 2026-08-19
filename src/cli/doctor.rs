@@ -117,8 +117,10 @@ fn bundles_with_missing_dirs<'a>(
                 missing.push(bundle.name.as_str());
             }
             Err(e) => {
-                return Err(anyhow::Error::new(e)
-                    .context(format!("stat bundle directory {}", path.display())));
+                return Err(anyhow::Error::new(e).context(format!(
+                    "stat bundle directory {}",
+                    crate::util::display_safe(&path.display().to_string())
+                )));
             }
         }
     }
@@ -150,9 +152,10 @@ fn cached_version_folders(adapter_cache: &Path) -> anyhow::Result<Option<Vec<Str
             // genuinely not a cached build, so it is skipped rather than raised.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                return Err(
-                    anyhow::Error::new(e).context(format!("stat cache entry {}", path.display()))
-                );
+                return Err(anyhow::Error::new(e).context(format!(
+                    "stat cache entry {}",
+                    crate::util::display_safe(&path.display().to_string())
+                )));
             }
         }
         // llmenv writes ASCII version tags, so a non-UTF-8 name is not a cache
@@ -960,12 +963,25 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     let config_dir = paths::config_dir()?;
     let bundles_dir = config_dir.join("bundles");
 
-    for name in bundles_with_missing_dirs(&config.bundle, &bundles_dir)? {
-        eprintln!(
-            "{info} Bundle '{}' declared but directory does not exist at {}",
-            crate::util::display_safe(name),
-            bundles_dir.join(name).display(),
-        );
+    // #1436 follow-up: a stat error here must not abort every diagnostic below
+    // it — the sibling version-skew scan already treats "could not check" as a
+    // warn-and-continue, and losing the rest of `doctor` (marketplace checks,
+    // cache writability, the lifecycle-hook report) to one unreadable bundle
+    // directory would be a worse regression than the misleading message #1436
+    // fixed in the first place.
+    match bundles_with_missing_dirs(&config.bundle, &bundles_dir) {
+        Ok(missing) => {
+            for name in missing {
+                eprintln!(
+                    "{info} Bundle '{}' declared but directory does not exist at {}",
+                    crate::util::display_safe(name),
+                    bundles_dir.join(name).display(),
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("{warn} Could not check bundle directories: {e:#}");
+        }
     }
 
     for name in unused_marketplaces(&config) {
@@ -1029,7 +1045,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                 Err(e) => {
                     eprintln!(
                         "{warn} Could not check {} for version skew: {e:#}",
-                        adapter_cache.display(),
+                        crate::util::display_safe(&adapter_cache.display().to_string()),
                     );
                     continue;
                 }
