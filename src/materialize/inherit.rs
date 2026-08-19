@@ -342,6 +342,126 @@ fn src_is_newer(src: &Path, dst: &Path) -> bool {
     }
 }
 
+/// Codex's durable, non-rebuildable SQLite state DBs (#1420) — three of the
+/// six databases Codex writes into `$CODEX_HOME`
+/// (`codex-rs/state/src/sqlite.rs`) that hold data with no other durable
+/// source:
+///
+/// - `goals_1.sqlite` — per-thread objectives/status/token budgets a user or
+///   agent set; nothing else records them.
+/// - `memories_1.sqlite` — generated memory content plus its extraction/
+///   consolidation job state; unlike the state DB below, Codex has no
+///   automatic backfill for it, so losing the file silently empties memory
+///   and makes the extraction jobs redo expensive work rather than just
+///   reindex.
+/// - `queue_1.sqlite` — the durable user-message queue; a message queued but
+///   not yet dequeued has no other record, so losing this file loses real,
+///   user-visible pending work.
+///
+/// The other three DBs are deliberately **not** linked, each confirmed
+/// against upstream Codex source (`codex-rs`, pinned `rust-v0.148.0`) rather
+/// than assumed from speculation:
+///
+/// - `state_5.sqlite` — a rebuildable index over the `sessions/` rollout
+///   files. Codex actively backfills it from scratch at startup, blocking on
+///   `BackfillStatus::Complete` for up to 30s
+///   (`codex-rs/rollout/src/state_db.rs`'s `wait_for_backfill_gate`).
+/// - `thread_history_1.sqlite` — a lazy projection over the same rollout
+///   files, keyed by a resumable byte offset that defaults to `0` when its
+///   row is missing
+///   (`codex-rs/thread-store/src/local/thread_history.rs`), so a missing
+///   file just reprojects from the start on next use.
+/// - `logs_2.sqlite` — a 10-day-retention diagnostic/feedback log
+///   (`codex-rs/state/src/runtime/logs.rs`'s `LOG_RETENTION_DAYS`), not data
+///   worth preserving across a hash change.
+///
+/// Linking either of the first two would only add WAL-consistency risk (see
+/// [`SQLITE_SIDECAR_SUFFIXES`]) for zero durability gain.
+const CODEX_GOALS_DB: &str = "goals_1.sqlite";
+const CODEX_MEMORIES_DB: &str = "memories_1.sqlite";
+const CODEX_QUEUE_DB: &str = "queue_1.sqlite";
+const CODEX_INHERITED_SQLITE_DBS: &[&str] = &[CODEX_GOALS_DB, CODEX_MEMORIES_DB, CODEX_QUEUE_DB];
+
+/// WAL-mode sidecar suffixes that must move in lockstep with the DB file they
+/// belong to. Codex opens all six SQLite DBs in WAL mode
+/// (`SqliteJournalMode::Wal`, `codex-rs/state/src/sqlite.rs`), so each of
+/// [`CODEX_INHERITED_SQLITE_DBS`] carries its own `<name>-wal`/`<name>-shm`
+/// files. SQLite opens these sidecars as independent paths — computed by
+/// string-appending the suffix, not by resolving the base file's symlink
+/// first — so symlinking only the base `.sqlite` file would leave the
+/// sidecars as ordinary local files in the ephemeral config dir, silently
+/// splitting a DB's committed data (main file, durable) from its uncommitted
+/// WAL frames (sidecar, ephemeral). Symlinking each suffix as its own path
+/// keeps `open()`'s symlink resolution working per file, closing that gap.
+const SQLITE_SIDECAR_SUFFIXES: &[&str] = &["-wal", "-shm"];
+
+/// Point each of [`CODEX_INHERITED_SQLITE_DBS`] — and its WAL sidecars — at
+/// the durable state dir (#1420). Same fold-then-link contract as
+/// [`link_durable_dir`], applied per file instead of per directory: a
+/// pre-existing real file is folded in (newest mtime wins, since Codex is the
+/// sole writer to either copy — same reasoning as [`capture_codex_auth`])
+/// before being replaced by a symlink. Neither side needs to exist yet: a
+/// dangling symlink is left in place so Codex's own `create_if_missing`
+/// (`sqlite.rs`) writes straight into the durable store the first time it
+/// opens a DB that has never existed on either side.
+///
+/// # Errors
+/// Returns an error when an existing file can't be folded in or a link can't
+/// be created.
+pub(crate) fn link_codex_sqlite_dbs(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    for name in CODEX_INHERITED_SQLITE_DBS {
+        link_durable_sqlite_member(name, state_dir, config_dir)?;
+        for suffix in SQLITE_SIDECAR_SUFFIXES {
+            link_durable_sqlite_member(&format!("{name}{suffix}"), state_dir, config_dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// Fold-then-link a single SQLite DB family member (the base file or one of
+/// its [`SQLITE_SIDECAR_SUFFIXES`]) into the durable store. See
+/// [`link_codex_sqlite_dbs`] for the contract.
+fn link_durable_sqlite_member(
+    name: &str,
+    state_dir: &Path,
+    config_dir: &Path,
+) -> anyhow::Result<()> {
+    let target = state_dir.join(name);
+    let link = config_dir.join(name);
+    let link_type = match std::fs::symlink_metadata(&link) {
+        Ok(md) => Some(md.file_type()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow::anyhow!("inspecting {}: {e}", link.display())),
+    };
+    match link_type {
+        None => attach_store(&target, &link),
+        Some(ft) if ft.is_symlink() => {
+            if std::fs::read_link(&link).is_ok_and(|dest| dest == target) {
+                return Ok(());
+            }
+            std::fs::remove_file(&link)
+                .with_context(|| format!("replacing stale link {}", link.display()))?;
+            attach_store(&target, &link)
+        }
+        Some(ft) if ft.is_file() => {
+            let target_exists = std::fs::symlink_metadata(&target).is_ok();
+            if !target_exists || src_is_newer(&link, &target) {
+                copy_owner_only(&link, &target)?;
+            }
+            std::fs::remove_file(&link)
+                .with_context(|| format!("removing folded file {}", link.display()))?;
+            attach_store(&target, &link)
+        }
+        Some(_) => {
+            tracing::warn!(
+                path = %link.display(),
+                "inherit: skipping Codex SQLite state file — not a regular file or symlink"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Move every `projects/` tree stranded in an old hashed folder into the durable
 /// store, newest mtime winning per file. Returns how many trees were folded.
 ///
@@ -1267,6 +1387,126 @@ mod tests {
     fn projects_and_history_names_are_stable() {
         assert_eq!(PathBuf::from(PROJECTS_DIR), PathBuf::from("projects"));
         assert_eq!(HISTORY_FILE, "history.jsonl");
+    }
+
+    /// First run: neither side has the DB yet, so each family member
+    /// (base file + both WAL sidecars) becomes a dangling symlink into the
+    /// state dir — ready for Codex's own `create_if_missing` to fill in.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sqlite_dbs_creates_dangling_symlinks_on_first_run() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        link_codex_sqlite_dbs(&state, &cfg).unwrap();
+
+        for name in CODEX_INHERITED_SQLITE_DBS {
+            for member in [(*name).to_string()]
+                .into_iter()
+                .chain(SQLITE_SIDECAR_SUFFIXES.iter().map(|s| format!("{name}{s}")))
+            {
+                let link = cfg.join(&member);
+                let md = std::fs::symlink_metadata(&link).unwrap();
+                assert!(md.file_type().is_symlink(), "{member} must be a symlink");
+                assert_eq!(std::fs::read_link(&link).unwrap(), state.join(&member));
+                assert!(
+                    std::fs::symlink_metadata(state.join(&member)).is_err(),
+                    "{member}'s target should not exist yet on a first run"
+                );
+            }
+        }
+    }
+
+    /// A pre-existing real `goals_1.sqlite` (created before this link
+    /// existed) is folded into the state dir before being replaced by the
+    /// symlink — its content must survive.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sqlite_dbs_folds_existing_real_file_then_links() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&cfg.join(CODEX_GOALS_DB), "pre-existing-goals-content");
+
+        link_codex_sqlite_dbs(&state, &cfg).unwrap();
+
+        let link = cfg.join(CODEX_GOALS_DB);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(state.join(CODEX_GOALS_DB)).unwrap(),
+            "pre-existing-goals-content",
+            "pre-existing DB content must survive the fold into the durable store"
+        );
+    }
+
+    /// Idempotent: a correct symlink is left alone, and re-running does not
+    /// error even though the target now exists.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sqlite_dbs_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        link_codex_sqlite_dbs(&state, &cfg).unwrap();
+        write(&state.join(CODEX_QUEUE_DB), "queued-message");
+        link_codex_sqlite_dbs(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(cfg.join(CODEX_QUEUE_DB)).unwrap(),
+            state.join(CODEX_QUEUE_DB)
+        );
+        assert_eq!(
+            std::fs::read_to_string(cfg.join(CODEX_QUEUE_DB)).unwrap(),
+            "queued-message",
+            "the symlink must transparently read the store's content"
+        );
+    }
+
+    /// A folder's real file that is *newer* than the store's copy wins the
+    /// fold — mirrors [`codex_auth_capture_replaces_the_store_when_the_folder_copy_is_newer`],
+    /// since Codex is the sole writer to either copy.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sqlite_dbs_newer_folder_copy_wins_the_fold() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        write(&state.join(CODEX_MEMORIES_DB), "stale-store-memories");
+        write(&cfg.join(CODEX_MEMORIES_DB), "fresh-folder-memories");
+        let now = filetime::FileTime::now();
+        filetime::set_file_mtime(
+            cfg.join(CODEX_MEMORIES_DB),
+            filetime::FileTime::from_unix_time(now.unix_seconds() + 60, 0),
+        )
+        .unwrap();
+
+        link_codex_sqlite_dbs(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(state.join(CODEX_MEMORIES_DB)).unwrap(),
+            "fresh-folder-memories",
+            "a newer folder copy must replace the store's stale one"
+        );
+    }
+
+    #[test]
+    fn codex_sqlite_db_names_are_stable() {
+        assert_eq!(CODEX_GOALS_DB, "goals_1.sqlite");
+        assert_eq!(CODEX_MEMORIES_DB, "memories_1.sqlite");
+        assert_eq!(CODEX_QUEUE_DB, "queue_1.sqlite");
+        assert_eq!(SQLITE_SIDECAR_SUFFIXES, ["-wal", "-shm"]);
     }
 
     // #1065: `copy_replacing`'s whole contract is "never write through a
