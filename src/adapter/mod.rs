@@ -76,7 +76,7 @@ pub(crate) fn lifecycle_hook_registrations(
 /// to one neutral event of its own — it rides the adapter's
 /// `user_prompt_submit` registration, which session logging and per-turn memory
 /// recall can already have claimed.
-pub(crate) fn slippage_rule_reinjection_enabled(manifest: &MergedManifest) -> bool {
+fn slippage_rule_reinjection_enabled(manifest: &MergedManifest) -> bool {
     manifest
         .capabilities
         .features
