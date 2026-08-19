@@ -555,27 +555,26 @@ pub(crate) fn open_bounded_log(
         }
     }
 
-    // Refuse anything at this path that isn't a plain file. `symlink_metadata`
-    // rather than `metadata` so a symlink is seen as a symlink: opening one would
-    // append the child's stderr to whatever it points at, and a pre-placed FIFO
-    // would block the open — hanging the shell prompt on every export.
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if !meta.is_file() => {
-            anyhow::bail!(
-                "log path {} is not a regular file ({:?}); refusing to write through it",
-                path.display(),
-                meta.file_type()
-            );
+    // Refuse anything at this path that isn't a plain file: opening a
+    // symlink would append the child's stderr to whatever it points at, and
+    // a pre-placed FIFO would block the open — hanging the shell prompt on
+    // every export. Shared with `session_log::file_sink`'s append-mode
+    // writer (#1431), which has the same "can't just replace a symlink"
+    // constraint an append does.
+    // No `.with_context()` here: `reject_non_regular_file`'s own message
+    // already names the path and the reason, and wrapping it would bury
+    // that behind a generic "inspecting log ..." in `Display`'s default
+    // (non-`{:#}`) output.
+    crate::paths::reject_non_regular_file(path)?;
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() >= max_bytes => {
+            // Single generation: enough to keep the previous failure's trace
+            // around without unbounded growth. A failed rotation isn't worth
+            // aborting the spawn over — the append below still succeeds,
+            // though the size bound then depends on the next attempt.
+            let _ = std::fs::rename(path, path.with_extension("log.1"));
         }
-        Ok(meta) => {
-            if meta.len() >= max_bytes {
-                // Single generation: enough to keep the previous failure's trace
-                // around without unbounded growth. A failed rotation isn't worth
-                // aborting the spawn over — the append below still succeeds,
-                // though the size bound then depends on the next attempt.
-                let _ = std::fs::rename(path, path.with_extension("log.1"));
-            }
-        }
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             return Err(anyhow::Error::new(e).context(format!("inspecting log {}", path.display())));

@@ -581,6 +581,38 @@ pub fn copy_replacing_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
     }))
 }
 
+/// Fail if `path` exists and isn't a regular file — in particular, a
+/// symlink, which `symlink_metadata` (never following it) distinguishes from
+/// a plain file that `metadata` alone would not.
+///
+/// Use before opening a path for appending, where an existing symlink can't
+/// simply be replaced the way [`write_owner_only`]'s unlink-then-recreate
+/// does — that would destroy the log/append history the caller is trying to
+/// preserve. This is a check-then-use guard, not a TOCTOU-proof one: the same
+/// residual, same-user-race risk `src/paths/dirfd.rs` documents for the
+/// fd-relative primitives in the `llmenv` crate applies here too (winning it
+/// requires already being the user who owns the files) (#1431).
+///
+/// # Errors
+/// Returns an error if `path` exists and is not a regular file (a symlink,
+/// FIFO, device, etc.), or if the path can't be stat'd for a reason other
+/// than not existing.
+pub fn reject_non_regular_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_file() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} is not a regular file ({:?}); refusing to write through it",
+                path.display(),
+                meta.file_type()
+            ),
+        )),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1431,6 +1463,60 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert_eq!(entries.len(), 2, "found stray files: {entries:?}");
+    }
+
+    // ---- reject_non_regular_file ----
+
+    #[test]
+    fn reject_non_regular_file_allows_a_missing_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("nope");
+        reject_non_regular_file(&path).expect("a missing path must be allowed");
+    }
+
+    #[test]
+    fn reject_non_regular_file_allows_a_real_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("real");
+        std::fs::write(&path, b"content").expect("write");
+        reject_non_regular_file(&path).expect("a regular file must be allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_non_regular_file_rejects_a_symlink() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"content").expect("write victim");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+
+        let err = reject_non_regular_file(&link).expect_err("a symlink must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_non_regular_file_rejects_a_dangling_symlink() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(tmp.path().join("does-not-exist"), &link)
+            .expect("dangling symlink");
+
+        assert!(
+            reject_non_regular_file(&link).is_err(),
+            "a dangling symlink must be rejected, not treated as absent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_non_regular_file_rejects_a_directory() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dir = tmp.path().join("subdir");
+        std::fs::create_dir(&dir).expect("mkdir");
+
+        assert!(reject_non_regular_file(&dir).is_err());
     }
 
     // #1178: write_owner_only_atomic must create every missing ancestor
