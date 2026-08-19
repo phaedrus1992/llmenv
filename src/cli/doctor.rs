@@ -1097,20 +1097,26 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
-    // #741: which lifecycle hooks are actually wired for this scope. Without
-    // this there was no way to confirm from inside llmenv that session
+    // #741/#1435: which lifecycle hooks are actually wired for this scope.
+    // Without this there was no way to confirm from inside llmenv that session
     // start/end, per-turn recall, or the Stop reminder would fire — the only
-    // check was reading the generated settings.json by hand.
-    if let Some((manifest, _)) = &doctor_manifest
-        && super::installed_adapters(&config).any(|a| a.name() == "claude_code")
-    {
-        eprintln!();
-        eprintln!("Lifecycle hooks (claude_code):");
-        for (event, registered, why) in crate::adapter::lifecycle_hook_registrations(manifest) {
-            if registered {
-                eprintln!("{pass} {event}");
-            } else {
-                eprintln!("{info} {event} not registered — {why}");
+    // check was reading the generated settings.json/config.toml by hand.
+    // `claude_code` and `codex` share the same engine-neutral gate
+    // (`crate::adapter::lifecycle_hook_registrations`), so both get reported
+    // the same way rather than only the first adapter to land this check.
+    if let Some((manifest, _)) = &doctor_manifest {
+        for engine in ["claude_code", "codex"] {
+            if !super::installed_adapters(&config).any(|a| a.name() == engine) {
+                continue;
+            }
+            eprintln!();
+            eprintln!("Lifecycle hooks ({engine}):");
+            for (event, registered, why) in crate::adapter::lifecycle_hook_registrations(manifest) {
+                if registered {
+                    eprintln!("{pass} {event}");
+                } else {
+                    eprintln!("{info} {event} not registered — {why}");
+                }
             }
         }
     }
