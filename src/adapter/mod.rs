@@ -10,7 +10,87 @@ pub(crate) mod tools;
 
 use std::path::{Path, PathBuf};
 
+use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::merge::MergedManifest;
+
+/// Which engine-neutral lifecycle events get a `hook-run` registration for this
+/// manifest, and why.
+///
+/// Engine-neutral on purpose: it reads only the manifest, so every adapter that
+/// wires lifecycle hooks gates them on the same answer, and `llmenv doctor`
+/// reports what those adapters actually write (#741) rather than re-deriving it.
+/// Codex wires the same set as Claude Code (#1435), so a gate that lived in one
+/// adapter would have had to be duplicated into the other and kept in step by
+/// hand.
+///
+/// `turn_start`'s gate is read straight from here by the generators.
+/// `session_start`/`session_end` are registered unconditionally, and `stop` is
+/// still derived independently in each adapter's session-log/task-tracker
+/// branch — folding that one in would mean restructuring how the whole
+/// session-log event set is emitted.
+///
+/// Each adapter's `lifecycle_registrations_match_*` test is what keeps those
+/// independent gates honest: it renders config for each combination and asserts
+/// this function agrees. Session logging is on in a default manifest, so
+/// fixtures that leave it that way can't tell the two halves of `stop`'s
+/// condition apart — the cases that disable it are the ones that make the
+/// assertion capable of failing.
+pub(crate) fn lifecycle_hook_registrations(
+    manifest: &MergedManifest,
+) -> Vec<(&'static str, bool, &'static str)> {
+    let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
+    let session_log = manifest.session_log.any_sink_enabled();
+    let task_tracker = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .is_some_and(|t| t.enabled);
+    // #317: the self-critique layer runs on Stop, so enabling it has to be a
+    // reason to register the event. Without this the layer is a phantom —
+    // config accepts it, `doctor` would report it, and nothing ever fires.
+    let slippage_critique = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && s.self_critique);
+    vec![
+        ("session_start", true, "always registered"),
+        ("session_end", true, "always registered"),
+        (
+            "turn_start",
+            icm_active,
+            "needs a memory backend (features.memory)",
+        ),
+        (
+            "stop",
+            session_log || task_tracker || slippage_critique,
+            "needs session logging, features.task_tracker, or slippage self_critique",
+        ),
+    ]
+}
+
+/// True when this manifest wants the `#317` rules digest reinjected on every
+/// prompt. Separate from `lifecycle_hook_registrations` because it doesn't map
+/// to one neutral event of its own — it rides the adapter's
+/// `user_prompt_submit` registration, which session logging and per-turn memory
+/// recall can already have claimed.
+fn slippage_rule_reinjection_enabled(manifest: &MergedManifest) -> bool {
+    manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && s.rule_reinjection)
+}
+
+/// True when `lifecycle_hook_registrations` says `event` gets registered.
+pub(crate) fn lifecycle_event_registered(manifest: &MergedManifest, event: &str) -> bool {
+    lifecycle_hook_registrations(manifest)
+        .iter()
+        .any(|(name, registered, _)| *name == event && *registered)
+}
 
 /// Convert a YAML native fragment to JSON and deep-merge it into `dst`.
 ///
@@ -655,9 +735,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, active_adapter_from, adapter_for_launch_target, emit_hook_context, engine_id,
-        known_engine_ids, modeled_key_redirect, overlay_native_json, registered_adapters,
-        remote_transport_type_str, resolve_bundle_relative_paths,
+        AgentAdapter, MEMORY_MCP_NAME, active_adapter_from, adapter_for_launch_target,
+        emit_hook_context, engine_id, known_engine_ids, lifecycle_event_registered,
+        lifecycle_hook_registrations, modeled_key_redirect, overlay_native_json,
+        registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
         resolve_command_paths_against_files, strip_json_nulls,
     };
     use crate::merge::MergedManifest;
@@ -831,6 +912,93 @@ mod tests {
     }
 
     proptest::proptest! {
+        /// The three enablers of `stop` are independent: any one of them on is
+        /// enough, and all three off is the only way it stays unregistered.
+        /// Hand-picked fixtures cover a handful of the eight combinations;
+        /// this covers all of them, so a gate that silently starts requiring
+        /// two of the three can't slip through.
+        #[test]
+        fn stop_is_registered_for_any_single_enabler(
+            session_log in proptest::bool::ANY,
+            task_tracker in proptest::bool::ANY,
+            self_critique in proptest::bool::ANY,
+        ) {
+            let mut manifest = MergedManifest::default();
+            if !session_log {
+                manifest.session_log.file = None;
+                manifest.session_log.transcript = None;
+            }
+            manifest.capabilities.features = Some(llmenv_config::Features {
+                task_tracker: Some(llmenv_config::TaskTracker {
+                    enabled: task_tracker,
+                    ..Default::default()
+                }),
+                slippage: Some(llmenv_config::SlippageControl {
+                    enabled: true,
+                    self_critique,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            proptest::prop_assert_eq!(
+                lifecycle_event_registered(&manifest, "stop"),
+                manifest.session_log.any_sink_enabled() || task_tracker || self_critique
+            );
+        }
+
+        /// `turn_start` tracks the memory MCP and nothing else — no other
+        /// feature may switch a per-prompt network hook on behind the user.
+        #[test]
+        fn turn_start_tracks_only_the_memory_mcp(
+            task_tracker in proptest::bool::ANY,
+            self_critique in proptest::bool::ANY,
+            memory in proptest::bool::ANY,
+        ) {
+            let mut manifest = MergedManifest::default();
+            manifest.capabilities.features = Some(llmenv_config::Features {
+                task_tracker: Some(llmenv_config::TaskTracker {
+                    enabled: task_tracker,
+                    ..Default::default()
+                }),
+                slippage: Some(llmenv_config::SlippageControl {
+                    enabled: true,
+                    self_critique,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            if memory {
+                manifest.mcps.push(crate::mcp::resolve::ResolvedMcp {
+                    name: MEMORY_MCP_NAME.to_string(),
+                    kind: crate::mcp::resolve::ResolvedKind::Remote {
+                        url: "http://localhost:9999".into(),
+                        transport: crate::config::McpTransport::Http,
+                    },
+                    headers: Default::default(),
+                    timeout: None,
+                    disabled_tools: vec![],
+                    mcp_permissions: None,
+                    wakeup_max_tokens: None,
+                });
+            }
+            proptest::prop_assert_eq!(
+                lifecycle_event_registered(&manifest, "turn_start"),
+                memory
+            );
+        }
+
+        /// `lifecycle_event_registered` is only a lookup — it must never
+        /// disagree with the table it reads, and an event that isn't in the
+        /// table is not registered.
+        #[test]
+        fn lifecycle_event_registered_agrees_with_the_table(event in "[a-z_]{0,20}") {
+            let manifest = MergedManifest::default();
+            let expected = lifecycle_hook_registrations(&manifest)
+                .into_iter()
+                .any(|(name, registered, _)| name == event && registered);
+            proptest::prop_assert_eq!(lifecycle_event_registered(&manifest, &event), expected);
+        }
+
         /// The safety contract in `adapter_for_launch_target`'s doc comment —
         /// never silently resolve an unrecognized engine, because that risks
         /// launching the wrong binary. Example tests only cover the four names

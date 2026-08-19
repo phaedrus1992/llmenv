@@ -67,60 +67,6 @@ const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("session_end", "SessionEnd"),
 ];
 
-/// Which engine-neutral lifecycle events get a `hook-run` registration for this
-/// manifest, and why.
-///
-/// Exists so `llmenv doctor` reports what `generate_settings_json` actually
-/// writes (#741) rather than re-deriving it from scratch.
-///
-/// `turn_start`'s gate is read straight from here by the generator.
-/// `session_start`/`session_end` come from `BASELINE_HOOK_EVENTS`
-/// unconditionally, and `stop` is still derived independently in the
-/// session-log/task-tracker branch — folding that one in would mean
-/// restructuring how the whole session-log event set is emitted.
-///
-/// `lifecycle_registrations_match_the_generated_settings` is what keeps the
-/// independent gates honest: it renders settings for each combination and
-/// asserts this function agrees. Session logging is on in a default manifest,
-/// so fixtures that leave it that way can't tell the two halves of `stop`'s
-/// condition apart — the cases that disable it are the ones that make the
-/// assertion capable of failing.
-pub(crate) fn lifecycle_hook_registrations(
-    manifest: &MergedManifest,
-) -> Vec<(&'static str, bool, &'static str)> {
-    let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
-    let session_log = manifest.session_log.any_sink_enabled();
-    let task_tracker = manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.task_tracker.as_ref())
-        .is_some_and(|t| t.enabled);
-    // #317: the self-critique layer runs on Stop, so enabling it has to be a
-    // reason to register the event. Without this the layer is a phantom —
-    // config accepts it, `doctor` would report it, and nothing ever fires.
-    let slippage_critique = manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.slippage.as_ref())
-        .is_some_and(|s| s.enabled && s.self_critique);
-    vec![
-        ("session_start", true, "always registered"),
-        ("session_end", true, "always registered"),
-        (
-            "turn_start",
-            icm_active,
-            "needs a memory backend (features.memory)",
-        ),
-        (
-            "stop",
-            session_log || task_tracker || slippage_critique,
-            "needs session logging, features.task_tracker, or slippage self_critique",
-        ),
-    ]
-}
-
 /// `(engine-neutral event, native Claude event)` pairs registered when any
 /// session-log sink is enabled — per-hook prompt/tool-use capture (#382).
 const SESSION_LOG_HOOK_EVENTS: &[(&str, &str)] = &[
@@ -1617,17 +1563,9 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // has to register the event — the memory-recall gate below and session
     // logging are the only other things that do, and neither is implied by
     // turning slippage on.
-    let slippage_reinjection = manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.slippage.as_ref())
-        .is_some_and(|s| s.enabled && s.rule_reinjection);
-    if slippage_reinjection
+    if super::slippage_rule_reinjection_enabled(manifest)
         && !manifest.session_log.any_sink_enabled()
-        && !lifecycle_hook_registrations(manifest)
-            .iter()
-            .any(|(event, registered, _)| *event == "turn_start" && *registered)
+        && !super::lifecycle_event_registered(manifest, "turn_start")
     {
         hooks_by_event
             .entry("UserPromptSubmit".to_string())
@@ -1644,10 +1582,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // configured at all.
     // Gate read from `lifecycle_hook_registrations` so `doctor` reports exactly
     // what gets written here rather than re-deriving the condition (#741).
-    if lifecycle_hook_registrations(manifest)
-        .iter()
-        .any(|(event, registered, _)| *event == "turn_start" && *registered)
-    {
+    if super::lifecycle_event_registered(manifest, "turn_start") {
         hooks_by_event
             .entry("UserPromptSubmit".to_string())
             .or_default()
@@ -1667,10 +1602,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                     "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
                 }));
         }
-    } else if lifecycle_hook_registrations(manifest)
-        .iter()
-        .any(|(event, registered, _)| *event == "stop" && *registered)
-    {
+    } else if super::lifecycle_event_registered(manifest, "stop") {
         // #231: the task tracker's Stop reminder needs its own hook
         // registration — it must not depend on session logging happening to
         // be on, and #317's self-critique layer needs the same. Only registers
@@ -6237,7 +6169,7 @@ mod tests {
                 m
             }),
         ] {
-            let registrations = super::lifecycle_hook_registrations(&manifest);
+            let registrations = crate::adapter::lifecycle_hook_registrations(&manifest);
             let settings: serde_json::Value =
                 serde_json::from_slice(&write_settings_bytes(&manifest)).unwrap();
             let commands: Vec<String> = settings["hooks"]
