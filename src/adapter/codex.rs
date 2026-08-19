@@ -925,7 +925,12 @@ pub(crate) fn apply_seeded_settings(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test scaffolding")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test scaffolding"
+)]
 mod tests {
     use super::{
         CodexAdapter, HOOK_RUN_COMMAND, SESSION_LOG_HOOK_EVENTS, SUPPORTED_HOOK_EVENTS,

@@ -6276,7 +6276,6 @@ mod tests {
                 task_tracker: Some(llmenv_config::TaskTracker {
                     enabled: task_tools,
                     block_engine_task_tools: task_tools,
-                    ..Default::default()
                 }),
                 slippage: Some(llmenv_config::SlippageControl {
                     enabled: true,

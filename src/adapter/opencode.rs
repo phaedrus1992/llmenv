@@ -208,6 +208,33 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[
     "Stop",
 ];
 
+/// Engine-neutral lifecycle events that always get a `hook-run` registration,
+/// paired with opencode's native event name. Same baseline Claude Code and
+/// Codex wire: without these the ICM memory wake-up/store never fires (#1439).
+const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("session_start", "SessionStart"),
+    ("session_end", "SessionEnd"),
+];
+
+/// `(engine-neutral event, native opencode event)` pairs registered when any
+/// session-log sink is enabled — per-hook prompt/tool-use capture (#382).
+///
+/// Claude Code's set narrowed to what `SUPPORTED_HOOK_EVENTS` accepts: opencode
+/// has no `Notification`, `SubagentStop`, or `PreCompact`, and emitting them
+/// would write table entries the shim never dispatches, so the capture would
+/// look wired and never fire.
+const SESSION_LOG_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("user_prompt_submit", "UserPromptSubmit"),
+    ("pre_tool_use", "PreToolUse"),
+    ("post_tool_use", "PostToolUse"),
+    ("stop", "Stop"),
+];
+
+/// The `llmenv hook-run` invocation for one engine-neutral event.
+fn hook_run_command(event: &str) -> String {
+    format!("llmenv hook-run {event} --engine opencode")
+}
+
 /// Template for `plugin/llmenv.js` — a self-contained ES module bridging
 /// opencode's JS plugin API to llmenv's hook-run subprocess calls.
 /// `${HOOK_TABLE}` is replaced at render time with a JSON array of
@@ -1162,20 +1189,7 @@ impl AgentAdapter for OpencodeAdapter {
             .collect();
         all_hooks.extend(plugin_hooks);
 
-        let guards_index_repository = manifest
-            .mcps
-            .iter()
-            .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME);
-        // Same gate #980 gave Claude Code: a user who wants the tracker but
-        // still wants opencode's native todo list keeps `block_engine_task_tools`
-        // off and the redirect isn't registered.
-        let redirects_todowrite = manifest
-            .capabilities
-            .features
-            .as_ref()
-            .and_then(|f| f.task_tracker.as_ref())
-            .is_some_and(|t| t.enabled && t.block_engine_task_tools);
-        let shim_js = generate_shim_js(&all_hooks, guards_index_repository || redirects_todowrite)?;
+        let shim_js = generate_shim_js(&all_hooks, manifest)?;
         let plugin_dir = out.join("plugin");
         std::fs::create_dir_all(&plugin_dir)?;
         crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), shim_js.as_bytes())?;
@@ -1528,8 +1542,8 @@ fn glob_matches(pattern: &str, input: &[char]) -> bool {
 /// the three auto-hooks (`check-stale`, `config-context`, `config-guard`)
 /// that always run on `SessionStart` / `PreToolUse`.
 ///
-/// `needs_pre_tool_hook` adds a fourth: `hook-run pre_tool_use`, which serves
-/// two consumers that both need to see tool calls by name —
+/// A fourth, `hook-run pre_tool_use`, serves two consumers that both need to
+/// see tool calls by name —
 ///
 /// - the `index_repository` name guard (#1331), since opencode gets the same
 ///   `manifest.mcps` Claude Code does and the clobber is reachable here too;
@@ -1540,9 +1554,14 @@ fn glob_matches(pattern: &str, input: &[char]) -> bool {
 /// so unlike Claude Code's anchored matchers this hook runs on every tool call
 /// and `hook-run` dispatches on `tool_name` itself. That per-call cost is why
 /// it isn't registered unconditionally.
+///
+/// `manifest` also drives the engine-neutral lifecycle hooks (#1439) — session
+/// start/end, per-turn memory recall, the #317 slippage layers, and session-log
+/// capture — read from the same `crate::adapter` gates `claude_code` and
+/// `codex` use, so `doctor` reports what this actually writes.
 fn generate_shim_js(
     hooks: &[crate::config::Hook],
-    needs_pre_tool_hook: bool,
+    manifest: &MergedManifest,
 ) -> anyhow::Result<String> {
     let mut by_event: std::collections::BTreeMap<&str, Vec<serde_json::Value>> =
         std::collections::BTreeMap::new();
@@ -1595,14 +1614,70 @@ fn generate_shim_js(
             "command": "llmenv config-guard --engine opencode",
             "timeout": 5000,
         }));
-    if needs_pre_tool_hook {
+    let mut push = |event: &'static str, command: String| {
         by_event
-            .entry("PreToolUse")
+            .entry(event)
             .or_default()
-            .push(serde_json::json!({
-                "command": "llmenv hook-run pre_tool_use --engine opencode",
-                "timeout": 5000,
-            }));
+            .push(serde_json::json!({ "command": command, "timeout": 5000 }));
+    };
+
+    // #1442: session logging registers `pre_tool_use` below, and opencode has
+    // no per-tool matcher — so that entry is already the every-tool
+    // registration these two consumers need. Emitting both would run the hook
+    // twice per tool call, halving `repeat_detect`'s effective threshold and
+    // making `read_once` see its own first entry.
+    let guards_index_repository = manifest
+        .mcps
+        .iter()
+        .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME);
+    // Same gate #980 gave Claude Code: a user who wants the tracker but still
+    // wants opencode's native todo list keeps `block_engine_task_tools` off and
+    // the redirect isn't registered.
+    let redirects_todowrite = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .is_some_and(|t| t.enabled && t.block_engine_task_tools);
+    if (guards_index_repository || redirects_todowrite)
+        && !super::unmatched_pre_tool_use_registered(manifest)
+    {
+        push("PreToolUse", hook_run_command("pre_tool_use"));
+    }
+
+    for (neutral_event, native_event) in BASELINE_HOOK_EVENTS {
+        push(native_event, hook_run_command(neutral_event));
+    }
+
+    // #317: the rules digest runs on UserPromptSubmit, so enabling the layer
+    // has to register the event — the memory-recall gate below and session
+    // logging are the only other things that do, and neither is implied by
+    // turning slippage on.
+    if super::slippage_rule_reinjection_enabled(manifest)
+        && !manifest.session_log.any_sink_enabled()
+        && !super::lifecycle_event_registered(manifest, "turn_start")
+    {
+        push("UserPromptSubmit", hook_run_command("user_prompt_submit"));
+    }
+
+    // #499: continuous per-prompt memory recall. Gated (unlike the baseline
+    // events above) because it runs on every prompt — an unconditional
+    // network-backed per-turn hook would add latency for scopes with no memory
+    // backend configured at all.
+    if super::lifecycle_event_registered(manifest, "turn_start") {
+        push("UserPromptSubmit", hook_run_command("turn_start"));
+    }
+
+    if manifest.session_log.any_sink_enabled() {
+        for (neutral_event, native_event) in SESSION_LOG_HOOK_EVENTS {
+            push(native_event, hook_run_command(neutral_event));
+        }
+    } else if super::lifecycle_event_registered(manifest, "stop") {
+        // #231/#317: the task tracker's Stop reminder and the self-critique
+        // layer each need their own registration rather than depending on
+        // session logging happening to be on. Only in the `else` branch, so a
+        // session-log setup doesn't get two `hook-run` calls on the same event.
+        push("Stop", hook_run_command("stop"));
     }
 
     let table: Vec<serde_json::Value> = by_event
@@ -1803,7 +1878,7 @@ fn render_opencode_default_models(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
@@ -4236,10 +4311,276 @@ mod tests {
     // #1304: same `block_engine_task_tools` opt-out Claude Code got in #980 —
     // a user who wants the tracker but keeps opencode's native todo list turns
     // it off and no redirect is registered.
+    /// The generated `plugin/llmenv.js` for `manifest`.
+    fn shim_for(manifest: &crate::merge::MergedManifest) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        OpencodeAdapter.materialize(manifest, tmp.path()).unwrap();
+        std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap()
+    }
+
+    /// Every `command` the shim's hook table registers under one opencode event.
+    fn shim_commands_for(js: &str, event: &str) -> Vec<String> {
+        let table = js
+            .split_once("const HOOK_TABLE = ")
+            .and_then(|(_, rest)| rest.split_once(";\n"))
+            .expect("the shim must embed a HOOK_TABLE")
+            .0;
+        let table: serde_json::Value = serde_json::from_str(table).expect("HOOK_TABLE is JSON");
+        table
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry["event"] == event)
+            .flat_map(|entry| entry["commands"].as_array().cloned().unwrap_or_default())
+            .filter_map(|c| c["command"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    fn manifest_with_memory_mcp() -> crate::merge::MergedManifest {
+        crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                wakeup_max_tokens: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn manifest_without_session_log() -> crate::merge::MergedManifest {
+        let mut manifest = crate::merge::MergedManifest::default();
+        manifest.session_log.file = None;
+        manifest.session_log.transcript = None;
+        manifest
+    }
+
+    /// #1439: opencode materialized the memory MCP but never the per-turn
+    /// recall hook, so `features.memory` was configured and nothing fired —
+    /// the same gap #1435 closed for Codex.
+    #[test]
+    fn turn_start_wired_when_memory_backend_active() {
+        let js = shim_for(&manifest_with_memory_mcp());
+        assert!(
+            shim_commands_for(&js, "UserPromptSubmit")
+                .iter()
+                .any(|c| c.ends_with(" turn_start --engine opencode")),
+            "{js}"
+        );
+    }
+
+    /// Per-prompt and network-backed, so it stays off for scopes with no memory
+    /// backend — the same gate the other two adapters apply.
+    #[test]
+    fn turn_start_not_wired_without_memory_backend() {
+        let js = shim_for(&crate::merge::MergedManifest::default());
+        assert!(
+            !js.contains("turn_start"),
+            "no memory backend is wired, so per-turn recall must stay off: {js}"
+        );
+    }
+
+    /// #231/#317: the task tracker's Stop reminder and the self-critique layer
+    /// must not depend on session logging happening to be on.
+    #[test]
+    fn stop_wired_for_task_tracker_without_session_log() {
+        let mut manifest = manifest_without_session_log();
+        manifest.capabilities.features = Some(crate::config::Features {
+            task_tracker: Some(crate::config::TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let js = shim_for(&manifest);
+        assert!(
+            shim_commands_for(&js, "Stop")
+                .iter()
+                .any(|c| c.ends_with(" stop --engine opencode")),
+            "{js}"
+        );
+    }
+
+    #[test]
+    fn stop_not_wired_without_session_log_task_tracker_or_self_critique() {
+        let js = shim_for(&manifest_without_session_log());
+        assert!(shim_commands_for(&js, "Stop").is_empty(), "{js}");
+    }
+
+    /// Session start/end capture is unconditional — `hook-run` no-ops cheaply
+    /// when nothing is configured, and without these the memory wake-up/store
+    /// never fires for opencode at all.
+    #[test]
+    fn baseline_session_hooks_are_registered() {
+        let js = shim_for(&crate::merge::MergedManifest::default());
+        for (event, neutral) in [
+            ("SessionStart", "session_start"),
+            ("SessionEnd", "session_end"),
+        ] {
+            assert!(
+                shim_commands_for(&js, event)
+                    .iter()
+                    .any(|c| c.ends_with(&format!(" {neutral} --engine opencode"))),
+                "{event} missing {neutral}: {js}"
+            );
+        }
+    }
+
+    /// #317: the rules digest runs on UserPromptSubmit, so enabling
+    /// reinjection has to register the event on its own.
+    #[test]
+    fn slippage_rule_reinjection_alone_registers_user_prompt_submit() {
+        let mut manifest = manifest_without_session_log();
+        manifest.capabilities.features = Some(crate::config::Features {
+            slippage: Some(crate::config::SlippageControl {
+                enabled: true,
+                rule_reinjection: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let js = shim_for(&manifest);
+        assert!(
+            shim_commands_for(&js, "UserPromptSubmit")
+                .iter()
+                .any(|c| c.ends_with(" user_prompt_submit --engine opencode")),
+            "{js}"
+        );
+    }
+
+    /// Every session-log event opencode registers has to be one opencode
+    /// actually accepts, or the hook looks wired and never fires. opencode's
+    /// supported set is shorter than Codex's, so this drops `SubagentStop` and
+    /// `PreCompact` on top of the `Notification` Codex already drops.
+    #[test]
+    fn session_log_events_are_all_supported_by_opencode() {
+        for (_, native) in SESSION_LOG_HOOK_EVENTS {
+            assert!(
+                SUPPORTED_HOOK_EVENTS.contains(native),
+                "{native} is not an opencode event"
+            );
+        }
+    }
+
+    /// #1442: opencode's plugin API has no per-tool matcher, so every
+    /// `pre_tool_use` registration is an every-tool one — two of them means a
+    /// single tool call runs the hook twice. Wiring session-log capture for
+    /// #1439 is exactly what would have reproduced the bug here.
+    #[test]
+    fn pre_tool_use_is_registered_at_most_once() {
+        for bits in 0..8u8 {
+            let (session_log, task_tools, cbm) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+            let label = format!("session_log={session_log} task_tools={task_tools} cbm={cbm}");
+            let mut manifest = crate::merge::MergedManifest::default();
+            if !session_log {
+                manifest.session_log.file = None;
+                manifest.session_log.transcript = None;
+            }
+            if cbm {
+                manifest.mcps.push(crate::mcp::resolve::ResolvedMcp {
+                    name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
+                    kind: crate::mcp::resolve::ResolvedKind::Stdio {
+                        command: "codebase-memory-mcp".into(),
+                        args: vec![],
+                        env: Default::default(),
+                    },
+                    headers: Default::default(),
+                    timeout: None,
+                    disabled_tools: vec![],
+                    mcp_permissions: None,
+                    wakeup_max_tokens: None,
+                });
+            }
+            manifest.capabilities.features = Some(crate::config::Features {
+                task_tracker: Some(crate::config::TaskTracker {
+                    enabled: task_tools,
+                    block_engine_task_tools: task_tools,
+                }),
+                ..Default::default()
+            });
+
+            let js = shim_for(&manifest);
+            let count = shim_commands_for(&js, "PreToolUse")
+                .iter()
+                .filter(|c| c.contains("hook-run pre_tool_use"))
+                .count();
+            assert!(
+                count <= 1,
+                "{label}: {count} pre_tool_use registrations: {js}"
+            );
+        }
+    }
+
+    /// The gates `doctor` reports must match what this adapter actually writes,
+    /// mirroring the equivalent test in `claude_code` and `codex`. Enumerates
+    /// every combination of the inputs the gates read rather than a handful of
+    /// fixtures: with hand-picked cases a gate that quietly starts requiring
+    /// two enablers instead of one still passes, because no fixture isolates
+    /// the second.
+    #[test]
+    fn lifecycle_registrations_match_the_rendered_shim() {
+        for bits in 0..16u8 {
+            let (session_log, task_tracker, self_critique, memory) =
+                (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            let label = format!(
+                "session_log={session_log} task_tracker={task_tracker} \
+                 self_critique={self_critique} memory={memory}"
+            );
+            let mut manifest = if memory {
+                manifest_with_memory_mcp()
+            } else {
+                crate::merge::MergedManifest::default()
+            };
+            if !session_log {
+                manifest.session_log.file = None;
+                manifest.session_log.transcript = None;
+            }
+            manifest.capabilities.features = Some(crate::config::Features {
+                task_tracker: Some(crate::config::TaskTracker {
+                    enabled: task_tracker,
+                    ..Default::default()
+                }),
+                slippage: Some(crate::config::SlippageControl {
+                    enabled: true,
+                    self_critique,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+
+            let js = shim_for(&manifest);
+            let commands: Vec<String> = SUPPORTED_HOOK_EVENTS
+                .iter()
+                .flat_map(|event| shim_commands_for(&js, event))
+                .collect();
+            for (event, registered, why) in crate::adapter::lifecycle_hook_registrations(&manifest)
+            {
+                // Space-delimited so `stop` doesn't also match `subagent_stop`.
+                let needle = format!(" {event} --engine opencode");
+                let present = commands
+                    .iter()
+                    .any(|c| c.contains("hook-run") && c.ends_with(&needle));
+                assert_eq!(
+                    present, registered,
+                    "{label}: doctor says {event} registered={registered} ({why}), \
+                     the shim disagrees: {commands:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn todowrite_redirect_follows_the_task_tracker_gate() {
+        // Session logging off: its every-tool capture hook registers
+        // `pre_tool_use` on its own (#1442), which would mask this gate.
         let tracker = |enabled: bool, block: bool| {
-            let mut m = crate::merge::MergedManifest::default();
+            let mut m = manifest_without_session_log();
             m.capabilities.features = Some(crate::config::Features {
                 task_tracker: Some(crate::config::TaskTracker {
                     enabled,
@@ -4264,10 +4605,27 @@ mod tests {
         assert!(!registered(&tracker(false, true)), "tracker off");
     }
 
+    /// Session logging is off in these fixtures because when it's on its own
+    /// every-tool capture hook registers `pre_tool_use` regardless (#1442), so
+    /// the guard's gate is only observable with the sinks disabled.
     #[test]
     fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
-        let with = generate_shim_js(&[], true).unwrap();
-        let without = generate_shim_js(&[], false).unwrap();
+        let mut cbm = manifest_without_session_log();
+        cbm.mcps.push(crate::mcp::resolve::ResolvedMcp {
+            name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
+            kind: crate::mcp::resolve::ResolvedKind::Stdio {
+                command: "codebase-memory-mcp".into(),
+                args: vec![],
+                env: Default::default(),
+            },
+            headers: Default::default(),
+            timeout: None,
+            disabled_tools: vec![],
+            mcp_permissions: None,
+            wakeup_max_tokens: None,
+        });
+        let with = generate_shim_js(&[], &cbm).unwrap();
+        let without = generate_shim_js(&[], &manifest_without_session_log()).unwrap();
         assert!(
             with.contains("llmenv hook-run pre_tool_use --engine opencode"),
             "guard hook missing when codebase-memory-mcp is wired"
@@ -4286,7 +4644,7 @@ mod tests {
     // silently defeat any guard that inspects arguments.
     #[test]
     fn shim_reads_tool_arguments_from_the_parameter_that_carries_them() {
-        let js = generate_shim_js(&[], true).unwrap();
+        let js = generate_shim_js(&[], &crate::merge::MergedManifest::default()).unwrap();
         assert!(
             !js.contains("input.output?.args"),
             "before-hook args come from the second parameter, not input.output"
@@ -4313,7 +4671,7 @@ mod tests {
             },
             bundle_origin: None,
         }];
-        let js = generate_shim_js(&hooks, false).unwrap();
+        let js = generate_shim_js(&hooks, &manifest_without_session_log()).unwrap();
         assert!(js.contains("\"command\":\"\""));
     }
 
@@ -4331,7 +4689,7 @@ mod tests {
         }];
         // "echo hello" has no '/' token, so resolve_bundle_relative_paths
         // returns None and generate_shim_js must fall back to the raw command.
-        let js = generate_shim_js(&hooks, false).unwrap();
+        let js = generate_shim_js(&hooks, &manifest_without_session_log()).unwrap();
         assert!(js.contains("echo hello"));
     }
 
@@ -4708,7 +5066,7 @@ mod tests {
         fn generate_shim_js_hook_table_is_valid_json(
             hooks in proptest::collection::vec(arb_hook(), 0..5)
         ) {
-            let js = generate_shim_js(&hooks, false).unwrap();
+            let js = generate_shim_js(&hooks, &manifest_without_session_log()).unwrap();
             let marker = "const HOOK_TABLE = ";
             let start = js.find(marker).unwrap() + marker.len();
             let end = js[start..]
@@ -4725,8 +5083,8 @@ mod tests {
         fn generate_shim_js_is_deterministic(
             hooks in proptest::collection::vec(arb_hook(), 0..5)
         ) {
-            let a = generate_shim_js(&hooks, false).unwrap();
-            let b = generate_shim_js(&hooks, false).unwrap();
+            let a = generate_shim_js(&hooks, &manifest_without_session_log()).unwrap();
+            let b = generate_shim_js(&hooks, &manifest_without_session_log()).unwrap();
             prop_assert_eq!(a, b);
         }
 
