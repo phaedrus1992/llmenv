@@ -115,7 +115,7 @@ fn slippage_rule_reinjection_enabled(manifest: &MergedManifest) -> bool {
 /// set (adapters diverge here — see each adapter's `SESSION_LOG_HOOK_EVENTS`),
 /// not assumed by this function. Passing `true` for an adapter whose set drops
 /// `pre_tool_use` would tell it to skip guard registrations it never replaces.
-pub(crate) fn unmatched_pre_tool_use_registered(
+fn unmatched_pre_tool_use_registered(
     manifest: &MergedManifest,
     session_log_includes_pre_tool_use: bool,
 ) -> bool {
