@@ -1530,36 +1530,42 @@ mod tests {
 
     /// The gates `doctor` reports must match what this adapter actually writes,
     /// the same way `claude_code`'s equivalent test keeps its two halves honest.
+    ///
+    /// Enumerates every combination of the four inputs the gates read rather
+    /// than a handful of fixtures: with hand-picked cases a gate that quietly
+    /// starts requiring two enablers instead of one still passes, because no
+    /// fixture isolates the second.
     #[test]
     fn lifecycle_registrations_match_the_rendered_hooks() {
-        for (label, manifest) in [
-            ("default", MergedManifest::default()),
-            ("memory backend", manifest_with_memory_mcp()),
-            ("no session log", manifest_without_session_log()),
-            ("task tracker, no session log", {
-                let mut m = manifest_without_session_log();
-                m.capabilities.features = Some(llmenv_config::Features {
-                    task_tracker: Some(llmenv_config::TaskTracker {
-                        enabled: true,
-                        ..Default::default()
-                    }),
+        for bits in 0..16u8 {
+            let (session_log, task_tracker, self_critique, memory) =
+                (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            let label = format!(
+                "session_log={session_log} task_tracker={task_tracker} \
+                 self_critique={self_critique} memory={memory}"
+            );
+            let mut manifest = if memory {
+                manifest_with_memory_mcp()
+            } else {
+                MergedManifest::default()
+            };
+            if !session_log {
+                manifest.session_log.file = None;
+                manifest.session_log.transcript = None;
+            }
+            manifest.capabilities.features = Some(llmenv_config::Features {
+                task_tracker: Some(llmenv_config::TaskTracker {
+                    enabled: task_tracker,
                     ..Default::default()
-                });
-                m
-            }),
-            ("slippage self_critique only", {
-                let mut m = manifest_without_session_log();
-                m.capabilities.features = Some(llmenv_config::Features {
-                    slippage: Some(llmenv_config::SlippageControl {
-                        enabled: true,
-                        self_critique: true,
-                        ..Default::default()
-                    }),
+                }),
+                slippage: Some(llmenv_config::SlippageControl {
+                    enabled: true,
+                    self_critique,
                     ..Default::default()
-                });
-                m
-            }),
-        ] {
+                }),
+                ..Default::default()
+            });
+
             let (_dir, parsed) = materialize_to_toml(&manifest);
             let commands: Vec<String> = parsed["hooks"]["events"]
                 .as_table()

@@ -735,9 +735,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, active_adapter_from, adapter_for_launch_target, emit_hook_context, engine_id,
-        known_engine_ids, modeled_key_redirect, overlay_native_json, registered_adapters,
-        remote_transport_type_str, resolve_bundle_relative_paths,
+        AgentAdapter, MEMORY_MCP_NAME, active_adapter_from, adapter_for_launch_target,
+        emit_hook_context, engine_id, known_engine_ids, lifecycle_event_registered,
+        lifecycle_hook_registrations, modeled_key_redirect, overlay_native_json,
+        registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
         resolve_command_paths_against_files, strip_json_nulls,
     };
     use crate::merge::MergedManifest;
@@ -911,6 +912,93 @@ mod tests {
     }
 
     proptest::proptest! {
+        /// The three enablers of `stop` are independent: any one of them on is
+        /// enough, and all three off is the only way it stays unregistered.
+        /// Hand-picked fixtures cover a handful of the eight combinations;
+        /// this covers all of them, so a gate that silently starts requiring
+        /// two of the three can't slip through.
+        #[test]
+        fn stop_is_registered_for_any_single_enabler(
+            session_log in proptest::bool::ANY,
+            task_tracker in proptest::bool::ANY,
+            self_critique in proptest::bool::ANY,
+        ) {
+            let mut manifest = MergedManifest::default();
+            if !session_log {
+                manifest.session_log.file = None;
+                manifest.session_log.transcript = None;
+            }
+            manifest.capabilities.features = Some(llmenv_config::Features {
+                task_tracker: Some(llmenv_config::TaskTracker {
+                    enabled: task_tracker,
+                    ..Default::default()
+                }),
+                slippage: Some(llmenv_config::SlippageControl {
+                    enabled: true,
+                    self_critique,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            proptest::prop_assert_eq!(
+                lifecycle_event_registered(&manifest, "stop"),
+                manifest.session_log.any_sink_enabled() || task_tracker || self_critique
+            );
+        }
+
+        /// `turn_start` tracks the memory MCP and nothing else — no other
+        /// feature may switch a per-prompt network hook on behind the user.
+        #[test]
+        fn turn_start_tracks_only_the_memory_mcp(
+            task_tracker in proptest::bool::ANY,
+            self_critique in proptest::bool::ANY,
+            memory in proptest::bool::ANY,
+        ) {
+            let mut manifest = MergedManifest::default();
+            manifest.capabilities.features = Some(llmenv_config::Features {
+                task_tracker: Some(llmenv_config::TaskTracker {
+                    enabled: task_tracker,
+                    ..Default::default()
+                }),
+                slippage: Some(llmenv_config::SlippageControl {
+                    enabled: true,
+                    self_critique,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            if memory {
+                manifest.mcps.push(crate::mcp::resolve::ResolvedMcp {
+                    name: MEMORY_MCP_NAME.to_string(),
+                    kind: crate::mcp::resolve::ResolvedKind::Remote {
+                        url: "http://localhost:9999".into(),
+                        transport: crate::config::McpTransport::Http,
+                    },
+                    headers: Default::default(),
+                    timeout: None,
+                    disabled_tools: vec![],
+                    mcp_permissions: None,
+                    wakeup_max_tokens: None,
+                });
+            }
+            proptest::prop_assert_eq!(
+                lifecycle_event_registered(&manifest, "turn_start"),
+                memory
+            );
+        }
+
+        /// `lifecycle_event_registered` is only a lookup — it must never
+        /// disagree with the table it reads, and an event that isn't in the
+        /// table is not registered.
+        #[test]
+        fn lifecycle_event_registered_agrees_with_the_table(event in "[a-z_]{0,20}") {
+            let manifest = MergedManifest::default();
+            let expected = lifecycle_hook_registrations(&manifest)
+                .into_iter()
+                .any(|(name, registered, _)| name == event && registered);
+            proptest::prop_assert_eq!(lifecycle_event_registered(&manifest, &event), expected);
+        }
+
         /// The safety contract in `adapter_for_launch_target`'s doc comment —
         /// never silently resolve an unrecognized engine, because that risks
         /// launching the wrong binary. Example tests only cover the four names
