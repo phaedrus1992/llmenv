@@ -555,6 +555,25 @@ write guard and read-once dedup on `PreToolUse`, the ICM memory and session-log
 lifecycle events on `SessionStart`/`SessionEnd`, and the throttle hooks when a
 throttle is configured.
 
+The per-turn hooks are gated on configuration, exactly as they are for Claude
+Code (added in v4.0.0):
+
+- `turn_start` on `UserPromptSubmit` — when a memory backend resolved for the
+  scope (`features.memory`). It runs on every prompt, so it stays off for a
+  scope with no memory configured.
+- `stop` on `Stop` — when `features.task_tracker` is enabled, or when
+  `features.slippage` has `self_critique` on.
+- `user_prompt_submit` on `UserPromptSubmit` — when `features.slippage` has
+  `rule_reinjection` on and nothing else already claimed that event.
+- The session-log turn capture set — `UserPromptSubmit`, `PreToolUse`,
+  `PostToolUse`, `Stop`, `SubagentStop`, `PreCompact` — when any `session_log`
+  sink is enabled.
+
+The session-log set is Claude Code's minus `Notification`, for the reason above:
+Codex has no such event, so emitting it would leave a hook that looks wired and
+never fires. `llmenv doctor` reports which of these are wired for the active
+scope.
+
 Those point at `llmenv hook-run --engine codex`, which works because Codex reads
 the same hook output shape Claude Code does — `hookSpecificOutput` carrying
 `hookEventName` and `additionalContext` — so injected context reaches the model
