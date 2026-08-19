@@ -211,7 +211,24 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
 
     for entry in entries {
         let path = entry?.path();
-        if !path.is_dir() {
+        // `std::fs::metadata` (not `path.is_dir()`, variant-bug-hunter finding,
+        // #1106): `is_dir()` swallows any stat error — permission denied, a
+        // TOCTOU race — into `false`, which would silently skip SKILL.md and
+        // hardcoded-path validation for a directory llmenv should have
+        // validated, rather than surfacing the stat failure. Uses `metadata`
+        // (follows symlinks), not `symlink_metadata`, because a symlinked
+        // entry still needs to reach the `canonicalize`/`starts_with` check
+        // below to be rejected as an escape rather than silently skipped.
+        // `NotFound` means the entry vanished between `read_dir` and here —
+        // nothing left to validate, not a real error.
+        let is_dir = match std::fs::metadata(&path) {
+            Ok(meta) => meta.is_dir(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("stat {}", path.display())));
+            }
+        };
+        if !is_dir {
             continue;
         }
         let canonical = path.canonicalize()?;
