@@ -380,7 +380,11 @@ Code and Codex:
 - `user_prompt_submit` on `UserPromptSubmit` — when `features.slippage` has
   `rule_reinjection` on and nothing else already claimed that event.
 - The session-log turn capture set — `UserPromptSubmit`, `PreToolUse`,
-  `PostToolUse`, `Stop` — when any `session_log` sink is enabled.
+  `PostToolUse`, `Stop` — when any `session_log` sink is enabled, which it is
+  by default (the transcript sink, at `info`). `info` already captures prompt
+  submissions, not just tool calls — see [What gets logged](configuration#what-gets-logged)
+  — so an opencode scope with no `session_log:` block still sends every prompt
+  to ICM's transcript store unless the sink is explicitly disabled.
 
 The session-log set is narrower than Claude Code's and Codex's: opencode has
 no `Notification`, `SubagentStop`, or `PreCompact` event (see the supported
@@ -598,7 +602,11 @@ Code (added in v4.0.0):
   `rule_reinjection` on and nothing else already claimed that event.
 - The session-log turn capture set — `UserPromptSubmit`, `PreToolUse`,
   `PostToolUse`, `Stop`, `SubagentStop`, `PreCompact` — when any `session_log`
-  sink is enabled.
+  sink is enabled, which it is by default (the transcript sink, at `info`).
+  `info` already captures prompt submissions, not just tool calls — see
+  [What gets logged](configuration#what-gets-logged) — so a Codex scope with
+  no `session_log:` block still sends every prompt to ICM's transcript store
+  unless the sink is explicitly disabled.
 
 The session-log set is Claude Code's minus `Notification`, for the reason above:
 Codex has no such event, so emitting it would leave a hook that looks wired and

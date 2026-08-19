@@ -938,7 +938,7 @@ Both sinks take the same sub-fields, plus one each of their own:
 | Sub-field | Required | Applies to | Notes |
 | --------- | -------- | ---------- | ----- |
 | `enabled` | no | both | Turn the sink on or off |
-| `level` | no | both | Minimum event level (`info`, `debug`, `trace`); default `info`. `debug` is what adds prompts and tool calls — see [What gets logged](#what-gets-logged) |
+| `level` | no | both | Minimum event level (`info`, `debug`, `trace`); default `info`. `debug` is what adds tool calls — prompts are already captured at the default `info` level, see [What gets logged](#what-gets-logged) |
 | `path` | no | `file` | Override the file sink's path; default `<state_dir>/session-log.jsonl` |
 | `retention_days` | no | `transcript` | Stale file-sink transcripts on disk are best-effort removed when older than this many days; `null` = disabled; must be >= 1 |
 
@@ -968,16 +968,22 @@ session_log:
 
 Two layers, gated by each sink's `level`:
 
-- **Baseline** (`level: info`, the default, whenever a sink is enabled): one
-  `lifecycle_start` event at session start, one `scope` event carrying the
-  active tags/bundles/project, and one `lifecycle_end` event at session end.
-- **Verbose** (`level: debug`): every prompt submission, tool call (before and
-  after), notification, stop, subagent stop, and pre-compact event, each
-  tagged with its role and (for tool events) the tool name.
+- **Baseline** (`level: info`, the default, whenever a sink is enabled):
+  `lifecycle_start` at session start, `scope` carrying the active
+  tags/bundles/project, `lifecycle_end` at session end — **and also every
+  prompt submission, notification, stop, subagent stop, and pre-compact
+  event**, tagged with its role. `info` is not a summary-only level: it's
+  everything except the two tool-call events below. A user's prompt text
+  reaches whichever sink is enabled (the transcript sink, over the ICM MCP,
+  by default) unless that sink is turned off.
+- **Verbose** (`level: debug`): the two tool-call events on top of the above —
+  `tool_use` (before) and `tool_result` (after), each tagged with the tool
+  name.
 
 Because `level` is per sink, a common setup is `debug` on the local file and
-`info` on the transcript — full detail stays on the machine, only the shape of
-the session reaches ICM.
+`info` on the transcript — full tool-call detail stays on the machine, while
+ICM still receives everything at `info`, prompts included. To keep prompt text
+off ICM entirely, disable the transcript sink rather than relying on `level`.
 
 > **Privacy note:** `level: debug` captures the *raw* text of every prompt
 > you submit and every tool call's input/output — including any secrets,
