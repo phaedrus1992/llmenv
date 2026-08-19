@@ -292,18 +292,29 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
 
 /// Write `content` to `path` with owner-only permissions (mode 0o600) on Unix.
 /// On Windows falls back to default permissions. Creates the file if absent,
-/// truncates if present. Use for any file containing user state or
-/// credentials (settings, sync state, MCP configs, ICM memory) where
-/// world-readable defaults would leak data on shared systems.
+/// replaces it if present — including a symlink, which is unlinked rather
+/// than written through (#1429; a plain `.create(true).truncate(true)` open
+/// would follow a pre-existing symlink at `path` and truncate its target
+/// instead). Use for any file containing user state or credentials
+/// (settings, sync state, MCP configs, ICM memory) where world-readable
+/// defaults would leak data on shared systems.
 pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        // Unlink first, then create exclusively: `O_TRUNC` on an existing
+        // symlink would follow it and truncate the target — the same
+        // unlink-then-`create_new` contract `dirfd::write_file_at` already
+        // uses for the fd-relative case.
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(path)?;
         file.write_all(content)?;
@@ -1131,6 +1142,39 @@ mod tests {
         write_owner_only(&path, b"short").expect("write2");
         let body = std::fs::read(&path).expect("read");
         assert_eq!(body, b"short");
+    }
+
+    /// A plain `.create(true).truncate(true)` open follows a pre-existing
+    /// symlink at `path` and truncates/overwrites its target instead of
+    /// replacing the link — the same TOCTOU class #1341/#1422/#1423/#1427
+    /// fixed for `std::fs::copy`-based writes (#1429).
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_does_not_write_through_a_symlinked_destination() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
+        let path = tmp.path().join("settings.json");
+        std::os::unix::fs::symlink(&victim, &path).expect("plant symlink");
+
+        write_owner_only(&path, b"attacker-controlled").expect("write");
+
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .expect("stat path")
+                .file_type()
+                .is_symlink(),
+            "the planted symlink must be replaced, not written through"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read path"),
+            b"attacker-controlled"
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("read victim"),
+            b"must-not-be-touched",
+            "the symlink's target must be untouched"
+        );
     }
 
     #[cfg(unix)]
