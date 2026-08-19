@@ -838,6 +838,12 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - cached OAuth credential (added in v3.8.0) — reports whether a token is cached
   in the durable state dir, and warns when the cached token has expired. See
   [Inherited Claude Code state](configuration.md#oauth-credential-inheritance).
+- Codex-specific diagnostics (added in v4.0.0), shown only when Codex is an
+  installed adapter: whether the Codex permission profile
+  ([Permissions](engines.md#permissions)) will render or was refused (and why),
+  any MCP server using a transport Codex can't speak (SSE), and whether an
+  already-materialized `config.toml` is valid TOML — all without requiring an
+  `export`/`regenerate` run first.
 
 - `--all` runs the full orphan analysis across the entire config (all bundles and
   scopes, not just active ones).
