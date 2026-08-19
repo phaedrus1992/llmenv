@@ -696,14 +696,21 @@ lost on every config edit or version bump, the same problem Claude Code's
   the first-ever captured credential forever and serving a stale or revoked
   token to every new folder indefinitely.
 
-Every file this relocates is copied with permissions forced to owner-only
-(`0o600`) regardless of the source's mode — `std::fs::copy` otherwise
-propagates whatever mode the source had, which would carry a looser umask
-into the durable store or a fresh folder alike.
+Every *copied* file (`history.jsonl`, `mcp-needs-auth-cache.json`, `auth.json`)
+has its permissions forced to owner-only (`0o600`) regardless of the source's
+mode — a plain copy otherwise propagates whatever mode the source had, which
+would carry a looser umask into the durable store or a fresh folder alike.
 
 Codex also writes six SQLite databases directly into `$CODEX_HOME`. Three are
-relocated the same way, symlinked (base file plus `-wal`/`-shm` sidecars) into
-the durable state dir (added in v4.0.0, [#1420](https://github.com/phaedrus1992/llmenv/issues/1420)):
+symlinked (base file plus `-wal`/`-shm` sidecars) into the durable state dir
+(added in v4.0.0, [#1420](https://github.com/phaedrus1992/llmenv/issues/1420)).
+Unlike the files above, these are usually never copied at all: on a first-ever
+run the symlink is created before the file exists on either side, so Codex's
+own `create_if_missing` writes it straight into the durable state dir — inside
+the state dir's `0o700` permissions, but under whatever umask Codex itself
+uses, not the `0o600` forced on the copied files. A pre-existing real file from
+before this link existed is folded in once (copied, then owner-only) the same
+way the files above are.
 
 - **`goals_1.sqlite`** — per-thread objectives/status/token budgets.
 - **`memories_1.sqlite`** — generated memory content and its extraction/

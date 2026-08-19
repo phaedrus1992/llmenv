@@ -264,18 +264,23 @@ fn capture_copied_files_named(
 
 /// Copy `src` to `dst` and force the result to owner-only (0o600) permissions.
 ///
-/// `std::fs::copy` propagates the *source's* mode to the destination — a
-/// history/auth file created under a looser umask would otherwise carry that
-/// looser mode into the durable store or a fresh hashed folder alike
-/// (security-audit, #1421). Every file this module copies is either a
-/// credential or prompt history, so owner-only is the right floor
-/// unconditionally, matching how everything else llmenv writes into the
-/// durable store and materialized folders is owner-only.
+/// Uses [`crate::paths::copy_replacing_symlink`] rather than `std::fs::copy`
+/// for two reasons: `std::fs::copy` propagates the *source's* mode to the
+/// destination — a history/auth file created under a looser umask would
+/// otherwise carry that looser mode into the durable store or a fresh hashed
+/// folder alike (security-audit, #1421) — and it opens the destination
+/// through `O_CREAT|O_TRUNC`, which writes *through* a symlink at `dst`
+/// rather than replacing it; `copy_replacing_symlink`'s write-temp-then-rename
+/// closes that gap the same way it already does for `cli::upgrade`'s binary
+/// swap (security-audit, #1420). Every file this module copies is either a credential or prompt history, so
+/// owner-only is the right floor unconditionally, matching how everything
+/// else llmenv writes into the durable store and materialized folders is
+/// owner-only.
 ///
 /// # Errors
 /// Returns an error when the copy or the permission change fails.
 fn copy_owner_only(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    std::fs::copy(src, dst)
+    crate::paths::copy_replacing_symlink(src, dst)
         .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     #[cfg(unix)]
     {
@@ -410,21 +415,44 @@ const SQLITE_SIDECAR_SUFFIXES: &[&str] = &["-wal", "-shm"];
 /// be created.
 pub(crate) fn link_codex_sqlite_dbs(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
     for name in CODEX_INHERITED_SQLITE_DBS {
-        link_durable_sqlite_member(name, state_dir, config_dir)?;
-        for suffix in SQLITE_SIDECAR_SUFFIXES {
-            link_durable_sqlite_member(&format!("{name}{suffix}"), state_dir, config_dir)?;
+        // Decided once from the base `.sqlite` file and applied to every
+        // member of the family (base + WAL sidecars) — never re-decided per
+        // member. SQLite ties a WAL to the exact database it was written
+        // against; letting each member pick its own winner independently
+        // could fold in a base file from one point in time alongside a WAL
+        // from another (security-audit, #1420).
+        let prefer_local = local_sqlite_db_is_newer(name, state_dir, config_dir);
+        for member in std::iter::once((*name).to_string()).chain(
+            SQLITE_SIDECAR_SUFFIXES
+                .iter()
+                .map(|suffix| format!("{name}{suffix}")),
+        ) {
+            link_durable_sqlite_member(&member, state_dir, config_dir, prefer_local)?;
         }
     }
     Ok(())
 }
 
+/// Whether `config_dir`'s copy of the base `.sqlite` file should win the fold
+/// over the durable store's copy — decided once per DB family so every member
+/// (base + sidecars) gets the same answer. A missing store copy always
+/// prefers the folder's; otherwise mtime decides, same as
+/// [`capture_codex_auth`].
+fn local_sqlite_db_is_newer(name: &str, state_dir: &Path, config_dir: &Path) -> bool {
+    let target = state_dir.join(name);
+    let link = config_dir.join(name);
+    std::fs::symlink_metadata(&target).is_err() || src_is_newer(&link, &target)
+}
+
 /// Fold-then-link a single SQLite DB family member (the base file or one of
 /// its [`SQLITE_SIDECAR_SUFFIXES`]) into the durable store. See
-/// [`link_codex_sqlite_dbs`] for the contract.
+/// [`link_codex_sqlite_dbs`] for the contract. `prefer_local` is decided once
+/// per family by [`local_sqlite_db_is_newer`], not per member.
 fn link_durable_sqlite_member(
     name: &str,
     state_dir: &Path,
     config_dir: &Path,
+    prefer_local: bool,
 ) -> anyhow::Result<()> {
     let target = state_dir.join(name);
     let link = config_dir.join(name);
@@ -434,23 +462,19 @@ fn link_durable_sqlite_member(
         Err(e) => return Err(anyhow::anyhow!("inspecting {}: {e}", link.display())),
     };
     match link_type {
-        None => attach_store(&target, &link),
+        None => attach_store_atomic(&target, &link),
         Some(ft) if ft.is_symlink() => {
             if std::fs::read_link(&link).is_ok_and(|dest| dest == target) {
                 return Ok(());
             }
-            std::fs::remove_file(&link)
-                .with_context(|| format!("replacing stale link {}", link.display()))?;
-            attach_store(&target, &link)
+            attach_store_atomic(&target, &link)
         }
         Some(ft) if ft.is_file() => {
             let target_exists = std::fs::symlink_metadata(&target).is_ok();
-            if !target_exists || src_is_newer(&link, &target) {
+            if !target_exists || prefer_local {
                 copy_owner_only(&link, &target)?;
             }
-            std::fs::remove_file(&link)
-                .with_context(|| format!("removing folded file {}", link.display()))?;
-            attach_store(&target, &link)
+            attach_store_atomic(&target, &link)
         }
         Some(_) => {
             tracing::warn!(
@@ -460,6 +484,34 @@ fn link_durable_sqlite_member(
             Ok(())
         }
     }
+}
+
+/// Point `link` at `target` via a `symlink`-then-`rename` swap instead of
+/// `remove_file` followed by a separate `symlink` — if the swap fails
+/// partway, `link` is left exactly as it was (still holding the just-copied
+/// data in the fold case) rather than removed with nothing yet in its place,
+/// which the next run's mtime comparison could otherwise mistake for "no
+/// local copy to consider" (silent-failure-hunter, #1420).
+///
+/// # Errors
+/// Returns an error when the temporary symlink can't be created or the
+/// rename fails.
+fn attach_store_atomic(target: &Path, link: &Path) -> anyhow::Result<()> {
+    let parent = link
+        .parent()
+        .with_context(|| format!("{} has no parent", link.display()))?;
+    let file_name = link
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("{} has no file name", link.display()))?;
+    let tmp = parent.join(format!(".{file_name}.tmp-symlink.{}", std::process::id()));
+    attach_store(target, &tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, link) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e)
+            .with_context(|| format!("swapping {} -> {}", link.display(), target.display()));
+    }
+    Ok(())
 }
 
 /// Move every `projects/` tree stranded in an old hashed folder into the durable
@@ -1498,6 +1550,87 @@ mod tests {
             std::fs::read_to_string(state.join(CODEX_MEMORIES_DB)).unwrap(),
             "fresh-folder-memories",
             "a newer folder copy must replace the store's stale one"
+        );
+    }
+
+    /// The fold decision is made once per DB family, from the base file's
+    /// mtime, and applied to every sidecar — never re-decided per member.
+    /// Here the base file is *older* locally (store should win) but the
+    /// `-wal` sidecar is *newer* locally in isolation; the sidecar must still
+    /// follow the base file's decision and keep the store's copy
+    /// (security-audit, #1420).
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sqlite_dbs_sidecar_follows_the_base_files_fold_decision() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        let wal_name = format!("{CODEX_QUEUE_DB}-wal");
+
+        write(&state.join(CODEX_QUEUE_DB), "store-base");
+        write(&cfg.join(CODEX_QUEUE_DB), "folder-base");
+        write(&state.join(&wal_name), "store-wal");
+        write(&cfg.join(&wal_name), "folder-wal");
+        let now = filetime::FileTime::now();
+        // Base file: folder's copy is older, so the store should win.
+        filetime::set_file_mtime(
+            cfg.join(CODEX_QUEUE_DB),
+            filetime::FileTime::from_unix_time(now.unix_seconds() - 60, 0),
+        )
+        .unwrap();
+        // WAL sidecar: folder's copy is newer in isolation — must NOT be
+        // allowed to win independently of the base file's decision.
+        filetime::set_file_mtime(
+            cfg.join(&wal_name),
+            filetime::FileTime::from_unix_time(now.unix_seconds() + 60, 0),
+        )
+        .unwrap();
+
+        link_codex_sqlite_dbs(&state, &cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(state.join(CODEX_QUEUE_DB)).unwrap(),
+            "store-base",
+            "an older base file must not win the fold"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state.join(&wal_name)).unwrap(),
+            "store-wal",
+            "the WAL sidecar must follow the base file's fold decision, not its own newer mtime"
+        );
+    }
+
+    /// A failure partway through the symlink swap must leave `link` exactly
+    /// as it was — never removed with nothing yet in its place — so a folded
+    /// copy that already landed in the store isn't mistaken for absent on the
+    /// next run (silent-failure-hunter, #1420).
+    #[cfg(unix)]
+    #[test]
+    fn attach_store_atomic_leaves_link_untouched_when_the_rename_target_is_a_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&state.join(CODEX_GOALS_DB), "already-folded");
+        // A directory at `link` can never be renamed over (EISDIR), forcing
+        // attach_store_atomic's swap to fail after the temp symlink is made.
+        std::fs::create_dir_all(cfg.join(CODEX_GOALS_DB)).unwrap();
+
+        let target = state.join(CODEX_GOALS_DB);
+        let link = cfg.join(CODEX_GOALS_DB);
+        assert!(attach_store_atomic(&target, &link).is_err());
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_dir(),
+            "a failed swap must leave the original entry at `link` untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "already-folded",
+            "the store's copy must be unaffected by a failed swap"
         );
     }
 
