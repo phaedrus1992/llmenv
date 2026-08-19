@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use std::collections::BTreeMap;
 
+use anyhow::Context as _;
 use schemars::JsonSchema;
 
 use super::{AgentAdapter, yaml_value_kind_name};
@@ -539,11 +540,18 @@ impl AgentAdapter for OpencodeAdapter {
                 anyhow::bail!("path traversal in rules file: {}", r.rel.display());
             }
             super::skills::reject_hardcoded_config_path(&r.raw, &r.rel.to_string_lossy())?;
-            let dest = out.join(&r.rel);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            crate::paths::write_owner_only(&dest, r.raw.as_bytes())?;
+            // `write_file_through_dirs`, not `create_dir_all` + `write_owner_only`:
+            // `out` persists across renders (the agent's live config dir), and a
+            // prior render's directory could have been replaced by a symlink
+            // between calls — `create_dir_all` would follow it (#1341-class
+            // TOCTOU, #1427).
+            crate::paths::dirfd::write_file_through_dirs(
+                out,
+                &r.rel,
+                r.raw.as_bytes(),
+                rustix::fs::Mode::from(0o600),
+            )
+            .with_context(|| format!("writing rules file {}", r.rel.display()))?;
             instructions.push(r.rel.to_string_lossy().into_owned());
             owned.push(r.rel.clone());
         }
@@ -3710,6 +3718,42 @@ mod tests {
             .materialize(&manifest, tmp.path())
             .unwrap_err();
         assert!(err.to_string().contains("path traversal"));
+    }
+
+    /// Found via #1427's variant search: `manifest.rules`' directory-component
+    /// resolution had the same gap `manifest.files` did — `create_dir_all`
+    /// follows a symlinked intermediate directory instead of refusing it,
+    /// landing the write inside the symlink's target.
+    #[cfg(unix)]
+    #[test]
+    fn materialize_rules_does_not_follow_a_symlinked_directory_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let mut manifest = MergedManifest::default();
+        manifest.rules.push(RuleFile {
+            bundle: "test".into(),
+            rel: PathBuf::from("rules/sub/note.md"),
+            frontmatter: None,
+            body: "first render".into(),
+            raw: "first render".into(),
+        });
+
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let sub_dir = tmp.path().join("rules/sub");
+        std::fs::remove_dir_all(&sub_dir).unwrap();
+        std::os::unix::fs::symlink(&outside, &sub_dir).unwrap();
+
+        let err = OpencodeAdapter
+            .materialize(&manifest, tmp.path())
+            .unwrap_err();
+        let _ = err;
+
+        assert!(
+            !outside.join("note.md").exists(),
+            "the write must not land inside the symlinked directory's target"
+        );
     }
 
     #[test]
