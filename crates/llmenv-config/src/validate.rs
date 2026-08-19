@@ -365,7 +365,7 @@ pub fn validate_permission_string(context: &str, raw: &str) -> Result<(), Valida
     Ok(())
 }
 
-pub(crate) fn is_valid_var_name(name: &str) -> bool {
+fn is_valid_var_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }

@@ -670,6 +670,14 @@ fn fresh_render_dedups_typed_and_native_hook_duplicate() {
 // #985: the task-tool redirect PreToolUse hook is registered only when the
 // task tracker is enabled. #980: also gated by the `block_engine_task_tools`
 // opt-out sub-toggle.
+//
+// #1442: session logging is on in a default manifest and registers an
+// unmatched every-tool `pre_tool_use` group, which folds in the task-tool
+// redirect (and every other matcher-scoped `pre_tool_use` consumer) instead
+// of a second, matcher-scoped registration alongside it. Session logging is
+// off here so this test keeps isolating the tracker gate specifically,
+// rather than the redirect's presence in the (functionally equivalent)
+// unmatched group.
 fn task_tracker_matcher_present(enabled: bool, block_engine_task_tools: bool) -> bool {
     let m = llmenv::merge::MergedManifest {
         capabilities: llmenv::config::Capabilities {
@@ -680,6 +688,11 @@ fn task_tracker_matcher_present(enabled: bool, block_engine_task_tools: bool) ->
                 }),
                 ..Default::default()
             }),
+            ..Default::default()
+        },
+        session_log: llmenv::config::SessionLog {
+            file: None,
+            transcript: None,
             ..Default::default()
         },
         ..Default::default()
