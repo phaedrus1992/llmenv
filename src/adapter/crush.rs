@@ -27,7 +27,13 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &["PreToolUse"];
 /// plugin the projection loop actually skips.
 const UNSUPPORTED_PLUGIN_DIRS: &[&str] = &["agents", "commands", "hooks"];
 
-/// Whether `payload` contains none of Crush's unsupported plugin subdirs.
+/// The first of Crush's unsupported plugin subdirs `payload` contains, or
+/// `None` when the plugin is compatible.
+///
+/// Returns the offending name rather than a bool so the caller's warning can
+/// name it without re-statting the tree — a second scan with `is_dir()` would
+/// reintroduce, in the message, exactly the swallowed stat error this function
+/// exists to avoid.
 ///
 /// Uses `std::fs::metadata` rather than `Path::is_dir` (variant-bug-hunter
 /// finding, #1106): `is_dir()` folds a stat error (permission denied) into
@@ -35,13 +41,13 @@ const UNSUPPORTED_PLUGIN_DIRS: &[&str] = &["agents", "commands", "hooks"];
 /// would let an actually-incompatible plugin (one whose unsupported subdir
 /// happens to be unreadable) render as if it were compatible. A missing
 /// subdir is the common, expected case and is not an error.
-fn plugin_is_compatible(payload: &Path) -> anyhow::Result<bool> {
+fn unsupported_plugin_dir(payload: &Path) -> anyhow::Result<Option<&'static str>> {
     for dir in UNSUPPORTED_PLUGIN_DIRS {
         let candidate = payload.join(dir);
         match std::fs::metadata(&candidate) {
             Ok(meta) => {
                 if meta.is_dir() {
-                    return Ok(false);
+                    return Ok(Some(dir));
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -50,7 +56,7 @@ fn plugin_is_compatible(payload: &Path) -> anyhow::Result<bool> {
             }
         }
     }
-    Ok(true)
+    Ok(None)
 }
 
 impl AgentAdapter for CrushAdapter {
@@ -192,11 +198,7 @@ impl AgentAdapter for CrushAdapter {
             Vec::new();
         for plugin in &manifest.plugins {
             let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
-            if !plugin_is_compatible(&payload)? {
-                let bad_dir = UNSUPPORTED_PLUGIN_DIRS
-                    .iter()
-                    .find(|dir| payload.join(dir).is_dir())
-                    .unwrap_or(&"<unknown>");
+            if let Some(bad_dir) = unsupported_plugin_dir(&payload)? {
                 eprintln!(
                     "warning: plugin '{}' contains unsupported Crush content: '{}/' \
                      directory — skipping this plugin. Crush has no equivalent for \
