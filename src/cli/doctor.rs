@@ -127,6 +127,49 @@ fn bundles_with_missing_dirs<'a>(
     Ok(missing)
 }
 
+/// Create the cache directory if it is absent, otherwise probe that llmenv can
+/// write into it.
+///
+/// Hardening only applies when this creates the directory; an existing one
+/// keeps whatever permissions its owner set — forcing 0700 here would hard-fail
+/// on a cache dir shared with a different uid, the same regression #1196 walked
+/// back for `codebase_memory.index_path` (#1198).
+///
+/// # Errors
+///
+/// A stat error other than "not found" — permission denied on a parent, an
+/// unreachable mount — is reported as the stat failure it is (#1445, the same
+/// class as #1436). `exists()` folded those into "does not exist", which sent
+/// a present-but-unreachable cache dir into the create branch and surfaced it
+/// under the generic "not writable" message; that reads as a permissions
+/// problem on the directory itself rather than on the path leading to it.
+/// Also errors when the path exists but is not a directory, and when the write
+/// probe or the directory creation fails.
+fn ensure_cache_dir_writable(cache_dir: &Path) -> anyhow::Result<()> {
+    match std::fs::metadata(cache_dir) {
+        Ok(meta) if meta.is_dir() => {
+            let probe = cache_dir.join(".llmenv-doctor-probe");
+            std::fs::write(&probe, b"").context("cache directory not writable")?;
+            let _ = std::fs::remove_file(&probe);
+        }
+        Ok(_) => anyhow::bail!(
+            "cache directory {} is not a directory",
+            crate::util::display_safe(&cache_dir.display().to_string())
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            crate::paths::create_dir_owner_only(cache_dir)
+                .context("cache directory not writable")?;
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "stat cache directory {}",
+                crate::util::display_safe(&cache_dir.display().to_string())
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Version folder names cached under one adapter's cache directory, with any
 /// content-hash suffix stripped. `Ok(None)` means the adapter has no cache dir
 /// at all — normal for an adapter that was never materialized.
@@ -1000,19 +1043,8 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         );
     }
 
-    // Check cache directory is writable. Hardening only applies when this
-    // check creates the dir; an existing one keeps whatever permissions its
-    // owner set — forcing 0700 here would hard-fail on a cache dir shared
-    // with a different uid, the same regression #1196 walked back for
-    // codebase_memory.index_path (#1198).
     let cache_dir = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
-    if cache_dir.exists() {
-        let probe = cache_dir.join(".llmenv-doctor-probe");
-        std::fs::write(&probe, b"").context("cache directory not writable")?;
-        let _ = std::fs::remove_file(&probe);
-    } else {
-        crate::paths::create_dir_owner_only(&cache_dir).context("cache directory not writable")?;
-    }
+    ensure_cache_dir_writable(&cache_dir)?;
     eprintln!(
         "{pass} Cache directory is writable: {}",
         cache_dir.display()
@@ -1852,6 +1884,104 @@ mod tests {
             result.is_err(),
             "unreadable bundles dir must surface the stat error, got {result:?}"
         );
+    }
+
+    // -- ensure_cache_dir_writable --
+
+    #[test]
+    fn ensure_cache_dir_writable_creates_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        ensure_cache_dir_writable(&cache_dir).unwrap();
+        assert!(cache_dir.is_dir());
+    }
+
+    /// An existing directory keeps whatever permissions its owner set, so the
+    /// check is a write probe rather than a re-hardening pass (#1196/#1198).
+    #[test]
+    fn ensure_cache_dir_writable_probes_an_existing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_cache_dir_writable(tmp.path()).unwrap();
+        assert!(
+            !tmp.path().join(".llmenv-doctor-probe").exists(),
+            "the probe file must be cleaned up"
+        );
+    }
+
+    /// #1445 (same class as #1436): `exists()` folded every stat failure into
+    /// "does not exist", which sent the check into the create branch and
+    /// reported an unreachable cache dir under the generic "not writable"
+    /// message. A stat failure and a missing directory need different fixes,
+    /// so they have to read differently.
+    ///
+    /// Uses a regular file as a path component (`ENOTDIR`) rather than an
+    /// unreadable parent: it is the same non-`NotFound` stat class, but it
+    /// needs no permission games, so it also exercises the branch when the
+    /// suite runs as root.
+    #[test]
+    fn ensure_cache_dir_writable_distinguishes_a_stat_error_from_a_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("not-a-dir");
+        std::fs::write(&blocker, b"").unwrap();
+
+        let err = format!(
+            "{:#}",
+            ensure_cache_dir_writable(&blocker.join("cache"))
+                .expect_err("an unstattable cache dir must error")
+        );
+        assert!(
+            err.contains("stat cache directory"),
+            "must name the stat failure, not the generic writability message: {err}"
+        );
+
+        // And a genuinely-missing directory is created rather than reported as
+        // a stat failure — otherwise the assertion above would pass for both.
+        let missing = tmp.path().join("absent");
+        ensure_cache_dir_writable(&missing).unwrap();
+        assert!(missing.is_dir());
+    }
+
+    /// The permission-denied shape #1445 was filed against. macOS can serve a
+    /// cached stat for a directory whose parent was just chmodded away, so the
+    /// reachability probe runs immediately before the call and the case is
+    /// skipped when the kernel still answers — the `ENOTDIR` test above is what
+    /// pins the branch deterministically.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_cache_dir_writable_reports_an_unreadable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let cache_dir = parent.join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let unreachable = std::fs::metadata(&cache_dir).is_err();
+        let result = ensure_cache_dir_writable(&cache_dir);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !unreachable {
+            return; // running as root, or the kernel served a cached stat
+        }
+
+        let err = format!(
+            "{:#}",
+            result.expect_err("an unreadable parent must surface the stat error")
+        );
+        assert!(err.contains("stat cache directory"), "got: {err}");
+    }
+
+    /// A regular file at the cache path used to reach the write probe and fail
+    /// as "not writable", which reads as a permissions problem.
+    #[test]
+    fn ensure_cache_dir_writable_rejects_a_non_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::write(&cache_dir, b"").unwrap();
+        let err = format!(
+            "{:#}",
+            ensure_cache_dir_writable(&cache_dir).expect_err("a file is not a cache directory")
+        );
+        assert!(err.contains("not a directory"), "got: {err}");
     }
 
     // -- cached_version_folders --
