@@ -5,11 +5,13 @@
 //! merge stage parses these into [`RuleFile`] values so the per-agent adapter
 //! can pick its own strategy:
 //!
-//! * **Claude Code** copies each rule verbatim to `<out>/rules/<rel>` —
-//!   frontmatter preserved — so Claude's own rules-directory convention
-//!   discovers them.
-//! * **AGENTS.md-only adapters** append `body` (frontmatter stripped) into
-//!   the concatenated rules file via [`agents_md_with_rules`](super::agents_md::concat_with_rules).
+//! * **Claude Code** and **opencode** copy each rule verbatim to
+//!   `<out>/rules/<rel>` — frontmatter preserved — so their own
+//!   rules-directory conventions discover them.
+//! * **AGENTS.md-only adapters** (**Codex**, #1103 — it has no per-file rule
+//!   mechanism with glob frontmatter, `docs/reference/codex/agents-md.md`)
+//!   append `body` (frontmatter stripped) into the concatenated instructions
+//!   file via [`append_rules`](super::agents_md::append_rules).
 //!
 //! The split lives in the merge stage (not the adapter) so the cache hash
 //! covers a single canonical representation regardless of which adapter
@@ -28,12 +30,12 @@ pub struct RuleFile {
     /// Raw frontmatter text between the `---` fences, exclusive. `None`
     /// when the file has no frontmatter block.
     ///
-    /// Not read today: the module docs above define `frontmatter`/`body` as the
-    /// split every AGENTS.md-only adapter consumes, but the two adapters that
-    /// exist both inline rule bodies themselves (see
-    /// `adapter::claude_code`'s note on `concat_with_rules`). Kept rather than
-    /// deleted because dropping it would silently retire that documented
-    /// contract, which is a design decision and not a lint cleanup (#1314).
+    /// Not read today: `append_rules` (#1103) only needs `body` — the whole
+    /// point of folding a rule into AGENTS.md is that Codex can't honor
+    /// path-glob frontmatter, so there's nothing to do with it there. Kept
+    /// rather than deleted because dropping it would silently retire the
+    /// documented `frontmatter`/`body` split, which is a design decision and
+    /// not a lint cleanup (#1314).
     #[cfg_attr(
         not(test),
         expect(
@@ -45,13 +47,6 @@ pub struct RuleFile {
     /// File body with the frontmatter block removed. The leading newline
     /// after the closing `---` fence is also stripped so the body starts
     /// at meaningful content.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "documented AGENTS.md adapter contract, not yet consumed"
-        )
-    )]
     pub(crate) body: String,
     /// Raw file contents — frontmatter + body — for adapters that want to
     /// pass the file through verbatim.
