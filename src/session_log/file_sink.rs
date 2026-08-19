@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 
-use llmenv_paths::{create_dir_owner_only, state_dir};
+use llmenv_paths::{create_dir_owner_only, reject_non_regular_file, state_dir};
 
 /// Default file-sink path: `<state_dir>/session-log.jsonl`.
 ///
@@ -41,6 +41,11 @@ impl FileSink {
         if let Some(parent) = self.path.parent() {
             create_dir_owner_only(parent)?;
         }
+        // A symlink can't simply be replaced the way write_owner_only's
+        // unlink-then-recreate does — that would destroy the log history
+        // this append is meant to preserve — so refuse it outright instead
+        // (#1431).
+        reject_non_regular_file(&self.path)?;
         let mut opts = OpenOptions::new();
         opts.create(true).append(true);
         #[cfg(unix)]
@@ -109,6 +114,43 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o700, "log dir must be owner-only, got {mode:o}");
+    }
+
+    /// `try_append` re-opens the destination on every call with no symlink
+    /// check — a pre-existing symlink there gets appended-to (and its
+    /// permissions rewritten) rather than refused, the same TOCTOU class
+    /// already fixed for other writers in this codebase (#1341, #1422,
+    /// #1423, #1427, #1429; extended here since append can't safely
+    /// unlink-and-replace the way those fixes did — that would destroy the
+    /// log history append is meant to preserve) (#1431).
+    #[cfg(unix)]
+    #[test]
+    fn try_append_does_not_write_through_a_symlinked_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "must-not-be-touched\n").unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        let sink = FileSink::new(path.clone());
+        let result = sink.try_append("{\"attacker\":true}");
+
+        assert!(
+            result.is_err(),
+            "appending through a pre-existing symlink must be refused"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "must-not-be-touched\n",
+            "the symlink's target must be untouched"
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink itself must be left alone, not replaced or removed"
+        );
     }
 
     #[cfg(unix)]
