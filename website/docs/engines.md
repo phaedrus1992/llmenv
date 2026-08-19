@@ -358,6 +358,37 @@ Claude Code adapter.
 | `command/*.md`, `agent/*.md` | plugin commands and agents translated (agents gain `mode: subagent`) |
 | `plugin/llmenv.js` | a generated ES-module shim bridging opencode's JS plugin API to llmenv's `hook-run` subprocess |
 
+### Hooks
+
+(per-turn hook parity added in v4.0.0, [#1439](https://github.com/phaedrus1992/llmenv/issues/1439))
+
+llmenv wires its own hooks for opencode, the same baseline it gives Claude Code
+and Codex: the config-source context and managed-cache write guard/read-once
+dedup on `PreToolUse`, and the ICM memory/session-log lifecycle events on
+`SessionStart`/`SessionEnd`. These route through `plugin/llmenv.js`, the
+generated shim bridging opencode's JS plugin API to `llmenv hook-run`
+subprocess calls — there's no nested matcher-group config to write, since
+opencode dispatches by table entry in the shim itself.
+
+The per-turn hooks are gated on configuration, exactly as they are for Claude
+Code and Codex:
+
+- `turn_start` on `UserPromptSubmit` — when a memory backend resolved for the
+  scope (`features.memory`).
+- `stop` on `Stop` — when `features.task_tracker` is enabled, or when
+  `features.slippage` has `self_critique` on.
+- `user_prompt_submit` on `UserPromptSubmit` — when `features.slippage` has
+  `rule_reinjection` on and nothing else already claimed that event.
+- The session-log turn capture set — `UserPromptSubmit`, `PreToolUse`,
+  `PostToolUse`, `Stop` — when any `session_log` sink is enabled.
+
+The session-log set is narrower than Claude Code's and Codex's: opencode has
+no `Notification`, `SubagentStop`, or `PreCompact` event (see the supported
+event list above), so none of the three are emitted — a shim table entry for
+an event opencode never dispatches would look wired and never fire.
+`llmenv doctor` reports which of these are wired for the active scope,
+alongside Claude Code and Codex.
+
 ### Capability map
 
 | Feature | opencode support | Notes |
