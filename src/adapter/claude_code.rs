@@ -1414,18 +1414,16 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             "hooks": [{ "type": "command", "command": CONFIG_GUARD_COMMAND }],
         }));
 
-    // #318: read-once file dedup hook — warn or deny repeated file reads.
-    // Registered unconditionally (no config gating). The hook-run handler in
-    // `run_inner` checks `features.read_once.enabled` and returns empty
-    // (pass-through) when disabled, so the regex match is the only cost when
-    // the feature is off.
-    hooks_by_event
-        .entry("PreToolUse".to_string())
-        .or_default()
-        .push(json!({
-            "matcher": "^Read$",
-            "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
-        }));
+    // Tool-name matchers that have to reach `hook-run pre_tool_use`. Collected
+    // rather than pushed inline because they are emitted only when session
+    // logging isn't already registering an unmatched every-tool group for the
+    // same command — see the gate below (#1442).
+    //
+    // #318: read-once file dedup — warn or deny repeated file reads. Always in
+    // the set (no config gating). The hook-run handler in `run_inner` checks
+    // `features.read_once.enabled` and returns empty (pass-through) when
+    // disabled, so the regex match is the only cost when the feature is off.
+    let mut pre_tool_use_matchers: Vec<String> = vec!["^Read$".to_string()];
 
     // #317: the metrics layer counts on PostToolUse, which only session
     // logging registers today. Without this the counter never runs and the
@@ -1455,13 +1453,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .and_then(|f| f.slippage.as_ref())
         .is_some_and(|s| s.enabled && (s.answer_before_act || s.explain_before_act))
     {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": "^Bash$",
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
-            }));
+        pre_tool_use_matchers.push("^Bash$".to_string());
     }
 
     // #317: the write guard needs to see `Write`. `Read` already reaches
@@ -1476,13 +1468,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .and_then(|f| f.slippage.as_ref())
         .is_some_and(|s| s.enabled && s.read_before_edit)
     {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": "^Write$",
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
-            }));
+        pre_tool_use_matchers.push("^Write$".to_string());
     }
 
     // #1331: block `index_repository`'s project-name override, which can
@@ -1494,13 +1480,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .iter()
         .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
     {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": format!("^{}$", crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL),
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
-            }));
+        pre_tool_use_matchers.push(format!(
+            "^{}$",
+            crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL
+        ));
     }
 
     // #985: redirect Claude Code's built-in task tools to the `llmenv task`
@@ -1522,13 +1505,24 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .and_then(|f| f.task_tracker.as_ref())
         .is_some_and(|t| t.enabled && t.block_engine_task_tools)
     {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": "^(TaskCreate|TaskList|TaskUpdate)$",
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
-            }));
+        pre_tool_use_matchers.push("^(TaskCreate|TaskList|TaskUpdate)$".to_string());
+    }
+
+    // #1442: session logging registers an unmatched `hook-run pre_tool_use`
+    // below, and that one group already runs for every tool the matchers above
+    // name — `hook-run` dispatches on `tool_name` itself. Emitting both made a
+    // `Read` reach the hook twice, halving `repeat_detect`'s effective
+    // threshold and making `read_once` see its own first entry.
+    if !super::unmatched_pre_tool_use_registered(manifest) {
+        for matcher in pre_tool_use_matchers {
+            hooks_by_event
+                .entry("PreToolUse".to_string())
+                .or_default()
+                .push(json!({
+                    "matcher": matcher,
+                    "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
+                }));
+        }
     }
 
     // Throttle hooks: poll usage backend and sleep adaptive delay to avoid rate limits.
@@ -3763,9 +3757,20 @@ mod tests {
 
     // #1331: the guard is only reachable if Claude Code actually routes the
     // tool call to it, so the matcher is as load-bearing as the deny itself.
+    // Session logging is off in these fixtures because when it's on the tool
+    // is routed by the unmatched every-tool registration instead and no
+    // matcher is written at all (#1442) — the covering assertion for that path
+    // is `pre_tool_use_reaches_hook_run_once_per_tool`.
+    fn cbm_manifest_without_session_log() -> crate::merge::MergedManifest {
+        let mut manifest = cbm_manifest();
+        manifest.session_log.file = None;
+        manifest.session_log.transcript = None;
+        manifest
+    }
+
     #[test]
     fn index_repository_guard_is_registered_when_codebase_memory_is_wired() {
-        let settings = render_settings_for_test(&cbm_manifest());
+        let settings = render_settings_for_test(&cbm_manifest_without_session_log());
         let expected = format!(
             "^{}$",
             crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL
@@ -3779,7 +3784,10 @@ mod tests {
 
     #[test]
     fn index_repository_guard_is_absent_without_codebase_memory() {
-        let settings = render_settings_for_test(&crate::merge::MergedManifest::default());
+        let mut manifest = crate::merge::MergedManifest::default();
+        manifest.session_log.file = None;
+        manifest.session_log.transcript = None;
+        let settings = render_settings_for_test(&manifest);
         assert!(
             !hook_matchers_for(&settings, "PreToolUse")
                 .iter()
@@ -6196,6 +6204,129 @@ mod tests {
                      settings.json {}: {commands:?}",
                     if present { "has it" } else { "does not" }
                 );
+            }
+        }
+    }
+
+    /// Tool names an anchored-alternation matcher (`^Read$`, `^(A|B)$`)
+    /// accepts. Every `pre_tool_use` matcher llmenv registers has that shape;
+    /// one that doesn't fails here rather than being silently mis-parsed into
+    /// an empty set that trivially satisfies the disjointness assertion.
+    fn tools_accepted_by(matcher: &str) -> Vec<String> {
+        let body = matcher
+            .strip_prefix('^')
+            .and_then(|m| m.strip_suffix('$'))
+            .unwrap_or_else(|| panic!("matcher {matcher} is not anchored"));
+        let body = body
+            .strip_prefix('(')
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap_or(body);
+        assert!(
+            body.chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '|'),
+            "matcher {matcher} is not a literal alternation this helper can read"
+        );
+        body.split('|').map(str::to_owned).collect()
+    }
+
+    /// #1442: a single tool call must reach `hook-run pre_tool_use` exactly
+    /// once. The session-log capture hook is unmatched, so it already runs for
+    /// every tool a matcher-scoped registration would have caught — emitting
+    /// both made a `Read` fire the hook twice, tripping `repeat_detect`'s
+    /// loop-breaker at half its configured threshold and making `read_once`
+    /// mistake a file's own first read for a repeat.
+    ///
+    /// Enumerates every enabler of a `pre_tool_use` registration rather than a
+    /// few fixtures: each one adds a group on the same event, so a pair that
+    /// only overlaps when both are on is exactly what hand-picked cases miss.
+    #[test]
+    fn pre_tool_use_reaches_hook_run_once_per_tool() {
+        for bits in 0..32u8 {
+            let (session_log, read_before_edit, answer_before_act, cbm, task_tools) = (
+                bits & 1 != 0,
+                bits & 2 != 0,
+                bits & 4 != 0,
+                bits & 8 != 0,
+                bits & 16 != 0,
+            );
+            let label = format!(
+                "session_log={session_log} read_before_edit={read_before_edit} \
+                 answer_before_act={answer_before_act} cbm={cbm} task_tools={task_tools}"
+            );
+            let mut manifest = crate::merge::MergedManifest::default();
+            if !session_log {
+                manifest.session_log.file = None;
+                manifest.session_log.transcript = None;
+            }
+            if cbm {
+                manifest.mcps.push(crate::mcp::resolve::ResolvedMcp {
+                    name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
+                    kind: crate::mcp::resolve::ResolvedKind::Remote {
+                        url: "http://localhost:9999".into(),
+                        transport: crate::config::McpTransport::Http,
+                    },
+                    headers: Default::default(),
+                    timeout: None,
+                    disabled_tools: vec![],
+                    mcp_permissions: None,
+                    wakeup_max_tokens: None,
+                });
+            }
+            manifest.capabilities.features = Some(llmenv_config::Features {
+                task_tracker: Some(llmenv_config::TaskTracker {
+                    enabled: task_tools,
+                    block_engine_task_tools: task_tools,
+                    ..Default::default()
+                }),
+                slippage: Some(llmenv_config::SlippageControl {
+                    enabled: true,
+                    read_before_edit,
+                    answer_before_act,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+
+            let settings = render_settings_for_test(&manifest);
+            let mut unmatched = 0usize;
+            let mut matched: Vec<Vec<String>> = Vec::new();
+            for group in settings["hooks"]["PreToolUse"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let registers = group["hooks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|h| h["command"].as_str())
+                    .any(|c| c.ends_with(" pre_tool_use"));
+                if !registers {
+                    continue;
+                }
+                match group.get("matcher").and_then(serde_json::Value::as_str) {
+                    None => unmatched += 1,
+                    Some(m) => matched.push(tools_accepted_by(m)),
+                }
+            }
+
+            assert!(
+                unmatched <= 1,
+                "{label}: {unmatched} every-tool pre_tool_use registrations: {settings:?}"
+            );
+            assert!(
+                unmatched == 0 || matched.is_empty(),
+                "{label}: an every-tool registration already covers {matched:?}, \
+                 so those tools fire pre_tool_use twice: {settings:?}"
+            );
+            for (i, a) in matched.iter().enumerate() {
+                for b in &matched[i + 1..] {
+                    let overlap: Vec<&String> = a.iter().filter(|t| b.contains(t)).collect();
+                    assert!(
+                        overlap.is_empty(),
+                        "{label}: {overlap:?} matches two pre_tool_use registrations"
+                    );
+                }
             }
         }
     }
