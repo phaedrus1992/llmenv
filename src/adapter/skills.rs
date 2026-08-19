@@ -255,8 +255,17 @@ pub(crate) fn validate_skills(out: &Path) -> anyhow::Result<()> {
         }
 
         let skill_md = path.join("SKILL.md");
-        if !skill_md.exists() {
-            anyhow::bail!("Skill directory {} missing SKILL.md", path.display());
+        match std::fs::metadata(&skill_md) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                anyhow::bail!("Skill directory {} missing SKILL.md", path.display());
+            }
+            // #1436 variant: a SKILL.md that is present but unreadable needs a
+            // different fix than one that isn't there, so it gets a different
+            // message.
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("stat {}", skill_md.display())));
+            }
         }
         validate_skill_frontmatter(&skill_md, &path)?;
         scan_skill_files_for_hardcoded_paths(&canonical)?;
@@ -403,7 +412,16 @@ pub(crate) fn discover_plugin_skills(
     let skills_src = plugin_dir.join("skills");
     match std::fs::symlink_metadata(&skills_src) {
         Ok(meta) if meta.is_dir() => {}
-        _ => return Ok(Vec::new()),
+        // A plugin with no `skills/`, or a symlinked one (skipped deliberately,
+        // #1337), genuinely contributes nothing.
+        Ok(_) => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        // #1436 variant: folding a stat error into "no skills here" would drop
+        // every skill the plugin ships without saying so.
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("stat plugin skills dir {}", skills_src.display())));
+        }
     }
     let mut skills: Vec<crate::config::SkillSource> = Vec::new();
     for entry in std::fs::read_dir(&skills_src)? {
@@ -807,6 +825,54 @@ mod tests {
 
         let skills = discover_plugin_skills(&plugin_dir).unwrap();
         assert!(skills.is_empty());
+    }
+
+    // #1436 variant: an unstattable `skills/` must not read as "this plugin has
+    // no skills" — that silently drops every skill the plugin ships.
+    #[cfg(unix)]
+    #[test]
+    fn discover_plugin_skills_propagates_stat_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugin");
+        std::fs::create_dir_all(plugin_dir.join("skills").join("foo")).unwrap();
+        std::fs::set_permissions(&plugin_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = discover_plugin_skills(&plugin_dir);
+        let readable_anyway = std::fs::symlink_metadata(plugin_dir.join("skills")).is_ok();
+        std::fs::set_permissions(&plugin_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "unstattable skills dir must surface the error, got {result:?}"
+        );
+    }
+
+    // #1436 variant: "missing SKILL.md" is the wrong diagnosis for a SKILL.md
+    // that is present but unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn validate_skills_distinguishes_unreadable_skill_md_from_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skills").join("demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: demo\n---\n").unwrap();
+        std::fs::set_permissions(&skill_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = validate_skills(tmp.path());
+        let readable_anyway = std::fs::metadata(skill_dir.join("SKILL.md")).is_ok();
+        std::fs::set_permissions(&skill_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            !err.contains("missing SKILL.md"),
+            "an unreadable SKILL.md must not be reported as missing: {err}"
+        );
     }
 
     // #1196: this module used to carry its own create_dir_owner_only, which
