@@ -1106,9 +1106,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     {
         eprintln!();
         eprintln!("Lifecycle hooks (claude_code):");
-        for (event, registered, why) in
-            crate::adapter::claude_code::lifecycle_hook_registrations(manifest)
-        {
+        for (event, registered, why) in crate::adapter::lifecycle_hook_registrations(manifest) {
             if registered {
                 eprintln!("{pass} {event}");
             } else {

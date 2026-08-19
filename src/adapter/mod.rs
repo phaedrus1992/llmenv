@@ -10,7 +10,87 @@ pub(crate) mod tools;
 
 use std::path::{Path, PathBuf};
 
+use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::merge::MergedManifest;
+
+/// Which engine-neutral lifecycle events get a `hook-run` registration for this
+/// manifest, and why.
+///
+/// Engine-neutral on purpose: it reads only the manifest, so every adapter that
+/// wires lifecycle hooks gates them on the same answer, and `llmenv doctor`
+/// reports what those adapters actually write (#741) rather than re-deriving it.
+/// Codex wires the same set as Claude Code (#1435), so a gate that lived in one
+/// adapter would have had to be duplicated into the other and kept in step by
+/// hand.
+///
+/// `turn_start`'s gate is read straight from here by the generators.
+/// `session_start`/`session_end` are registered unconditionally, and `stop` is
+/// still derived independently in each adapter's session-log/task-tracker
+/// branch — folding that one in would mean restructuring how the whole
+/// session-log event set is emitted.
+///
+/// Each adapter's `lifecycle_registrations_match_*` test is what keeps those
+/// independent gates honest: it renders config for each combination and asserts
+/// this function agrees. Session logging is on in a default manifest, so
+/// fixtures that leave it that way can't tell the two halves of `stop`'s
+/// condition apart — the cases that disable it are the ones that make the
+/// assertion capable of failing.
+pub(crate) fn lifecycle_hook_registrations(
+    manifest: &MergedManifest,
+) -> Vec<(&'static str, bool, &'static str)> {
+    let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
+    let session_log = manifest.session_log.any_sink_enabled();
+    let task_tracker = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .is_some_and(|t| t.enabled);
+    // #317: the self-critique layer runs on Stop, so enabling it has to be a
+    // reason to register the event. Without this the layer is a phantom —
+    // config accepts it, `doctor` would report it, and nothing ever fires.
+    let slippage_critique = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && s.self_critique);
+    vec![
+        ("session_start", true, "always registered"),
+        ("session_end", true, "always registered"),
+        (
+            "turn_start",
+            icm_active,
+            "needs a memory backend (features.memory)",
+        ),
+        (
+            "stop",
+            session_log || task_tracker || slippage_critique,
+            "needs session logging, features.task_tracker, or slippage self_critique",
+        ),
+    ]
+}
+
+/// True when this manifest wants the `#317` rules digest reinjected on every
+/// prompt. Separate from `lifecycle_hook_registrations` because it doesn't map
+/// to one neutral event of its own — it rides the adapter's
+/// `user_prompt_submit` registration, which session logging and per-turn memory
+/// recall can already have claimed.
+pub(crate) fn slippage_rule_reinjection_enabled(manifest: &MergedManifest) -> bool {
+    manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        .is_some_and(|s| s.enabled && s.rule_reinjection)
+}
+
+/// True when `lifecycle_hook_registrations` says `event` gets registered.
+pub(crate) fn lifecycle_event_registered(manifest: &MergedManifest, event: &str) -> bool {
+    lifecycle_hook_registrations(manifest)
+        .iter()
+        .any(|(name, registered, _)| *name == event && *registered)
+}
 
 /// Convert a YAML native fragment to JSON and deep-merge it into `dst`.
 ///
