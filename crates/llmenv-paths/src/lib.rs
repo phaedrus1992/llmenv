@@ -290,40 +290,39 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Write `content` to `path` with owner-only permissions (mode 0o600) on Unix.
-/// On Windows falls back to default permissions. Creates the file if absent,
-/// replaces it if present — including a symlink, which is unlinked rather
-/// than written through (#1429; a plain `.create(true).truncate(true)` open
-/// would follow a pre-existing symlink at `path` and truncate its target
-/// instead). Use for any file containing user state or credentials
+/// Write `content` to `path` with owner-only permissions (mode 0o600).
+/// Creates the file if absent, replaces it if present — including a
+/// symlink, which is unlinked rather than written through (#1429; a plain
+/// `.create(true).truncate(true)` open would follow a pre-existing symlink
+/// at `path` and truncate its target instead). Fails if `path`'s parent
+/// directory doesn't exist — use [`write_owner_only_atomic`] if you need it
+/// created. Use for any file containing user state or credentials
 /// (settings, sync state, MCP configs, ICM memory) where world-readable
 /// defaults would leak data on shared systems.
+///
+/// Shares [`write_owner_only_atomic`]'s temp-file-plus-`rename` mechanism
+/// rather than a direct `create_new` open: an exclusive open that loses a
+/// race against another writer to the same `path` has to retry, and unlike
+/// a same-directory temp name (unique per call via `TMP_COUNTER`), retrying
+/// the *shared destination* itself doesn't scale under real contention —
+/// `rename`'s replace-regardless-of-what's-there semantics do, without a
+/// retry loop at all.
+///
+/// # Errors
+/// Returns an error if `path` has no file name, or the underlying write or
+/// rename fails.
 pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Unlink first, then create exclusively: `O_TRUNC` on an existing
-        // symlink would follow it and truncate the target — the same
-        // unlink-then-`create_new` contract `dirfd::write_file_at` already
-        // uses for the fd-relative case.
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content)?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, content)?;
-    }
-    Ok(())
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no file name: {}", path.display()),
+        )
+    })?;
+    write_owner_only_atomic_in_dir(parent, file_name, path, content)
 }
 
 /// Atomically write `content` to `path` with owner-only permissions.
@@ -1175,6 +1174,40 @@ mod tests {
             b"must-not-be-touched",
             "the symlink's target must be untouched"
         );
+    }
+
+    /// The unlink-then-`create_new` fix must not regress the ordinary
+    /// concurrent-writer case: the old non-exclusive open let two writers to
+    /// the same path both succeed (later write wins), and `create_new` losing
+    /// that race must retry rather than surface a hard error where the old
+    /// code silently succeeded (#1429).
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_concurrent_writers_all_succeed() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("contended.json");
+        write_owner_only(&path, b"initial").expect("seed");
+
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    let payload = format!("writer-{i}").into_bytes();
+                    for _ in 0..20 {
+                        write_owner_only(&p, &payload).expect("concurrent write must not fail");
+                    }
+                })
+            })
+            .collect();
+
+        for w in writers {
+            w.join().expect("writer thread panicked");
+        }
+
+        // Some writer's payload must have landed — the file must exist and be
+        // non-empty, not corrupted or missing.
+        let body = std::fs::read(&path).expect("read after concurrent writes");
+        assert!(!body.is_empty());
     }
 
     #[cfg(unix)]
