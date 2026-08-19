@@ -201,10 +201,14 @@ pub(crate) fn bundle_file_mode(abs: &Path) -> anyhow::Result<rustix::fs::Mode> {
         .with_context(|| format!("reading metadata for {}", abs.display()))?
         .permissions()
         .mode();
-    // `mode & 0o755` is bounded well within u16's range, so this never
-    // truncates real bits — `from_bits_truncate` still guards against a
-    // stray high bit `Mode` doesn't model rather than panicking on one.
-    let masked = u16::try_from(mode & 0o755).unwrap_or(0o644);
+    // `RawMode`, not a hardcoded integer width: `Mode`'s underlying bits type
+    // is `u16` on macOS/BSD but `u32` on Linux, and `RawMode` is rustix's own
+    // portable alias for it (matching how `dirfd.rs`'s `FileType::from_raw_mode`
+    // already does this cross-platform conversion). `mode & 0o755` is bounded
+    // well within either width, so this never truncates real bits —
+    // `from_bits_truncate` still guards against a stray high bit `Mode`
+    // doesn't model rather than panicking on one.
+    let masked = rustix::fs::RawMode::try_from(mode & 0o755).unwrap_or(0o644);
     Ok(rustix::fs::Mode::from_bits_truncate(masked))
 }
 
