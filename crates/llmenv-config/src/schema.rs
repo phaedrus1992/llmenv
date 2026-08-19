@@ -665,7 +665,7 @@ pub struct Permissions {
 }
 
 impl Permissions {
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.default_mode.is_none()
             && self.preset.is_none()
             && self.allow.is_empty()
@@ -739,8 +739,8 @@ pub struct PermissionRule {
 /// name; `value` is the value. Both are required.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EnvVar {
-    pub name: String,
-    pub value: String,
+    name: String,
+    value: String,
 }
 
 /// A hook registration. `command` paths in `handler` are bundle-relative when

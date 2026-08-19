@@ -659,16 +659,27 @@ fn emit_baseline_hooks(
             CONFIG_GUARD_COMMAND.to_string(),
         ));
 
-    // Read-once dedup (#318). Registered unconditionally: the `hook-run`
-    // handler checks `features.read_once.enabled` and passes through when off,
-    // so the matcher is the only cost when the feature is disabled.
-    by_event
-        .entry("PreToolUse".into())
-        .or_default()
-        .push(matched_group(
-            "^Read$",
-            format!("{HOOK_RUN_COMMAND} pre_tool_use"),
-        ));
+    // Read-once dedup (#318). The `hook-run` handler checks
+    // `features.read_once.enabled` and passes through when off, so the matcher
+    // is the only cost when the feature is disabled.
+    //
+    // #1442: skipped when session logging registers an unmatched `pre_tool_use`
+    // below — that group already runs for every tool, including `Read`, so
+    // emitting both made a `Read` reach the hook twice, halving
+    // `repeat_detect`'s effective threshold and making `read_once` see its own
+    // first entry.
+    let session_log_includes_pre_tool_use = SESSION_LOG_HOOK_EVENTS
+        .iter()
+        .any(|(neutral, _)| *neutral == "pre_tool_use");
+    if !super::unmatched_pre_tool_use_registered(manifest, session_log_includes_pre_tool_use) {
+        by_event
+            .entry("PreToolUse".into())
+            .or_default()
+            .push(matched_group(
+                "^Read$",
+                format!("{HOOK_RUN_COMMAND} pre_tool_use"),
+            ));
+    }
 
     if manifest.throttle.is_some() {
         by_event
@@ -917,7 +928,12 @@ pub(crate) fn apply_seeded_settings(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test scaffolding")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test scaffolding"
+)]
 mod tests {
     use super::{
         CodexAdapter, HOOK_RUN_COMMAND, SESSION_LOG_HOOK_EVENTS, SUPPORTED_HOOK_EVENTS,
@@ -1526,6 +1542,120 @@ mod tests {
                 "{native} is not a Codex event"
             );
         }
+    }
+
+    /// Tool names an anchored-alternation matcher (`^Read$`, `^(A|B)$`)
+    /// accepts. Every `pre_tool_use` matcher llmenv registers has that shape;
+    /// one that doesn't fails here rather than being silently mis-parsed into
+    /// an empty set that trivially satisfies the disjointness assertion.
+    fn tools_accepted_by(matcher: &str) -> Vec<String> {
+        let body = matcher
+            .strip_prefix('^')
+            .and_then(|m| m.strip_suffix('$'))
+            .unwrap_or_else(|| panic!("matcher {matcher} is not anchored"));
+        let body = body
+            .strip_prefix('(')
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap_or(body);
+        assert!(
+            body.chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '|'),
+            "matcher {matcher} is not a literal alternation this helper can read"
+        );
+        body.split('|').map(str::to_owned).collect()
+    }
+
+    /// #1442: a single tool call must reach `hook-run pre_tool_use` exactly
+    /// once. Mirrors `claude_code`'s test of the same name — both adapters
+    /// merge the same two sources of `pre_tool_use` registrations (the
+    /// matcher-scoped read-once hook and session logging's unmatched capture
+    /// hook), and the bug reached Codex precisely because the gate was
+    /// per-adapter.
+    #[test]
+    fn pre_tool_use_reaches_hook_run_once_per_tool() {
+        for bits in 0..4u8 {
+            let (session_log, task_tracker) = (bits & 1 != 0, bits & 2 != 0);
+            let label = format!("session_log={session_log} task_tracker={task_tracker}");
+            let mut manifest = MergedManifest::default();
+            if !session_log {
+                manifest.session_log.file = None;
+                manifest.session_log.transcript = None;
+            }
+            manifest.capabilities.features = Some(llmenv_config::Features {
+                task_tracker: Some(llmenv_config::TaskTracker {
+                    enabled: task_tracker,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+
+            let (_dir, parsed) = materialize_to_toml(&manifest);
+            let mut unmatched = 0usize;
+            let mut matched: Vec<Vec<String>> = Vec::new();
+            for group in parsed["hooks"]["events"]
+                .get("PreToolUse")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let registers = group
+                    .get("hooks")
+                    .and_then(toml::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|h| h.get("command").and_then(toml::Value::as_str))
+                    .any(|c| c.ends_with(" pre_tool_use"));
+                if !registers {
+                    continue;
+                }
+                match group.get("matcher").and_then(toml::Value::as_str) {
+                    None => unmatched += 1,
+                    Some(m) => matched.push(tools_accepted_by(m)),
+                }
+            }
+
+            assert!(
+                unmatched <= 1,
+                "{label}: {unmatched} every-tool pre_tool_use registrations: {parsed:?}"
+            );
+            assert!(
+                unmatched == 0 || matched.is_empty(),
+                "{label}: an every-tool registration already covers {matched:?}, \
+                 so those tools fire pre_tool_use twice: {parsed:?}"
+            );
+            // Lower bound (#1442 P2): an upper bound alone passes at zero
+            // registrations too. The session-log-off case is covered by
+            // `read_once_matcher_survives_when_session_logging_is_off`.
+            if session_log {
+                assert_eq!(
+                    unmatched, 1,
+                    "{label}: session logging is on but no every-tool \
+                     pre_tool_use registration exists: {parsed:?}"
+                );
+            }
+            for (i, a) in matched.iter().enumerate() {
+                for b in &matched[i + 1..] {
+                    let overlap: Vec<&String> = a.iter().filter(|t| b.contains(t)).collect();
+                    assert!(
+                        overlap.is_empty(),
+                        "{label}: {overlap:?} matches two pre_tool_use registrations"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #1442: with session logging off nothing registers the unmatched capture
+    /// hook, so the matcher-scoped read-once registration is what has to keep
+    /// `Read` reaching `hook-run` — the dedup gate must not drop it outright.
+    #[test]
+    fn read_once_matcher_survives_when_session_logging_is_off() {
+        let (_dir, parsed) = materialize_to_toml(&manifest_without_session_log());
+        assert!(
+            hook_commands_for(&parsed, "PreToolUse")
+                .contains(&format!("{HOOK_RUN_COMMAND} pre_tool_use")),
+            "{parsed:?}"
+        );
     }
 
     /// The gates `doctor` reports must match what this adapter actually writes,

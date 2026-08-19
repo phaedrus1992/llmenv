@@ -85,6 +85,43 @@ fn slippage_rule_reinjection_enabled(manifest: &MergedManifest) -> bool {
         .is_some_and(|s| s.enabled && s.rule_reinjection)
 }
 
+/// True when the session-log capture hooks (#382) will register an unmatched —
+/// every-tool — `hook-run pre_tool_use` for this manifest.
+///
+/// Adapters must skip their matcher-scoped `pre_tool_use` registrations when
+/// this is true. `hook-run pre_tool_use` dispatches on `tool_name` itself, so
+/// the unmatched group already serves every matcher-scoped consumer: read-once
+/// dedup (#318), the slippage guards (#317), the `index_repository` name guard
+/// (#1331), the task-tool redirect (#985). Registering both makes a matching
+/// tool call reach `hook-run pre_tool_use` twice, which trips `repeat_detect`'s
+/// loop-breaker at half its configured threshold and makes `read_once` mistake
+/// a file's own first read for a repeat (#1442).
+///
+/// Lives here rather than in either adapter because all three engines merge the
+/// same two sources of `pre_tool_use` registrations, and a gate duplicated per
+/// adapter is what let the bug reach a second one in the first place.
+///
+/// The correctness of dropping the matcher-scoped groups rests on a matcher-less
+/// `PreToolUse` entry firing for every tool call. This is documented upstream
+/// for both engines with native matcher syntax, not just inferred from
+/// behavior: Claude Code's hooks reference states `"*"`, `""`, or omitted
+/// `matcher` "match all" (<https://docs.claude.com/en/docs/claude-code/hooks#matcher-patterns>),
+/// and Codex's states the same for `PreToolUse` specifically
+/// (<https://developers.openai.com/codex/hooks#matcher-patterns>). opencode has
+/// no matcher concept at its plugin-API level at all — see `generate_shim_js`'s
+/// own doc comment — so it isn't relying on this contract in the first place.
+///
+/// `session_log_includes_pre_tool_use` is the caller's own session-log event
+/// set (adapters diverge here — see each adapter's `SESSION_LOG_HOOK_EVENTS`),
+/// not assumed by this function. Passing `true` for an adapter whose set drops
+/// `pre_tool_use` would tell it to skip guard registrations it never replaces.
+fn unmatched_pre_tool_use_registered(
+    manifest: &MergedManifest,
+    session_log_includes_pre_tool_use: bool,
+) -> bool {
+    session_log_includes_pre_tool_use && manifest.session_log.any_sink_enabled()
+}
+
 /// True when `lifecycle_hook_registrations` says `event` gets registered.
 pub(crate) fn lifecycle_event_registered(manifest: &MergedManifest, event: &str) -> bool {
     lifecycle_hook_registrations(manifest)
