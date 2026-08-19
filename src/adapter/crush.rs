@@ -27,10 +27,30 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &["PreToolUse"];
 /// plugin the projection loop actually skips.
 const UNSUPPORTED_PLUGIN_DIRS: &[&str] = &["agents", "commands", "hooks"];
 
-fn plugin_is_compatible(payload: &Path) -> bool {
-    !UNSUPPORTED_PLUGIN_DIRS
-        .iter()
-        .any(|dir| payload.join(dir).is_dir())
+/// Whether `payload` contains none of Crush's unsupported plugin subdirs.
+///
+/// Uses `std::fs::metadata` rather than `Path::is_dir` (variant-bug-hunter
+/// finding, #1106): `is_dir()` folds a stat error (permission denied) into
+/// `false`, indistinguishable from the subdir simply not existing — which
+/// would let an actually-incompatible plugin (one whose unsupported subdir
+/// happens to be unreadable) render as if it were compatible. A missing
+/// subdir is the common, expected case and is not an error.
+fn plugin_is_compatible(payload: &Path) -> anyhow::Result<bool> {
+    for dir in UNSUPPORTED_PLUGIN_DIRS {
+        let candidate = payload.join(dir);
+        match std::fs::metadata(&candidate) {
+            Ok(meta) => {
+                if meta.is_dir() {
+                    return Ok(false);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("stat {}", candidate.display())));
+            }
+        }
+    }
+    Ok(true)
 }
 
 impl AgentAdapter for CrushAdapter {
@@ -172,7 +192,7 @@ impl AgentAdapter for CrushAdapter {
             Vec::new();
         for plugin in &manifest.plugins {
             let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
-            if !plugin_is_compatible(&payload) {
+            if !plugin_is_compatible(&payload)? {
                 let bad_dir = UNSUPPORTED_PLUGIN_DIRS
                     .iter()
                     .find(|dir| payload.join(dir).is_dir())
