@@ -1191,6 +1191,26 @@ mod tests {
         }
     }
 
+    /// A hook declared with a bundle-relative script path must resolve
+    /// against that bundle's directory (#1101) — `resolve_bundle_relative_paths`
+    /// itself is covered by its own unit test in `adapter::mod`, but the glue
+    /// wiring `hook.bundle_origin` through `render_hooks` is Codex-specific
+    /// and needs its own proof it's actually called.
+    #[test]
+    fn hook_command_with_bundle_origin_resolves_relative_paths() {
+        let mut manifest = MergedManifest::default();
+        let mut hook = command_hook("PreToolUse", Some("Bash"), "bash hooks/guard.sh");
+        hook.bundle_origin = Some(std::path::PathBuf::from("/bundles/foo"));
+        manifest.capabilities.hooks.push(hook);
+
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        let rendered = format!("{:?}", parsed["hooks"]["events"]["PreToolUse"]);
+        assert!(
+            rendered.contains("/bundles/foo/hooks/guard.sh"),
+            "bundle-relative hook command must resolve against bundle_origin: {rendered}"
+        );
+    }
+
     /// Codex takes the same nested matcher-group shape as Claude Code, under
     /// `hooks.events.<Event>`, and its event names match — so the neutral hooks
     /// map across without translation.
