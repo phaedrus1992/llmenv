@@ -630,7 +630,7 @@ without a translation layer.
 | Install-method seed              | n/a — Codex self-detects its own install method in-process ([#1107](https://github.com/phaedrus1992/llmenv/issues/1107))                                                               |
 | Statusline                       | n/a — no external-command hook exists (added in v4.0.0, [#1104](https://github.com/phaedrus1992/llmenv/issues/1104)) — see [Statusline](#statusline)                                   |
 | Session/history/auth inheritance | inherited across hash changes (added in v4.0.0, [#1105](https://github.com/phaedrus1992/llmenv/issues/1105)) — see [Durable state inheritance](#durable-state-inheritance)             |
-| SQLite state DBs                 | not yet ([#1420](https://github.com/phaedrus1992/llmenv/issues/1420)) — `state`/`logs`/`goals`/`memories`/`queue`/`thread-history` databases under `$CODEX_HOME`                       |
+| SQLite state DBs                 | `goals`/`memories`/`queue` inherited (added in v4.0.0, [#1420](https://github.com/phaedrus1992/llmenv/issues/1420)) — see [Durable state inheritance](#durable-state-inheritance)      |
 | Plugins                          | n/a — verified-absent from Codex's own source, no analogue of `installed_plugins.json` (added in v4.0.0, [#1106](https://github.com/phaedrus1992/llmenv/issues/1106))                  |
 | LSP                              | n/a — verified-absent from Codex's own source, no `[lsp]`/`Lsp` config surface (added in v4.0.0, [#1106](https://github.com/phaedrus1992/llmenv/issues/1106))                          |
 | Skills                           | first-class + built-in `llmenv` skill, registered via `[[skills.config]]` (added in v4.0.0, [#1106](https://github.com/phaedrus1992/llmenv/issues/1106)) — see [Skills](#skills)       |
@@ -701,11 +701,22 @@ Every file this relocates is copied with permissions forced to owner-only
 propagates whatever mode the source had, which would carry a looser umask
 into the durable store or a fresh folder alike.
 
-Codex also writes six SQLite databases directly into `$CODEX_HOME`
-(`state`/`logs`/`goals`/`memories`/`queue`/`thread-history`). Those are **not**
-covered yet — symlinking or copying a live SQLite file risks corruption via its
-`-wal`/`-shm` sidecar files, and deserves its own design pass. Tracked in
-[#1420](https://github.com/phaedrus1992/llmenv/issues/1420).
+Codex also writes six SQLite databases directly into `$CODEX_HOME`. Three are
+relocated the same way, symlinked (base file plus `-wal`/`-shm` sidecars) into
+the durable state dir (added in v4.0.0, [#1420](https://github.com/phaedrus1992/llmenv/issues/1420)):
+
+- **`goals_1.sqlite`** — per-thread objectives/status/token budgets.
+- **`memories_1.sqlite`** — generated memory content and its extraction/
+  consolidation job state.
+- **`queue_1.sqlite`** — the durable user-message queue.
+
+Each holds data with no other durable source, so losing the file on a hash
+change would silently reset it. The other three are deliberately left
+in place: **`state_5.sqlite`** and **`thread_history_1.sqlite`** are
+rebuildable indexes Codex reprojects from `sessions/` on its own (a startup
+backfill and a lazy byte-offset projection, respectively), and
+**`logs_2.sqlite`** is a 10-day-retention diagnostic log, not data worth
+preserving across a hash change.
 
 ### Permissions
 
